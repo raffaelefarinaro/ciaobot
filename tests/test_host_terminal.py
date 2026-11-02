@@ -247,6 +247,32 @@ def test_terminal_env_drops_engine_secrets(monkeypatch: pytest.MonkeyPatch) -> N
     assert env["PATH"] == "/term/path"
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GH_TOKEN",
+        "github_token",
+        "PRIVATE_KEY",
+        "OPENAI_API_KEY",
+        "SERVICE_API_TOKEN",
+        "X_AUTH_TOKEN",
+        "X_ACCESS_TOKEN",
+        "MY_SECRET",
+        "MY_SECRET_KEY",
+        "DB_PASSWORD",
+        "SLACK_TOKEN",
+        "AWS_PRIVATE_KEY_ID",
+    ],
+)
+def test_sensitive_env_keys_are_stripped(key: str) -> None:
+    assert host_terminal._is_sensitive_env_key(key)
+
+
+@pytest.mark.parametrize("key", ["HOME", "PATH", "LANG", "TOKENIZERS_PARALLELISM", "EDITOR"])
+def test_ordinary_env_keys_are_kept(key: str) -> None:
+    assert not host_terminal._is_sensitive_env_key(key)
+
+
 def test_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     _setup(monkeypatch, "sunos5")
     assert host_terminal.capabilities().reason == "unsupported_platform"
@@ -313,6 +339,36 @@ def test_resolve_folder_falls_back_to_the_agent_root(tmp_path: Path) -> None:
     assert host_terminal.resolve_folder(_config(root), pcm, project_id="p") == root.resolve()
     with pytest.raises(FileNotFoundError):
         host_terminal.resolve_folder(_config(tmp_path / "gone"), pcm, project_id="p")
+
+
+def test_folder_choices_lists_the_repo_then_the_workspace(tmp_path: Path) -> None:
+    config, pcm, root, _repo, tree = _resolve_fixture(tmp_path, code_mode=True)
+    assert host_terminal.folder_choices(config, pcm, chat_id="c") == {
+        "repo": tree.resolve(),
+        "workspace": root.resolve(),
+    }
+
+
+def test_resolve_folder_honours_the_location(tmp_path: Path) -> None:
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="workspace") == root.resolve()
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="repo") == repo.resolve()
+
+
+def test_resolve_folder_keeps_the_repo_when_the_workspace_root_is_gone(tmp_path: Path) -> None:
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    root.rmdir()
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
+    with pytest.raises(FileNotFoundError):
+        host_terminal.resolve_folder(config, pcm, chat_id="c", location="workspace")
+
+
+def test_folder_choices_offers_one_folder_when_the_repo_is_the_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    project = SimpleNamespace(id="p", repo_path=str(root), workspace="")
+    pcm = _Pcm({}, {"p": project})
+    assert host_terminal.folder_choices(_config(root), pcm, project_id="p") == {"repo": root.resolve()}
 
 
 def test_resolve_folder_unknown_chat_is_lookup_error(tmp_path: Path) -> None:

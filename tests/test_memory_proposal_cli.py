@@ -1754,3 +1754,369 @@ def test_cli_dismiss_refuses_a_nested_runtime_or_env_variant_reason_file(
         assert "credential" in capsys.readouterr().err
         assert queue.read_bytes() == before
         assert _no_sidecar(queue)
+
+
+def test_review_path_encodes_workspace_and_never_contains_proposal_text() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from ciao.proposal_tracking import proposal_review_path
+
+    review_key = "prv_" + "ab" * 32
+    path = proposal_review_path("wörk space", review_key)
+
+    split = urlsplit(path)
+    assert split.path == "/memory/review"
+    assert parse_qs(split.query) == {
+        "show": ["suggested"],
+        "workspace": ["wörk space"],
+        "proposal": [review_key],
+    }
+    assert set(parse_qs(split.query, keep_blank_values=True)) == {"show", "workspace", "proposal"}
+
+
+def _scan_config(root: Path):  # noqa: ANN202 — CiaoConfig, imported lazily like the CLI
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env({"CIAO_WORKSPACE": str(root), "PWA_AUTH_TOKEN": "t"})
+
+
+def _write_skill_record(config, change: str) -> None:  # noqa: ANN001
+    from ciao import skill_proposals
+
+    skill_proposals.upsert_proposal(
+        config,
+        skill_proposals.SkillProposal(
+            id=skill_proposals.proposal_id("work", "2026-08-09-defuddle"),
+            workspace="work",
+            skill="2026-08-09-defuddle",
+            canonical_path="/agent/skills/2026-08-09-defuddle/SKILL.md",
+            reviewed_revision="a" * 64,
+            title="Skill reflection: 2026-08-09-defuddle",
+            problem="Repeated fetch failures.",
+            change=change,
+            rationale="It handles blocked pages.",
+            sources=(
+                skill_proposals.SkillEvidence(
+                    chat_id="sess-a1",
+                    archive="2026-08-09T10:00:00Z",
+                    turn="",
+                    excerpt="outcome=needs_review corrections=1 errors=0 turns=3",
+                ),
+            ),
+            lifecycle=skill_proposals.PENDING,
+            chat_id="",
+            updated_at="2026-08-09T10:00:00Z",
+        ),
+    )
+
+
+def test_review_key_distinguishes_target_and_request(tmp_path: Path) -> None:
+    from ciao.proposal_tracking import proposal_review_key, skill_review_key
+    from ciao.web.proposal_service import _scan_proposal_rows
+
+    root, _vault, queue = _handover_install(
+        tmp_path,
+        None,
+        "- [people Mo] Mo likes tea.  _(from: Chat)_",
+        "- [people Ada] Mo likes tea.  _(from: Chat)_",
+        "- [learnings] Retry with backoff.  _(from: Chat)_  _(request: req-1)_",
+        "- [learnings] Retry with backoff.  _(from: Chat)_  _(request: req-2)_",
+        "- [note_edit sidecar-1] Tighten the intro.  _(from: Chat)_",
+    )
+    config = _scan_config(root)
+
+    rows, _by_id = _scan_proposal_rows(config)
+
+    keys = [row["review_key"] for row in rows]
+    assert len(set(keys)) == 5
+    assert keys[0] == proposal_review_key("work", "people", "Mo likes tea.", "Chat", "Mo", "")
+    # A note_edit row with no sidecar on file has its target blanked, so the
+    # key must come from the bullet's own sidecar id, never the enriched path.
+    assert rows[4]["target"] != "sidecar-1"
+    assert keys[4] == proposal_review_key(
+        "work", "note_edit", "Tighten the intro.", "Chat", "sidecar-1", ""
+    )
+    # The decider is not part of the question: the same bullet settled by a
+    # different decider keeps its key.
+    queue.write_text(
+        queue.read_text(encoding="utf-8").replace(
+            "Mo likes tea.  _(from: Chat)_\n",
+            "Mo likes tea.  _(from: Chat)_  _(decide: nightly; repeated)_\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    decided_rows, _ = _scan_proposal_rows(config)
+    assert decided_rows[0]["review_key"] == keys[0]
+    assert decided_rows[0]["decider"] == "nightly"
+
+    # Skill rows: the key follows the change text, not the filename.
+    _write_skill_record(config, "Add a defuddle fallback.")
+    first = [r for r in _scan_proposal_rows(config)[0] if r["kind"] == "skill"][0]
+    assert first["review_key"] == skill_review_key("work", first["id"], "Add a defuddle fallback.")
+
+    _write_skill_record(config, "Add a different fallback.")
+    second = [r for r in _scan_proposal_rows(config)[0] if r["kind"] == "skill"][0]
+    assert second["id"] == first["id"]
+    assert second["review_key"] != first["review_key"]
+
+
+def test_review_path_matches_web_identity(tmp_path: Path, capsys) -> None:
+    """List rows carry the same id and review link the PWA scan hands out."""
+    import json
+
+    from ciao import cli
+    from ciao.proposal_tracking import stable_proposal_id
+    from ciao.web.proposal_service import _scan_proposal_rows
+
+    root, vault, queue = _handover_install(
+        tmp_path,
+        None,
+        "- [people Mo] Mo likes tea.  _(from: Chat)_",
+        "- [memory] Prefers tabs.  _(from: Chat)_",
+        "- [memory] Prefers tabs.  _(from: Chat)_",
+    )
+    listing = ["memory-proposals", "--workspace", str(root), "--vault-root", str(vault), "--json"]
+
+    assert cli.main(listing) == 0
+    listed = json.loads(capsys.readouterr().out)["proposals"]
+    web_rows, _by_id = _scan_proposal_rows(_scan_config(root))
+    web = {row["id"]: row for row in web_rows}
+
+    assert [row["id"] for row in listed] == list(web)
+    for row in listed:
+        assert row["review_key"] == web[row["id"]]["review_key"]
+        assert row["review_path"] == web[row["id"]]["review_path"]
+    # The action id bytes are the unchanged stable id, ordinal and all.
+    assert listed[2]["id"] == stable_proposal_id(
+        "work", "work/Workspace/Memory-Proposals.md", "memory", "Prefers tabs.", "Chat", 1
+    )
+
+    keys = {row["text"]: row["review_key"] for row in listed}
+    # Reordering the bullets keeps every question's link.
+    queue.write_text(
+        "# Memory Proposals\n\n## 2026-01-01T00:00:00Z\n\n"
+        "- [memory] Prefers tabs.  _(from: Chat)_\n"
+        "- [people Mo] Mo likes tea.  _(from: Chat)_\n"
+        "- [memory] Prefers tabs.  _(from: Chat)_\n",
+        encoding="utf-8",
+    )
+    assert cli.main(listing) == 0
+    reordered = json.loads(capsys.readouterr().out)["proposals"]
+    assert {row["text"]: row["review_key"] for row in reordered} == keys
+
+    # Deleting one of two equivalent duplicates keeps the survivor's link.
+    queue.write_text(
+        "# Memory Proposals\n\n## 2026-01-01T00:00:00Z\n\n"
+        "- [people Mo] Mo likes tea.  _(from: Chat)_\n"
+        "- [memory] Prefers tabs.  _(from: Chat)_\n",
+        encoding="utf-8",
+    )
+    assert cli.main(listing) == 0
+    survivor = json.loads(capsys.readouterr().out)["proposals"]
+    assert [row["review_key"] for row in survivor if row["text"] == "Prefers tabs."] == [keys["Prefers tabs."]]
+
+
+def test_add_review_path_only_for_pending_proposal(tmp_path: Path, capsys) -> None:
+    import json
+
+    from ciao import cli
+    from ciao.memory_proposals import record_promotion
+    from ciao.proposal_tracking import proposal_review_path
+    from ciao.web.proposal_service import _scan_proposal_rows
+
+    root, vault, queue = _handover_install(
+        tmp_path, None, "- [people Mo] Mo likes tea.  _(from: Chat)_"
+    )
+    base = ["memory-proposal-add", "--workspace", str(root), "--vault-root", str(vault), "--json"]
+
+    def add(text: str, *extra: str) -> dict:
+        assert cli.main([*base, "--kind", "memory", *extra, text]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    first = add("Prefers tabs.")
+    assert first["queued"] is True
+    assert first["review_key"].startswith("prv_") and len(first["review_key"]) == 68
+    assert first["review_path"] == proposal_review_path("work", first["review_key"])
+    web = {row["id"]: row for row in _scan_proposal_rows(_scan_config(root))[0]}
+    assert web[first["id"]]["review_key"] == first["review_key"]
+    assert web[first["id"]]["review_path"] == first["review_path"]
+
+    duplicate = add("Prefers tabs.")
+    assert duplicate["duplicate"] is True
+    assert (duplicate["review_key"], duplicate["review_path"]) == (
+        first["review_key"],
+        first["review_path"],
+    )
+
+    # A multiline, delimiter-bearing fact links through the bullet it was stored as.
+    tricky = add("Uses (uv) ] marks\nacross lines.")
+    assert tricky["queued"] is True
+    assert tricky["review_key"] is not None
+    assert _web_row_key(root, tricky["id"]) == tricky["review_key"]
+
+    assert cli.main([
+        "memory-proposal-dismiss", "--workspace", str(root), "--vault-root", str(vault),
+        "Prefers tabs.",
+    ]) == 0
+    capsys.readouterr()
+    dismissed = add("Prefers tabs.")
+    assert dismissed["dismissed_before"] is True
+    assert (dismissed["id"], dismissed["review_key"], dismissed["review_path"]) == (None, None, None)
+
+    record_promotion(queue, text="Keeps a lockfile.", kind="memory")
+    promoted = add("Keeps a lockfile.")
+    assert promoted["promoted_before"] is True
+    assert promoted["review_key"] is None and promoted["review_path"] is None
+
+    # Text-only dedupe suppresses a same-text fact aimed at another person.
+    suppressed = add("Mo likes tea.", "--kind", "people", "--payload", "Ada")
+    assert suppressed["duplicate"] is True
+    assert suppressed["review_key"] is None and suppressed["review_path"] is None
+
+
+def _web_row_key(root: Path, proposal_id: str) -> str:
+    from ciao.web.proposal_service import _scan_proposal_rows
+
+    rows, _by_id = _scan_proposal_rows(_scan_config(root))
+    return next(row["review_key"] for row in rows if row["id"] == proposal_id)
+
+
+def test_review_links_preserve_proposal_workspace_resolution(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import json
+
+    from ciao import cli
+    from ciao.proposal_tracking import proposal_review_path
+
+    root, vault, _queue = _handover_install(
+        tmp_path, None, "- [memory] Prefers tabs.  _(from: Chat)_"
+    )
+
+    assert cli.main([
+        "memory-proposals", "--workspace", str(root), "--vault-root", str(vault), "--json",
+    ]) == 0
+    registered = json.loads(capsys.readouterr().out)["proposals"][0]
+    assert registered["review_key"] is not None
+    assert registered["review_path"] == proposal_review_path("work", registered["review_key"])
+
+    # Implicit resolution, with no flags, names the same registered vault.
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    assert cli.main(["memory-proposals", "--json"]) == 0
+    implicit = json.loads(capsys.readouterr().out)["proposals"][0]
+    assert implicit["review_key"] == registered["review_key"]
+
+    # A vault outside the registry, whose directory happens to be called `work`,
+    # must not impersonate the registered owner.
+    impostor = tmp_path / "elsewhere" / "work"
+    (impostor / "Workspace").mkdir(parents=True)
+    (impostor / "Workspace" / "Memory-Proposals.md").write_text(
+        "# Memory Proposals\n\n- [memory] Prefers tabs.  _(from: Chat)_\n", encoding="utf-8"
+    )
+    assert cli.main([
+        "memory-proposals", "--workspace", str(root), "--vault-root", str(impostor), "--json",
+    ]) == 0
+    loose = json.loads(capsys.readouterr().out)["proposals"][0]
+    assert loose["text"] == "Prefers tabs."
+    assert (loose["id"], loose["review_key"], loose["review_path"]) == (None, None, None)
+
+
+def test_review_link_null_when_registry_config_invalid(tmp_path: Path, monkeypatch, capsys) -> None:
+    import json
+
+    from ciao import cli
+    from ciao.config import CiaoConfig
+
+    root, vault, _queue = _handover_install(
+        tmp_path, None, "- [memory] Prefers tabs.  _(from: Chat)_"
+    )
+    # The explicit filesystem --workspace names the install; the vault comes from
+    # the environment, so the resolver never reads the registry.
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(vault))
+
+    def unreadable(*_args, **_kwargs):
+        raise ValueError("workspace registry is unreadable")
+
+    monkeypatch.setattr(CiaoConfig, "from_env", unreadable)
+
+    assert cli.main([
+        "memory-proposal-add", "--workspace", str(root), "--json", "--kind", "memory", "Uses uv.",
+    ]) == 0
+    added = json.loads(capsys.readouterr().out)
+    assert added["queued"] is True
+    assert (added["id"], added["review_key"], added["review_path"]) == (None, None, None)
+
+    assert cli.main(["memory-proposals", "--workspace", str(root), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)["proposals"]
+    assert {row["text"] for row in listed} == {"Prefers tabs.", "Uses uv."}
+    assert all(
+        (row["id"], row["review_key"], row["review_path"]) == (None, None, None)
+        for row in listed
+    )
+
+
+@pytest.mark.parametrize("promoted", [False, True])
+def test_cli_dismiss_refuses_a_skill_draft_row_and_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], promoted: bool
+) -> None:
+    """A skill-draft row is settled with skill-draft-approve/reject, never here.
+
+    The queue cannot settle a draft: the sidecar would stay pending with no
+    bullet, and a re-filed copy would re-enter the queue under a new id. The
+    refusal lands before anything is written, so the queue and decisions stay as
+    they were.
+    """
+    from ciao import cli
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.upstream_drafts import (
+        DRAFT_PENDING,
+        UPSTREAM_ISSUE,
+        file_draft,
+        read_records,
+    )
+    from ciao.workspace_reroot import mark_born_per_root
+
+    vault = tmp_path / "memory-vault"
+    runtime = tmp_path / ".runtime"
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        vault_root=vault,
+        workspaces={"work": WorkspaceConfig(name="work", vault_root=str(vault))},
+    )
+    mark_born_per_root(tmp_path, runtime, ["work"])
+    draft = file_draft(
+        config,
+        "work",
+        target=UPSTREAM_ISSUE,
+        skill="web-research",
+        title="Document the offline fallback for a timed-out fetch",
+        change="State that a fetch that times out must be retried once with a longer budget.",
+        body="A search fetch that times out is reported as no results. Retry once first.",
+        repository="example/tools",
+        version="1.4.0",
+        private_evidence="chat-42 turn 7: the fetch reported no results",
+    )
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    before = queue.read_text(encoding="utf-8")
+    assert f"skill-draft:{draft.id}" in before
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        *(["--promoted"] if promoted else []),
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        draft.id,
+    ])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "skill-draft-approve" in err
+    assert "skill-draft-reject" in err
+    assert draft.id in err
+    assert queue.read_text(encoding="utf-8") == before
+    assert read_decisions(queue) == []
+    assert read_records(config, "work")[0].lifecycle == DRAFT_PENDING

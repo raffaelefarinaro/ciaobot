@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { installViewportPlumbing } from './viewport'
+import { installViewportPlumbing, stopViewportPlumbing } from './viewport'
 
 const FULL_HEIGHT = 932
 const KEYBOARD_HEIGHT = 596
 
-type FakeViewport = EventTarget & { height: number }
+type FakeViewport = EventTarget & { height: number; offsetTop?: number }
 
 // One shared fake for the whole file. The plumbing attaches its listeners once,
 // so swapping in a fresh EventTarget per test would orphan them and the fake
@@ -167,5 +167,63 @@ describe('installViewportPlumbing', () => {
 
     expect(document.activeElement).toBe(field)
     field.remove()
+  })
+})
+
+describe('installViewportPlumbing and --safe-top', () => {
+  const originalScreen = window.screen
+  const originalRect = Element.prototype.getBoundingClientRect
+  // The shared fake predates `offsetTop`; these tests need it too.
+  const vp = vv as FakeViewport & { offsetTop?: number }
+
+  function safeTop(): string {
+    return document.documentElement.style.getPropertyValue('--safe-top')
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(window, 'screen', { value: { height: 932 }, configurable: true })
+    // jsdom does not resolve env(); the probe is the only box measured here.
+    Element.prototype.getBoundingClientRect = () => ({ height: 59 } as DOMRect)
+    Object.defineProperty(vp, 'offsetTop', { value: 0, configurable: true, writable: true })
+  })
+
+  afterEach(() => {
+    stopViewportPlumbing()
+    Object.defineProperty(window, 'screen', { value: originalScreen, configurable: true })
+    Element.prototype.getBoundingClientRect = originalRect
+    delete vp.offsetTop
+  })
+
+  it('leaves the live CSS safe-area inset authoritative after startup and rotation', () => {
+    installViewportPlumbing()
+
+    // Healthy full-screen webview: the env inset is kept.
+    vp.height = 932
+    vp.offsetTop = 0
+    window.dispatchEvent(new Event('orientationchange'))
+    expect(safeTop()).toBe('')
+
+    // A shorter viewport does not prove the top has been inset by the OS.
+    vp.height = 873
+    vp.offsetTop = 0
+    window.dispatchEvent(new Event('orientationchange'))
+    expect(safeTop()).toBe('')
+  })
+
+  it('keeps the inset while the keyboard is open', () => {
+    installViewportPlumbing()
+
+    // The keyboard makes the viewport short, which is not evidence that the OS
+    // inset the top: dropping the inset here would jerk every header up a
+    // status bar each time a field takes focus.
+    vp.height = KEYBOARD_HEIGHT
+    vp.offsetTop = 0
+    vp.dispatchEvent(new Event('resize'))
+    expect(safeTop()).toBe('')
+
+    // Closing it into a shorter viewport must not remove the top inset.
+    vp.height = 873
+    vp.dispatchEvent(new Event('resize'))
+    expect(safeTop()).toBe('')
   })
 })

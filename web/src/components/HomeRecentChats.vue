@@ -195,6 +195,7 @@ import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
+import { formatTime } from '../lib/time'
 import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -493,6 +494,12 @@ function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
   if (tier === 'needsYou' && store.chatFailed(chat.chat_id)) {
     const next = chat.retry?.status === 'pending' ? 'will retry' : 'switch model or retry'
     return `${classifyError(chat.last_error || '').label.toLowerCase()} · ${next}`
+  }
+  // A retry the agent or engine scheduled without a failed turn (a network
+  // retry set from inside a reply). The sidebar marks it; the card says when.
+  if (chat.retry?.status === 'pending') {
+    const at = formatTime(chat.retry.next_at)
+    return at ? `retry scheduled ${at}` : 'retry scheduled'
   }
   const task = taskSignals.taskForChat(chat)
   // A chat from an earlier attempt does not speak for the newer one.
@@ -1273,9 +1280,10 @@ defineExpose({ onArrow })
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
-/* A pass blocked on the owner takes the accent, and a pass that stopped with
-   work left takes the warn colour. Both are rows you are meant to
-   act on, so neither reads as the muted background chatter an in-flight row is.
+/* A pass blocked on the owner and a pass that stopped with work left both take
+   the accent; the words, not the colour, tell them apart. Both are rows you are
+   meant to act on, so neither reads as the muted background chatter an
+   in-flight row is.
    One rule per phase, so nothing has to win a specificity fight to colour a
    row correctly. */
 .home-chat-item--insight-needsYou .home-chat-tidy-note {
@@ -1283,7 +1291,7 @@ defineExpose({ onArrow })
 }
 
 .home-chat-item--insight-attention .home-chat-tidy-note {
-  color: var(--warning);
+  color: var(--accent);
 }
 
 .remote-chip {

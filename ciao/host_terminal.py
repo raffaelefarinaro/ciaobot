@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ciao.tool_path import terminal_path
 
@@ -127,11 +127,32 @@ def _spawn(
     )
 
 
+# Do not let a spawned terminal inherit provider credentials, API keys, or
+# tokens belonging to the engine. The suffix rules also cover user-configured
+# MCP and service credentials whose names are not known to Ciaobot ahead of time.
+_SENSITIVE_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_API_TOKEN",
+    "_AUTH_TOKEN",
+    "_ACCESS_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_TOKEN",
+)
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    return (
+        upper in {"GH_TOKEN", "GITHUB_TOKEN", "PRIVATE_KEY"}
+        or upper.endswith(_SENSITIVE_ENV_SUFFIXES)
+        or "_PRIVATE_KEY" in upper
+    )
+
+
 def _terminal_env() -> dict[str, str]:
     """The engine's environment minus secrets."""
-    # Private name on purpose: reuse the one suffix list rather than copy it.
-    from ciao.background import _is_sensitive_env_key
-
     env = {
         key: value
         for key, value in os.environ.items()
@@ -295,15 +316,24 @@ def launch(folder: Path, *, action: str | None, runtime_dir: Path) -> str:
     return _launch_linux(folder, command, env)
 
 
-def resolve_folder(
+FolderLocation = Literal["workspace", "repo"]
+
+
+def folder_choices(
     config: Any, pcm: Any, *, chat_id: str = "", project_id: str = ""
-) -> Path:
-    """The folder to open, from server state only."""
+) -> dict[FolderLocation, Path]:
+    """The folders a terminal for this target may open in, from server state only.
+
+    ``workspace`` is the workspace's agent root; ``repo`` is the linked
+    repository, or the chat's code-mode worktree when it has one. Only folders
+    that exist are listed, repo first: the first entry is the default.
+    """
     from ciao import workspaces
 
     if not chat_id and not project_id:
         raise ValueError("chat_id or project_id is required")
     project: Any = None
+    repo: Path | None = None
     if chat_id:
         chat = pcm.get_chat(chat_id)
         if chat is None:
@@ -313,14 +343,38 @@ def resolve_folder(
             loc = chat.repo_location or {}
             path = loc.get("path")
             if path and loc.get("exists", True) and Path(path).is_dir():
-                return Path(path).resolve()
+                repo = Path(path).resolve()
     else:
         project = pcm.get_project(project_id)
         if project is None:
             raise LookupError("project not found")
-    if project and project.repo_path and Path(project.repo_path).is_dir():
-        return Path(project.repo_path).resolve()
+    if repo is None and project and project.repo_path and Path(project.repo_path).is_dir():
+        repo = Path(project.repo_path).resolve()
+    choices: dict[FolderLocation, Path] = {}
+    if repo is not None:
+        choices["repo"] = repo
     root = workspaces.agent_root_for(config, project.workspace if project else "")
-    if root.is_dir():
-        return root.resolve()
-    raise FileNotFoundError(str(root))
+    # A repository that is the agent root itself is one folder, not a choice.
+    if root.is_dir() and root.resolve() != repo:
+        choices["workspace"] = root.resolve()
+    if not choices:
+        raise FileNotFoundError(str(root))
+    return choices
+
+
+def resolve_folder(
+    config: Any,
+    pcm: Any,
+    *,
+    chat_id: str = "",
+    project_id: str = "",
+    location: FolderLocation | None = None,
+) -> Path:
+    """The folder to open, from server state only: ``location``, else the default."""
+    choices = folder_choices(config, pcm, chat_id=chat_id, project_id=project_id)
+    if location is None:
+        return next(iter(choices.values()))
+    folder = choices.get(location)
+    if folder is None:
+        raise FileNotFoundError(f"no {location} folder for this target")
+    return folder

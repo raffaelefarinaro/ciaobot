@@ -247,7 +247,8 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
 
 def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> None:
     role = _stock("skills/ciao-memory/SKILL.md")
-    assert "Read it before writing a note and file the note in the folder its line names" in role
+    assert "Make each new note with `ciao note create" in role
+    assert "files it in the category's folder" in role
     assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
     # The list is read, never memorized: a category added in Settings must reach
     # the agent without editing this file.
@@ -589,3 +590,8 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
 
 def test_stock_memory_assets_route_repo_facts() -> None:
     assert "`repo`" in _stock("commands/remember.md")
+
+
+def test_the_capabilities_catalog_names_the_vault_ignore_file() -> None:
+    memory = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
+    assert "`.ciaoignore`" in memory

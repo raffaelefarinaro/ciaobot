@@ -38,13 +38,16 @@ still the patch this code sees.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ciao import subagent_tracking
+from ciao.providers.base import BACKGROUND_WORK_MAX_S as _BACKGROUND_WORK_MAX_S
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_collab_tree_counts,
@@ -69,6 +72,14 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # batches a burst of finished scripts into one turn, this one waits out
 # startup, and they are free to diverge.
 _STARTUP_WAKE_COALESCE_SECONDS = 5.0
+
+# Written at graceful shutdown, consumed once at boot: the OpenCode background
+# work (subagents and shells) that the restart is about to kill.
+_INTERRUPTED_WORK_FILE = "interrupted_background_work.json"
+
+# The cap lives in providers.base (the providers enforce it too); re-exported
+# here as the watcher horizon.
+BACKGROUND_WORK_MAX_S = _BACKGROUND_WORK_MAX_S
 
 
 class SubagentWatcherHost(Protocol):
@@ -281,8 +292,8 @@ class SubagentWatchers:
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
-        # per tick, a re-parse only when the file grew) with a wide horizon.
-        deadline = time.perf_counter() + 3600
+        # per tick, a re-parse only when the file grew) up to the shared cap.
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 try:
@@ -367,7 +378,7 @@ class SubagentWatchers:
         """Poll the opencode session tree and its background shells while background work runs."""
         last_count = -1
         last_work = -1
-        deadline = time.perf_counter() + 3600
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 chat = self._host._chats.get(chat_id)
@@ -511,9 +522,8 @@ class SubagentWatchers:
         the sweep shipped must not wake every chat that ever left a Monitor
         running months ago. An unparseable or empty ``last_activity_at`` never
         skips a chat — the wake is worth more than the risk of missing one.
-        Delivery goes through the same deferred path as
-        ``queue_background_wake`` — a bounded coalescing sleep, then
-        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
+        Delivery goes through a deferred path — a bounded
+        coalescing sleep, then ``_deliver_wake`` — so the sweep does not fire mid-startup and never
         raises into the caller. Tasks already woken this process
         (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
         "lost" marker from a persisted wake is the durable guard, so a wake
@@ -585,9 +595,9 @@ class SubagentWatchers:
     def build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
         """Compose the wake turn for CLI tasks orphaned by a dead CLI.
 
-        Mirrors the background-run wake: name the log/output the command was
-        writing and tell the chat to verify rather than assume. The first line
-        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
+        Name the log/output the command was writing and tell the chat to
+        verify rather than assume. The first line carries
+        ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
         recognise this prompt in the JSONL later and mark the tasks lost —
         the wake must never be sent twice.
         """
@@ -609,7 +619,160 @@ class SubagentWatchers:
             "the command was writing, and inspect the process (pgrep/ps) "
             "rather than assuming it finished or that the last lines tell the "
             "whole story. For future long-running commands use the "
-            "`ciao run start -- <cmd>` command, which survives CLI restarts "
-            "and wakes this chat with the exit code, log tail and log path."
+            "Bash tool's `run_in_background` and read its output file when it "
+            "finishes."
+        )
+        return "\n".join(lines)
+
+    def _interrupted_work_path(self) -> Path:
+        return Path(self._host._config.state_path).parent / _INTERRUPTED_WORK_FILE
+
+    def record_interrupted_background_work(self) -> int:
+        """At shutdown, record the OpenCode chats whose background work the restart kills.
+
+        OpenCode keeps its background set only in the provider object and
+        disconnect clears it, so this runs before the providers are disconnected.
+        Returns the number of chats recorded. Never raises: shutdown must not
+        fail here.
+        """
+        try:
+            chats: dict[str, dict[str, Any]] = {}
+            for chat_id, service in list(self._host._providers.items()):
+                live = service.provider
+                if not isinstance(live, OpencodeProvider) or not service.background_work_outstanding:
+                    continue
+                chat = self._host._chats.get(chat_id)
+                if chat is None or not chat.session_id:
+                    continue
+                chats[chat_id] = {
+                    "session_id": chat.session_id,
+                    "children": live.background_child_ids(),
+                    "shells": [
+                        {"id": row["id"], "command": row["command"]}
+                        for row in live.background_shell_rows()
+                    ],
+                }
+            if not chats:
+                return 0
+            path = self._interrupted_work_path()
+            tmp = path.with_suffix(".tmp")
+            payload = {"recorded_at": datetime.now(UTC).isoformat(), "chats": chats}
+            tmp.write_text(json.dumps(payload), encoding="utf-8", newline="")
+            os.replace(tmp, path)
+            logger.warning(
+                "Recorded background work interrupted by shutdown in %d chat(s)", len(chats)
+            )
+            return len(chats)
+        except Exception:  # noqa: BLE001 — shutdown must never fail here
+            logger.exception("Recording interrupted OpenCode background work failed")
+            return 0
+
+    def sweep_interrupted_background_work(self) -> int:
+        """At boot, consume the shutdown record and wake each chat it still names.
+
+        The file is deleted whatever it holds, so a wake is sent at most once.
+        A record older than ``_ORPHANED_CLI_TASK_SWEEP_MAX_AGE``, an archived
+        chat, a chat no longer on OpenCode, or a chat whose session changed gets
+        no wake. Returns the number of chats armed for a wake. Never raises.
+        """
+        path = self._interrupted_work_path()
+        if not path.exists():
+            return 0
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return self._arm_interrupted_work_wakes(payload)
+        except Exception:  # noqa: BLE001 — a bad record must not break startup
+            logger.exception("Unreadable interrupted background work record at %s", path)
+            return 0
+        finally:
+            path.unlink(missing_ok=True)
+
+    def _arm_interrupted_work_wakes(self, payload: Any) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        recorded_at = chat_service._parse_iso(payload.get("recorded_at") or "")
+        if recorded_at is None or datetime.now(UTC) - recorded_at > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE:
+            return 0
+        chats = payload.get("chats")
+        if not isinstance(chats, dict):
+            return 0
+        armed = 0
+        for chat_id, entry in chats.items():
+            try:
+                if not isinstance(entry, dict):
+                    continue
+                chat = self._host._chats.get(chat_id)
+                if (
+                    chat is None
+                    or chat.archived
+                    or chat.provider != "opencode"
+                    or chat.session_id != entry.get("session_id")
+                ):
+                    continue
+                children = [child for child in entry.get("children", []) if isinstance(child, str)]
+                shells = [
+                    {"id": shell["id"], "command": str(shell.get("command") or "")}
+                    for shell in entry.get("shells", [])
+                    if isinstance(shell, dict) and isinstance(shell.get("id"), str)
+                ]
+                if not children and not shells:
+                    continue
+                prompt = self.build_interrupted_work_wake_prompt(children, shells)
+                try:
+                    asyncio.create_task(
+                        self._deferred_interrupted_work_wake(
+                            chat, prompt, len(children) + len(shells)
+                        )
+                    )
+                except RuntimeError:
+                    # No running loop: dropping the wake beats raising into boot.
+                    logger.debug("No event loop for interrupted background work wake of %s", chat_id)
+                    continue
+                armed += 1
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill startup
+                logger.exception("Interrupted background work sweep failed for chat %s", chat_id)
+        return armed
+
+    async def _deferred_interrupted_work_wake(
+        self, parent: ChatInfo, prompt: str, count: int
+    ) -> None:
+        """Wait out the startup coalescing window, then deliver the interrupted-work wake."""
+        try:
+            await asyncio.sleep(_STARTUP_WAKE_COALESCE_SECONDS)
+            self._host._deliver_wake(parent, prompt, count=count, origin="cli_task_wake")
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception("Interrupted background work wake failed for chat %s", parent.chat_id)
+
+    @staticmethod
+    def build_interrupted_work_wake_prompt(
+        children: list[str], shells: list[dict[str, str]]
+    ) -> str:
+        """Compose the wake turn for OpenCode background work a restart interrupted.
+
+        The first line carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the
+        PWA's ``cli_task_wake`` card recognises it. Children come first, then
+        shells, in the order recorded.
+        """
+        count = len(children) + len(shells)
+        lines = [
+            f"{subagent_tracking.CLI_TASK_WAKE_PREFIX} {count} CLI task"
+            f"{'s' if count != 1 else ''} you started (OpenCode subagents / background shells) "
+            "were interrupted: the Ciaobot engine restarted and stopped this chat's OpenCode "
+            "server, so they will never finish or report back."
+        ]
+        for child in children:
+            lines.append("")
+            lines.append(f"— subagent: interrupted subagent session (task {child})")
+        for shell in shells:
+            lines.append("")
+            lines.append(f"— shell: background shell (task {shell['id']})")
+            if shell["command"]:
+                lines.append(f"command: {shell['command']}")
+        lines.append("")
+        lines.append(
+            "Check the real state yourself now: inspect the files, worktrees or output they "
+            "were writing rather than assuming they finished. To continue an interrupted subagent "
+            "with its context, call the task tool again with its sessionID (the task id above). "
+            "Re-run any interrupted shell that still needs to run."
         )
         return "\n".join(lines)

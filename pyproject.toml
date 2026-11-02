@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "1.7.0"
+version = "1.8.0"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk[otel]==0.2.174",
+  "claude-agent-sdk[otel]==0.2.176",
   # Runtime security pins for transitive dependencies (#953, #1081). `mcp`
   # accepts PyJWT[crypto]>=2.10.1, `pywebpush`->`requests` accepts
   # urllib3>=1.26,<3, and `mcp`->`aiohttp` (3.14.3) accepts
@@ -43,6 +43,10 @@ dependencies = [
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
   "firecrawl-anydoc>=0.2.4,<0.3.0",
+  # Plain-text reply excerpts need CommonMark parsing at runtime; the exact
+  # release is already resolved in uv.lock (via pip-audit -> rich), so this
+  # only promotes it to a direct requirement for wheel installs.
+  "markdown-it-py==4.2.0",
   # Windows has no system tz database, so without this `zoneinfo.ZoneInfo`
   # (schedules, operator actions) cannot find any zone, not even UTC.
   "tzdata; sys_platform == 'win32'",
@@ -93,6 +97,7 @@ namespaces = false
   "deploy/*.png",
   "deploy/*.svg",
   "evals/*.json",
+  "evals/tasks/**/*",
   "entity-types.yaml",
   "retired-entity-types.yaml",
   "public/*.md",
@@ -114,6 +119,8 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 explicit_package_bases = true
+# Eval fixture code (hyphenated task dirs) is not engine code and is not a package.
+exclude = ['^ciao/stock/evals/tasks/']
 
 [tool.coverage.run]
 source = ["ciao"]

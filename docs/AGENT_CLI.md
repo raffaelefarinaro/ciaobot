@@ -34,10 +34,6 @@ flowchart LR
   provider's **foreground** shell as `CIAO_AGENT_TOKEN` (with `CIAO_AGENT_URL`
   as the loopback base). This deliberately reverses the old "never in the shell
   env" invariant: CLI-first requires the agent's shell to hold chat authority.
-  Background runs keep the protection: `ciao/background.py` strips
-  `CIAO_AGENT_TOKEN` (and `PWA_AUTH_TOKEN`) from every background child, so a
-  detached command cannot call back into the agent surface with the caller's
-  authority, outliving the turn that was approved.
 - **Transport.** `ciao` posts `{op, arguments}` to `POST /agent/v1/{op}` with
   `Authorization: Bearer <token>`. `AgentDispatcher` verifies the token with
   `AgentSessionRegistry` (formerly `McpSessionRegistry`), resolves the operation
@@ -53,7 +49,7 @@ flowchart LR
   the workspace of the project that owns it. So a chat's token can read,
   message, retitle, archive and delete **other chats in the same workspace**; it
   cannot touch another workspace. The chat half of the principal drives the
-  plan-mode gate, the child-mode ceiling, background-run ownership, revocation
+  plan-mode gate, the child-mode ceiling, revocation
   granularity, and per-chat telemetry — and it lets an operation recognise its
   own chat so it does not tear down its own caller.
 - The scope is also not a containment boundary against the model itself. The
@@ -134,10 +130,9 @@ runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the command reference and
 application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 `ciao vault review …`), projects (`ciao project …`), workspaces
-(`ciao workspace list`), chats (`ciao chat …`), background runs
-(`ciao run …`), schedules (`ciao schedule …`), the task board
-(`ciao task …`, including `task delegate` and `task report`), note
-verification (`ciao note verify`), webhook triggers (`ciao webhook …`),
+(`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
+(`ciao task …`, including `task delegate` and `task report`), notes
+(`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
 Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), file
 surfacing (`ciao file surface`), and the suggested terminal command
 (`ciao chat terminal-offer`). Browser-session administration,

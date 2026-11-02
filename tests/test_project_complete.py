@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -742,3 +743,138 @@ def test_complete_project_closure_pass_uses_last_active_chat(tmp_path: Path) -> 
 
     assert result["memory_pass"] == "pass"
     assert seen == [newer]
+
+
+# ── folder moves repoint the references into and out of the project ───────
+
+
+def test_complete_repoints_project_backlinks(tmp_path: Path) -> None:
+    folder = _make_work_project_folder(tmp_path, "foo")
+    (folder / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    journal = tmp_path / "memory-vault" / "work" / "journals" / "daily.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text(
+        "# Daily\n- [foo](../projects/active/foo/foo.md)\n- [plan](../projects/active/foo/plan.md)\n",
+        encoding="utf-8",
+    )
+    links = tmp_path / "memory-vault" / "work" / "notes" / "links.md"
+    links.parent.mkdir(parents=True)
+    links.write_text("# Links\n- [[projects/active/foo/foo]]\n", encoding="utf-8")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None):
+        pcm.complete_project(proj.project_id)
+
+    assert journal.read_text(encoding="utf-8") == (
+        "# Daily\n- [foo](../projects/completed/foo/foo.md)\n- [plan](../projects/completed/foo/plan.md)\n"
+    )
+    assert links.read_text(encoding="utf-8") == "# Links\n- [[projects/completed/foo/foo]]\n"
+
+
+def test_restore_repoints_backlinks_back_to_active(tmp_path: Path) -> None:
+    _make_work_project_folder(tmp_path, "foo")
+    journal = tmp_path / "memory-vault" / "work" / "journals" / "daily.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("# Daily\n- [foo](../projects/active/foo/foo.md)\n", encoding="utf-8")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+    with patch.object(pcm, "enqueue_project_closure", return_value=None):
+        pcm.complete_project(proj.project_id)
+    assert journal.read_text(encoding="utf-8") == "# Daily\n- [foo](../projects/completed/foo/foo.md)\n"
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write("- appended while completed\n")
+
+    pcm.restore_project("work", "foo")
+
+    assert journal.read_text(encoding="utf-8") == (
+        "# Daily\n- [foo](../projects/active/foo/foo.md)\n- appended while completed\n"
+    )
+
+
+def test_project_move_repoints_links_from_moving_notes(tmp_path: Path) -> None:
+    # `[o](../other/other.md)` names no moved stem, so only the rule that every
+    # moving note is planned can select it for the rewrite.
+    _make_work_project_folder(tmp_path, "other")
+    folder = _make_work_project_folder(tmp_path, "foo")
+    (folder / "plan.md").write_text("# Other\n[o](../other/other.md)", encoding="utf-8")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None):
+        pcm.complete_project(proj.project_id)
+
+    completed_plan = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "foo" / "plan.md"
+    assert completed_plan.read_text(encoding="utf-8") == "# Other\n[o](../../active/other/other.md)"
+
+
+def test_complete_move_failure_leaves_backlinks_and_project(tmp_path: Path) -> None:
+    folder = _make_work_project_folder(tmp_path, "foo")
+    journal = tmp_path / "memory-vault" / "work" / "journals" / "daily.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("# Daily\n- [foo](../projects/active/foo/foo.md)\n", encoding="utf-8")
+    before = journal.read_bytes()
+    completed = tmp_path / "memory-vault" / "work" / "projects" / "completed"
+    assert not completed.exists()
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with (
+        patch.object(pcm, "enqueue_project_closure", return_value=None),
+        patch("ciao.vault_review.shutil.move", side_effect=OSError("disk full")),
+        pytest.raises(ValueError),
+    ):
+        pcm.complete_project(proj.project_id)
+
+    # The closure section is appended to the project doc before the move, and a
+    # failed move does not take it back out. That is pre-existing behaviour and out
+    # of scope here, so the project doc is deliberately not compared byte-for-byte.
+    assert journal.read_bytes() == before
+    assert folder.is_dir()
+    assert not completed.exists()
+    assert proj.project_id in pcm._projects
+
+
+def test_complete_refuses_existing_destination_without_touching_the_project(tmp_path: Path) -> None:
+    folder = _make_work_project_folder(tmp_path, "foo")
+    completed = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "foo"
+    completed.mkdir(parents=True)
+    before = (folder / "foo.md").read_bytes()
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None), pytest.raises(ValueError):
+        pcm.complete_project(proj.project_id)
+
+    assert (folder / "foo.md").read_bytes() == before
+    assert proj.project_id in pcm._projects
+
+
+def test_complete_repoints_backlinks_in_unheaded_notes(tmp_path: Path) -> None:
+    # A journal with neither frontmatter nor an H1 is a placeholder to the
+    # index, but it still links the project and must follow the move.
+    _make_work_project_folder(tmp_path, "foo")
+    journal = tmp_path / "memory-vault" / "work" / "journals" / "daily.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("[foo](../projects/active/foo/foo.md)\n", encoding="utf-8")
+    # A moving note of the same shape must be re-spelled too: its link to a
+    # sibling project would otherwise break once it leaves active/.
+    _make_work_project_folder(tmp_path, "other")
+    scratch = tmp_path / "memory-vault" / "work" / "projects" / "active" / "foo" / "scratch.md"
+    scratch.write_text("[o](../other/other.md)\n", encoding="utf-8")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None):
+        pcm.complete_project(proj.project_id)
+
+    text = journal.read_text(encoding="utf-8")
+    assert "projects/completed/foo/foo.md" in text and "projects/active/foo" not in text
+    completed_scratch = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "foo" / "scratch.md"
+    assert completed_scratch.read_text(encoding="utf-8") == "[o](../../active/other/other.md)\n"

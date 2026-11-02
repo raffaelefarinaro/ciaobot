@@ -1,0 +1,17 @@
+{
+  "id": "H7-shed-task-breakdown",
+  "tier": "hard",
+  "category": "task_breakdown",
+  "prompt": "Make a task for each open item in the garden shed project doc, due Friday, in the Garden shed project. Don't duplicate anything that's already on my task board.",
+  "entry": {"kind": "prompt"},
+  "setup": [{"kind": "task", "title": "Order the roof felt", "body": "Holzbau Keller has the felt in stock; two rolls."}],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {"kind": "new_tasks", "count": 3, "due": "weekday:friday", "project_name_contains": ["garden"],
+     "titles_cover": [["concrete", "pour"], ["stain"], ["neighbour", "neighbor", "boundary", "hedge"]]},
+    {"kind": "new_projects", "count": 0},
+    {"kind": "new_schedules", "count": 0},
+    {"kind": "new_files", "glob": "memory-vault/projects/**", "max": 0}
+  ]
+}

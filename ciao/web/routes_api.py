@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 # the annotations need the name at module scope.
 if TYPE_CHECKING:
     from ciao import operator_actions, update_tasks
+    from ciao.native_installer import NativeBootstrapContext
 
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -85,6 +86,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
+from ciao.providers.claude import ClaudeProvider, is_process_task
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_child_status,
@@ -95,6 +97,7 @@ from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
+    DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
     ScheduleEntry,
@@ -102,6 +105,7 @@ from ciao.schedules import (
     compute_next_run,
     is_interval,
     normalize_archive_policy,
+    normalize_days_of_week,
     normalize_interval_minutes,
     publish_automations_changed,
     run_failed_since,
@@ -132,6 +136,7 @@ from ciao.web.project_chats import (
     ChatPinConflictError,
     ChatInfo,
     ProjectChatManager,
+    ProjectOrderError,
     TerminalOfferConflictError,
 )
 from ciao.web.routes_helpers import (
@@ -321,22 +326,6 @@ def _rename_import_store(request: Request) -> Any:
     return ImportStore(engine_store_path(request.app.state.config))
 
 
-def _rename_run_store(request: Request) -> Any:
-    """The background-run store a workspace rename rewrites.
-
-    The live runner's store when the app has one, else a store on the same
-    file.
-    """
-    from ciao.background import BackgroundRunStore  # noqa: PLC0415
-
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is not None:
-        inner = getattr(runner, "_store", None)
-        return inner if inner is not None else runner
-    config = request.app.state.config
-    return BackgroundRunStore(Path(config.state_path).parent)
-
-
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -388,7 +377,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                     schedules=_rename_schedule_store(request),
                     webhooks=_rename_webhook_store(request),
                     imports=_rename_import_store(request),
-                    runs=_rename_run_store(request),
                 )
             except WorkspaceRenameBusy as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
@@ -1727,13 +1715,33 @@ async def reorder_projects(request: Request) -> JSONResponse:
     """Persist a drag-reordered project sequence for one workspace."""
     pcm = request.app.state.project_chat_manager
     body = await request.json()
-    workspace = body.get("workspace") or ""
-    ordered_ids = body.get("order")
-    if not workspace or not isinstance(ordered_ids, list):
+    workspace = body.get("workspace") if isinstance(body, dict) else None
+    ordered_ids = body.get("order") if isinstance(body, dict) else None
+    expected = body.get("expected_order") if isinstance(body, dict) else None
+    if (
+        not isinstance(workspace, str)
+        or not workspace
+        or not isinstance(ordered_ids, list)
+        or not all(isinstance(pid, str) for pid in ordered_ids)
+        or not isinstance(expected, list)
+        or not all(isinstance(pid, str) for pid in expected)
+    ):
         return JSONResponse(
-            {"error": "workspace and order[] are required"}, status_code=400
+            {
+                "error": "workspace, order[] and expected_order[] are required",
+                "code": "project_order_invalid",
+            },
+            status_code=400,
         )
-    projects = pcm.reorder_projects(workspace, [str(pid) for pid in ordered_ids])
+    try:
+        projects = pcm.reorder_projects(workspace, ordered_ids, expected)
+    except ProjectOrderError as exc:
+        if exc.code == "project_order_conflict":
+            return JSONResponse(
+                {"error": str(exc), "code": exc.code, "order": exc.current},
+                status_code=409,
+            )
+        return JSONResponse({"error": str(exc), "code": exc.code}, status_code=400)
     return JSONResponse([p.to_dict() for p in projects])
 
 
@@ -2849,48 +2857,36 @@ async def chat_move_to_background(request: Request) -> JSONResponse:
     return JSONResponse({"error": outcome}, status_code=409)
 
 
-def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
-    """The runner and the run named in the path, if this chat owns it.
+async def chat_background_task_stop(request: Request) -> JSONResponse:
+    """Stop one running native background task (Claude) or shell (OpenCode).
 
-    A run owned by another chat answers 404, like a missing one: the Work
-    details rail only ever asks about its own chat's runs.
+    ``task_id`` is the bare id from the Processes row (``task:<id>`` or
+    ``shell:<id>`` with the prefix removed). 404 when the chat, its live
+    provider or the id is unknown; the row leaves ``/api/subagents/running``
+    once the provider reports the task finished. 502 when OpenCode cannot be
+    reached.
     """
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is None:
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    task_id = request.path_params["task_id"]
+    if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    run = runner.get(request.path_params["run_id"])
-    if run is None or run.parent_chat_id != request.path_params["chat_id"]:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return runner, run
-
-
-async def chat_background_run_log(request: Request) -> JSONResponse:
-    """The last lines of a background run's log, for the Chat details rail."""
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    return JSONResponse({**run.summary(), "last_lines": runner.tail(run.run_id)})
-
-
-async def chat_background_run_cancel(request: Request) -> JSONResponse:
-    """Stop a background run from the Chat details rail.
-
-    The finish edge announces itself over /ws/events and wakes the chat, the
-    same as a cancel the agent asked for.
-    """
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    from ciao.background import BackgroundRunError
-
+    service = pcm._providers.get(chat_id)
+    provider = service.provider if service is not None else None
+    stopped = False
     try:
-        updated = await runner.cancel(run.run_id)
-    except BackgroundRunError:
-        # Pruned between the lookup and the cancel.
+        if isinstance(provider, ClaudeProvider):
+            stopped = await provider.stop_background_task(task_id)
+        elif isinstance(provider, OpencodeProvider):
+            stopped = await provider.stop_background_shell(task_id)
+    except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
+        logger.warning("stopping background task %s failed", task_id, exc_info=True)
+        return JSONResponse(
+            {"error": "the provider could not be reached or refused"}, status_code=502
+        )
+    if not stopped:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(updated.summary())
+    return JSONResponse({"ok": True})
 
 
 async def chat_prompt(request: Request) -> JSONResponse:
@@ -3393,7 +3389,9 @@ async def running_subagents(request: Request) -> JSONResponse:
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
     scanned: list[tuple[str, Any]] = []
-    for chat_id in pcm.active_chat_ids():
+    # A provider holding only a native shell has no stream, count or watcher,
+    # so it is absent from `active_chat_ids`; the feed lists it anyway.
+    for chat_id in sorted({*pcm.active_chat_ids(), *pcm.background_work_chat_ids()}):
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
@@ -3474,6 +3472,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                     "is_async": True,
                     "status": "running",
                     "turn_index": None,
+                    "started_at": _epoch_to_iso(shell["started_at"]),
+                    "stoppable": True,
                 })
         return rows
 
@@ -3484,18 +3484,33 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     path = subagent_tracking.find_parent_session_file(
         chat.session_id, Path(config.workspace_root), agent_root=agent_root
     )
-    if path is None:
+    # Native tasks (background Bash, Monitor) come from the loaded provider
+    # when there is one: its SDK-tracked set is the live truth and the only
+    # one that can be stopped. Without a loaded provider the parent JSONL's
+    # unfinished tasks stand in, listed but not stoppable. Never both, so a
+    # task is not listed twice.
+    provider_service = pcm._providers.get(chat.chat_id)
+    live_provider = provider_service.provider if provider_service is not None else None
+    live_claude = live_provider if isinstance(live_provider, ClaudeProvider) else None
+    if path is None and live_claude is None:
         return []
-    def _scan() -> list[subagent_tracking.SubagentInfo]:
+
+    def _scan() -> tuple[
+        list[subagent_tracking.SubagentInfo], list[subagent_tracking.SubagentInfo]
+    ]:
         # Both halves belong off the event loop. running_agents() is not a
         # cheap filter over the parsed state: it stats and tail-reads each
         # running agent's own transcript, and this endpoint is polled by the
         # sidebar for every working chat.
+        if path is None:
+            return [], []
         state = subagent_tracking.parse_session_subagents(path)
-        return subagent_tracking.running_agents(path, state)
+        agents = subagent_tracking.running_agents(path, state)
+        tasks = [] if live_claude is not None else subagent_tracking.running_tasks(state)
+        return agents, tasks
 
-
-    return [
+    agents, tasks = await asyncio.to_thread(_scan)
+    claude_rows: list[dict] = [
         {
             "agent_id": info.agent_id,
             "description": info.description,
@@ -3504,8 +3519,44 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             "status": info.status,
             "turn_index": info.turn_index,
         }
-        for info in await asyncio.to_thread(_scan)
+        for info in agents
     ]
+    # Processes rows reuse the shell row shape; `isShellRow` routes them.
+    claude_rows.extend(
+        {
+            "agent_id": f"task:{info.agent_id}",
+            "description": info.command or info.description or "Background task",
+            "subagent_type": "monitor" if info.subagent_type == "Monitor" else "shell",
+            "is_async": True,
+            "status": "running",
+            "turn_index": None,
+            "started_at": info.started_at,
+            "stoppable": False,
+        }
+        for info in tasks
+    )
+    if live_claude is not None:
+        for task in live_claude.background_shell_rows():
+            task_type = str(task["task_type"])
+            if not is_process_task(task):
+                # Background agents already have their own rows above.
+                continue
+            claude_rows.append({
+                "agent_id": f"task:{task['id']}",
+                "description": task["command"] or "Background task",
+                "subagent_type": "monitor" if "monitor" in task_type else "shell",
+                "is_async": True,
+                "status": "running",
+                "turn_index": None,
+                "started_at": _epoch_to_iso(task["started_at"]),
+                "stoppable": True,
+            })
+    return claude_rows
+
+
+def _epoch_to_iso(seconds: float) -> str:
+    """ISO 8601 UTC for epoch ``seconds``."""
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
 def _merge_subagent_dispatch_meta(
@@ -5526,7 +5577,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         try:
             target_date = datetime.fromisoformat(run_at_date).date()
             hh, mm = body["time"].split(":")
-            tz = ZoneInfo(body.get("timezone", "Europe/Zurich"))
+            tz = ZoneInfo(body.get("timezone", DEFAULT_TIMEZONE))
             target_dt = datetime(
                 target_date.year, target_date.month, target_date.day,
                 int(hh), int(mm), tzinfo=tz,
@@ -5554,6 +5605,7 @@ async def create_schedule(request: Request) -> JSONResponse:
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
         command = normalize_schedule_command(body.get("command"))
+        days_of_week = normalize_days_of_week(body.get("days_of_week"))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     # Stamp the workspace from the target project so the schedule still routes
@@ -5585,8 +5637,8 @@ async def create_schedule(request: Request) -> JSONResponse:
         provider=provider,
         mode=mode,
         chat_id=body.get("chat_id", 0),
-        timezone_name=body.get("timezone", "Europe/Zurich"),
-        days_of_week=body.get("days_of_week"),
+        timezone_name=body.get("timezone", DEFAULT_TIMEZONE),
+        days_of_week=days_of_week,
         thread_id=body.get("thread_id"),
         frequency=frequency,
         interval_minutes=interval_minutes,
@@ -5697,7 +5749,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if "timezone" in body:
         entry.timezone_name = body["timezone"]
     if "days_of_week" in body:
-        entry.days_of_week = body["days_of_week"] or None
+        try:
+            entry.days_of_week = normalize_days_of_week(body["days_of_week"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "thread_id" in body:
         entry.thread_id = body["thread_id"] or None
     if "chat_id" in body:
@@ -5898,6 +5953,7 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "log_level",
     "dev_mode",
     "app_repo",
+    "resume_after_restart",
 })
 
 
@@ -5928,6 +5984,8 @@ def _routines_payload(config, app_settings) -> dict:
         "log_level": s.log_level,
         "dev_mode": s.dev_mode,
         "app_repo": s.app_repo,
+        # Settings → General: resume a chat whose turn a restart cut off (#2128).
+        "resume_after_restart": s.resume_after_restart,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
@@ -6301,6 +6359,202 @@ def _schedule_launchd_server_handoff() -> bool:
     return True
 
 
+#: Body fields the native setup request may carry. The trust-critical paths
+#: (`python`, `launch_agents_dir`, `app_dir`) are in the set only so a client
+#: that sends them empty is not rejected; a non-empty value is refused above.
+_NATIVE_SETUP_FIELDS: frozenset[str] = frozenset(
+    {
+        "workspace",
+        "port",
+        "provider",
+        "vault_root",
+        "vault_mode",
+        "workspace_name",
+        "password",
+        "auth_token",
+        "restart",
+        "python",
+        "launch_agents_dir",
+        "app_dir",
+    }
+)
+#: String fields the native branch reads; anything else is a malformed body.
+_NATIVE_SETUP_STRING_FIELDS: tuple[str, ...] = (
+    "workspace",
+    "provider",
+    "vault_root",
+    "vault_mode",
+    "workspace_name",
+    "password",
+    "auth_token",
+)
+_NATIVE_SETUP_STATE_CHANGED = (
+    "the installer state changed while setup was open; nothing was written"
+)
+_NATIVE_SETUP_RESTART_REFUSED = (
+    "setup was recorded but the server could not be restarted; nothing was started"
+)
+_NATIVE_SETUP_ALREADY_CLAIMED = (
+    "setup already ran for this native bootstrap; nothing else was written"
+)
+_NATIVE_SETUP_WRITE_REFUSED = (
+    "setup could not write this install because the on-disk state differs from "
+    "the one the installer prepared; nothing was started"
+)
+_NATIVE_SETUP_RECORD_REFUSED = (
+    "setup wrote the workspace but could not record the native handoff result; "
+    "nothing was started"
+)
+
+
+def _request_native_failure_exit(request: Request) -> None:
+    """Stop a native bootstrap child after it already mutated the destination.
+
+    Retrying a setup that wrote a workspace, wrote a definition or recorded a
+    result could compound partial state, so the child asks the server to leave
+    with a nonzero code. The installer parent observes that as a failed run and
+    never activates. Only the native branch calls this. With no usable restart
+    hook the child exits right here: silently continuing would leave a
+    half-written bootstrap serving.
+    """
+    restart_fn = getattr(request.app.state, "request_restart", None)
+    if callable(restart_fn):
+        try:
+            restart_fn(1)
+            return
+        except Exception:
+            # A broken hook must not turn the failure into a 500 with the child
+            # still serving: fall through to the hard exit.
+            pass
+    os._exit(1)
+
+
+class _NativeFinishRefusal(Exception):
+    """A fixed refusal after the native claim; the handler maps it to its 409."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _publish_setup_environment(workspace: Path, port: int, password: str) -> None:
+    # Hand the chosen workspace to the relaunched process. A foreground
+    # `ciao run` restarts by re-execing itself with the current environment,
+    # and nothing else tells the fresh process where setup landed — without
+    # this it boots straight back into the bootstrap wizard.
+    os.environ["CIAO_WORKSPACE"] = str(workspace)
+    os.environ["PWA_PORT"] = str(port)
+    # Same reason for the credentials: `load_dotenv` does not override values
+    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
+    # bootstrap process would outrank the password just written to .env.
+    os.environ["PWA_AUTH_TOKEN"] = password
+
+
+async def _native_finish_write(
+    context: NativeBootstrapContext,
+    *,
+    workspace: Path,
+    setup_kwargs: dict[str, Any],
+    password: str,
+    port: int,
+    startup_id: str,
+    bootstrap_host: str,
+    bootstrap_port: int,
+) -> tuple[Path, list[Path]]:
+    """Everything the native bootstrap does after its single-flight claim.
+
+    Resolve, re-check the captured state, write, record and read back. Returns
+    the resolved workspace and what setup wrote. A refusal is raised as
+    :class:`_NativeFinishRefusal` with its fixed message; any other exception
+    propagates to the handler, which treats it the same way. The caller requests
+    the failure exit on every exception, so nothing here has to clean up.
+    """
+    from ciao import native_handoff
+    from ciao.cli import setup_workspace
+    from ciao.native_handoff import NativeHandoffError
+    from ciao.native_installer import NativeBootstrapError
+
+    resolved_workspace = workspace.resolve()
+    # Last read-only gate before the first destination write. It re-checks the
+    # host snapshot, the bootstrap directory identities, the private scratch
+    # chain, the absent live definition and handoff result, the chosen workspace
+    # and the engine interpreter. It runs off the event loop because the host
+    # check reads files and runs the codesign probe.
+    try:
+        resolved_workspace = await asyncio.to_thread(
+            context.assert_ready_to_write,
+            startup_id=startup_id,
+            workspace=resolved_workspace,
+            port=port,
+            engine_python=sys.executable,
+            config_host=bootstrap_host,
+            config_port=bootstrap_port,
+        )
+    except NativeBootstrapError:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_STATE_CHANGED) from None
+
+    # setup_workspace only writes workspace files and the bundled-engine
+    # LaunchAgent. The release installer owns app downloads, so setup remains
+    # responsive and never reaches out to GitHub. The native branch never
+    # overwrites a definition: setup_kwargs carries exclusive_service_definition.
+    written = await asyncio.to_thread(
+        functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
+    )
+    _publish_setup_environment(resolved_workspace, port, password)
+
+    # The definition this setup wrote must be exactly the one the context
+    # proved absent before the write. Comparing the reported path catches a
+    # legacy override or a setup that wrote nowhere.
+    try:
+        written_definitions = [
+            Path(path).resolve()
+            for path in written
+            if Path(path).name == context.definition_path.name
+        ]
+    except OSError:
+        written_definitions = []
+    if written_definitions != [context.definition_path.resolve()]:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
+    try:
+        # The schema-2 record binds the definition's digest, the executed
+        # program/interpreter identities and the environment. It is written
+        # off the event loop; the read-back below is the record identity check
+        # for this run and this child.
+        recorded = await asyncio.to_thread(
+            functools.partial(
+                native_handoff.record_setup_completion,
+                run_id=context.run_id,
+                startup_id=context.startup_id,
+                workspace=resolved_workspace,
+                written=written,
+                port=port,
+                engine_python=str(context.engine_python),
+            )
+        )
+        result = await asyncio.to_thread(
+            native_handoff.read_result,
+            expected_run_id=context.run_id,
+        )
+    except (NativeHandoffError, OSError, ValueError):
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED) from None
+    try:
+        identity_ok = (
+            Path(recorded).resolve() == context.handoff_path.resolve()
+            and result.run_id == context.run_id
+            and result.startup_id == context.startup_id
+            and result.workspace == resolved_workspace
+            and result.port == port
+            and result.service_backend == "macos"
+            and result.definition_path.resolve() == context.definition_path.resolve()
+            and Path(result.engine_python).resolve() == context.engine_python.resolve()
+        )
+    except OSError:
+        identity_ok = False
+    if not identity_ok:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
+    return resolved_workspace, written
+
+
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
     """Write real setup config from bootstrap mode and request supervisor restart."""
     config = request.app.state.config
@@ -6314,6 +6568,10 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
+    native_context: NativeBootstrapContext | None = getattr(
+        request.app.state, "native_bootstrap", None
+    )
+
     # Decided before anything is written: the installer bootstrap completes by
     # exiting, so a request that would leave it running must not provision the
     # destination or the service first.
@@ -6324,6 +6582,39 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             {"error": "the installer bootstrap completes by exiting"},
             status_code=400,
         )
+    if native_context is not None and not installer_mode:
+        return JSONResponse(
+            {"error": "the native bootstrap state is inconsistent"},
+            status_code=409,
+        )
+    if native_context is not None:
+        # The body is untrusted browser input. In native mode the installer has
+        # already fixed where the definition and the engine live, so a request
+        # may choose only the destination and its own settings; an override of
+        # those trust seams is refused before any path is resolved.
+        unexpected = sorted(set(body) - _NATIVE_SETUP_FIELDS)
+        if unexpected:
+            return JSONResponse(
+                {"error": "the native setup request carries an unsupported field"},
+                status_code=400,
+            )
+        # Only absent, null or the empty string may reach the trust seams. A
+        # non-empty string is the explicit override refusal; any other value
+        # (0, false, [], {}) is refused as a state conflict, never coerced.
+        for key in ("launch_agents_dir", "app_dir", "python"):
+            value = body.get(key)
+            if value not in (None, ""):
+                return JSONResponse(
+                    {"error": f"the native setup request must not override {key}"},
+                    status_code=400 if type(value) is str else 409,
+                )
+        for key in _NATIVE_SETUP_STRING_FIELDS:
+            value = body.get(key)
+            if value is not None and type(value) is not str:
+                return JSONResponse(
+                    {"error": f"the native setup request field {key} must be a string"},
+                    status_code=400,
+                )
 
     # The wizard's primary question is the workspace: one root folder holding
     # the vault (memory-vault/ by default) plus app data, all one git repo.
@@ -6380,37 +6671,88 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    # The native branch resolves the workspace inside its guarded block, after
+    # the claim; the legacy path resolves it here as before.
+    resolved_workspace = Path(workspace).expanduser()
+    if native_context is None:
+        resolved_workspace = resolved_workspace.resolve()
+    tracker = getattr(request.app.state, "startup_tracker", None)
+
+    if native_context is not None:
+        # Single flight: claimed synchronously before the first await in the
+        # guarded block and never released, so a second request, or a retry
+        # after a refusal, is refused rather than racing the non-exclusive
+        # workspace writes. Refusals before this line take no claim and exit
+        # nothing; every path after it ends in the failure exit or an ok.
+        if getattr(request.app.state, "native_finish_claimed", False):
+            return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
+        request.app.state.native_finish_claimed = True
+
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
     # responsive and never reaches out to GitHub.
-    try:
-        written = await asyncio.to_thread(
-            functools.partial(
-                setup_workspace,
-                workspace,
-                auth_token=password,
-                vault_root=str(body.get("vault_root", "")).strip() or None,
-                vault_mode=vault_mode,
-                workspace_name=workspace_name,
-                default_provider=default_provider,
-                python_path=str(body.get("python", "")).strip() or None,
+    setup_kwargs: dict[str, Any] = {
+        "auth_token": password,
+        "vault_root": str(body.get("vault_root", "")).strip() or None,
+        "vault_mode": vault_mode,
+        "workspace_name": workspace_name,
+        "default_provider": default_provider,
+        "port": port,
+    }
+    if native_context is None:
+        setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
+        setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
+        setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
+    else:
+        # The installer fixed the interpreter and the definition directory; the
+        # body is never read for these, so no request can move the trust seams.
+        setup_kwargs["python_path"] = None
+        setup_kwargs["launch_agents_dir"] = None
+        setup_kwargs["app_dir"] = None
+        # An existing definition is a refusal, not an overwrite. Only the
+        # native branch opts in; every legacy caller keeps `write_text`.
+        setup_kwargs["exclusive_service_definition"] = True
+        # Use the host snapshot this child proved at capture, not a second
+        # independent selection that could downgrade to the direct shape.
+        setup_kwargs["verified_host"] = native_context.expected_host
+    if native_context is not None:
+        try:
+            resolved_workspace, written = await _native_finish_write(
+                native_context,
+                workspace=resolved_workspace,
+                setup_kwargs=setup_kwargs,
+                password=password,
                 port=port,
-                launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-                app_dir=str(body.get("app_dir", "")).strip() or None,
+                startup_id=getattr(tracker, "startup_id", "") or "",
+                bootstrap_host=config.pwa_host,
+                bootstrap_port=config.pwa_port,
             )
-        )
-    except RuntimeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-    # Hand the chosen workspace to the relaunched process. A foreground
-    # `ciao run` restarts by re-execing itself with the current environment,
-    # and nothing else tells the fresh process where setup landed — without
-    # this it boots straight back into the bootstrap wizard.
-    os.environ["CIAO_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
-    os.environ["PWA_PORT"] = str(port)
-    # Same reason for the credentials: `load_dotenv` does not override values
-    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
-    # bootstrap process would outrank the password just written to .env.
-    os.environ["PWA_AUTH_TOKEN"] = password
+        except _NativeFinishRefusal as finish_refusal:
+            # The claim is taken and something may already be on disk: the
+            # child leaves nonzero, the installer parent never activates.
+            _request_native_failure_exit(request)
+            return JSONResponse({"error": finish_refusal.message}, status_code=409)
+        except asyncio.CancelledError:
+            # A client disconnect or shutdown cancelled the awaited write. It is
+            # a BaseException, so it needs its own clause: exit closed, then let
+            # the cancellation propagate instead of answering the request.
+            _request_native_failure_exit(request)
+            raise
+        except Exception:
+            # Any other failure after the claim, including one raised before the
+            # write, ends the same way: a nonzero exit, never a served wizard.
+            _request_native_failure_exit(request)
+            return JSONResponse(
+                {"error": _NATIVE_SETUP_WRITE_REFUSED}, status_code=409
+            )
+    else:
+        try:
+            written = await asyncio.to_thread(
+                functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
+            )
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
@@ -6420,17 +6762,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         and not str(body.get("launch_agents_dir", "")).strip()
     )
 
-    if installer_mode:
+    if native_context is None and installer_mode:
         # The installer parent owns the service: this child records what setup
-        # wrote, exits 0, and the parent verifies and activates.
+        # wrote, exits 0, and the parent verifies and activates. This is the
+        # unchanged schema-1 legacy path.
         from ciao.installer_handoff import HandoffError, record_setup_completion
 
-        tracker = getattr(request.app.state, "startup_tracker", None)
         try:
             record_setup_completion(
                 run_id=request.app.state.installer_run_id,
                 startup_id=getattr(tracker, "startup_id", "") or "",
-                workspace=str(Path(workspace).expanduser().resolve()),
+                workspace=str(resolved_workspace),
                 written=written,
                 port=port,
             )
@@ -6453,13 +6795,26 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     )
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
-        if callable(restart_fn):
+        if native_context is not None:
+            # The setup is recorded, so a dead or missing restart must not leave
+            # this child serving; the parent never activates a run that ends
+            # this way. The fixed refusal is returned only if the exit returns.
+            try:
+                if not callable(restart_fn):
+                    raise RuntimeError("the native bootstrap has no restart hook")
+                restart_fn(0)
+            except Exception:
+                os._exit(1)
+                return JSONResponse(
+                    {"error": _NATIVE_SETUP_RESTART_REFUSED}, status_code=409
+                )
+        elif callable(restart_fn):
             restart_fn(0 if (handoff or installer_mode) else RESTART_EXIT_CODE)
 
     return JSONResponse({
         "ok": True,
         "restart_requested": restart,
-        "workspace": str(Path(workspace).expanduser().resolve()),
+        "workspace": str(resolved_workspace),
         "written": [str(path) for path in written],
     })
 
@@ -7928,7 +8283,8 @@ async def list_proposals(request: Request) -> JSONResponse:
     record is surfaced under the same ``rows`` list with ``kind: "skill"``.
     """
     config = request.app.state.config
-    rows, _by_id = proposal_service._scan_proposal_rows(config)
+    # Off the event loop: the scan is blocking file I/O.
+    rows, _by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, config)
     return JSONResponse({"rows": rows})
 
 
@@ -8969,9 +9325,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # before the bullet goes. A refusal that could not be written
                 # aborts the batch whole rather than half-resolving it.
                 for row in entry["rows"]:
-                    if row.get("kind") not in {"category", "note_edit"}:
+                    if proposal_service._is_skill_draft_row(config, row):
+                        # Settled first, like the others. The settlement removes the
+                        # bullet itself, so its line is kept out of the rewrite below.
+                        keep_lines.add(int(row["line"]))
+                        refusal = await asyncio.to_thread(
+                            proposal_service._settle_skill_draft, config, row
+                        )
+                    elif row.get("kind") not in {"category", "note_edit"}:
                         continue
-                    if row["kind"] == "category":
+                    elif row["kind"] == "category":
                         refusal = await asyncio.to_thread(
                             proposal_service.decline_category_row, config, row
                         )
@@ -9402,6 +9765,24 @@ async def proposal_action(request: Request) -> JSONResponse:
         )
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
+    if action == "dismiss" and proposal_service._is_skill_draft_row(config, row):
+        # The same rule again: the draft's settlement is on record before anything
+        # else. It removes its own bullet, so the line removal below must not run
+        # for this row; by index it would take a different line.
+        decline_error = await asyncio.to_thread(
+            proposal_service._settle_skill_draft, config, row, reason=reason
+        )
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": proposal_actions.ProposalActionResult(
+                    id=pid, action="dismiss", dismissed=True
+                ).as_dict(),
+            }
+        )
 
     if ctx.get("file"):
         # A whole file, not a bullet in a queue: the line-removal path below

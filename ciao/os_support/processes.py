@@ -2,8 +2,7 @@
 
 A caller spawns with ``**tree_spawn_options()`` and wraps the new pid in a
 ``ProcessTree`` straight away. ``terminate()`` asks the tree to stop and
-``kill()`` ends it, grandchildren included (``git push`` forks ``ssh``; a
-background run forks whatever its command does).
+``kill()`` ends it, grandchildren included (``git push`` forks ``ssh``).
 
 POSIX is the process group exactly as the call sites used it before this
 module existed: ``start_new_session=True`` makes the child a group leader

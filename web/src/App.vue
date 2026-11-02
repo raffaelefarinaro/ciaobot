@@ -564,9 +564,23 @@ a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
   transition: background 120ms var(--ease), transform 120ms var(--ease);
 }
 
-.btn-primary:hover { background: var(--accent-strong); }
+.btn-primary:hover:not(:disabled) { background: var(--accent-strong); }
 .btn-primary:active { transform: scale(0.98); }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn-primary:disabled {
+  background: var(--bg3);
+  border-color: var(--bg3);
+  color: var(--fg3);
+  cursor: not-allowed;
+  transform: none;
+}
+.btn-primary.btn-small {
+  padding: 8px 16px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--accent);
+}
+.btn-primary.btn-small:hover:not(:disabled) { border-color: var(--accent-strong); }
+.btn-primary.btn-small:active:not(:disabled) { background: var(--accent-strong); }
+.btn-primary.btn-small:disabled { border-color: var(--bg3); }
 
 /* Compact control (30×30 layout) with a full --touch hit area. Padding expands
    the border-box for taps; negative margin keeps flex/grid spacing tight.
@@ -904,9 +918,9 @@ input:focus, textarea:focus, select:focus {
 }
 .hint--warn {
   display: block;
-  color: var(--fg2);
-  background: color-mix(in srgb, var(--warning) 6%, var(--bg2));
-  border: 1px solid var(--border-strong);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg2));
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
   border-radius: var(--radius-sm);
   padding: 10px 12px;
 }

@@ -1,0 +1,60 @@
+{
+  "id": "H1-multi-source-synthesis",
+  "tier": "hard",
+  "category": "synthesis",
+  "prompt": "Read the three files in Documents/inbox and update the summer party project doc with the catering decisions.",
+  "entry": {
+    "kind": "prompt"
+  },
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "all": [
+        "Forno Rosso",
+        "38",
+        "30%"
+      ]
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "any": [
+        "2027-03-12",
+        "12 March 2027",
+        "March 12, 2027",
+        "12 Mar 2027",
+        "12.03.2027",
+        "March 12th, 2027",
+        "12th March 2027",
+        "12th of March 2027"
+      ]
+    },
+    {
+      "kind": "file_excludes",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "any": [
+        "price: CHF 45",
+        "price:** CHF 45",
+        "price is CHF 45",
+        "costs CHF 45"
+      ]
+    },
+    {
+      "kind": "frontmatter_valid",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "links_resolve",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "new_files",
+      "glob": "memory-vault/projects/**",
+      "max": 0
+    }
+  ]
+}

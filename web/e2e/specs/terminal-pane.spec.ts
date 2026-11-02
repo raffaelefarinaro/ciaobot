@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { COMPOSER, activeWorkspaceButton, boot, isolate } from '../support/app'
+import { COMPOSER, activeWorkspaceButton, boot, isolate, settled } from '../support/app'
 
 /**
  * The browser terminal's pane, in a real browser.
@@ -89,9 +89,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect(pane.locator('.tp-warning')).toContainText('not a sandbox')
   await expect(pane.locator('.tp-status')).toContainText('fixture.local')
 
-  // No shell is running yet, and starting one is an explicit act.
-  await expect(pane.getByRole('tab')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  // No shell was running, so opening the terminal started one.
   await expect(pane.getByRole('tab')).toHaveCount(1)
 
   // The shell answers.
@@ -118,6 +116,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   // A pointer with a keyboard behind it has no use for on-screen keys: the
   // row is rendered for the layout but hidden until a coarse pointer.
   await expect(pane.locator('.tp-keys')).toBeHidden()
+  await expect(pane.locator('.tp-hint-touch')).toBeHidden()
 
   // The documented way out: Shift+Tab hands the keyboard to the panel's own
   // controls, and the shell never sees the key.
@@ -188,6 +187,19 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // in already has one, and a second would be a frame of its own.
   expect(await pane.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
 
+  // The tile slides in (chat-tile-in); boxes read on different frames of it
+  // disagree by up to the slide's 12px, so measure once it has settled.
+  await settled(tile)
+  // Close sits top right of the header, beside the title, as the pinned
+  // file tile's does — not on a row of its own under it.
+  const headBox = (await pane.locator('.tp-head').boundingBox())!
+  const titleBox = (await pane.locator('.tp-title').boundingBox())!
+  const closeBox = (await pane.locator('.tp-close').boundingBox())!
+  expect(closeBox.x).toBeGreaterThan(titleBox.x + titleBox.width)
+  expect(headBox.x + headBox.width - (closeBox.x + closeBox.width)).toBeLessThanOrEqual(16)
+  expect(closeBox.y).toBeLessThan(titleBox.y + titleBox.height)
+  await pane.locator('.tp-head').screenshot({ path: test.info().outputPath('terminal-head.png') })
+
   // The divider between the chat and the tile, and it is a separator.
   const divider = page.locator('.chat-split-resizer')
   await expect(divider).toBeVisible()
@@ -207,6 +219,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // The divider drags: the chat gives up the room and the tile takes it.
   const dividerBox = (await divider.boundingBox())!
   await dragDivider(page, divider, dividerBox.x - 100)
+  await settled(page.locator('.chat-main'))
 
   const columnAfter = (await column.boundingBox())!
   const paneAfter = (await pane.boundingBox())!
@@ -218,6 +231,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // Dragged as far left as it goes, the chat column stops at its 360px
   // floor: the divider cannot squeeze the conversation to a sliver.
   await dragDivider(page, divider, 120)
+  await settled(page.locator('.chat-main'))
   const columnLeft = (await column.boundingBox())!
   expect(columnLeft.width).toBeGreaterThanOrEqual(360)
   expect(columnLeft.width).toBeLessThanOrEqual(362)
@@ -227,6 +241,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
 
   // Dragged as far right as it goes, the tile stops at its 360px floor.
   await dragDivider(page, divider, 2000)
+  await settled(page.locator('.chat-main'))
   const tileBox = (await tile.boundingBox())!
   expect(tileBox.width).toBeGreaterThanOrEqual(360)
   expect(tileBox.width).toBeLessThanOrEqual(362)
@@ -344,10 +359,129 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   // The pane is scoped to this chat, not to another one.
   await expect.poll(() => scopeQueries.join(' ')).toContain('chat_id=alpha-chat-2')
 
-  // A shell starts here like any other: opening the panel starts nothing.
-  await expect(pane.getByRole('tab')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  // A shell starts here like any other: opening the panel starts one.
   await expect(pane.getByRole('tab')).toHaveCount(1)
+})
+
+test('the terminal belongs to the chat: it hides on a switch and comes back with its shell', async ({ page }) => {
+  await boot(page, NO_REPO_CHAT_PATH, COMPOSER)
+  // The fixture's shells outlive a spec within one worker, and opening adopts
+  // a shell an earlier spec left for this chat, so the count is taken once the
+  // terminal is open: the claim is that coming back starts nothing.
+  const countSessions = () => page.evaluate(async () => {
+    const res = await fetch('/__fixture__/terminal')
+    return (await res.json()).sessions.length as number
+  })
+
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  const surface = pane.locator('.tp-surface')
+  await expect(pane.locator('.tp-surface textarea')).toBeEditable()
+  await surface.click()
+  await page.keyboard.type(`echo ${OUTPUT}`)
+  await page.keyboard.press('Enter')
+  await expect(surface).toContainText(OUTPUT)
+  const open = await countSessions()
+
+  // Another chat: the terminal is hidden and the slot is the chat's again.
+  await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(CHAT_PATH))
+  await expect(pane).toBeHidden()
+  await expect(page.locator('.chat-split-resizer')).toHaveCount(0)
+
+  // Back: the same shell, no new one, and the keyboard was not taken.
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(NO_REPO_CHAT_PATH))
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  await expect(surface).toContainText(OUTPUT)
+  expect(await countSessions()).toBe(open)
+  const focusInPane = await page.evaluate(() => !!document.activeElement?.closest('.terminal-pane'))
+  expect(focusInPane).toBe(false)
+
+  // Closed there, it stays closed after a round trip.
+  await pane.getByRole('button', { name: 'Close' }).click()
+  await expect(pane).toBeHidden()
+  await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(CHAT_PATH))
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(NO_REPO_CHAT_PATH))
+  await expect(pane).toBeHidden()
+})
+
+test('a chat with a linked repository asks where to open the shell', async ({ page }, testInfo) => {
+  // A fixture session of its own: the earlier journeys left shells running
+  // for this chat, and a running shell is adopted rather than asked about.
+  await isolate(page, `terminal-pane-repo-${testInfo.workerIndex}`)
+  const linked = await page.request.post('/__fixture__/terminal-repo', { data: { chat_id: 'alpha-chat-1' } })
+  expect(linked.ok(), 'the fixture refused the repository').toBe(true)
+  await boot(page, CHAT_PATH, COMPOSER)
+
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+
+  // Nothing starts until the person picks a folder.
+  const chooser = pane.getByRole('group', { name: 'Where to open the shell' })
+  await expect(chooser).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('terminal-chooser.png'), animations: 'disabled' })
+
+  await chooser.getByRole('button', { name: /Repository/ }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  await expect(pane.getByRole('tab')).toHaveAttribute('title', /\/synthetic\/repo/)
+  await expect(chooser).toBeHidden()
+
+  // A second shell asks again, and can go to the workspace.
+  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  await chooser.getByRole('button', { name: /Workspace/ }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(2)
+  await expect(pane.getByRole('tab').nth(1)).toHaveAttribute('title', /\/synthetic\/workspace/)
+})
+
+test.describe('on a touch screen wide enough for the tile', () => {
+  test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true })
+
+  test('the key row sits under the screen in the tile', async ({ page }) => {
+    await isolate(page, 'terminal-pane-touch-tile')
+    await boot(page, CHAT_PATH, COMPOSER)
+    // A coarse pointer is what shows the row; a fine one would hide it.
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+
+    await page.locator('.work-inspector-trigger').click()
+    const details = page.locator('#chat-work-rail')
+    await expect(details).toBeVisible()
+    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+
+    const pane = page.locator('.terminal-pane')
+    await expect(pane).toBeVisible()
+    await expect(pane).toHaveClass(/terminal-pane--tile/)
+
+    // A shell starts with the pane, and the row follows the screen.
+    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
+    await expect(keys).toBeVisible()
+    await expect(keys.getByRole('button')).toHaveCount(9)
+    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
+
+    // The row is under the screen, not beside it or above it. The tile slides
+    // in with chat-tile-in, which starts at scale(0.985): a key read before the
+    // tile (not just the pane) settles measures 44 * 0.985 = 43.34px (#2391).
+    const surface = pane.locator('.tp-surface')
+    await settled(page.locator('.chat-split-side'))
+    await settled(pane)
+    const surfaceBox = (await surface.boundingBox())!
+    const rowBox = (await keys.boundingBox())!
+    expect(rowBox.y).toBeGreaterThanOrEqual(surfaceBox.y + surfaceBox.height - 0.5)
+
+    // Every key is a 44px target.
+    for (let i = 0; i < 9; i += 1) {
+      const box = (await keys.getByRole('button').nth(i).boundingBox())!
+      expect(box.height, `key ${i} is ${box.height}px tall`).toBeGreaterThanOrEqual(44 - 0.5)
+      expect(box.width, `key ${i} is ${box.width}px wide`).toBeGreaterThanOrEqual(44 - 0.5)
+    }
+  })
 })
 
 test.describe('on a phone', () => {
@@ -385,6 +519,8 @@ test.describe('on a phone', () => {
     await pane.getByRole('button', { name: 'New terminal session' }).click()
     const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
     await expect(keys).toBeVisible()
+    await expect(pane.locator('.tp-hint-touch')).toBeVisible()
+    await expect(keys.getByRole('button')).toHaveCount(9)
     const field = pane.locator('.tp-surface textarea')
     await expect(field).toBeEditable()
     await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()

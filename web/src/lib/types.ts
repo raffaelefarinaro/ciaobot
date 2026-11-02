@@ -390,7 +390,7 @@ export interface ChatRetryInfo {
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
-  | 'task_resume' | 'webhook' | 'update_task'
+  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -410,6 +410,8 @@ export interface ChatMessage {
   steered?: boolean
   // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
   origin?: TurnOrigin
+  // Engine-recorded context pack a provider handover sent; on the handover marker only.
+  sent_context?: string
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -474,25 +476,10 @@ export interface RunningSubagent {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number | null
-}
-
-/**
- * A tracked `background_run_start` command, as /ws/events reports it. No pid,
- * cwd or log path: every connected client receives these.
- */
-export interface BackgroundRunSummary {
-  run_id: string
-  label: string
-  cmd: string[]
-  started_at: string
-  // "queued" | "running" while live; "ok" | "error" | "cancelled" once ended.
-  status: string
-  exit_code: number | null
-}
-
-/** `GET /api/chats/{id}/background-runs/{run}/log`. */
-export interface BackgroundRunLog extends BackgroundRunSummary {
-  last_lines: string[]
+  /** Process rows (`shell` / `monitor`): ISO start time, empty when unknown. */
+  started_at?: string
+  /** Process rows: the engine can stop it from the Processes list. */
+  stoppable?: boolean
 }
 
 /** `GET /api/subagents/running`. Chats with nothing running are omitted. */
@@ -644,7 +631,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
@@ -653,13 +640,12 @@ export type EventsWsMessage =
   // because the engine can change a chat's offer from any session.
   | { type: 'chat_terminal_offer_changed'; chat_id: string; terminal_offer: TerminalOffer | null }
   | { type: 'chat_created'; chat: ChatInfo }
-  | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
+  | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_code_mode'; chat_id: string; project_id: string; code_mode: boolean; actor: CodeModeActor; at: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
-  | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
@@ -957,6 +943,9 @@ export interface RoutineSettings {
   log_level?: string
   dev_mode?: boolean
   app_repo?: string
+  // Settings → General: a chat whose turn a restart or crash cut off gets one
+  // "Continue after restart" turn at the next start. Missing = on.
+  resume_after_restart?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string
@@ -1617,9 +1606,19 @@ export interface TaskInvalidRow {
 /** What one entry of `GET /api/tasks`'s `tasks` array may be. */
 export type TaskRow = Task | TaskInvalidRow
 
+/**
+ * The board's persisted card order: one id sequence per status, plus the
+ * version the server stamps on every change to it.
+ */
+export interface TaskOrder {
+  version: number
+  sequences: Record<TaskStatus, string[]>
+}
+
 export interface TaskListResponse {
   workspace: string
   tasks: TaskRow[]
+  order: TaskOrder
 }
 
 /**
@@ -1790,6 +1789,9 @@ export interface ProposalRow {
   workspace: string
   path: string
   line: number
+  /** Read-only review identity and canonical link from the listing; distinct from the action `id`. Locally hydrated rows may lack both and never match a deep link. */
+  readonly review_key?: string
+  readonly review_path?: string
   region?: string
   leak_warning?: boolean
   rehome?: RehomeSignal

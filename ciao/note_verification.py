@@ -23,7 +23,10 @@ writes nothing, so the worklist pass and the proposal writer can both ask what
   the ``quoted`` text seen there, a ``supports`` clause). One good row among
   three uncited ones leaves two claims with nothing behind them, so the test is
   on the whole set, not on whether one row qualifies. An uncited edit is
-  returned for a human, never written quietly.
+  returned for a human, never written quietly. An edit planned against other
+  text is a ``conflict``; an edit whose replacement is the note's own text, or
+  whose evidence was given but no row names the note, is ``unverified``, because
+  there is nothing for a person to decide.
 * ``retire`` — **never** applied here. Retirement is a human decision, so it is
   returned as ``needs_review`` and nothing is written.
 * ``unverified`` — no mutation and no proposal. A missing, unavailable or
@@ -413,6 +416,11 @@ def _supporting_evidence(request: VerificationRequest) -> tuple[Evidence, ...]:
     )
 
 
+def _evidence_names_note(request: VerificationRequest) -> bool:
+    """Whether any evidence row, cited or not, says it is about this note."""
+    return any(_names_note(row, request.relative_path) for row in request.evidence)
+
+
 def _all_citations(request: VerificationRequest) -> bool:
     """Whether *every* evidence row is a citation, and there is at least one.
 
@@ -445,7 +453,7 @@ def _missing_evidence_reason(request: VerificationRequest) -> str:
     if not _supporting_evidence(request):
         return (
             "no evidence row names this note "
-            f"({request.relative_path}), so nothing supports a re-stamp of it"
+            f"({request.relative_path}), so none of it is evidence about this note"
         )
     uncited = sum(1 for row in request.evidence if not _is_citation(row))
     if uncited:
@@ -466,6 +474,11 @@ def _missing_evidence_reason(request: VerificationRequest) -> str:
 _RETIRE_REASON = (
     "retirement is a human decision: this service never retires, deletes, "
     "trashes or archives a note, so the judgement is returned for review"
+)
+
+_NO_CHANGE_REASON = (
+    "the replacement is byte-identical to the text it would replace, so there "
+    "is nothing to change; nothing was written and nothing was queued"
 )
 
 
@@ -609,6 +622,14 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
     new text with nothing behind them, which is the outcome this rule exists to
     prevent: the edit comes back as ``needs_review`` and nothing is written.
 
+    Checked in this order, so each refusal names the right gap: a ``before``
+    that is not the note's text is a ``conflict``; a replacement that equals the
+    note's text is ``unverified`` (nothing to change); evidence was given but no
+    row names the note is ``unverified`` (nobody can decide anything about this
+    note from it); only then does an uncited edit about this note go to review.
+    No evidence at all is not "evidence about another note": it falls through to
+    review, as an uncited edit always has.
+
     The replacement is the caller's, verbatim. In particular it is **not**
     re-stamped here: the caller knows what it changed and what the note's
     ``updated:`` should therefore say, and a service that rewrote the text it
@@ -631,6 +652,39 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
                 "deletion, which this service never performs"
             ),
         )
+    if edit.before and edit.before != note_text:
+        reason = (
+            "the note no longer holds the text this edit was planned "
+            "against; nothing was written and no check was recorded"
+        )
+        if edit.before in note_text:
+            reason += (
+                "; `before` is a fragment of the note, not its full text — a "
+                "one-entry edit needs `entry` and `entry_fingerprint`"
+            )
+        return VerificationPlan(
+            action=RECORD_ONLY,
+            status=CONFLICT,
+            outcome=UPDATE,
+            after_text="",
+            reason=reason,
+        )
+    if edit.after == note_text:
+        return VerificationPlan(
+            action=RECORD_ONLY,
+            status=UNVERIFIED,
+            outcome=UNVERIFIED,
+            after_text="",
+            reason=_NO_CHANGE_REASON,
+        )
+    if request.evidence and not _evidence_names_note(request):
+        return VerificationPlan(
+            action=RECORD_ONLY,
+            status=UNVERIFIED,
+            outcome=UNVERIFIED,
+            after_text="",
+            reason=_missing_evidence_reason(request),
+        )
     if not _supporting_evidence(request) or not _all_citations(request):
         return VerificationPlan(
             action=PROPOSE,
@@ -638,17 +692,6 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
             outcome=UPDATE,
             after_text="",
             reason=_missing_evidence_reason(request),
-        )
-    if edit.before and edit.before != note_text:
-        return VerificationPlan(
-            action=RECORD_ONLY,
-            status=CONFLICT,
-            outcome=UPDATE,
-            after_text="",
-            reason=(
-                "the note no longer holds the text this edit was planned "
-                "against; nothing was written and no check was recorded"
-            ),
         )
     return VerificationPlan(
         action=AUTO_APPLY,

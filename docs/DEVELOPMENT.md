@@ -83,7 +83,7 @@ A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
 onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
-backed-up migration into the standard named folder. Settings → Manage workspaces →
+backed-up migration into the standard named folder. Settings → Overview → All workspaces →
 Archive never deletes or merges a workspace: it moves the folder intact to
 `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/` and unregisters it
 (`ciao/workspace_archive.py`); tests for it live in
@@ -125,6 +125,67 @@ it refuses when an existing workspace, live service definition, or registered
 macOS LaunchAgent/Windows scheduled task is found, and also refuses if the
 service query cannot verify absence. Export-directory overrides do not affect
 the live service paths checked by this guard.
+
+#2339 adds a native classifier (`install_discovery.classify_native_install`)
+beside that guard. The native coordinator (`ciao.native_installer`, #2340) calls it twice, before its first mutation. It
+separates `fresh` from `configured` (a live definition or job, a completed
+workspace, or an explicit disabled launchd override), `partial` (a receipt, uv
+tool directory, `ciao` shim, setup marker, server host, the migration transaction
+or its `before/` images, the host-upgrade journal `server-host-upgrade.json`, or
+an interrupted handoff result) and `unknown` (a failed query, unreadable marker,
+dangling-symlink ancestor or inherited redirect).
+
+The permanent sibling lock `server-host-upgrade.lock` is deliberately not
+partial evidence. Every mutating host command creates it and never removes it,
+so an idle, empty, correctly owned lock proves only that some host command once
+ran, not that Ciaobot was installed. The classifier opens the existing file
+read-only (never `O_CREAT`, never truncating or writing), requires a regular
+file with the installer's owner and no group/other bits, and probes it with one
+non-blocking `flock`: **held** is a concurrent host mutation and **unsafe** is
+an unreadable, linked, non-empty or foreign-owned shape — both are `unknown`.
+An idle lock contributes no evidence. The probe briefly holds an idle lock, so
+it must be the single pre-mutation scan, not a poll. The migration transaction,
+its `before/` images, the host-upgrade journal and the host ownership record
+stay `partial`: the classifier never deletes, rolls back or rewrites them, and
+recovery is the operator's explicit use of the existing migration/transaction
+commands.
+
+Precedence is configured > unknown > partial > fresh, and unknown is never
+fresh. `partial`, `unknown` and a held-lock (concurrent) answer all refuse a
+native install; none is permission to remove what was found and reinstall
+silently. There is also no current-run or run-id exemption — a handoff result or
+marker written by this process is still evidence, because path presence is not
+ownership. The workspace search is finite (`cwd`, `~/Ciaobot` and an explicit
+suggestion, never a disk walk), so a complete workspace elsewhere is not
+`configured` evidence.
+
+The classifier reads the two documents it interprets — a workspace `.env` and
+the install receipt — through its own bounded, no-follow, non-blocking
+descriptor, never through the legacy guard's `read_text`. A FIFO, socket, device,
+symlink or a file with a second hard link where either belongs, a file over the
+64 KiB limit, a file that is replaced or rewritten during the read, undecodable
+text, or an unreadable path is `unknown`, not `partial` and never `fresh`; so is
+a symlink or a file where `~/.local/state/ciaobot` (the directory holding the
+receipt, migration transaction, host-upgrade journal and lock) should be. The
+legacy guard's semantics are unchanged.
+
+A `fresh` classification is not an activation permit, and the setup child
+cannot recover one by calling the classifier again: by the time the child runs,
+the installer parent has already created the uv tool directory, the `ciao` shim,
+the workspace and often the receipt, so the same scan answers `partial` or
+`configured` even though this run created every one of those paths. #2340
+therefore owns the native entry point on **both** sides of the handoff, and
+neither the parent's decision nor a path allowlist of "things this installer
+creates" is sufficient proof — a same-UID writer can pre-create any path on that
+list. The parent must establish current-run ownership from owner-private,
+run-id-bound evidence before it mutates anything, the setup child must do the
+same for the artifacts it finds rather than asking for a fresh answer, and both
+must re-check every known surface immediately before their writes instead of
+trusting the earlier scan. Those checks narrow the window but do not make it
+atomic: a same-UID writer can interleave between a check and the write it
+guards, so the classifier, the parent's current-run ownership and the child's
+re-checks are evidence and refusal points, not a guarantee that the race is
+closed. Tests: `tests/test_native_install_classifier.py`.
 
 The supported macOS release path is the one-line installer:
 
@@ -213,6 +274,87 @@ recorded definition is the live one, that definition names the same destination,
 and the destination is a completed workspace; otherwise it reports what is
 uncertain and starts nothing.
 
+That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
+`ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
+file but **schema 2 only**. The legacy CLI, routes and installer paths never
+import it; the setup child's native branch and the existing loopback-only,
+bootstrap-mode-only `/api/setup/finish` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` described
+below. The native coordinator's `read_result` and `activate` consume the handoff. Its result additionally records the
+definition's sha256, the program the definition actually executes and the
+interpreter it runs with both device/inode/size/mtime identities, and the
+definition's environment. The native path implements macOS only: a Windows
+backend is refused explicitly before a result is read or written, and the
+legacy Windows installer path is unchanged. The definition is the authority: a
+direct `ciao` console is a script whose program is the script and whose
+interpreter is the absolute Python on its shebang. `resolve_console_interpreter`
+accepts only that one absolute, Python-named form and refuses `env`, relative,
+argument-bearing or missing shebangs; #2340 must call it before setup mutates a
+workspace. Native activation re-establishes all of them, parses the same bytes
+that produced the digest, and requires the real template's job semantics: the
+fixed key set with every template key present, `com.ciao.server`, the matching
+direct/hosted `AssociatedBundleIdentifiers`, `RunAtLoad`/`KeepAlive` true, the
+exact workspace logs, `SERVER_NOFILE_TARGET` resource limits, the recorded
+four-key environment compared exactly (including `PATH` — there is no separate
+path allowlist, because the digest already binds the bytes and a
+runtime-derived PATH policy would narrow the legacy wizard's persisted
+development PATH), no direct `ExitTimeOut` but the hosted one, the recorded
+program and interpreter, or the canonical owned host's exact `serve --python`
+command. macOS then calls `macos_service.load_fresh_agent`, which digests the
+definition before the first qualified absence probe and again immediately
+before one `launchctl bootstrap`, and refuses an explicit disabled override
+through the read-only `launchctl print-disabled` listing without ever enabling,
+unloading or reloading anything. Both strict readers share
+`ciao/os_support/definition.py`: `O_BINARY` where available, a byte count equal
+to the opened size, and the inode/size/mtime rechecks. The schema-2 result and
+the definition both go through that reader; the result's privacy is checked on
+the opened descriptor with the strict verifier (owned by the effective user,
+exact mode, and on macOS no extended-ACL allow entry for another principal),
+and activation's default completed-workspace
+check reads the legacy `.env` through it too, so a FIFO where `.env` belongs is
+a refusal rather than a hung parent. The scratch chain — the home directory,
+`~/.ciao` and `~/.ciao/installer-bootstrap` — is validated as well: no component
+may be a symlink, all must belong to the current user, an ancestor may not be
+group/other-writable, and the scratch directory itself must be `0700`. A
+missing `~/.ciao` or scratch directory is created privately; a pre-existing one
+is judged and never chmod'ed, so an unsafe one is refused.
+
+That chain must already be private before the bootstrap child starts, because
+the child itself cannot create it that way: its launcher
+`mkdir(parents=True, exist_ok=True)` and
+`CiaoConfig.from_env(installer_bootstrap=True)` create a missing
+`~/.ciao/installer-bootstrap` at the process umask (normally `0755`), which the
+native recorder then refuses. #2339 therefore exposes
+`native_handoff.prepare_bootstrap_scratch()`, the parent's narrow preparation
+step: it creates only the missing chain components `0700`, never creates or
+changes the home directory, and fails closed on a pre-existing symlinked,
+foreign-owned, group/other-writable `~/.ciao` or a scratch directory that is not
+exactly `0700`, leaving it unchanged. **#2340 must call it after the read-only
+fresh-install preflight and before spawning the bootstrap child** — never
+before the preflight, and never as a repair for an existing installation. The
+legacy config is not changed, and the native coordinator is the only production
+caller of the preparation. Creating the directory privately is not current-run ownership: a
+same-UID writer can create an owner-only name first, so #2340 still has to bind
+it to run-bound evidence. The legacy
+`is_set_up_workspace` keeps its `read_text` for every existing caller. Native activation still parses the same
+bytes it digested. The launchctl absence
+and disabled-listing shapes were recorded from read-only probes on one current
+macOS and fail closed, but have not been validated across the supported macOS
+releases; #2340 must do that before wiring activation. There is no native
+Windows loader: task XML carries no port and the legacy registration path
+forces an overwrite, so a Windows record or activation fails closed rather than
+falling back to the legacy backend loader, and the legacy Windows installer is
+unchanged.
+
+A schema-1 result is refused by the native reader and a schema-2 result by the
+legacy reader. The stat identities are evidence, not a security guarantee: a
+same-UID writer can rewrite a file in place to the same size and restore its
+mtime, and the digest/identity checks and the service manager's (or the later
+`exec`'s) open remain separate steps, so the checks narrow the race and do not
+close it. Tests: `tests/test_native_handoff.py`, `tests/test_definition_read.py`,
+`tests/test_macos_service_native.py`, `tests/test_service_login_strict.py` and
+`tests/test_native_install_classifier.py`.
+
 A fresh macOS install classifies the machine before creating anything: with no
 engine definition and no configured workspace it skips folder creation,
 `ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
@@ -243,13 +385,99 @@ and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on
 macOS only.
 
+The bootstrap has its own, narrower trust root. A machine that already has a
+`uv` (on `PATH`, else `~/.local/bin/uv`) reuses it exactly as before, and only a
+missing `uv` is installed, from the pinned archive for its architecture:
+`https://github.com/astral-sh/uv/releases/download/0.12.17/uv-<triple>.tar.gz`.
+The installer compares that archive with a sha256 reviewed into
+`scripts/install-engine.sh` and only then reads the member list: at most one
+`uv-<triple>/` directory (a tar producer may omit the directory entry; the exact
+`uv` file is what is extracted), one regular `uv-<triple>/uv` and optionally one
+regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 staging
+directory. Any other member, a link, a duplicate, an absolute
+or `..` path, or an ambiguous name is a refusal that extracts and runs nothing.
+The verified staged executable is what a native-mode install takes; the staged
+copy is published to `~/.local/bin/uv` only on the legacy missing-uv path, so
+bootstrapping never replaces a uv the machine already has. That publish is one
+exclusive create straight at the destination (`set -C`, i.e. `O_EXCL`), with no
+temporary and no rename: a path already there — a regular file, a directory, a
+symlink, a dangling symlink, a hardlink to a file elsewhere — is refused, by the
+create's own `EEXIST` or by a check that only exists to name the shape, and
+nothing is written, followed or moved into it. `mv` is not used,
+because on BSD it follows a destination that is a directory or a symlink to one
+and moves the file inside. The write, the executable bit and the final identity
+check all happen through the descriptor that create returned, in one subshell
+that holds it open until they are done: the bytes go to the descriptor, and the
+mode is set with `chmod 700 /dev/fd/3`, so a symlink or a regular file
+substituted at the path is never written to, followed or made executable. The
+created inode is read from that descriptor too, never from the path, and the
+path is checked against it once more before the descriptor closes; a mismatch is
+a refusal that leaves whatever is there where it is. The descriptor also keeps
+that inode allocated while the check runs, so the created file's number cannot
+be reused by a file substituted at the path (a substitute necessarily carries a
+different inode). The path is read with `lstat` and the descriptor with GNU
+`stat -L`; the BSD or GNU spelling is chosen from the kernel instead of trying
+one and falling back to the other, because GNU reads `stat -f` as filesystem
+status and `%i` as an extra operand: it prints that status to stdout and only
+then fails on the missing operand, so a `||` fallback would find the status
+already there to compare as if it were an inode. The digest check runs
+`/usr/bin/shasum` and the identity check `/usr/bin/stat`, never a command chosen
+by `PATH`, and the digest is read from `shasum`'s own output rather than piped
+through another PATH-resolved parser.
+Ownership is claimed only after the create has returned and the descriptor's
+inode has been read, and a
+failed write takes back its own partial file only while the path still lstat's
+to that same inode — so a create refused by somebody else's file leaves it
+alone, and a substituted file found by that check is left where its writer put
+it. A write failure this run observes is taken back; a run that is killed or
+loses power after the create can leave an empty or partial file that the next
+run refuses. The next run never guesses and never unlinks it: its failure names
+the path, says to inspect it and hash it, and suggests removal only when the
+operator is sure it is that interrupted leftover. That check and the `rm` are
+separate syscalls, so a same-user writer
+who replaces the path in between can still have their file removed; a
+substitution made before the check is not. That is safety against substitution,
+not isolation, and the residual it cannot close is the same-user writer: a
+process that already owns `~/.local/bin` can replace the path after the final
+check, before the next run, and none of this is per-user isolation.
+The run that publishes also keeps executing the private staged copy: reopening
+`~/.local/bin/uv` would let a later substitution of that path decide which uv
+the install runs.
+That publish is at user scope — a directory this user owns, with no privileged
+write — and it is deliberately outside every transaction this installer runs: it
+happens before the release manifest is even fetched, and the migration receipt
+does not carry it. A `--migrate` that fails gives back the plists, the shim, the
+install receipt and the tool environment it snapshotted, and leaves the
+published `uv` where it is. That is a rollback of the migration, not of the
+machine, and it is not a promise of full rollback. It is also the intended
+outcome: the file was authenticated before it was written, it is the first uv on
+a Mac that had none, and the next run reusing it is what the publish is for.
+There is no piped shell installer in this path. The trust root for the archive
+is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
+Apple signature for these assets, and the installer does not claim one.
+The 0700 scratch directory that holds the archive and the staged copy is not
+per-user isolation: it excludes other users, but a process running as the same
+user can replace the archive between the `/usr/bin/shasum` check and the tar
+read, or swap the staged copy before it runs. The digest table and TLS bound
+what the network can hand this script; nothing here defends against code already
+running as this user.
+Bumping `UV_VERSION` means replacing all six digests in the same review, and no
+checksum is fetched at install time. The bootstrap proves only that the
+archive matches the embedded digest; it does not authenticate anything that
+archive's `uv` later downloads. The engine manifest signature and the wheel
+digest are verified separately after the bootstrap. Python and the packages
+`uv run` fetches (cryptography included) are not covered by the engine key and
+have no independently pinned hash in this installer.
+
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
 recorded as absent, so a rollback removes only what the migration created, and
 the tool environment is copied only when one is already there — the common
-hand-over from the retired app has none), and refuses to touch anything if that
+hand-over from the retired app has none; a `uv` this run bootstrapped is not one
+of the before-images, see above), and refuses to touch that engine or its
+service if the
 app is still running 20 s after it was asked to quit. It then either
 repoints `com.ciao.server` at the new engine and, only once that engine answers
 with the version just installed, retires the app's own agent — restoring the
@@ -319,22 +547,383 @@ if one is present it downloads `ciaobot-server-host-macos-universal-v1.tar.gz`,
 checks its SHA-256 and size against the signed entry, and asks the wheel's module to
 install it. The module re-checks the archive, extracts it under `filter="data"`,
 inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity and
-the read-only `/usr/bin/codesign` probes), writes the owner-only record at
+the read-only `/usr/bin/codesign` probes) under the policy the entry *selects* — the
+production revision-4 ad-hoc host, or the signed revision-5 host with the Developer
+ID team the release authenticated — writes the owner-only record at
 `~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) from the
 staged snapshot — **before** the atomic rename to `~/Applications/Ciaobot Server.app`
 — and re-verifies the installed host with `verify_owned_host`. It runs after the
-read-only preflight and never on a `--migrate --as-client` Mac. An existing verified
-host is a no-op. Only a refusal about the release — a manifest that did not verify,
-or an archive that does not match its signed digest — stops the run; every other
-host refusal (a disk full, a `codesign` probe that timed out, a bundle at the target
-the module cannot prove it owns) warns (module exit 3) and the engine install
-continues, because the host is optional and inert and must not abort the one-liner.
+read-only preflight and never on a `--migrate --as-client` Mac. An existing host
+whose record proves the same policy is a no-op. Only a refusal about the release — a
+manifest that did not verify, an archive that does not match its signed digest, or a
+signed identity the local record contradicts — stops the run; every other host
+refusal (a disk full, a `codesign` probe that timed out, a bundle at the target the
+module cannot prove it owns) warns (module exit 3) and the engine install continues,
+because the host is optional and inert and must not abort the one-liner. A completed
+probe that *disproved* the signed identity (`signature_rejected`) is never in that
+warn set: it aborts before the engine or the service is touched.
 Because the record is written before the rename, a process killed in that window
 leaves a consistent, verified host rather than a recordless bundle every later run
 reports as `host_exists`; a Python failure removes both the bundle and record the
 run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
+
+The native fresh-install path (#2340) is a separate, opt-in entry point. The native
+coordinator (`ciao.native_installer`, #2340) is its production caller. `ciao.native_installer.create_fresh_host` takes the
+authenticated manifest bytes and signature, not a caller-selected entry, and calls
+`verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
+It fixes the host bundle and ownership record to the canonical home paths and the
+release public key; there is no caller-supplied path, key or pre-selected entry.
+It requires the run's `native_lock.NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+ownership record or host-upgrade journal that already exists, including terminal
+journal evidence it must not settle. Fresh mode also requires canonical absolute
+paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
+outside the bundle, and every existing ancestor to be a real directory owned by
+this user, not group/other writable and free of a foreign extended-ACL grant; an
+existing record or journal parent must already be private and is never chmod'ed.
+The sibling upgrade lock follows the same rule: an existing lock must be a
+regular single-link owner-only ACL-clean file and is never chmod'ed; only a lock
+this run creates with `O_EXCL`/`O_NOFOLLOW` is set exactly `0600` with `fchmod`
+on its descriptor, and the public name is re-bound after `flock`. A replaced,
+hard-linked, ACL-granting or unverifiable lock refuses. Missing controlled
+directories are created one component at a time relative to held no-follow
+parent descriptors and made exactly `0700` with `fchmod`; existing safe `0755`
+parents (for example `.local`/`state` or `Applications`) are validated and left
+unchanged. A umask that strips the owner bits fails closed and leaves the new
+name as evidence instead of using a path-based chmod. It then calls
+`install_server_host(..., require_absent=True, trusted_root=Path.home())`: under
+the host upgrade lock that
+mode refuses any `_CURRENT` same-policy host or superseded replacement instead of
+adopting or replacing it, and it never finishes a journal. The default `False`
+keeps every legacy no-op/replacement path unchanged. After the install the helper
+re-verifies the owned host and requires equality with the snapshot the installer
+returned; a changed host is refused and left in place, never rolled back. The
+checks are refusal points, not proof: a same-UID writer can still interleave
+between a check and the write it guards, and a lost rename may leave the record the
+fresh attempt wrote (the existing `keep_record` path) while the run reports
+`HOST_EXISTS` and never claims that host as its own. When a fresh install fails
+after its rename, it renames the bundle it placed into a unique name inside its
+own staging directory, re-checks that entry's inode, and only then removes it. A
+substitute swapped in before that rename is kept in the staging directory and
+named in the error, never deleted. The race is moved onto a name no other writer
+knows in advance and narrowed, not closed: a same-UID writer can still swap the
+stage directory or the scratch entry between the checks and the removal.
+
+The native coordinator lives in `ciao.native_installer`. It is started only by
+`install.sh --native-install`, through this CLI contract:
+
+```
+python -I -m ciao.native_installer run
+  --run-id UUID --events-fd N --first-seq S --prior-events P
+  --version V --uv ABS --uv-sha256 HEX64 --wheel ABS --wheel-sha256 HEX64
+  --manifest ABS --signature ABS --host-archive ABS
+  [--workspace ABS]
+```
+
+Parsing rejects abbreviations and prints one fixed line, `invalid handover
+arguments`, that never echoes a value. A digest that is not 64 lowercase hex
+characters is refused the same way.
+
+`--workspace` is the classifier and wizard suggestion only; the wizard may save a
+different workspace. The public descriptor range is 3–9. Exit 0 means
+`service_ready` was emitted; 1 means any other end; 2 means the handover arguments
+were refused before the descriptor was used, and the shell never sends such a
+request. Signals (SIGINT, SIGTERM, SIGHUP) only set the cancellation flag.
+
+`run_native_install` checks the artifacts first: each path is absolute, not a
+symlink, and a regular file (uv also executable), and `--version` must equal the
+running `ciao.__version__`. The coordinator then creates a private `0700` run
+directory and copies `uv` and the wheel into it. Each source is opened once with
+no-follow, must be owned by the current user with no group or other write bit,
+and must hash to the digest the shell passed in. The copy is re-hashed against
+the same digest, and only the copies are used afterwards. A digest mismatch is
+`verification_failed`. A failure in any of these checks is a fixed `failed`
+event before any classification or mutation.
+
+Every uv call and the interpreter probe run with one allowlisted environment: a
+pinned `HOME` (the account home, which must equal `$HOME`), `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+`LANG=C.UTF-8`, and nothing else. Each runs in its own session, in the private
+empty directory, with `--no-config` and the pinned default index; the variables
+that redirect tools, indexes, interpreters, loaders or TLS are never passed. The
+tool and bin directories must equal `<home>/.local/share/uv/tools` and
+`<home>/.local/bin`, or the run is `unknown_state`. The classifier gets the same
+environment. The wizard child keeps the caller's `PATH` and drops the same
+variables. Cancellation is polled while uv runs; cancel or timeout terminates
+and reaps the child's session. The probed interpreter is bound to the handoff's
+`engine_python` (same realpath and device and inode, else `wizard_failed`), and
+the `ciao` shim is re-checked before the wizard starts (else `install_failed`). uv links `<bin>/ciao` into `<tool>/ciaobot/bin`, so the shim is a symlink: its link identity and its resolved target (inside the tool env; device, inode and sha256) are both recorded and both re-checked. The tool interpreter may link into uv's managed Python root under the pinned home, which is where real uv installs point it; anywhere else is `install_failed`. The wizard is spawned as `<tool>/ciaobot/bin/python <verified target> run ...`: the interpreter by its tool-env path (so uv's `pyvenv.cfg` is found) and the console script by its resolved target, so nothing is resolved again at exec. The interpreter's resolved device and inode are recorded at the probe and re-checked with the shim (`python_changed`).
+
+The production steps are: the uv tool and bin
+directories (asked of the private uv copy only), the canonical classification, the
+private state and run lock (a held lock is reported on stderr with its pid and
+liveness, never removed), the bootstrap scratch, the second classification, the
+fresh host through `create_fresh_host`, a recheck of that host, the engine install
+(`uv tool install --python 3.13` on the private wheel copy, with no `--force`, probed
+and recorded as the one existing install receipt), the hidden wizard command, the
+schema-2 handoff read, `native_handoff.activate`, and the readiness proof
+`prove_native_readiness` for the handoff port. The coordinator owns the run lock,
+both classifications, the host install and the engine install; the shell only
+validates, preflights, bootstraps and downloads. Release: Not present in engine 1.7.0; ships in the next engine release after 1.7.0 (exact semver assigned at release).
+
+The testable private seam, `_run_native_install`, takes injected callables for
+every external effect. Its `NativeInstallOutcome` records attempted
+and completed flags separately, so a host or activation step that mutates and then
+raises is never reported as unattempted; `activation_attempted` means the service
+may be running.
+
+The phases are split between the shell and the coordinator. The shell owns
+`preflight`, `bootstrap` and `download` and hands the descriptor over after them.
+The coordinator's `EventWriter` is built with `after_phase="download"`, so it
+refuses any re-emitted shell phase (`phase_out_of_order`). The coordinator owns
+`install`, `wizard`, `activation` and `readiness`. Its longest path is seven
+events (four phases, `wizard_ready`, `setup_saved` and one terminal), and it
+refuses a handoff that leaves fewer than seven event slots instead of mutating
+with no room to report an outcome. The public event descriptor must be in the
+shell's 3–9 range, and the writer refuses a descriptor that is the same underlying file (device and
+inode) as stdout or stderr (`stdio_alias`) before it changes any flag.
+
+The coordinator classifies fresh, prepares the private state directory, takes the
+run lock, prepares the bootstrap scratch chain, classifies again immediately
+before the first host/engine mutation, creates the host through the real
+`create_fresh_host`, rechecks the host and lock before the engine install,
+installs the engine, starts the wizard with only a private bind-notification
+pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
+to close the pipe** (so a delayed second record is a refusal). The self-reported
+port is only a claim: `wizard_listener(port, child_pid)` must return every pid
+holding a listening socket on that port, IPv4 and IPv6. The set must be non-empty,
+and every pid must be the wizard child or in the process group the child leads
+(`_OwnedChild.owns_process`), or the run is `wizard_failed` before `wizard_ready`
+is emitted. It then emits `wizard_ready`, validates the run-bound handoff, emits
+`setup_saved`, and calls activation. After `wizard_ready`, a wizard exit or any
+`failed` event ends trust in that origin, and the client must stop using it.
+`workspace` is only the classifier suggestion; the selected directory is read from
+the handoff and reported, and an optional `expected_workspace` is the only
+exact-match check.
+
+After activation a bounded readiness loop calls the injected `prove_ready`. The
+answers `listener_missing`, `startup_status_unavailable` and `startup_not_ready`
+are retried every `readiness_interval` up to `readiness_timeout` (60 s). Any other
+answer, an exception, a non-proof value or a ready proof for another port is
+`service_not_ready`, and a cancelled proof is `cancelled`. `service_ready` is
+emitted once, and only after a ready proof on the handoff port and a clean child
+and lock cleanup. If lock release or child cleanup fails, the run reports
+`failed("internal_error")` with `activation_completed=True`.
+
+The public event descriptor must be in the shell's 3–9 range at the coordinator
+boundary. Cancellation is a flag the caller sets; the normal loop observes it,
+sends SIGTERM, waits a finite grace, sends SIGKILL, and reaps only the child it
+started in that child's own session before releasing the lock, keeping the lock
+when reaping cannot be proven. The child waits are clamped to the whole-run
+budget, cleanup has its own bounded grace/reap deadlines, and injected synchronous
+steps are checked before and after but cannot be preempted by this module. It
+never passes the public event descriptor to a child (the wizard sees only the
+private pipe), never stops, reloads, quiesces or rolls back an activated service
+on a later failure or cancellation, preserves partial artifacts, writes no
+onboarding or install receipt, and adds no route. `SIGKILL` runs no cleanup and
+leaves the lock and child as evidence. Tests: `tests/test_native_installer.py`.
+
+**Recovering a native-install lock**
+
+A lock at `~/.local/state/ciaobot/native-install.lock` means a native install is
+running, or one was killed (SIGKILL or power loss) before it could clean up. That
+path is the state directory the native coordinator (`ciao.native_installer`, #2340)
+uses for its run lock.
+
+1. Nothing in the tool removes, adopts or repairs the lock automatically. A busy
+   or unknown lock refuses every native run with `install_in_progress`. An unsafe
+   lock, or an unsafe state directory, refuses with `unknown_state` instead,
+   because the tool cannot tell what wrote it.
+2. Read `run.json` in the lock directory. It holds `schema`, `run_id` and `pid`.
+3. Check whether that pid is still running with `ps -p <pid>`. A live pid is not
+   proof that an installer is running: pids are reused, and a process owned by
+   another user can hold one. A dead pid does not by itself authorise removal.
+4. Remove the lock directory by hand only when you have confirmed that no
+   installer is running (the pid check alone is not enough) and no Ciaobot
+   installer window is open. A later native run still refuses a partial install
+   that the killed run left behind (receipt, tool environment or host). Inspect
+   or remove those separately: the native installer never repairs them.
+5. `ciao.native_lock.inspect_native_lock(state_dir)` returns the same
+   classification read-only, including the recorded pid and whether it is alive.
+   The coordinator does not print it yet.
+
+**Native install mode (`install.sh --native-install`)**
+
+Not present in engine 1.7.0; ships in the next engine release after 1.7.0 (exact semver assigned at release). The Mac client must pin the sha256 of that release's `install.sh` asset, which `.github/workflows/publish.yml` copies verbatim from `scripts/install-engine.sh`; uv's digest table does not authenticate `install.sh` itself.
+
+Invocation:
+
+```sh
+sh install.sh --version VERSION --native-install --events-fd N --run-id UUID [--workspace /abs] [--no-modify-path]
+```
+
+Arguments and descriptor:
+
+- `--events-fd N` takes exactly one digit from 3 to 9. The descriptor must be open, writable, and must not alias stdout or stderr. An unusable descriptor or run id produces diagnostics on stderr and exit 1, and no event, because there is no reliable channel.
+- `--run-id` is a canonical lowercase hyphenated UUID.
+- `--version` is required. `--workspace`, when given, is an absolute path with no `.` or `..` component and no control character; it is only the wizard's suggestion.
+- `--migrate`, `--as-host`, `--as-client` and `--no-start` are incompatible with `--native-install`. `--no-modify-path` is accepted and redundant: native mode never edits a shell profile.
+- Any other refusal after the descriptor is known is one `failed` event with `invalid_arguments`.
+- Without `--native-install`, `--events-fd` or `--run-id` is refused as a legacy usage error.
+- Parse-stage refusals emit nothing: an unknown option, a missing value for `--version`, `--workspace`, `--as-client`, `--events-fd` or `--run-id`, and `--help`. They end before the channel is validated, so the client gets diagnostics and exit 1 (`--help` exits 0 after printing usage) and no event.
+
+Events:
+
+- Each line is one compact JSON object with the keys `schema` (1), `run_id`, `seq` and `type`, plus the keys its type allows. The five types are `phase`, `wizard_ready` (adds `origin`), `setup_saved`, `service_ready` (adds `origin`) and `failed` (adds `code`).
+- Bounds: a line is at most 1024 bytes including its newline, a run has at most 32 events, and `seq` strictly increases. Gaps are allowed.
+- The shell writes only `phase preflight`, `phase bootstrap` and `phase download` (seq 1 to 3), or one `failed`. The coordinator writes `phase install`, `phase wizard`, `wizard_ready`, `setup_saved`, `phase activation`, `phase readiness`, and then `service_ready` or `failed`.
+- After the handover the shell writes nothing.
+
+Failure codes:
+
+| Code | Emitted by | Meaning |
+| --- | --- | --- |
+| `invalid_arguments` | shell | A flag is missing, incompatible or malformed, or the release lacks the coordinator (`NATIVE_COORDINATOR_PROTOCOL` mismatch). |
+| `existing_install` | shell | This Mac already has a Ciaobot install. |
+| `partial_install` | shell | This Mac has leftovers of an earlier install. Native install never repairs them. |
+| `unknown_state` | shell | The state could not be proven fresh: a redirect variable, an unsafe state directory, an unreadable ancestor, or an indeterminate launchd answer. |
+| `install_in_progress` | shell | Another native run holds the lock, or it was left by a killed run. |
+| `download_failed` | shell | The verified uv, the manifest, the wheel or the host could not be downloaded or the uv archive does not match its reviewed digest. |
+| `verification_failed` | shell | The manifest signature, the wheel or host digest, or the server host entry does not match the signed release. |
+| `install_failed` | shell | A system tool is missing, the OS is not macOS 13 or newer, or the private coordinator environment could not be built. |
+| `cancelled` | shell | SIGINT, SIGTERM or SIGHUP arrived before the handover. |
+| `wizard_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error` | coordinator | See `ciao.native_installer.FAILURE_CODES`. The shell never emits `event_channel_failed` or `internal_error`. |
+
+Exit semantics: exit 0 means `service_ready` was emitted, and any other exit is a failure. End of file on the events descriptor without a terminal event is a failure too; this is part of the client contract.
+
+Cancellation: SIGINT, SIGTERM or SIGHUP to the shell (or its process group) before the handover is reported as `failed(cancelled)`. After the handover the shell forwards SIGTERM to the coordinator, which stops the wizard. An activated service is never stopped by cancellation.
+
+Lock and partial state: the coordinator owns the run lock and both canonical classifications. The shell's system-only preflight refuses an existing, partial, unknown or locked Mac before any network work and changes nothing it found. The native installer never repairs, retries or reinstalls; see the recovery paragraph above.
+
+Trust chain: the pinned uv digest table authenticates the uv archive. The shell's own sha256 of the extracted uv executable is passed to the coordinator as `--uv-sha256`. The signed manifest authenticates the wheel and the server host, and both are checked before the handover; the wheel's manifest sha256 is passed as `--wheel-sha256`. The coordinator re-hashes its private copies, and it re-verifies the host archive (`verify_host_archive`) before it installs anything.
+
+What native mode does to the environment. Every command the native branch runs before the handover gets only a fixed PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME` and `LANG=C`: an external program runs under `/usr/bin/env -i`, and a shell function runs after its environment is cleared of every other exported variable. Every uv call, and every call to the coordinator's venv python before the handover, also runs under `/usr/bin/env -i` from a private working directory, with a private `TMPDIR`. Commands resolve only through that PATH. uv runs with `--no-config` (no `uv.toml` or `UV_*` configuration), `--managed-python` (uv's own CPython, never a PATH `python3.13`) and `--default-index https://pypi.org/simple`. `uv run` adds `--no-build`, and `uv pip install` adds `--only-binary :all:`. Every release fetch is https-only, quiet (`-q`, no curlrc) and bounded to 600 seconds and 512 MiB.
+
+Limits:
+
+- Full hash-pinning of `cryptography` and of the wheel's dependency closure is not done. The residual exposure is a compromise of PyPI or of the index the pinned URL names. The wheel and the host archive are pinned by the signed manifest.
+- The uv flags are verified against the pinned uv 0.12.17. The release archive was downloaded and its sha256 matched the reviewed `uv-aarch64-apple-darwin.tar.gz` entry, and `--no-config`, `--managed-python` and `--default-index` (`uv run`, `uv venv`, `uv pip install`), `--no-build` (`uv run`) and `--only-binary` (`uv pip install`) appear in that binary's `--help`. The flags are checked by their help text, not by a live index in CI. A release that changes them must update `uv_call` and this section together.
+- Same-user limits: a process running as this user can still change files in the private working directory between a check and its use, and it can replace the staged uv or the release files in that window. The mode-0700 directory keeps other users out; it does not stop the user's own processes.
+- The client must pin the `install.sh` digest itself (see the release sentence above).
+
+Tests: `tests/test_native_install_sh.py` (shell, fake tools) and `tests/test_native_installer.py` (coordinator).
+
+The native bootstrap child side is now explicit but internal. When the native
+coordinator starts it with the private `--installer-native-fd` (hidden, and
+refused without `--installer-bootstrap`/`--installer-run-id`),
+`_run_server_locked` builds a `NativeBootstrapContext` in a worker thread and
+threads it through `create_app` to `app.state.native_bootstrap`. `capture`
+requires macOS, the `macos` backend, the already-private scratch chain, an
+absent live definition and handoff result, a launchd-proven absent server job,
+the device/inode/mode identity of the bootstrap root and runtime, and a
+`verify_owned_host` snapshot. The legacy bootstrap passes no descriptor and
+keeps its exact schema-1 path, call shapes and browser auto-open. A native child
+opens no browser. `_mark_bound_when_serving` calls the context only after
+`uvicorn.Server.started` and `tracker.done(BIND_PHASE)`, writes exactly one
+bounded `{"schema":1,"port":N}` line, makes the private descriptor
+non-inheritable and closes it; a refused or failed write stops the child instead
+of serving invisibly. The existing loopback-only, bootstrap-mode-only
+`POST /api/setup/finish` (no session cookie; see docs/REMOTE_BOUNDARY.md) is
+the only native route: it refuses unknown body fields and any non-empty
+`python`, `launch_agents_dir` or `app_dir` override, re-runs
+`assert_ready_to_write` in a worker thread before the first write (config
+identities, scratch, definition/handoff absence, launchd absence, host snapshot,
+engine interpreter, an explicit expected workspace, and a chosen workspace that
+is not already a Ciaobot workspace), calls `setup_workspace(...,
+exclusive_service_definition=True)` so the definition is created `O_EXCL`/
+`O_NOFOLLOW` at `0o600` instead of overwritten, records schema 2 through
+`native_handoff.record_setup_completion` in `asyncio.to_thread`, and reads the
+result back to require this run's id, this child's startup id, the chosen
+workspace, port, live definition path and interpreter. It adds no route, no
+environment variable and no second onboarding or install receipt, and never
+starts, stops or reloads a service. Remaining limits are real: a same-UID writer
+can interleave between a check and the write it guards; the child can prove the
+host is owned, not that this run created its record. The native coordinator starts
+the setup child with `_wizard_argv`. Tests:
+`tests/test_native_bootstrap.py`.
+
+Replacing an owned legacy host with the signed one is the one host change that is
+a *transaction*, because the previous app and its exact ownership record have to
+survive until the engine this run installs has answered healthily — which is
+after the installer module has returned (#2330). A normal (start-enabled) run
+passes `--defer-commit --owner-pid "$$"`: the module keeps the old bundle in a
+nonce-derived dotted directory beside the target, keeps the exact old record
+bytes, writes one owner-only journal at `~/.local/state/ciaobot/server-host-upgrade.json`
+with the operation nonce and this shell's pid, installs the signed host, and
+returns at phase `installed`. The shell then asks `transaction-status` whether it
+owns a pending upgrade. With one pending, the health wait requires the exact new
+`version` on the configured port *and* positive evidence that the responder is the
+process instance this run started, bound to objects rather than strings:
+
+1. exactly one pid holds the listening socket before the request
+   (`lsof -nP -iTCP:<port> -sTCP:LISTEN -t`) and the same pid holds it after it, so
+   an unrelated listener cannot answer and exit in between;
+2. that pid is the `pid` in this runtime root's `server.lock`, the response's
+   `startup_id` is the lock's, and the lock itself is a regular file this user owns
+   with mode `0600`, opened without following a link, whose opened inode is the one
+   the directory listed - readable lock metadata alone proves nothing;
+3. the listener's bounded ancestor chain (`ps -o ppid=`, four hops) reaches the pid
+   `launchctl print` reports for the job, and the kernel says that job process'
+   executable is the installed `Ciaobot Server` (`libproc`'s `proc_pidpath`,
+   through the verified wheel's `server_host_install executable` subcommand).
+   `ps -o comm=` only prints a name and `lsof -d txt` lists every mapped
+   executable segment (a signed host has many), so neither is executable
+   identity. The executable itself must not be a symlink; its parent directories are
+   canonicalised, so a relocated `Applications` folder still matches. The kernel path
+   and that canonical expected path must be the same string, which must be a regular
+   file. This is path equality, not byte or inode identity after an in-place
+   replacement. An
+   unreadable pid, a pid outside the 32-bit range, a truncated path or any other
+   executable is a refusal. A pid can be recycled
+   after the listener/lock captures and before this probe; if the replacement is
+   the same installed host the check still passes, so this narrows the window
+   rather than eliminating it, and no PID-reuse proof is claimed beyond the
+   kernel's current answer.
+
+A missing, ambiguous, over-deep or unreadable answer is a failure, not a pass, and
+the timeout message names the step that could not be proven (version, lock,
+listener, ancestry or executable) so the operator has a direction. Every later failure path — an explicit `fail`,
+`abort_install`, a signal, an unexpected `set -e` exit — gives the old pair back
+exactly once through `rollback-upgrade`, and `commit-upgrade` runs only after
+positive engine health and, in a `--migrate` hand-over, after the app's own agent
+has been retired. When a launchd job may already run out of the candidate host,
+the shell boots it out, proves with `launchctl print` that the job is really gone
+and waits for the process to exit before reverting the identity. That check fails
+closed: a job launchd still holds, a `launchctl print` that failed for any reason
+other than launchd confirming it has no such job, a process still present, or a
+`pgrep` that could not answer all keep the before-images and the journal, leave
+the run nonzero and skip the engine-definition reload rather than claiming a
+rollback of a still-running candidate. The EXIT handler also discovers the operation this shell
+owns from the journal itself (owner pid plus nonce) when the child finished the
+install before the run could record it, and keeps the journal with a spoken
+incomplete recovery when that discovery cannot be made. A commit or rollback that
+settled but could not remove its before-images keeps that settled state (nothing
+rolls a committed host back) yet still makes the installer exit nonzero, and the
+next host transaction is refused until the leftover is gone. `--no-start` never defers: it reports that the
+upgrade completes on a later normal run and leaves the previous host in place, and
+a wheel-only release or a client never touches the host at all. A journal left by a
+killed run is settled by the next run: a live owner is a refusal, and an unfinished
+or abandoned one is *not* rolled back by `install` itself — the shell quiesces the
+service and calls `rollback-upgrade` before retrying, so the identity is never
+reverted under a process that may still be running.
+
+Every release today publishes the ad-hoc revision-4 host, and its record keeps the
+unchanged schema 1. The signed revision-5 policy (#2329) is opt-in end to end: an
+explicitly signed manifest entry names the expected Developer ID team, a schema-2
+record persists it, and runtime verification checks that team, the stable
+designated requirement, the hardened runtime, the secure timestamp and the one
+Apple Events entitlement offline with the read-only `/usr/bin/codesign` probes
+(`docs/SERVER_HOST_CONTRACT.md`). The installer accepts such an entry (#2330), and
+an owned revision-2/3/4 host is migrated to it by the transaction above; the
+migration still activates only for an explicit signed entry, so `publish.yml`
+keeps building the un-flagged revision-4 manifest and a production install stays
+ad-hoc revision 4 until a separately approved activation. Same-policy current
+hosts are no-ops even when a rebuild changed their CDHashes, a signed host is
+never downgraded to the legacy one, and a different team is never adopted
+automatically. Nothing in this path has been validated against a real Developer ID
+certificate, a real TCC grant or a real device: the tests use fake teams
+(`TESTTEAM01`, `OTHERTEAM1`) and fake `codesign` output, and the protected
+rehearsal plus an operator device walk remain the gate that turns this on.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`
 naming a wheel cut before the host work: the shell probes for the module first,
@@ -399,28 +988,31 @@ while the server is running, because the live schedule store may be writing it.
   on the post-merge push run instead.
   The `windows` job (`windows-latest`, every PR and push) is blocking since
   #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
-  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate:
-  on pushes and PRs into `main` it also runs `pytest -n auto --durations=30
-  tests/` and `npm test`, which take about 15 minutes on a hosted runner, so a
-  PR into `develop` skips them and waits about 2 minutes. A Windows test
-  failure therefore surfaces on the post-merge push run, and `/ciao-release`
-  will not cut while that run is red. The job fails on any gate that ran. Every
-  gate runs even after an earlier one failed, the job summary lists the counts
-  and the failing tests by name, and the full logs are in its
-  `windows-results` artifact. Its install.ps1 steps (full runs only) (dry runs under both
-  PowerShell hosts, the analyzer, and a real end-to-end install and
-  `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
-  task that does not start there is a datum, not a verdict. Known flaky
-  Windows tests are listed in #696's C9 tracking comment.
+  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate: on
+  pushes and PRs into `main` it also runs `pytest -n auto --durations=30 tests/`
+  and `npm test`, which take about 15 minutes on a hosted runner, so a PR into
+  `develop` skips them and waits about 2 minutes. A `develop` PR labelled
+  `windows-full` runs them too; use it for path, filesystem, process or
+  installer changes. The label is read from the event, so add it and then push
+  (an empty commit is enough) — re-running a job replays the old event and does
+  not see a new label. A Windows test failure therefore surfaces on the
+  post-merge push run, and `/ciao-release` will not cut while that run is red.
+  The job fails on any gate that ran. Every gate runs even after an earlier one
+  failed, the job summary lists the counts and the failing tests by name, and
+  the full logs are in its `windows-results` artifact. Its install.ps1 steps
+  (full runs only) (dry runs under both PowerShell hosts, the analyzer, and a
+  real end-to-end install and `-Uninstall`) stay advisory: a hosted runner has
+  no interactive logon, so a task that does not start there is a datum, not a
+  verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
   The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
   contributor's Windows account usually has neither the symlink privilege nor
   the coreutils. Without Developer Mode, a test that creates a symlink of its
   own is skipped ("cannot create a symlink here", `tests/conftest.py`) rather
-  than failing with WinError 1314, so a local run reports more skips than CI;
-  a symlink the engine itself makes still fails, since the engine must not
-  need one on Windows. The suite also points `LOCALAPPDATA` at each test's
-  home, so a machine with Ciaobot installed does not hand its real logon-task
-  workspace to config-discovery tests.
+  than failing with WinError 1314, so a local run reports more skips than CI; a
+  symlink the engine itself makes still fails, since the engine must not need
+  one on Windows. The suite also points `LOCALAPPDATA` at each test's home, so a
+  machine with Ciaobot installed does not hand its real logon-task workspace to
+  config-discovery tests.
   One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
   `Windows ConPTY terminal tests`, which is `pytest -q -rfE
   tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
@@ -568,7 +1160,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches seven engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches seven engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`. The signed (Developer ID, notarized) host is rehearsed only by the separate, manually dispatched, protected `.github/workflows/server-host-signing-rehearsal.yml`, which uploads no release asset, needs operator-provisioned credentials (a Developer ID certificate and a notarization-capable App Store Connect API key) and is not part of `publish.yml`; see `docs/SERVER_HOST_RELEASE.md`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -754,7 +1346,7 @@ Settings. If you add a state, decide all four of those in the same change: what
 Home offers, what Settings lists, what a refusal says, and whether the outcome can
 be mistaken for "done".
 For Chat details changes, verify the docked rail and narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list. The × closes the surface; the ⓘ tab reopens it, restoring focus between the rail heading and chat-body tab. Project context is readable prose with file mentions linked in place, resolving the canonical filename to its full path without a separate link row; token estimates count the sent capsule.
-For task-board layout changes, preserve To do, In progress, In review and Done on every width: fixed 310px lanes side by side that scroll sideways when they do not fit, with Done behind a tab at the end of the row. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all.
+For task-board layout changes, preserve To do, In progress, In review and Done on every width: fixed 310px lanes side by side that scroll sideways when they do not fit, with Done behind a tab at the end of the row. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all. Card and lane reordering runs on pointer events and `setPointerCapture`, so a test of it drives the grip with real mouse or touch input (`page.mouse` down, move, up, as in `web/e2e/specs/task-board-reorder.spec.ts`) or with the keyboard; a synthetic `dragstart` or `draggable` check never reaches the engine. For any grip, lane or motion change, also check the 44px coarse-pointer targets, reduced motion (the placeholder stays, the travel goes) and browser zoom. Run these specs against the fixture server that `web/e2e/support/app.ts` boots, never against a live engine.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a
@@ -802,6 +1394,8 @@ duplicate stems. Relative Markdown links are the vault's only cross-link
 dialect, so there is one broken-link bucket, not one per dialect. `INDEX.md`, `MEMORY.md`, and `log.md` are exempt
 from the frontmatter requirement. External URLs, absolute paths, and anchors
 are not treated as vault links.
+
+A vault can list generated files in a `.ciaoignore` at its root: one glob per line, `#` comments, gitignore-style (`*` and `?` stay within one path segment, `**` spans directories, a pattern without `/` matches at any depth, a trailing `/` matches a directory, case-insensitive, no `!` negation). Matching files are skipped by `vault-lint`, `os-audit`, the orphan and duplicate checks, `INDEX.md` and the Memory Map, but stay valid link targets. Search indexing does not read it.
 
 Use `--vault-root` to choose a vault. Otherwise it uses `CIAO_VAULT_ROOT` or
 `./memory-vault`. A clean scan exits 0. Findings, a missing vault root, or an
@@ -1535,6 +2129,21 @@ reaches a person as a proposal. The plan-mode gate is the existing one:
 `tests/test_curation_run.py` for the pass, and `tests/test_agent_surface.py` for
 the CLI mapping.
 
+### Creating a note: `note_create`
+
+`ciao note create --type T --title T` is the one way an agent makes a vault note
+(`ciao/note_create.py`, `control_plane.note_create`, the `note_create` operation,
+`_WRITE` so plan mode refuses it). The type is checked against the vault's
+category registry (`load_entity_types` on the agent vault root); the note lands
+under the workspace vault root in the category's folder, or in `--path`, a
+vault-relative folder, which a category with no folder requires. The description
+and body come from files inside the workspace (`--description-file`,
+`--body-file`), confined by `_safe_relative` and capped at
+`MAX_NOTE_FILE_BYTES`, so prose never travels as an argument. The file is opened
+exclusively: an existing note is `note_exists`, never overwritten. The search
+index is not refreshed; `vault_search` indexes on every query. Tests:
+`tests/test_note_create.py`, `tests/test_agent_surface.py`.
+
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.
 `--with-vault` adds the note-aging pass (still informational, never changes the
@@ -1996,7 +2605,7 @@ No shipped producer runs a DAG today — the weekly skill-evolution pass was the
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 
-The Chat details *Running* list (rail and drawer Activity tab; the left sidebar no longer lists them) shows background command runs first, from the `chat_background_runs` event and the `/ws/events` snapshot (`BackgroundRun.summary()`: no pid, cwd or log path), with *Log* (`GET /api/chats/{id}/background-runs/{run_id}/log`) and *Stop* (`POST …/cancel`), both refusing another chat's run with 404. The subagent rows below them are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Chat details tests.
+The Chat details *Running* list (rail and drawer Activity tab; the left sidebar no longer lists them) shows native background shells and Monitors first, each with *Stop* (`POST /api/chats/{id}/background-tasks/{task_id}/stop`). The subagent rows below them are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Chat details tests.
 
 ## Agent control plane (CLI-first since S6)
 
@@ -2011,10 +2620,8 @@ Self-affecting operations must defer until the caller chat drains.
 Since S6 the agent runs every operation as `ciao <noun> <verb>` in the managed
 provider's shell. `ProjectChatManager.build_agent_request` deliberately injects
 `CIAO_AGENT_TOKEN` (and `CIAO_AGENT_URL`) into that **foreground** shell — this
-is the point of the CLI surface (D-01), not a leak. `ciao/background.py` strips
-`CIAO_AGENT_TOKEN` (and `PWA_AUTH_TOKEN`) from every background child so a
-detached command cannot call back with the caller's authority. Keep that split
-when changing token delivery; do not add the token to telemetry arguments.
+is the point of the CLI surface (D-01), not a leak. Do not add the token to
+telemetry arguments.
 
 See `docs/AGENT_CLI.md` for the catalog and provider configuration.
 

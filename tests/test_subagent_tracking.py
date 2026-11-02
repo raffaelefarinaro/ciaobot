@@ -550,7 +550,7 @@ def test_injected_context_does_not_change_notification_turn_counting(tmp_path: P
     assert state.subagents["next-agent"].turn_index == 0
 
 
-def test_prefixed_compact_recap_remains_skipped(tmp_path: Path) -> None:
+def test_unflagged_prefix_text_advances_turn_index(tmp_path: Path) -> None:
     records = [
         _user_text("first real turn"),
         _user_text("This session is being continued from a previous conversation."),
@@ -561,7 +561,7 @@ def test_prefixed_compact_recap_remains_skipped(tmp_path: Path) -> None:
 
     state = parse_session_subagents(_write_session(tmp_path, records))
 
-    assert state.subagents["prefix-agent"].turn_index == 1
+    assert state.subagents["prefix-agent"].turn_index == 2
 
 
 def test_flagged_compact_recap_does_not_advance_turn_index(tmp_path: Path) -> None:
@@ -583,6 +583,47 @@ def test_flagged_compact_recap_does_not_advance_turn_index(tmp_path: Path) -> No
     state = parse_session_subagents(_write_session(tmp_path, records))
 
     assert state.subagents["compact-agent"].turn_index == 1
+
+
+@pytest.mark.parametrize("notice_kind", ["wake", "notification"])
+def test_flagged_compaction_notice_does_not_change_task_state_or_turn_index(
+    tmp_path: Path, notice_kind: str
+) -> None:
+    from ciao.subagent_tracking import CLI_TASK_WAKE_PREFIX
+
+    task_id = "compact-task"
+    if notice_kind == "wake":
+        recap = CLI_TASK_WAKE_PREFIX + (
+            " 1 CLI task you started were lost: the owner exited.\n"
+            f"— Monitor: report (task {task_id})"
+        )
+    else:
+        recap = (
+            "<task-notification>\n"
+            f"<task-id>{task_id}</task-id>\n"
+            "<status>completed</status>\n"
+            "<summary>Finished</summary>\n"
+            "</task-notification>"
+        )
+    records = [
+        _user_text("first real turn"),
+        _monitor_dispatch("toolu_task", "report"),
+        _task_result("toolu_task", task_id),
+        {
+            "type": "user",
+            "isCompactSummary": True,
+            "message": {"role": "user", "content": recap},
+        },
+        _user_text("second real turn"),
+        _assistant_dispatch("toolu_after_compact", "After compaction"),
+        _dispatch_result("toolu_after_compact", "after-compact-agent"),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents[task_id].status == "running"
+    assert state.subagents[task_id].raw_status == ""
+    assert state.subagents["after-compact-agent"].turn_index == 1
 
 
 def test_agent_and_task_counts_are_independent(tmp_path: Path) -> None:
@@ -654,3 +695,22 @@ def test_cli_task_wake_marks_tasks_lost_with_context_prefix(tmp_path: Path) -> N
     assert info.raw_status == "lost"
     assert running_tasks(state) == []
 
+
+
+def test_task_started_at_is_parsed(tmp_path: Path) -> None:
+    """A task row carries the launch receipt's record timestamp."""
+    receipt = _bash_result("toolu_b", "task_b")
+    receipt["timestamp"] = "2026-10-27T08:15:30.000Z"
+    bare = _bash_result("toolu_c", "task_c")
+    session = _write_session(tmp_path, [
+        _user_text("go"),
+        _bash_dispatch("toolu_b", "build"),
+        receipt,
+        _bash_dispatch("toolu_c", "lint"),
+        bare,
+    ])
+
+    state = parse_session_subagents(session)
+
+    assert state.subagents["task_b"].started_at == "2026-10-27T08:15:30.000Z"
+    assert state.subagents["task_c"].started_at == ""

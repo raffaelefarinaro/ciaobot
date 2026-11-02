@@ -8,7 +8,7 @@ List pending items with `ciao memory-proposals` and route each by its bracketed 
 - `[project <doc-path>]` folds into that canonical doc.
 - `[people <Name>]` updates that person note (merge, do not overwrite). File people in this workspace's `People/`: a contact you deal with here belongs here, even if first met in another workspace's chat.
 - `[learnings]` files into `Workspace/Learnings.md` (see the learnings pass).
-- `[review]` has no destination yet, so decide what it is first.
+- `[review]` has no destination yet, so decide what it is first. A `[review <id>] [upstream issue …]` or `[review <id>] [new skill …]` row is a skill draft: settle it only with `ciao skill-draft-approve <id>` or `ciao skill-draft-reject <id>`, never with `memory-proposal-dismiss`, and never re-file it with `skill-draft-add`.
 
 Steps for one item you file:
 
@@ -59,3 +59,4 @@ For each `[memory]` / `[profile]` row in the worklist:
 - If an acting command exits 1, leave the row queued and escalate it with `ciao memory-proposal-escalate`, using the refusal it printed as the reason.
 - Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves, and `memory-proposal-accept` takes at most five facts per run and only while you hold the curation lease.
 - Under **What needs you** report the region rows left queued. Count the rows you acted on under **What I did**.
+- When `ciao memory-proposals` returns a `review_path` for a row you leave queued, report it verbatim next to that row under **What needs you**. Keys and links are derived from the question's content, so an edited or resolved question may stop being available; never invent an id, and never accept a proposal because a link exists.

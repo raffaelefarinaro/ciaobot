@@ -357,11 +357,13 @@ import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import { handleAppLinkClick } from '../lib/appLinks'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
+import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
+useOverlayBackEntry(() => store.isOpen, () => store.close())
 const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
 const opener = ref<HTMLElement | null>(props.opener)
 watch(() => store.isOpen, (open, wasOpen) => {
@@ -1435,6 +1437,19 @@ watch(
   background: var(--bg2, rgba(255, 255, 255, 0.04));
 }
 .fv-body-csv {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* An artifact is a document with its own scroller. Keeping the body a block
+   box left the viewer's `flex: 1` inert, so the frame sat at its 320px floor
+   inside a full-height modal and the phone got a dead screen under it. Give
+   the body the column contract and let the frame own the scrolling.
+   Doubled class so `overflow: hidden` beats `.fv-body`'s `overflow: auto`,
+   which is declared later in this sheet: same specificity, later source order.
+   The padding is left alone, so the desktop modal keeps its gutter and the
+   ≤640px query below still zeroes it for a phone. */
+.fv-body.fv-body-html {
   display: flex;
   flex-direction: column;
   overflow: hidden;

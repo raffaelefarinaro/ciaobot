@@ -1,9 +1,9 @@
-import { SETTINGS_HIDDEN_PAGES, SETTINGS_NAV } from './settingsNav'
+import { SETTINGS_NAV } from './settingsNav'
 
 /**
  * Links that point into the app itself rather than out of it.
  *
- * An agent writes `[Reply to Ivo](/tasks/<id>)` or `[Workspaces](/settings/workspaces)`
+ * An agent writes `[Reply to Ivo](/tasks/<id>)` or `[Workspace settings](/settings/workspace)`
  * in a chat or a vault note, and the reader expects the task or page to open.
  * Rendered markdown gives every other anchor `target="_blank"`, and a vault
  * note's links are not intercepted at all, so without this an app link either
@@ -15,9 +15,11 @@ import { SETTINGS_HIDDEN_PAGES, SETTINGS_NAV } from './settingsNav'
  * 32-hex record id `ciao task list` returns; a short prefix is not an id. A
  * conversation is named by its own id, `chat-` plus eight lowercase hex
  * characters. A page is an exact path — no query strings, no arbitrary
- * fragments, and no `/api`, `/ws` or protocol-relative addresses. The single
- * exception is a workspace's File access target, whose one query parameter and
- * fixed fragment are parsed by `parseWorkspaceFileAccessHref`. Adding one is a
+ * fragments, and no `/api`, `/ws` or protocol-relative addresses. The two
+ * exceptions are a workspace's File access target, whose one query parameter and
+ * fixed fragment are parsed by `parseWorkspaceFileAccessHref`, and a proposal
+ * review link, whose three fixed-order parameters are parsed by
+ * `parseProposalReviewHref`. Adding one is a
  * deliberate decision: an unknown or malformed address stays an ordinary
  * browser link.
  */
@@ -35,18 +37,16 @@ const PAGE_HREFS = [
   '/memory/history',
 ]
 
-// Settings tabs come from the sidebar's own rail (plus the pages with no rail
-// item), so a renamed tab cannot leave this list behind. `/settings/home` is
-// the General tab by name; the shipped app links to `/settings#install-app`
+// Settings tabs come from the sidebar's own rail, so a renamed tab cannot
+// leave this list behind. `/settings/home` is the General tab by name; the shipped app links to `/settings#install-app`
 // and both spellings land there.
 const SETTINGS_HREFS = [
   ...SETTINGS_NAV.map(item => item.to),
-  ...SETTINGS_HIDDEN_PAGES.map(item => item.to),
   '/settings/home',
   '/settings/home#install-app',
   '/settings#install-app',
   '/settings/providers#chat-providers',
-  '/settings/workspaces#new-workspace',
+  '/settings/workspace#new-workspace',
 ]
 
 const APP_ROUTE_HREFS = new Set([...PAGE_HREFS, ...SETTINGS_HREFS])
@@ -60,7 +60,20 @@ const CHAT_HREF = /^\/chat\/(chat-[0-9a-f]{8})$/
 // fragment, no other tab. The link only locates the control; it never chooses
 // a value, saves, or switches the active workspace.
 const WORKSPACE_FILE_ACCESS_HREF =
-  /^\/settings\/workspaces\?workspace=([A-Za-z0-9][A-Za-z0-9_-]{0,63})#file-access$/
+  /^\/settings\/workspace\?workspace=([A-Za-z0-9][A-Za-z0-9_-]{0,63})#file-access$/
+
+// One pending proposal's review question, as `proposal_review_path` in
+// ciao/proposal_tracking.py emits it (that parameter order, exactly). The link
+// only locates the question; MemoryMapView's resolver decides whether it is
+// still pending, and nothing here accepts, dismisses or authenticates.
+const PROPOSAL_REVIEW_HREF =
+  /^\/memory\/review\?show=suggested&workspace=([A-Za-z0-9][A-Za-z0-9_-]{0,63})&proposal=(prv_[a-f0-9]{64})$/
+
+/** The workspace and review key an exact proposal review link names, or null. */
+export function parseProposalReviewHref(href: string): { workspace: string; proposal: string } | null {
+  const match = PROPOSAL_REVIEW_HREF.exec((href || '').trim())
+  return match ? { workspace: match[1]!, proposal: match[2]! } : null
+}
 
 /** The workspace an exact File access link names, or null for anything else. */
 export function parseWorkspaceFileAccessHref(href: string): string | null {
@@ -86,6 +99,7 @@ export function isAppRouteHref(href: string): boolean {
     || parseTaskHref(raw) !== null
     || parseChatHref(raw) !== null
     || parseWorkspaceFileAccessHref(raw) !== null
+    || parseProposalReviewHref(raw) !== null
 }
 
 /**
@@ -105,9 +119,9 @@ export function isPlainLeftClick(event: MouseEvent): boolean {
  * and can veto the navigation — a dialog that has to close out of the way
  * and may be refused by its own unsaved-changes confirm.
  *
- * A task link opens as a peek over the current view, with the URL unchanged,
- * so the chat stays put. On the board's own routes it navigates as before,
- * since the board already shows that task in its editor.
+ * A task link opens the board's task editor over the current view, with the URL
+ * unchanged, so the chat stays put. On the board's own routes it navigates as
+ * before, since the board already shows that task in its editor.
  */
 export function handleAppLinkClick(event: MouseEvent, before?: () => Promise<boolean>): boolean {
   const target = event.target as HTMLElement | null

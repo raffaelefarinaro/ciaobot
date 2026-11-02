@@ -330,7 +330,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -358,6 +358,8 @@ export const toChatMessage = (m: ServerRow) => ({
   steered: m.steered || undefined,
   // Who the engine wrote this turn for (wake, automation, webhook, ...).
   origin: m.origin || undefined,
+  // The handover pack the engine recorded on a handover marker; the card shows it.
+  sent_context: m.sent_context || undefined,
   // _filecard fields. Empty/undefined for non-file rows.
   file_path: m.file_path,
   action: m.action,

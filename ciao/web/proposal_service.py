@@ -970,7 +970,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     """
     rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
-    rehome = _rehome_signal(config)
+    # Computed lazily: a full vault scan that only move_file (rehome) rows read.
+    rehome: dict[str, dict[str, Any]] | None = None
     ws_names = list(config.workspace_names())
 
     for workspace in config.workspace_names():
@@ -986,6 +987,16 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                 line_index, raw, bullet, pid = (
                     entry.line, entry.raw, entry.bullet, entry.proposal_id,
                 )
+                # Hashed from the bullet as parsed, before the note_edit branch
+                # below replaces `target` with the note path.
+                review_key = proposal_tracking.proposal_review_key(
+                    workspace,
+                    bullet.kind,
+                    bullet.text,
+                    bullet.source,
+                    bullet.target,
+                    bullet.request,
+                )
                 row: dict[str, Any] = {
                     "id": pid,
                     "kind": bullet.kind,
@@ -998,6 +1009,10 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # by: an accept can await a model call, and a concurrent
                     # accept/dismiss rewrites the file underneath it.
                     "raw": raw,
+                    "review_key": review_key,
+                    "review_path": proposal_tracking.proposal_review_path(
+                        workspace, review_key
+                    ),
                 }
                 if bullet.target:
                     # The payload a destination kind acts on: the person name
@@ -1024,6 +1039,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # Rehome rows: expose the live signal. The destination named
                     # in the bullet is a guess unless the tags justify it, and a
                     # dual-tag note names more than one candidate.
+                    if rehome is None:
+                        rehome = _rehome_signal(config)
                     signal = _rehome_lookup(rehome, bullet.text, ws_names)
                     row["rehome"] = {
                         # The note this row is about, so a UI can show a name and
@@ -1076,6 +1093,9 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
         # on is a notification wearing a button.
         for proposal in skill_proposals.read_queue(config, workspace):
             path = skill_proposals.proposal_path(config, workspace, proposal.skill)
+            review_key = proposal_tracking.skill_review_key(
+                workspace, proposal.id, proposal.change
+            )
             row = {
                 "id": proposal.id,
                 "kind": "skill",
@@ -1125,6 +1145,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                 "workspace": workspace,
                 "path": skill_proposals.proposal_rel_path(workspace, proposal.skill),
                 "line": -1,
+                "review_key": review_key,
+                "review_path": proposal_tracking.proposal_review_path(workspace, review_key),
             }
             rows.append(row)
             by_id[proposal.id] = {
@@ -2228,6 +2250,54 @@ def _settle_note_edit(
         return str(exc)
     except (MemoryReceiptError, QueueLockError, OSError) as exc:
         return f"could not record the decision for {sidecar_id}: {exc}"
+    return ""
+
+
+def _is_skill_draft_row(config, row: dict[str, Any]) -> bool:
+    """Whether a queue row is a live skill draft's ``[review]`` bullet.
+
+    The draft's own sidecar text is the source the bullet cites, so a ``review``
+    row that cites anything else is an ordinary question and keeps the ordinary
+    path. A row whose draft no longer exists is an orphan: there is nothing to
+    settle, so it takes the ordinary path and its bullet is removed.
+    """
+    from ciao import upstream_drafts
+    from ciao.upstream_drafts import DRAFT_KIND, decision_text
+
+    target = str(row.get("target") or "").strip()
+    return (
+        row.get("kind") == DRAFT_KIND
+        and bool(target)
+        and str(row.get("source") or "") == decision_text(target)
+        and upstream_drafts.find_draft(config, target) is not None
+    )
+
+
+def _settle_skill_draft(config, row: dict[str, Any], *, reason: str = "") -> str:
+    """Reject the skill draft a ``[review]`` row belongs to; "" when it is settled.
+
+    The draft's settlement writes the decision and then removes its own bullet,
+    so a settled row must not have its line removed by the caller. A refusal
+    (unattended run, a draft that cannot be recorded) is returned as a string and
+    the row stays queued, the same contract as :func:`_settle_note_edit`.
+    """
+    from ciao import upstream_drafts
+    from ciao.memory_receipts import MemoryReceiptError, QueueLockError
+
+    try:
+        upstream_drafts.reject_draft(
+            config,
+            str(row["target"]),
+            reason or "dismissed from the memory-proposal queue",
+            via="pwa",
+        )
+    except (
+        upstream_drafts.DraftError,
+        MemoryReceiptError,
+        QueueLockError,
+        OSError,
+    ) as exc:
+        return str(exc)
     return ""
 
 

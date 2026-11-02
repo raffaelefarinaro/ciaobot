@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import asyncio
@@ -22,6 +23,7 @@ from ciao.fs_sandbox import (
     _seatbelt_profile,
     claude_file_tool_guard,
     claude_sandbox_settings,
+    claude_task_output_path_allowed,
     engine_read_roots,
     node_tool_read_roots,
     path_outside_roots,
@@ -89,9 +91,13 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
     assert _writable_rules(profile) == 1
     # Traversal of `/` itself is allowed (without it every child aborts under
     # `deny default`), and process rules carry no `*` suffix (a parse error).
-    # The /var and /tmp symlinks are readable too, so a path spelled through
-    # them (as $TMPDIR is) still resolves (#1174).
-    assert '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))' in profile
+    # The /var, /tmp and /etc symlinks are readable too, so a path spelled
+    # through them (as $TMPDIR is, or /etc/paths.d in the PATH probe) still
+    # resolves (#1174, #2448).
+    assert (
+        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp") (literal "/etc"))'
+        in profile
+    )
     assert "(allow process-exec)" in profile
     assert "(allow process-fork)" in profile
 
@@ -150,16 +156,17 @@ def test_darwin_sandbox_exec_refuses_a_file_outside_the_root(tmp_path):
     resolved = root.resolve()
     inside = resolved / "inside.txt"
     inside.write_text("inside", encoding="utf-8")
-    # The outside file must live somewhere the profile does not allow for
+    # The outside probe must live somewhere the profile does not allow for
     # reading: /private (and the rest of the system list) is readable by
     # design, so a second tmp file would be the wrong probe — and the suite's
-    # conftest fakes $HOME into tmp, so $HOME is out too. /etc is outside
-    # every allowed subpath and /etc/hosts always exists on macOS.
-    outside = Path("/etc/hosts")
-    assert outside.is_file()
+    # conftest fakes $HOME into tmp, so $HOME is out too. /etc is readable by
+    # design now (its link is granted, #2448), so it is no longer a probe.
+    # /Volumes is outside every allowed subpath and is never an engine ancestor.
+    outside = Path("/Volumes")
+    assert outside.is_dir()
     prefix = opencode_sandbox_prefix(roots=[resolved])
     denied = subprocess.run(
-        [*prefix, "/bin/cat", str(outside)], capture_output=True, timeout=30
+        [*prefix, "/bin/ls", str(outside)], capture_output=True, timeout=30
     )
     assert denied.returncode != 0
     allowed = subprocess.run(
@@ -244,6 +251,23 @@ def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
     assert ["--bind", str(config), str(config)] not in [argv[i : i + 3] for i in range(len(argv))]
 
 
+def test_darwin_seatbelt_reads_etc_through_its_symlink(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        assert '(literal "/etc")' in _seatbelt_profile([tmp_path])
+        return
+    # /etc is a symlink to /private/etc. `ciao gws` probes /etc/paths.d from
+    # every OpenCode workspace-scope chat; a refused link fails it before gws
+    # starts (#2448). The target is already readable through /private.
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    prefix = opencode_sandbox_prefix(roots=[root])
+    for flag, probe in (("-d", "/etc/paths.d"), ("-f", "/etc/paths")):
+        result = subprocess.run(
+            [*prefix, "/bin/test", flag, probe], capture_output=True, timeout=30
+        )
+        assert result.returncode == 0, (probe, result.stderr)
+
+
 def test_darwin_seatbelt_reaches_a_root_spelled_through_var(tmp_path):
     if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
         assert '(literal "/var")' in _seatbelt_profile([tmp_path])
@@ -285,8 +309,11 @@ def test_tool_paths_outside_the_roots_are_detected(tmp_path):
         assert out("escape/secret.txt")
 
 
-def _guard_decision(guard, tool_name: str, tool_input: dict) -> str:
-    result = asyncio.run(guard({"tool_name": tool_name, "tool_input": tool_input}, None, None))
+def _guard_decision(guard, tool_name: str, tool_input: dict, session_id: str | None = None) -> str:
+    hook_input: dict = {"tool_name": tool_name, "tool_input": tool_input}
+    if session_id is not None:
+        hook_input["session_id"] = session_id
+    result = asyncio.run(guard(hook_input, None, None))
     return result.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -312,6 +339,191 @@ def test_claude_file_tool_guard_denies_paths_outside_the_roots(tmp_path):
 
     with pytest.raises(ValueError):
         claude_file_tool_guard(cwd=root, roots=[])
+
+
+def test_claude_file_tool_guard_denies_a_path_it_cannot_resolve(tmp_path):
+    # A NUL byte makes Path.resolve raise; the hook must deny, not raise (#2208).
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root])
+    assert _guard_decision(guard, "Read", {"file_path": str(root / "a\x00.md")}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": "/etc/hosts\x00"}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": "~no_such_user_2208/a.md"}) == "deny"
+    assert path_outside_roots("~no_such_user_2208/a.md", cwd=root, roots=[root]) is True
+    assert claude_task_output_path_allowed(
+        "~no_such_user_2208/x.output", session_id="abcdefgh", cwd=root, tmp_base=str(tmp_path), uid=0
+    ) is False
+
+
+_TASK_SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
+
+
+def _task_guard_setup(tmp_path):
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    tmp_base = (tmp_path / "clitmp").resolve()
+    tasks = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / _TASK_SESSION / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "abc.output").write_text("HELLO", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(tmp_base))
+    return root, tmp_base, tasks, guard
+
+
+def _read_task(guard, path, session_id=_TASK_SESSION) -> str:
+    return _guard_decision(guard, "Read", {"file_path": str(path)}, session_id)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_path_allowed_own_session(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    assert _read_task(guard, tasks / "abc.output") == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_other_session_or_workspace(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    assert _read_task(guard, other / "x.output") == "deny"
+    # Same session id under another workspace's directory is still this
+    # session's shape, but a different session id never matches.
+    assert _read_task(guard, tasks / "abc.output", "ffffffff-0000-1111") == "deny"
+    other_uid = tmp_base / f"claude-{os.getuid() + 1}" / "-munged-cwd" / _TASK_SESSION / "tasks"
+    other_uid.mkdir(parents=True)
+    (other_uid / "x.output").write_text("secret", encoding="utf-8")
+    assert _read_task(guard, other_uid / "x.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_non_read_tools(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = str(tasks / "abc.output")
+    for tool, tool_input in (
+        ("Write", {"file_path": path, "content": "x"}),
+        ("Edit", {"file_path": path}),
+        ("Glob", {"pattern": "*.output", "path": str(tasks)}),
+        ("Grep", {"pattern": "x", "path": str(tasks)}),
+    ):
+        assert _guard_decision(guard, tool, tool_input, _TASK_SESSION) == "deny", tool
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_without_session_id(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = tasks / "abc.output"
+    assert _guard_decision(guard, "Read", {"file_path": str(path)}) == "deny"
+    assert _read_task(guard, path, "") == "deny"
+    assert _read_task(guard, path, "short") == "deny"
+    assert _read_task(guard, path, "bad/../id/12345678") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_symlink_escape(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    secret = tmp_path / "secret.output"
+    secret.write_text("secret", encoding="utf-8")
+    (tasks / "link.output").symlink_to(secret)
+    assert _read_task(guard, tasks / "link.output") == "deny"
+    # A symlinked tasks directory pointing at another session is refused too.
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    session_dir = tasks.parent.parent / "0a1b2c3d-9999-9999"
+    session_dir.symlink_to(other.parent)
+    assert _read_task(guard, session_dir / "tasks" / "x.output", "0a1b2c3d-9999-9999") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_wrong_shape(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    (tasks / "abc.txt").write_text("x", encoding="utf-8")
+    (tasks / "sub").mkdir()
+    (tasks / "sub" / "n.output").write_text("x", encoding="utf-8")
+    (tasks.parent / "extra.output").write_text("x", encoding="utf-8")
+    assert _read_task(guard, tasks / "abc.txt") == "deny"
+    assert _read_task(guard, tasks / "sub" / "n.output") == "deny"
+    assert _read_task(guard, tasks.parent / "extra.output") == "deny"
+    assert _read_task(guard, f"{tasks}/../tasks/abc.output") == "allow"  # collapses to the file
+    assert _read_task(guard, f"{tasks}/../../abc.output") == "deny"
+    assert _read_task(guard, f"{tasks}/*.output") == "deny"
+    assert _read_task(guard, f"{tasks}/a?c.output") == "deny"
+    assert _read_task(guard, f"{tasks}/[a]bc.output") == "deny"
+    assert _read_task(guard, f"{tasks}/{{abc}}.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_respects_cli_tmp_base(tmp_path):
+    root, tmp_base, tasks, _ = _task_guard_setup(tmp_path)
+    elsewhere = (tmp_path / "elsewhere").resolve()
+    elsewhere.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(elsewhere))
+    assert _read_task(guard, tasks / "abc.output") == "deny"
+    no_base = claude_file_tool_guard(cwd=root, roots=[root])
+    assert _read_task(no_base, tasks / "abc.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_untrimmed_paths(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = str(tasks / "abc.output")
+    for value in (f"{path} ", f" {path}", f"{path}\n", f"{path}/"):
+        assert _read_task(guard, value) == "deny", repr(value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_links_inside_the_tasks_dir(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    (tasks / "sym.output").symlink_to(other / "x.output")
+    assert _read_task(guard, tasks / "sym.output") == "deny"
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("x", encoding="utf-8")
+    os.link(elsewhere, tasks / "hard.output")
+    assert _read_task(guard, tasks / "hard.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_session_id_boundaries(tmp_path):
+    root, tmp_base, _, guard = _task_guard_setup(tmp_path)
+
+    def read_as(session_id: str) -> str:
+        tasks = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / session_id / "tasks"
+        tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / "a.output").write_text("x", encoding="utf-8")
+        return _read_task(guard, tasks / "a.output", session_id)
+
+    assert read_as("a" * 7) == "deny"
+    assert read_as("a" * 8) == "allow"
+    assert read_as("a" * 64) == "allow"
+    assert read_as("a" * 65) == "deny"
+    assert read_as("abcd_efgh") == "deny"
+    assert read_as("abcd efgh") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_symlinked_tmp_base_and_case_variants(tmp_path):
+    root, _, _, _ = _task_guard_setup(tmp_path)
+    real = (tmp_path / "real").resolve()
+    tasks = real / f"claude-{os.getuid()}" / "seg" / _TASK_SESSION / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "abc.output").write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(link))
+    assert _read_task(guard, tasks / "abc.output") == "allow"
+    via_link = link / f"claude-{os.getuid()}" / "seg" / _TASK_SESSION / "tasks" / "abc.output"
+    assert _read_task(guard, via_link) == "allow"
+    # On a case-insensitive filesystem the variants name the files above, so
+    # nothing is created; the match is on the spelling either way.
+    if not (tasks.parent / "TASKS").exists():
+        (tasks.parent / "TASKS").mkdir()
+        (tasks.parent / "TASKS" / "abc.output").write_text("x", encoding="utf-8")
+        (tasks / "abc.OUTPUT").write_text("x", encoding="utf-8")
+    assert _read_task(guard, tasks.parent / "TASKS" / "abc.output") == "deny"
+    assert _read_task(guard, tasks / "abc.OUTPUT") == "deny"
 
 
 def test_seatbelt_lists_the_ancestors_of_granted_paths_only(tmp_path):
@@ -1432,3 +1644,243 @@ def test_claude_macos_settings_fail_closed_when_the_denied_folder_cannot_be_list
         claude_sandbox_settings(
             scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
         )
+
+
+def _archive_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A workspace root, and a memory pass's source archive outside it (#2459)."""
+    base = tmp_path.resolve()
+    root = base / "personal"
+    root.mkdir()
+    chats = base / "Logs" / "Chats" / "src-1" / "claude"
+    chats.mkdir(parents=True)
+    archive = chats / "2026-11-01T10-00-00-s.md"
+    archive.write_text("transcript", encoding="utf-8")
+    return root, chats, archive
+
+
+def test_claude_file_tool_guard_reads_an_exact_read_only_file_and_never_writes_it(tmp_path):
+    root, chats, archive = _archive_tree(tmp_path)
+    sibling = chats / "other.md"
+    sibling.write_text("other", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Grep", {"pattern": "x", "path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Glob", {"pattern": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Write", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "Edit", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "MultiEdit", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(sibling)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(chats)}) == "deny"
+    assert _guard_decision(guard, "Glob", {"pattern": f"{chats}/*"}) == "deny"
+
+
+def test_a_read_only_directory_does_not_make_its_files_readable(tmp_path):
+    root, _, _ = _archive_tree(tmp_path)
+    config_dir = tmp_path.resolve() / "gh-config"
+    config_dir.mkdir()
+    (config_dir / "hosts.yml").write_text("token", encoding="utf-8")
+    inside = root / "gws"
+    inside.mkdir()
+    (inside / "token.json").write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[config_dir, inside])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(config_dir / "hosts.yml")}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(config_dir)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(config_dir / "new.yml")}) == "deny"
+    # Inside the root a read-only folder stays readable, and its files stay write-denied.
+    assert _guard_decision(guard, "Read", {"file_path": str(inside / "token.json")}) == "allow"
+    assert _guard_decision(guard, "Edit", {"file_path": str(inside / "token.json")}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(inside / "new.json")}) == "deny"
+
+
+def test_claude_file_tool_guard_pins_a_read_only_file_inside_a_root(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds" / "client_secret.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[creds])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(creds)}) == "allow"
+    assert _guard_decision(guard, "Edit", {"file_path": str(creds)}) == "deny"
+    assert _guard_decision(guard, "MultiEdit", {"file_path": str(creds)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(creds)}) == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows lacks")
+def test_a_link_in_the_archive_folder_to_elsewhere_is_not_readable(tmp_path):
+    root, chats, archive = _archive_tree(tmp_path)
+    secret = tmp_path.resolve() / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    link = chats / "link.md"
+    link.symlink_to(secret)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(link)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+
+
+def test_claude_settings_grant_a_memory_pass_archive_read_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, _, archive = _archive_tree(tmp_path)
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=[archive]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert str(archive) in filesystem["allowRead"]
+    assert str(archive) not in filesystem["allowWrite"]
+    assert str(archive) not in filesystem["denyWrite"]
+    # Only the file is granted: no folder above it is readable through the grant.
+    assert not {str(parent) for parent in archive.parents} & set(filesystem["allowRead"])
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
+    reason="needs macOS sandbox-exec",
+)
+def test_darwin_seatbelt_reads_a_memory_pass_archive_only():
+    # The real home, not tmp_path: the profile's system subpaths already read
+    # /private, so a probe under pytest's tmp dir passes with or without the
+    # grant (#2459). conftest points Path.home() at an isolated folder, so the
+    # real one comes from the passwd entry.
+    import pwd  # POSIX only; a module-level import breaks collection on Windows
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not os.access(real_home, os.W_OK):
+        pytest.skip("home folder is not writable")
+    base = Path(tempfile.mkdtemp(dir=real_home, prefix="ciao-seatbelt-")).resolve()
+    try:
+        root = base / "personal"
+        root.mkdir()
+        chats = base / "Logs" / "Chats" / "src-1" / "claude"
+        chats.mkdir(parents=True)
+        archive = chats / "s.md"
+        archive.write_text("transcript", encoding="utf-8")
+        sibling = chats / "other.md"
+        sibling.write_text("other", encoding="utf-8")
+
+        prefix = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+        granted = subprocess.run(
+            [*prefix, "/bin/cat", str(archive)], capture_output=True, timeout=30
+        )
+        assert granted.returncode == 0
+        assert granted.stdout == b"transcript"
+        ungranted = subprocess.run(
+            [*prefix, "/bin/cat", str(sibling)], capture_output=True, timeout=30
+        )
+        assert ungranted.returncode != 0
+        bare = opencode_sandbox_prefix(roots=[root])
+        without_grant = subprocess.run(
+            [*bare, "/bin/cat", str(archive)], capture_output=True, timeout=30
+        )
+        assert without_grant.returncode != 0
+
+        profile = prefix[2]
+        assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(archive))}"))' in profile
+        assert not any(
+            "file-write*" in line and str(archive) in line for line in profile.splitlines()
+        )
+        ok = root / "ok.txt"
+        control = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+        )
+        assert control.returncode == 0
+        written = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo x > '{archive}'"], capture_output=True, timeout=30
+        )
+        assert written.returncode != 0
+        assert archive.read_text(encoding="utf-8") == "transcript"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, _, archive = _archive_tree(tmp_path)
+
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+
+    triples = _bwrap_triples(argv)
+    assert ["--ro-bind", str(archive), str(archive)] in triples
+    assert not any(str(archive) in triple and triple[0] == "--bind" for triple in triples)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_case_variant_of_a_pinned_file_is_not_writable(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds"
+    creds.mkdir(parents=True)
+    pinned = creds / "credentials.json"
+    pinned.write_text("{}", encoding="utf-8")
+    variant = creds / "Credentials.json"
+    if not variant.exists():
+        pytest.skip("the filesystem is case-sensitive")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[pinned])
+
+    assert _guard_decision(guard, "Edit", {"file_path": str(variant)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(variant)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(pinned)}) == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_hardlink_to_a_pinned_file_inside_a_root_is_not_writable(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds"
+    creds.mkdir(parents=True)
+    pinned = creds / "client_secret.json"
+    pinned.write_text("{}", encoding="utf-8")
+    alias = root / "elsewhere.json"
+    os.link(pinned, alias)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[pinned])
+
+    assert _guard_decision(guard, "Edit", {"file_path": str(alias)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(alias)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(alias)}) == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_hardlink_to_another_file_is_not_the_granted_file(tmp_path):
+    # Read matches by identity, so a link to the granted file reads the same bytes
+    # and nothing else: a hardlink to some other file is still refused.
+    root, _, archive = _archive_tree(tmp_path)
+    secret = tmp_path.resolve() / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    alias = archive.with_name("h.md")
+    os.link(secret, alias)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(secret)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+
+
+def test_a_read_only_entry_that_cannot_resolve_is_skipped_not_raised(tmp_path):
+    root, _, archive = _archive_tree(tmp_path)
+    broken = Path(str(archive) + "\x00")
+
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[broken, archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Read", {"file_path": str(broken)}) == "deny"
+
+
+def test_a_non_pass_chat_may_read_the_read_only_receipt_by_design(tmp_path):
+    # Every workspace chat is granted the reroot receipt read-only (#1945), so
+    # the guard lets its file tools open that exact file, and nothing beside it.
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    receipt = tmp_path.resolve() / "runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[receipt])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(receipt)}) == "allow"
+    assert _guard_decision(guard, "Read", {"file_path": str(receipt.parent / "x.json")}) == "deny"

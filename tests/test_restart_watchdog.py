@@ -38,6 +38,62 @@ def test_supervised_watchdog_exits_with_the_restart_code_and_never_execs() -> No
     assert exits == [75]
 
 
+def test_native_bootstrap_watchdog_exits_without_re_execing() -> None:
+    """The native installer parent reads the child's exit code; an exec would detach it."""
+    exits: list[int] = []
+
+    _restart_watchdog(
+        1,
+        supervised=False,
+        native_bootstrap=True,
+        sleep=lambda s: None,
+        execv=_NeverExec(),
+        exit_now=exits.append,
+    )
+
+    assert exits == [1]
+
+
+def test_legacy_installer_bootstrap_watchdog_still_reexecs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy installer bootstrap no longer hands its flag to the watchdog
+    (only the native context does), so it takes the same unsupervised re-exec
+    path it took before this change."""
+    execs: list[tuple[str, list[str]]] = []
+    exits: list[int] = []
+    monkeypatch.setattr(sys, "argv", ["ciao", "run", "--installer-bootstrap"])
+
+    _restart_watchdog(
+        75,
+        supervised=False,
+        native_bootstrap=False,
+        sleep=lambda s: None,
+        execv=lambda exe, argv: execs.append((exe, argv)),
+        exit_now=exits.append,
+    )
+
+    assert exits == []
+    assert len(execs) == 1
+    assert execs[0][1][:3] == [sys.executable, "-m", "ciao.cli"]
+
+
+def test_native_bootstrap_watchdog_clean_exit_is_zero() -> None:
+    """A clean-exit request from the native bootstrap exits 0, never re-execs."""
+    exits: list[int] = []
+
+    _restart_watchdog(
+        0,
+        supervised=False,
+        native_bootstrap=True,
+        sleep=lambda s: None,
+        execv=_NeverExec(),
+        exit_now=exits.append,
+    )
+
+    assert exits == [0]
+
+
 def test_unsupervised_watchdog_re_execs_as_before() -> None:
     """A plain `ciao run` under launchd has no supervisor to relaunch it, so
     the watchdog re-execs a fresh interpreter under the same pid."""

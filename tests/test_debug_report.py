@@ -7,8 +7,14 @@ from pathlib import Path
 
 from ciao import job_runs
 from ciao.debug_report import (
+    SCOPED_ENGINE_LOG_OMISSION_NOTE,
+    SCOPED_LOG_OMISSION_REASON,
+    SCOPED_REPORT_MAX_CHARS,
+    SCOPED_REPORT_TRUNCATION_MARKER,
     build_issue_report,
+    build_workspace_issue_report,
     format_issue_report,
+    format_workspace_issue_report,
     recent_job_failures,
 )
 from ciao.job_runs import JobRun
@@ -89,7 +95,7 @@ def test_stale_failures_are_dropped(tmp_path: Path) -> None:
         status="error", error="OneShotError: Model not found",
     ))
     job_runs.record_run(JobRun(
-        job="background_run", label="Background command run",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=4), ended_at=_ago(hours=4),
         status="error", error="timed out",
     ))
@@ -119,7 +125,7 @@ def test_failures_before_since_floor_are_dropped(tmp_path: Path) -> None:
         status="error", error="already triaged",
     ))
     job_runs.record_run(JobRun(
-        job="background_run", label="Background command run",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=2), ended_at=_ago(hours=2),
         status="error", error="fresh failure",
     ))
@@ -271,3 +277,157 @@ def test_debug_log_absent_is_empty(tmp_path: Path) -> None:
     assert report["debug_log"] == ""
     assert report["debug_log_lines"] == 0
     assert "Debug log tail" not in report["report_text"]
+
+
+def test_recent_job_failures_require_exact_recorded_workspace() -> None:
+    """A run's workspace is its captured execution owner, never inferred."""
+    cases = [
+        ("own", {"workspace": "alpha"}),
+        ("foreign", {"workspace": "beta"}),
+        ("missing", {}),
+        ("empty", {"workspace": ""}),
+        ("invalid", {"workspace": 7}),
+        ("similar", {"workspace": "alpha2"}),
+    ]
+    for index, (error, extra) in enumerate(cases):
+        job_runs.record_run(JobRun(
+            job=f"job-{index}", label="Synthetic",
+            started_at=_ago(hours=1), ended_at=_ago(hours=1),
+            status="error", error=error, extra=extra,
+        ))
+
+    assert [f["error"] for f in recent_job_failures(workspace="alpha")] == ["own"]
+    # Unknown caller scope matches nothing rather than falling back to all.
+    assert recent_job_failures(workspace="") == []
+    # The engine-wide reader keeps seeing every stamped and unscoped failure.
+    assert {f["error"] for f in recent_job_failures()} == {
+        error for error, _ in cases
+    }
+
+
+def test_workspace_report_omits_engine_logs_and_states_it(tmp_path: Path) -> None:
+    _write_error_log(tmp_path, "SYNTH-ENGINE ERROR\n")
+    job_runs.record_run(JobRun(
+        job="schedule_dispatch", label="Scheduled dispatch",
+        started_at=_ago(hours=1), ended_at=_ago(hours=1),
+        status="error", error="own stream exploded",
+        extra={"workspace": "alpha", "schedule_id": "sched-a"},
+    ))
+    job_runs.record_run(JobRun(
+        job="vault_index", label="Vault index refresh",
+        started_at=_ago(hours=2), ended_at=_ago(hours=2),
+        status="error", error="beta stream exploded",
+        extra={"workspace": "beta"},
+    ))
+
+    report = build_workspace_issue_report("alpha")
+
+    assert report["scope"] == {"workspace": "alpha", "engine_logs": "omitted"}
+    assert report["omitted"] == {
+        "error_log": SCOPED_LOG_OMISSION_REASON,
+        "debug_log": SCOPED_LOG_OMISSION_REASON,
+        "service_log": SCOPED_LOG_OMISSION_REASON,
+    }
+    assert [f["error"] for f in report["failed_jobs"]] == ["own stream exploded"]
+    # No engine log payload or path is part of a scoped report at all.
+    assert "error_log" not in report
+    assert "error_log_path" not in report
+    assert "debug_log" not in report
+    assert "debug_log_path" not in report
+    text = report["report_text"]
+    assert "own stream exploded" in text
+    assert "beta stream exploded" not in text
+    assert "SYNTH-ENGINE" not in text
+    assert "omitted" in text
+    assert text == format_workspace_issue_report(report)
+
+
+def test_workspace_report_states_omission_with_no_scoped_failures(tmp_path: Path) -> None:
+    _write_error_log(tmp_path, "SYNTH-ENGINE ERROR\n")
+    report = build_workspace_issue_report("alpha")
+    assert report["has_issues"] is False
+    assert report["failed_jobs"] == []
+    text = report["report_text"]
+    assert "No failed background jobs" in text
+    assert "omitted" in text
+    assert "SYNTH-ENGINE" not in text
+
+
+def test_workspace_report_never_reads_engine_logs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def _refuse(*args: object, **kwargs: object) -> str:
+        raise AssertionError("engine-wide log reader called")
+
+    for target in (
+        "ciao.debug_report.build_issue_report",
+        "ciao.debug_report.tail_error_log",
+        "ciao.debug_report.tail_debug_log",
+    ):
+        monkeypatch.setattr(target, _refuse)
+
+    report = build_workspace_issue_report("alpha")
+
+    assert report["failed_jobs"] == []
+    assert report["scope"]["engine_logs"] == "omitted"
+
+
+def test_workspace_report_redacts_failed_job_errors() -> None:
+    job_runs.record_run(JobRun(
+        job="backup", label="Backup",
+        started_at=_ago(hours=1), ended_at=_ago(hours=1),
+        status="error",
+        error="push https://u:ghp_abc@github.com/x failed after 3 retries",
+        extra={"workspace": "alpha"},
+    ))
+
+    report = build_workspace_issue_report("alpha")
+
+    error = report["failed_jobs"][0]["error"]
+    assert "ghp_abc" not in error
+    assert "https://[redacted]@github.com/x" in error
+    assert "failed after 3 retries" in error
+    assert "ghp_abc" not in report["report_text"]
+    assert "https://[redacted]@github.com/x" in report["report_text"]
+    # Redaction changes the report, never the recorded run.
+    raw = job_runs.load_runs()["backup"]["recent"][0]["error"]
+    assert "ghp_abc" in raw
+
+
+def test_workspace_report_bounds_total_body_before_fencing() -> None:
+    huge = "A" * (SCOPED_REPORT_MAX_CHARS * 3)
+    report = {
+        "failed_jobs": [
+            {"label": "huge", "ended_at": "2026-01-01", "error": huge},
+        ],
+    }
+
+    first = format_workspace_issue_report(report)
+    second = format_workspace_issue_report(report)
+
+    assert first == second
+    assert len(first) <= SCOPED_REPORT_MAX_CHARS
+    assert SCOPED_REPORT_TRUNCATION_MARKER.strip() in first
+    assert SCOPED_ENGINE_LOG_OMISSION_NOTE in first
+
+
+def test_recent_job_failures_filters_before_limit() -> None:
+    """A newer foreign backlog must not crowd out an older owned failure."""
+    for index in range(25):
+        job_runs.record_run(JobRun(
+            job=f"foreign-{index}", label="Foreign",
+            started_at=_ago(minutes=index + 1), ended_at=_ago(minutes=index + 1),
+            status="error", error=f"foreign {index}",
+            extra={"workspace": "beta" if index % 2 else ""},
+        ))
+    job_runs.record_run(JobRun(
+        job="owned", label="Owned",
+        started_at=_ago(hours=5), ended_at=_ago(hours=5),
+        status="error", error="owned failure",
+        extra={"workspace": "alpha"},
+    ))
+
+    failures = recent_job_failures(limit=5, workspace="alpha")
+
+    assert [failure["error"] for failure in failures] == ["owned failure"]
+    assert len(failures) <= 5

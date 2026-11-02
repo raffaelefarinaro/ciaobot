@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test'
+import { expect, type Browser, type BrowserContextOptions, type Locator, type Page } from '@playwright/test'
 
 /**
  * Give this browser context its own slice of the fixture's mutable state, so a
@@ -22,6 +22,20 @@ export const BOOTED = 'text=alpha first conversation'
 /** The chat composer; the readiness signal for a `/chat/...` route. */
 export const COMPOSER = 'textarea.chat-input'
 
+export interface BootOptions {
+  /** Awaited before navigation, so a test can set up state for this load. */
+  beforeNavigate?: () => Promise<void>
+  /**
+   * Awaited after navigation and before the readiness wait. The seam a test
+   * uses to inspect a surface that is still loading, or to hold it there.
+   */
+  beforeReady?: () => Promise<void>
+  /** Called in the same turn the readiness wait starts, after `beforeReady`. */
+  onReadyWait?: () => void
+  /** Bound on the readiness wait, so a test can prove that it blocks. */
+  readyTimeout?: number
+}
+
 /**
  * Load a route and wait until the app has finished booting.
  *
@@ -29,14 +43,54 @@ export const COMPOSER = 'textarea.chat-input'
  * because a fixed wait is how a browser suite becomes both slow and flaky on a
  * loaded CI runner.
  */
-export async function boot(page: Page, path = '/', ready: string = BOOTED): Promise<void> {
+export async function boot(
+  page: Page,
+  path = '/',
+  ready: string = BOOTED,
+  options: BootOptions = {},
+): Promise<void> {
+  await options.beforeNavigate?.()
   await page.goto(path)
-  await expect(page.locator(ready).first()).toBeVisible()
+  await options.beforeReady?.()
+  options.onReadyWait?.()
+  await expect(page.locator(ready).first())
+    .toBeVisible(options.readyTimeout === undefined ? undefined : { timeout: options.readyTimeout })
 }
 
 /** The current workspace scope control at the top of the sidebar. */
 export function activeWorkspaceButton(page: Page) {
   return page.locator('.workspace-scope-trigger').first()
+}
+
+/**
+ * Finish an active pointer drag with a destination move and release in the same
+ * JavaScript task, before Vue can flush the preview. The caller must already
+ * have pressed and activated the drag with real mouse events; this keeps the
+ * browser's layout and hit testing while forcing the pending-render seam.
+ */
+export async function releasePointerInSameTask(
+  root: Locator,
+  point: { x: number; y: number },
+  pointerId = 1,
+): Promise<void> {
+  await root.evaluate(
+    (el, arg) => {
+      const init: PointerEventInit = {
+        pointerId: arg.pointerId,
+        isPrimary: true,
+        pointerType: 'mouse',
+        button: 0,
+        buttons: 1,
+        clientX: arg.point.x,
+        clientY: arg.point.y,
+        bubbles: true,
+        cancelable: true,
+      }
+      el.dispatchEvent(new PointerEvent('pointermove', init))
+      el.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
+    },
+    { point, pointerId },
+  )
 }
 
 /**
@@ -104,4 +158,99 @@ export async function quiesce(page: Page, frames = 5): Promise<void> {
     w.__quiet.sig = sig
     return w.__quiet.n >= need
   }, frames, { polling: 'raf', timeout: 0 })
+}
+
+/**
+ * Resolve once every finite animation and transition in `locator`'s subtree
+ * has finished. Waits one frame first, so a transition the last input just
+ * triggered has started and is counted. Infinite animations (spinners,
+ * cursors) are skipped and a cancelled one counts as finished.
+ *
+ * Use it before reading the geometry (`boundingBox()`) of anything that
+ * slides, fades or resizes: a box read mid-animation disagrees with the next
+ * frame's (#2295). For DOM state after a pointer release, poll instead
+ * (`expect.poll`, #2288). `src/lib/e2eSettleReads.test.ts` fails on a
+ * one-shot read right after a release.
+ */
+export async function settled(locator: Locator): Promise<void> {
+  await locator.evaluate(async (el) => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    await Promise.all(
+      el.getAnimations({ subtree: true })
+        .filter((a) => Number.isFinite(a.effect?.getComputedTiming().endTime ?? Infinity))
+        .map((a) => a.finished.catch(() => undefined)),
+    )
+  })
+}
+
+/** The notifications bell in the expanded sidebar's brand row. */
+export const BELL = '.sidebar-brand-row .notif-bell'
+/** The same bell in the collapsed rail. */
+export const RAIL_BELL = '.sidebar-history-rail .notif-bell'
+/** The bell in the pane header, which only shows below 768px. */
+export const HEADER_BELL = '.header-trail .notif-bell'
+/** The inbox popover (or sheet) a bell opens. */
+export const INBOX_DIALOG = '[role="dialog"][aria-label="Notifications"]'
+/** One inbox row. */
+export const ROWS = '.notif-row'
+
+/**
+ * Open the inbox from the bell the viewport shows, and wait for its dialog.
+ * Pass `bell` to name one: at phone width the header bell is the visible one.
+ */
+export async function openInbox(page: Page, bell?: string): Promise<Locator> {
+  const trigger = bell ? page.locator(bell) : page.getByRole('button', { name: /^Notifications/ })
+  await trigger.click()
+  const dialog = page.getByRole('dialog', { name: 'Notifications' })
+  await expect(dialog).toBeVisible()
+  return dialog
+}
+
+/** What `POST /__fixture__/inbox` accepts; see the header of `fixture/server.mjs`. */
+export interface InboxSeed {
+  reset?: boolean
+  chats?: Record<string, Record<string, unknown>>
+  removeChats?: string[]
+  tasks?: Record<string, unknown[]>
+  schedules?: Record<string, Record<string, unknown>>
+  removeSchedules?: string[]
+  actions?: unknown[]
+  events?: unknown[]
+}
+
+/**
+ * Move what the notification inbox reads, and push any `events` frames to every
+ * socket of this session. `page.request` shares the context's cookie jar, so
+ * `isolate()` must have run first.
+ */
+export async function seedInbox(page: Page, seed: InboxSeed): Promise<void> {
+  const res = await page.request.post('/__fixture__/inbox', { data: seed })
+  expect(res.ok()).toBe(true)
+}
+
+/** Every non-GET `/api/` request this session has made, in order. */
+export async function fixtureWrites(page: Page): Promise<Array<{ method: string; path: string }>> {
+  const res = await page.request.get('/__fixture__/writes')
+  expect(res.ok()).toBe(true)
+  return (await res.json()).writes
+}
+
+/** The count a bell announces, from its accessible name: 0 for "none". */
+export async function bellCount(page: Page, selector = BELL): Promise<number> {
+  const label = (await page.locator(selector).first().getAttribute('aria-label')) ?? ''
+  const match = /Notifications, (\d+) items?/.exec(label)
+  if (match) return Number(match[1])
+  if (/none/.test(label)) return 0
+  throw new Error(`unrecognised bell label: ${label}`)
+}
+
+/**
+ * A second device of the same install: another browser context carrying the
+ * same fixture session id, so server-side events reach both.
+ */
+export async function secondDevice(browser: Browser, session: string, opts?: BrowserContextOptions): Promise<Page> {
+  const context = await browser.newContext(opts)
+  const page = await context.newPage()
+  await isolate(page, session)
+  return page
 }

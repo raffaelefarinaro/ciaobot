@@ -136,6 +136,9 @@ class SubagentInfo:
     # First 200 chars of the dispatch command (Monitor / background Bash), so
     # a wake prompt can name the log or output file to check.
     command: str = ""
+    # Timestamp of the launch receipt record (ISO 8601 as the CLI wrote it) for
+    # a CLI-owned task; "" when the record carried none.
+    started_at: str = ""
 
 
 @dataclass
@@ -391,7 +394,7 @@ def _is_countable_user_turn(
         return False
     if is_cli_envelope(text):
         return False
-    if is_compact_summary(record, text):
+    if is_compact_summary(record):
         return False
     if is_hidden_continuation(text):
         return False
@@ -512,6 +515,11 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
 
             if rtype != "user":
                 continue
+            # Compaction recaps are provider-generated context, not user turns
+            # or task events. Exclude them before inspecting tool receipts,
+            # wake prompts, or completion notifications in their text.
+            if is_compact_summary(record):
+                continue
 
             message = record.get("message")
             tool_use_result = record.get("toolUseResult")
@@ -570,6 +578,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     turn_index=user_idx - 1 if user_idx > 0 else None,
                     kind="task",
                     command=str(dispatched.get("command") or ""),
+                    started_at=str(record.get("timestamp") or ""),
                 )
                 continue
 

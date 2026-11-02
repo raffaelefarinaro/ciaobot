@@ -1,14 +1,51 @@
 <template>
-  <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true"></span>
+  <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true">
+    <svg
+      v-if="kind === 'alert'"
+      width="12"
+      height="11"
+      viewBox="0 0 16 14"
+      aria-hidden="true"
+    >
+      <path d="M8 1.2L15 12.8H1Z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+      <rect x="7.2" y="4.6" width="1.6" height="4.4" class="activity-glyph-knock" />
+      <rect x="7.2" y="10" width="1.6" height="1.6" class="activity-glyph-knock" />
+    </svg>
+    <template v-else-if="kind === 'run'">
+      <svg class="activity-glyph-prompt" width="7" height="11" viewBox="0 0 7 11" aria-hidden="true">
+        <path d="M3.5 0.5V10.5M6 3.1C5.8 2.2 4.9 1.6 3.5 1.6 2 1.6 1 2.3 1 3.4 1 4.6 2.2 5 3.5 5.4 4.8 5.8 6 6.3 6 7.6 6 8.7 5 9.4 3.5 9.4 2 9.4 1 8.8 0.9 7.9" />
+      </svg>
+      <i class="activity-glyph-cursor"></i>
+    </template>
+    <template v-else>
+      <i
+        v-for="(order, cell) in WORKING_CHASE"
+        :key="cell"
+        class="activity-glyph-pixel"
+        :class="{
+          'activity-glyph-pixel--fixed': order < 0,
+          'activity-glyph-pixel--still': cell % 2 === 0,
+        }"
+        :style="{ '--i': order }"
+      ></i>
+    </template>
+  </span>
 </template>
 
 <script setup lang="ts">
-// One mark per kind of live work, so a working turn, a subagent and a shell
-// run no longer draw the same pulsing dot. Shape carries the meaning, not
-// colour: working pulses, an agent orbits, a run is a diamond with a dot tracing
-// its edges. Decorative only: the caller owns the accessible name.
-export type ActivityGlyphKind = 'working' | 'agent' | 'run' | 'run-failed'
+// One mark per kind of live work, all in the row's accent: shape and motion
+// carry the meaning, never hue, because an accent preset can sit next to any
+// semantic colour. A working turn (or its subagents) is a 3x3 pixel grid whose
+// lit pixel chases the perimeter; a background run is a shell prompt, `$` and
+// a blinking block cursor. Anything that wants the owner (a question, a failure, a stuck
+// pass) is a filled alert triangle, still.
+// Decorative only: the caller owns the accessible name.
+export type ActivityGlyphKind = 'working' | 'run' | 'alert'
 defineProps<{ kind: ActivityGlyphKind }>()
+
+// Chase step of each of the 9 grid cells in row-major order; -1 is the dim
+// centre, which never animates. The even cells are the reduced-motion checker.
+const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
 </script>
 
 <style scoped>
@@ -21,107 +58,71 @@ defineProps<{ kind: ActivityGlyphKind }>()
   line-height: 1;
 }
 
-/* The chat's own turn: a solid accent dot with a halo and an expanding ring. */
+/* A working turn: a 3x3 pixel grid, one lit pixel chasing the perimeter and
+   leaving a short tail over a dim grid. */
 .activity-glyph--working {
-  width: 8px;
+  --pixel-rest: 0.18;
+  display: inline-grid;
+  grid-template-columns: repeat(3, 3px);
+  gap: 1px;
+}
+
+.activity-glyph-pixel {
+  width: 3px;
+  height: 3px;
+  background: var(--accent);
+  opacity: var(--pixel-rest);
+  animation: activity-glyph-chase 1.2s linear infinite;
+  animation-delay: calc(var(--i) * 0.15s - 1.2s);
+}
+
+.activity-glyph-pixel--fixed { animation: none; }
+
+/* A background run: a shell prompt waiting on its command, `$` and a block
+   cursor that blinks. Sized to sit on the same 11px line as the grid. */
+.activity-glyph--run {
+  gap: 1px;
+  height: 11px;
+  color: var(--accent);
+}
+
+/* Drawn, not typed: a font's `$` sits on the baseline, below the cursor. */
+.activity-glyph-prompt {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.activity-glyph-cursor {
+  width: 4px;
   height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent);
-  animation: activity-glyph-pulse 1.1s ease-in-out infinite;
-}
-
-.activity-glyph--working::before {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.45;
-  animation: activity-glyph-ring 1.1s ease-out infinite;
-  pointer-events: none;
-}
-
-/* A subagent: a ring with a satellite dot orbiting it. */
-.activity-glyph--agent {
-  box-sizing: border-box;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-.activity-glyph--agent::after {
-  content: "";
-  position: absolute;
-  top: -2.5px;
-  left: calc(50% - 2px);
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform-origin: 2px 6.5px;
-  animation: activity-glyph-orbit 1.6s linear infinite;
-}
-
-/* A shell run: a diamond whose edges a dot traces, neutral. Same motion
-   language as the orbit, a shape neither the agent ring nor the task
-   checkbox uses. Failure is red and still. */
-.activity-glyph--run,
-.activity-glyph--run-failed {
-  box-sizing: border-box;
-  width: 9px;
-  height: 9px;
-  margin: 2px; /* the rotated diagonal is ~12.7px */
-  transform: rotate(45deg);
-  color: var(--fg2);
-  border: 1.5px solid color-mix(in srgb, currentColor 55%, transparent);
-}
-
-.activity-glyph--run::after,
-.activity-glyph--run-failed::after {
-  content: "";
-  position: absolute;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
   background: currentColor;
-  offset-path: path('M-0.75,-0.75 H6.75 V6.75 H-0.75 Z');
-  offset-rotate: 0deg;
-  animation: activity-glyph-trace 1.8s linear infinite;
+  animation: activity-glyph-blink 1.1s steps(1, end) infinite;
 }
 
-.activity-glyph--run-failed { color: var(--error); }
-.activity-glyph--run-failed::after { animation: none; }
+/* The alert: a filled triangle with a knocked-out "!". */
+.activity-glyph--alert { color: var(--accent); }
+.activity-glyph-knock { fill: var(--on-accent); }
 
-@keyframes activity-glyph-trace {
-  from { offset-distance: 0%; }
-  to { offset-distance: 100%; }
+@keyframes activity-glyph-chase {
+  0% { opacity: 1; }
+  35% { opacity: 0.55; }
+  70%, 100% { opacity: var(--pixel-rest); }
 }
 
-@keyframes activity-glyph-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@keyframes activity-glyph-ring {
-  0% { transform: scale(0.6); opacity: 0.45; }
-  100% { transform: scale(1.6); opacity: 0; }
-}
-
-@keyframes activity-glyph-orbit {
-  to { transform: rotate(360deg); }
+@keyframes activity-glyph-blink {
+  50% { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .activity-glyph--working,
-  .activity-glyph--working::before,
-  .activity-glyph--agent::after,
-  .activity-glyph--run::after {
+  .activity-glyph-pixel,
+  .activity-glyph-cursor {
     animation: none;
   }
 
-  .activity-glyph--working { opacity: 1; }
-  .activity-glyph--working::before { opacity: 0.3; }
+  /* Frozen into a shape, never a bare dot: the working grid a checker, the
+     run its prompt with a solid cursor. */
+  .activity-glyph-pixel--still { opacity: 1; }
 }
 </style>

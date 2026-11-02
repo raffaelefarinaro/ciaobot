@@ -60,9 +60,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 - Run every gate CI blocks on before pushing, not just the tests. CI's
   blocking steps are, in order:
   1. `mypy ciao`, which is easy to forget and fails the whole job. Watch for
-     `no-any-return`: several attributes (`ProjectChatManager._background_runner`,
-     for one) are typed `Any` because they are wired after construction, so
-     returning a call on one straight out of a typed function is an error.
+     `no-any-return`: an attribute typed `Any` (for instance one wired after construction)
+     makes any call on it return `Any`, so returning that call straight out
+     of a typed function is an error.
      Annotate the local instead.
   2. `pytest -n auto tests/`, the full suite, before claiming backend work is
      complete. A fake object in an unrelated test can break on a new
@@ -85,8 +85,21 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   going green is not proof those will. Path handling is the usual Windows
   break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
   string literals.
+  A test that hands a path to code that checks it is absolute builds it from
+  `tmp_path`: `/nonexistent/x` has no drive and is relative on Windows.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
+- Run one full backend suite and one frontend run at a time, here and in any
+  gate script. Two concurrent suites starve the machine and time out the 20 s
+  component tests (`SettingsFsScope`), which reads as a red gate. A single
+  failure is re-run (`--lf`) before it is called red. Timing tests assert
+  relative behaviour with a small absolute allowance, not a fixed millisecond
+  budget a loaded machine can miss.
+- Assert a guard where it acts, not only in the finished output. When a change
+  bounds, redacts, filters or fences untrusted text, the test should observe the
+  value at that seam (what is handed to the fence, filter or builder), and an
+  ordering-sensitive filter needs more inputs than its limit so that reversing
+  "filter then limit" fails the test.
 - Some docs are checked by tests, so new code often needs a doc edit:
   - a new route in `app.py` goes in `PWA_API.md`. A new POST/PATCH/DELETE
     `/api/*` route also needs an entry under `## Agent recipes` there, or a
@@ -145,9 +158,7 @@ this file; the gates are the ones under Verification.
 - PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
   close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
   next release."
-- The repo is registered in Orca; loop state lives in
-  `~/orca/workspaces/ciaobot/plans/`. Branch prefix:
-  `raffaelefarinaro/issue-<N>-<slug>`.
+- Branch prefix: `raffaelefarinaro/issue-<N>-<slug>`.
 - Gates run from a worktree with the main checkout's venv, which is an
   editable install of `~/repos/ciaobot`: always set `PYTHONPATH=$PWD`
   (`PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/`).
@@ -163,6 +174,9 @@ this file; the gates are the ones under Verification.
   The Windows suites and the macOS job run only there. If it goes red, open a
   `bug` issue naming the failing tests and the merge that broke them, and fix
   it before merging more on top. `/ciao-release` will not cut over a red run.
+  Before queuing a PR whose diff touches path handling, the filesystem,
+  subprocesses or Windows code, add the `windows-full` label and push once, so
+  the full Windows suites run on the PR instead of after merge.
 - Hands-on device testing (a real Windows or macOS install) is for diffs that
   touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
   service or scheduled-task code, engine update/migration, or `desktop/`.
@@ -179,7 +193,11 @@ this file; the gates are the ones under Verification.
   win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
   tests/` (re-run only `--lf` before calling it red; latency tests flake under
   load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
-  in `web/` (remove the symlink afterwards).
+  in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
+  also runs `npm run test:e2e` after the build: the Playwright suite runs in CI
+  only on the macOS job after merge, so a renamed button a spec still looks for
+  reaches `develop` red (#2279). The terminal-renderer specs need
+  `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
   `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
   together. Resolve by keeping both sides.
@@ -187,6 +205,10 @@ this file; the gates are the ones under Verification.
   (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
   `git ls-remote origin <branch>` with the reported sha and drop strays with
   `--force-with-lease`.
+- Live `ciao eval tasks` runs (`docs/TASK_EVAL.md`) import the checkout under
+  test through an editable venv. Run them from a detached worktree with its own
+  venv, never from an issue worktree: the merge queue removes that worktree and
+  every later run in the batch errors.
 
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the

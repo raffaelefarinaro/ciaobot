@@ -434,3 +434,41 @@ def test_repo_instructions_are_capped_at_8000_characters() -> None:
     from ciao import repo_link
 
     assert repo_link.REPO_INSTRUCTIONS_MAX_CHARS == 8_000
+
+
+def test_the_file_access_line_names_the_read_only_archive() -> None:
+    """A memory pass is told its source archive is readable and never writable (#2459)."""
+    capsule = build_context_capsule(
+        workspace="work",
+        file_roots=("/work/agent",),
+        file_read_only=("/work/Logs/Chats/src-1/claude/s.md",),
+    )
+
+    line = next(entry for entry in capsule.splitlines() if entry.startswith("file_access="))
+    assert "read and write under /work/agent; read only: /work/Logs/Chats/src-1/claude/s.md;" in line
+    assert "read only:" not in build_context_capsule(workspace="work", file_roots=("/work/agent",))
+
+
+def test_the_prompt_prefix_names_a_memory_pass_archive_as_read_only(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("work")
+    assert workspace is not None
+    config.workspaces["work"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    archive = config.logs_root / "Chats" / "src-1" / "claude" / "s.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("transcript", encoding="utf-8")
+    project = manager._memory_pass.ensure_project("work")
+    chat = manager.create_chat(
+        project.project_id,
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "src-1",
+            "archive_path": str(archive),
+            "archive_policy": "when_clean",
+        },
+    )
+
+    prefix = manager._build_prompt_prefix(chat)
+
+    assert f"read only: {archive.resolve()}" in prefix

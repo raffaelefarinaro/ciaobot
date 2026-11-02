@@ -1,4 +1,4 @@
-import { devices, expect, test, type Page } from '@playwright/test'
+import { devices, expect, test, type Locator, type Page } from '@playwright/test'
 import { boot, isolate } from '../support/app'
 
 /**
@@ -49,6 +49,18 @@ async function open(page: Page, id: string) {
     json: { workspace: 'alpha', tasks: TASKS },
   }))
   await boot(page, '/tasks', '.task-card')
+}
+
+/** Pick a card up by its own text and drop it on the middle of `target`, with real pointer moves. */
+async function dragBySurface(page: Page, title: string, target: Locator, dy = 0) {
+  const card = page.locator('.task-card', { hasText: title })
+  const from = (await card.locator('.task-title').boundingBox())!
+  const to = (await target.boundingBox())!
+  await page.mouse.move(from.x + 4, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(from.x + 4, from.y + from.height / 2 + 12, { steps: 3 })
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2 + dy, { steps: 12 })
+  await page.mouse.up()
 }
 
 const lane = (page: Page, name: string) => page.locator('.task-lanes').getByRole('region', { name, exact: true })
@@ -210,7 +222,8 @@ test.describe('Done behind a tab', () => {
 
   test('dropping a card on the collapsed tab opens the completion sheet', async ({ page }) => {
     await open(page, 'task-lanes-done-drop')
-    await page.locator('.task-card', { hasText: 'Plan the offsite' }).dragTo(toggle(page))
+    // The card's own surface drag; HTML5 drag and drop is gone from the board.
+    await dragBySurface(page, 'Plan the offsite', toggle(page))
     await expect(page.getByRole('dialog')).toBeVisible()
     const actions = page.locator('.task-resolution-sheet .form-actions button')
     await expect(actions).toHaveCount(2)

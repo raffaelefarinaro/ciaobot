@@ -84,7 +84,7 @@ describe('Settings > Workspaces rows', () => {
       history: createMemoryHistory(),
       routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
     })
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
     await router.isReady()
     const { default: SettingsView } = await import('../SettingsView.vue')
     const wrapper = mount(SettingsView, {

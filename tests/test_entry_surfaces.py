@@ -31,7 +31,8 @@ def _person_note(*, related: str = "", updated: str = "2026-09-29") -> str:
     moves the note's *own* date, which is the other axis: a test that wants the
     row queued on the whole-note signal rather than the entry one sets an old
     date, and a test that wants the row queued *only* because of an overdue fact
-    leaves it current.
+    leaves it current. The paragraph between the heading and the bullets is the
+    same-section prose a fact's context is allowed to show.
     """
     link = f"related: [{related}]\n" if related else ""
     # Composed rather than interpolated into a dedented template: `dedent`
@@ -49,8 +50,12 @@ def _person_note(*, related: str = "", updated: str = "2026-09-29") -> str:
         "---\n"
         "# Alice\n"
         "\n"
-        "- Lives in Porto [verified: 2026-09-28]\n"
-        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "Tenancy notes from the letting agency.\n"
+        "\n"
+        "- Lives in Porto and works remotely for a design studio "
+        "[verified: 2026-09-28]\n"
+        "- Landlord is Mr Silva, who handles the building repairs "
+        "[verified: 2019-05-01]\n"
     )
 
 
@@ -136,11 +141,13 @@ def test_a_mixed_note_is_queued_and_names_the_exact_fact(tmp_path: Path) -> None
     assert finding["reason"] == "aged"
     assert finding["own_date"] is True
     assert finding["last_verified"] == "2019-05-01"
-    # The neighbouring line is named, because a reader deciding whether a bullet
-    # is current needs the context around it and not just the sentence — but the
-    # sibling fact above it is not, because a fact reprinted as another fact's
-    # context reads as the same claim made twice.
-    assert any(line.startswith("# ") for line in finding["context"])
+    # The same-section paragraph is named, because a reader deciding whether a
+    # bullet is current needs the prose around it and not just the sentence. The
+    # note's own heading is not reprinted — the row already names the section —
+    # and the sibling fact above it is not context either, because a fact
+    # reprinted as another fact's context reads as the same claim made twice.
+    assert finding["context"] == ["Tenancy notes from the letting agency."]
+    assert not any(line.startswith("# ") for line in finding["context"])
     assert not any("Lives in Porto" in line for line in finding["context"])
 
 
@@ -495,10 +502,15 @@ def test_history_shows_an_entry_decision_at_the_entrys_scale(
         ---
         # Alice
 
-        - Lives in Porto [verified: 2026-09-28]
+        Tenancy notes from the letting agency.
+
+        - Lives in Porto and works remotely for a design studio [verified: 2026-09-28]
         """
     )
-    entry_before = "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+    entry_before = (
+        "- Landlord is Mr Silva, who handles the building repairs "
+        "[verified: 2019-05-01]\n"
+    )
     start = before.index(entry_before)
     detail = _history_detail(
         NoteEditProposal(

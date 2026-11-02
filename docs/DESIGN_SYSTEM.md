@@ -145,7 +145,7 @@ Existing and wanted:
 | Component | Owns | Status |
 |---|---|---|
 | `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 5 call sites** |
-| `ActivityGlyph` | the shape of live work: working pulse, subagent orbit, shell-run prompt `›_` | **exists: ChatSignals, BackgroundRunRows, Chat details rail, sidebar project rollup, composer activity cluster** |
+| `ActivityGlyph` | the shape of live work: working pulse, subagent orbit, shell-run prompt `›_` | **exists: ChatSignals, ShellRows, Chat details rail, sidebar project rollup, composer activity cluster** |
 | `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
 | `TabBar` | a tablist: tab styling, count pills, and the roving-tabindex keyboard contract | **exists, all 3 call sites** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
@@ -261,7 +261,7 @@ sites), then settings incrementally per tab. Do not big-bang 28 cards.
 
 `SettingsView.vue` is the largest file in the app: a 2,210-line template and
 2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
-(`/settings/workspaces`, `/settings/providers`,
+(`/settings/workspace`, `/settings/providers`,
 `/settings/context`, `/settings/skills`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
 where most of the L1.1 violations live, and splitting makes them visible.

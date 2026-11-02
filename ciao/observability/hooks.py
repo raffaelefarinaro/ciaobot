@@ -1,14 +1,11 @@
 """Programmatic Claude Agent SDK hooks wired by ClaudeProvider.
 
-Two hooks are wired today, both ``PreToolUse``: one on ``Bash`` forces
-background shell commands to run in the foreground and denies detached
-invocations (``nohup … &``, a bare trailing ``&``, ``setsid``/``disown``),
-and one on ``Monitor`` denies the CLI's built-in watcher. All of those paths
-die with the CLI subprocess and never deliver a completion to this chat, so
-the denials point the model at the managed ``ciao run start -- …`` command.
-A background process belongs to the Claude SDK subprocess and is stopped when
-the turn ends, while its terminal notification is not emitted until a later
-turn resumes the session.
+One hook is wired today, a ``PreToolUse`` hook on ``Bash`` that denies
+detached invocations (``nohup … &``, a bare trailing ``&``,
+``setsid``/``disown``). Those escape the CLI's tracking: no wake, no UI row,
+and an orphan that survives teardown. Native ``run_in_background`` Bash and
+``Monitor`` are allowed unchanged: the CLI tracks them and wakes the chat when
+they finish, and Ciaobot keeps the provider alive while they run.
 
 There is deliberately no ``UserPromptSubmit`` hook. Runtime context (date,
 active workspace, GWS profile, cwd) and vault entity tags are built once by
@@ -34,19 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 BACKGROUND_RUN_GUIDANCE = (
-    "Ciaobot does not run detached shell processes from the Claude CLI: they "
-    "belong to the CLI subprocess and are lost when it reconnects, and their "
-    "completion is never delivered back to this chat. For a long-running "
-    "command use `ciao run start -- <cmd>` instead (it survives CLI restarts "
-    "and wakes this chat with the exit code, log tail and log path). "
-    "Use `ciao run status <id>` only if you need the state mid-turn."
+    "Do not detach processes with nohup, &, setsid or disown: Ciaobot cannot "
+    "track them or wake this chat. Run the command with the Bash tool's "
+    "`run_in_background: true` instead; the chat is woken when it finishes."
 )
 
 # Detached-shell shapes we deny. Quoted substrings, heredoc bodies, and
 # comments are stripped before matching, but quotes are not parsed, so an
 # unquoted odd `&` in text (e.g. ``echo a & b``) remains a known false
 # positive. A wrongly denied command is acceptable: it only asks the model
-# to rephrase or use ``ciao run start``, it never runs anything.
+# to rephrase or use ``run_in_background``, it never runs anything.
 _DETACHED_SHELL_RE = re.compile(
     r"(^|[;&|]\s*)nohup\s"              # nohup anywhere as a command start
     r"|(?<![&>|<\\])&(?![&>|])"         # a standalone & (not &&, 2>&1, >&, <&, |&, &>, \&)
@@ -102,27 +96,16 @@ def _looks_detached(command: str) -> bool:
     return False
 
 
-def build_foreground_bash_hook():
-    """Return a PreToolUse callback that keeps Bash inside the active turn.
+def build_detached_shell_deny_hook():
+    """Return a PreToolUse callback that denies detached Bash invocations.
 
-    A background Bash process (``run_in_background``) belongs to the managed
-    CLI subprocess. While the SDK client stays connected it keeps running
-    after the turn ends, and its completion makes the CLI start a follow-up
-    turn by itself (verified 2026-10-15, #1394). It does not outlive that
-    subprocess: an idle reap, a reconnect or an engine restart kills it, and
-    then no completion is delivered beyond the dead-CLI wake reporting it
-    lost. Rewriting the call to the foreground keeps the result in the turn
-    that asked for it; long jobs belong in ``ciao run start -- …``.
+    ``nohup … &``, a bare trailing ``&`` and ``setsid``/``disown`` spawn a
+    process the CLI does not track: no completion wakes the chat, the UI shows
+    no row, and the orphan outlives the CLI subprocess. The deny reason points
+    at the Bash tool's native ``run_in_background``.
 
-    The same callback denies detached invocations (``nohup … &``, a bare
-    trailing ``&``, ``setsid``/``disown``): those belong to the CLI
-    subprocess too and are lost when it reconnects, with no completion ever
-    delivered to the chat. The deny reason points at the managed
-    ``ciao run start -- …`` command instead of rewriting the command.
-
-    Background ``Agent`` calls are intentionally untouched: their completion
-    arrives as a native follow-up turn that the between-turns drain streams,
-    and the subagent watcher tracks the running count.
+    Native ``run_in_background`` Bash, ``Monitor`` and background ``Agent``
+    calls are untouched: the CLI tracks them and delivers their completion.
     """
 
     async def on_pre_tool_use(
@@ -136,8 +119,6 @@ def build_foreground_bash_hook():
         tool_input = input_data.get("tool_input")
         if not isinstance(tool_input, dict):
             return {}
-        # Detach check comes first: a rewrite alone would still launch the
-        # detached child (e.g. ``nohup job &`` with run_in_background=true).
         command = tool_input.get("command")
         if isinstance(command, str) and _looks_detached(command):
             return {
@@ -151,54 +132,7 @@ def build_foreground_bash_hook():
                     ),
                 }
             }
-        if tool_input.get("run_in_background") is True:
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "updatedInput": {**tool_input, "run_in_background": False},
-                    "additionalContext": (
-                        "Ciaobot kept this Bash command in the foreground because "
-                        "background shell processes stop when the SDK turn ends. "
-                        "Wait for the tool result before replying. If you expect "
-                        "this to take minutes, cancel it and use "
-                        "`ciao run start -- <cmd>` instead: a foreground "
-                        "Bash command that outlives its timeout is moved to the "
-                        "CLI's own background tracking, which this hook cannot "
-                        "intercept and whose result is frequently never "
-                        "delivered to the chat."
-                    ),
-                }
-            }
         return {}
-
-    return on_pre_tool_use
-
-
-def build_monitor_deny_hook():
-    """Return a PreToolUse callback that denies the CLI's built-in ``Monitor``.
-
-    A Monitor watcher is owned by the CLI subprocess: it dies on reconnect
-    and its terminal notification is only emitted when a later turn resumes
-    the session, so a monitored long run can finish silently. The deny
-    reason steers the model to Ciaobot's managed ``ciao run start -- …``
-    command, which survives restarts and wakes the chat on completion.
-    """
-
-    async def on_pre_tool_use(
-        input_data: dict[str, Any],
-        tool_use_id: str | None,
-        context: Any,  # HookContext; untyped here to avoid an import cycle
-    ) -> dict[str, Any]:
-        del tool_use_id, context  # unused
-        if input_data.get("tool_name") != "Monitor":
-            return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": BACKGROUND_RUN_GUIDANCE,
-            }
-        }
 
     return on_pre_tool_use
 

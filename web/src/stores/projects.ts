@@ -11,7 +11,7 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
-import { errorMessage } from '../lib/errorMessage'
+import { apiErrorMessage, errorMessage, errorPayload } from '../lib/errorMessage'
 import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
 import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { applyAppearanceSettings } from '../composables/useAppearanceSettings'
@@ -31,8 +31,6 @@ import type {
   RunningSubagent,
   RunningSubagentsResponse,
   MoveToBackgroundResponse,
-  BackgroundRunLog,
-  BackgroundRunSummary,
   SubagentTranscript,
   TerminalOffer,
   WsEvent,
@@ -48,7 +46,8 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
+import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
 export interface NewChatRuntime {
@@ -75,6 +74,7 @@ import {
   type ServerRow,
 } from '../lib/chatHistory'
 import {
+  mirroredPendingQuestion,
   parseCapabilityQuestion,
   parseQuestions,
   questionsSignature,
@@ -96,9 +96,6 @@ export { setListIndex } from '../lib/safeList'
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
 // tell an abandoned draft from a chat the user deliberately named.
 const DEFAULT_CHAT_TITLE = 'New Chat'
-
-// How long the composer says how a background run ended before the line goes.
-const FINISHED_RUN_NOTICE_MS = 6000
 
 /**
  * The boot's draft candidates whose chat is gone for good.
@@ -161,6 +158,8 @@ export const useProjectStore = defineStore('projects', () => {
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
+  // Whether the active-chat list could be read, as opposed to what it said.
+  const chatsHealth = ref<SourceHealth>(checkingHealth())
   // Every switch re-reads, whichever path made it (the scope menu, a deep link
   // into another workspace's chat, a new chat there). Boot reads from
   // `fetchAll` once the workspace is known, so a value restored from local
@@ -297,23 +296,16 @@ export const useProjectStore = defineStore('projects', () => {
   // WS is open). projectStreaming is what powers sidebar dots on inactive
   // chats and projects.
   const projectStreaming = ref<Record<string, boolean>>({})
+  // Chats whose running stream is a between-turns wake (background work
+  // finished, no user row drove it). The turn before it already settled, so
+  // it keeps rendering instead of yielding to the live trace.
+  const wakeStreaming = ref<Record<string, boolean>>({})
   // Per-chat count of background subagents still running *after* the parent
   // turn's result landed. Driven by `chat_subagents_ready` over /ws/events
   // (the server's subagent watcher). Powers a persistent "N background agents
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
-  // Per-chat live `background_run_start` command runs, oldest first. Driven
-  // by `chat_background_runs` over /ws/events and re-seeded from the snapshot.
-  // Separate from `backgroundAgents`: a background run has no transcript to
-  // open, only a command, a log and a Stop. Without it the chat goes fully
-  // idle the moment the turn ends, with nothing saying a command is still
-  // going — the tool is non-blocking by design.
-  const backgroundRuns = ref<Record<string, BackgroundRunSummary[]>>({})
-  // The run that most recently ended in each chat, held for a few seconds so
-  // the composer can say how it ended instead of the line just vanishing.
-  const finishedBackgroundRuns = ref<Record<string, BackgroundRunSummary>>({})
-  const finishedRunTimers = new Map<string, ReturnType<typeof setTimeout>>()
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -967,10 +959,11 @@ export const useProjectStore = defineStore('projects', () => {
     // started; leaving it set would route this resend into the local queue
     // (no server stream will ever drain it) instead of starting a real turn.
     clearStreamingState(chatId)
-    // The optimistic bubble from the lost send is gone with the history
-    // reload, so this re-renders it fresh; a successful delivery clears the
-    // tracking via the echoed user_echo. Empty comment buckets: the original
-    // send already consumed them via consumePreparedAttachments.
+    // The resend reuses the surviving optimistic bubble (found by send id)
+    // and pushes a fresh one only when a reload dropped it; a successful
+    // delivery clears the tracking via the echoed user_echo. Empty comment
+    // buckets: the original send already consumed them via
+    // consumePreparedAttachments.
     // The same send id rides on: this is the same logical send, so the
     // engine can recognise it instead of running a second turn for it. The
     // retry tag rides with it, so a resend of a deliberate retry is still
@@ -1011,6 +1004,18 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
+
+  // The projects a drag can move: General and the auto-managed projects stay
+  // where the server pins them.
+  const reorderableProjects = computed(() => workspaceProjects.value.filter(p => !p.is_auto))
+
+  // Bumps when the project order or membership changes from outside a
+  // reorder this store has in flight, so the sidebar can cancel a drag.
+  const projectOrderEpoch = ref(0)
+  let reorderInFlight = false
+  function bumpProjectOrderEpoch() {
+    if (!reorderInFlight) projectOrderEpoch.value += 1
+  }
 
   const workspaceOptions = computed<WorkspaceInfo[]>(() => {
     if (workspaces.value.length) return workspaces.value
@@ -1060,6 +1065,8 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(streaming.value[chatId] || projectStreaming.value[chatId])
   })
 
+  const isWakeStreaming = computed(() => Boolean(wakeStreaming.value[activeChatId.value || '']))
+
   const currentStreamingText = computed(() =>
     streamingText.value[activeChatId.value || ''] || ''
   )
@@ -1076,9 +1083,6 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
-  const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
-    backgroundRuns.value[activeChatId.value || ''] || []
-  )
   const backgroundableCalls = ref<Record<string, BackgroundableCalls>>({})
   const activeBackgroundableCalls = computed<BackgroundableCalls>(() =>
     backgroundableCalls.value[activeChatId.value || ''] || {}
@@ -1194,12 +1198,11 @@ export const useProjectStore = defineStore('projects', () => {
   )
 
   // The UI-facing "is anything happening?" — deliberately NOT `anyChatWorking`,
-  // which is the poll gate above. A background run is the assistant working and
-  // must light the nav item, but it is not a subagent, so folding it into the
-  // gate would poll /api/subagents/running for rows that cannot exist.
+  // which is the poll gate above. A native background shell is the assistant
+  // working and must light the nav item, but it is not a subagent.
   const anyChatBusy = computed(() =>
     anyChatWorking.value
-    || Object.values(backgroundRuns.value).some(runs => runs.length > 0),
+    || Object.values(runningSubagents.value).some(rows => rows.some(isShellRow)),
   )
 
   // The server keeps a row "running" until the agent's transcript goes idle,
@@ -1225,17 +1228,28 @@ export const useProjectStore = defineStore('projects', () => {
     }
     runningPollLive.value = false
   }
-  // Poll until the rows clear or the drain budget is spent. Used for the
+  // Poll until the rows clear or the drain budget is spent (shell rows never
+  // spend it). Used for the
   // falling edge of work and for rows discovered while nothing is working.
   function startRunningSubagentDrain(): void {
     let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
     runningPollLive.value = true
     runningSubagentTimer = setInterval(() => {
-      if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
+      if (Object.keys(runningSubagents.value).length === 0) {
         stopRunningSubagentPoll()
         return
       }
-      drainTicksLeft -= 1
+      // A listed shell or Monitor is retired by the server from provider
+      // state (24 h cap), so it keeps the poll alive without spending the
+      // budget; agent rows stay bounded.
+      const holdsShell = Object.values(runningSubagents.value).some(rows => rows.some(isShellRow))
+      if (!holdsShell) {
+        if (drainTicksLeft <= 0) {
+          stopRunningSubagentPoll()
+          return
+        }
+        drainTicksLeft -= 1
+      }
       void refreshRunningSubagents()
     }, RUNNING_SUBAGENT_POLL_MS)
   }
@@ -1323,24 +1337,68 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
-  function chatHasBackgroundRuns(chatId: string): boolean {
-    return (backgroundRuns.value[chatId]?.length || 0) > 0
+  // Per-task stop state, keyed chat id then bare task id. It lives here, not in
+  // the rows: the composer popover unmounts on close and the Chat details rail
+  // is a second view of the same rows, and both must show a stop still pending.
+  const stoppingTasks = ref<Record<string, Record<string, true>>>({})
+  const stopTaskErrors = ref<Record<string, Record<string, string>>>({})
+  const stopTaskTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  // A task the provider never reports ended must not leave Stop locked for good.
+  const STOP_LOCK_MS = 15_000
+
+  function dropTaskEntry(map: Record<string, Record<string, unknown>>, chatId: string, taskId: string) {
+    const rows = map[chatId]
+    if (!rows || !(taskId in rows)) return
+    delete rows[taskId]
+    if (!Object.keys(rows).length) delete map[chatId]
   }
 
-  async function fetchBackgroundRunLog(chatId: string, runId: string): Promise<BackgroundRunLog> {
-    return api.get<BackgroundRunLog>(
-      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/log`,
-    )
+  function releaseStoppingTask(chatId: string, taskId: string) {
+    const key = `${chatId}\u0000${taskId}`
+    cancelTimer(stopTaskTimers.get(key))
+    stopTaskTimers.delete(key)
+    dropTaskEntry(stoppingTasks.value, chatId, taskId)
   }
 
-  // The row leaves when the finish edge arrives over /ws/events, not here, so
-  // every client drops it at the same moment.
-  async function cancelBackgroundRun(chatId: string, runId: string): Promise<void> {
-    await api.post(
-      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/cancel`,
-      {},
+  // Stops one native shell or Monitor from the Processes list. It stays
+  // "stopping" until the row leaves the running list: the engine answers
+  // before the provider has reported the task ended. A failure is recorded
+  // for the row, not thrown.
+  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
+    if (stoppingTasks.value[chatId]?.[taskId]) return
+    dropTaskEntry(stopTaskErrors.value, chatId, taskId)
+    stoppingTasks.value[chatId] = { ...stoppingTasks.value[chatId], [taskId]: true }
+    stopTaskTimers.set(
+      `${chatId}\u0000${taskId}`,
+      scheduleTimer(() => releaseStoppingTask(chatId, taskId), STOP_LOCK_MS),
     )
+    try {
+      await api.post(
+        `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+        {},
+      )
+    } catch {
+      releaseStoppingTask(chatId, taskId)
+      stopTaskErrors.value[chatId] = {
+        ...stopTaskErrors.value[chatId],
+        [taskId]: 'Could not stop this process. Try again.',
+      }
+    }
   }
+
+  // A row that left the poll has ended: its stopping state and error go too.
+  watch(runningSubagents, (all) => {
+    for (const map of [stoppingTasks.value, stopTaskErrors.value]) {
+      for (const chatId of Object.keys(map)) {
+        const live = new Set((all[chatId] || []).filter(isShellRow).map(r => shellTaskId(r.agent_id)))
+        for (const taskId of Object.keys(map[chatId])) {
+          if (live.has(taskId)) continue
+          if (map === stoppingTasks.value) releaseStoppingTask(chatId, taskId)
+          else dropTaskEntry(map, chatId, taskId)
+        }
+      }
+    }
+  }, { deep: false })
 
   // Subagents this chat has working right now, from /api/subagents/running.
   // Sidebar rows and the per-row "working" signal read this; it is deliberately
@@ -1358,15 +1416,13 @@ export const useProjectStore = defineStore('projects', () => {
    * Is this chat doing anything right now?
    *
    * One definition for every "working" surface. Each consumer used to OR the
-   * sources by hand, so adding one meant finding them all — and the last
-   * addition (background runs) reached the home lanes but not the project
-   * header, which is why the two disagreed for a chat whose only activity was
-   * a running subagent. Add new activity sources here, not at the call sites.
+   * sources by hand, so adding one meant finding them all, and the surfaces
+   * disagreed for a chat whose only activity was a running subagent. Add new
+   * activity sources here, not at the call sites.
    */
   function chatIsWorking(chatId: string): boolean {
     return isChatStreaming(chatId)
       || chatHasBackgroundAgents(chatId)
-      || chatHasBackgroundRuns(chatId)
       || chatHasRunningSubagents(chatId)
   }
 
@@ -1581,6 +1637,9 @@ export const useProjectStore = defineStore('projects', () => {
     const previousWorkspace = activeWorkspace.value
     const previousChatId = activeChatId.value
     const crossing = project.workspace !== previousWorkspace
+    // A surface holding an unsaveable draft refuses the switch; creating the
+    // chat anyway would open it in the workspace the overlay is still drawing.
+    if (crossing && !(await workspaceSwitchAllowed(previousWorkspace))) return
     if (crossing && previousChatId) {
       disconnectWs(previousChatId)
     }
@@ -1982,12 +2041,16 @@ export const useProjectStore = defineStore('projects', () => {
         api.get<WorkspacesResponse>('/api/workspaces'),
         api.get<ProjectInfo[]>('/api/projects'),
         api.get<ChatInfo[]>('/api/chats?active_only=1'),
-      ])
+      ]).catch((e) => {
+        chatsHealth.value = failedHealth(chatsHealth.value, e)
+        throw e
+      })
       workspaces.value = workspaceResponse.workspaces || []
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
       projects.value = p
+      bumpProjectOrderEpoch()
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
       reconcileActiveChats(c, listReadStart)
@@ -2014,8 +2077,7 @@ export const useProjectStore = defineStore('projects', () => {
       // requests must not be undone by the route that started them.
       const urlChatId = routeChatId()
       if (urlChatId && !canOpenChat(urlChatId)) await ensureChatInfo(urlChatId)
-      if (urlChatId && canOpenChat(urlChatId)) {
-        await ensureWorkspaceForChat(urlChatId)
+      if (urlChatId && canOpenChat(urlChatId) && await ensureWorkspaceForChat(urlChatId)) {
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
         activeChatId.value = null
@@ -2026,12 +2088,12 @@ export const useProjectStore = defineStore('projects', () => {
         if (typeof document === 'undefined' || document.visibilityState === 'visible') {
           void markRead(bootChatId)
         }
-        const history = bootChatId === initialChatId && initialHistory
-          ? initialHistory
-          : loadMessages(bootChatId, { waitForSettledReply: !isArchivedChat(bootChatId) })
-        void history.then(() => {
-          if (activeChatId.value === bootChatId && !isArchivedChat(bootChatId)) connectWs(bootChatId)
-        })
+        // The socket opens before history resolves: an engine-started turn's
+        // buffered user_echo is the only source of its user row until then.
+        if (!isArchivedChat(bootChatId)) connectWs(bootChatId)
+        if (!(bootChatId === initialChatId && initialHistory)) {
+          void loadMessages(bootChatId, { waitForSettledReply: !isArchivedChat(bootChatId) })
+        }
       }
       connectEventsWs()
       checkPendingTarget()
@@ -2149,6 +2211,16 @@ export const useProjectStore = defineStore('projects', () => {
   // each chat. A read may only write when neither of them is newer than it.
   let terminalOfferSnapshotClock = 0
   const terminalOfferChatClock: Record<string, number> = {}
+  // The clock value at which the live stream last mirrored an AskUserQuestion
+  // onto a chat's `pending_question`. A chat-list read that started before it
+  // carries the pre-question snapshot and must not erase the mirror.
+  const liveQuestionClock: Record<string, number> = {}
+
+  function keepLivePendingQuestion(next: ChatInfo, readStartedAt: number): ChatInfo {
+    if (next.pending_question || readStartedAt >= (liveQuestionClock[next.chat_id] ?? 0)) return next
+    const local = chats.value.find(c => c.chat_id === next.chat_id)?.pending_question
+    return local ? { ...next, pending_question: local } : next
+  }
 
   function nextTerminalOfferClock(): number {
     terminalOfferClock += 1
@@ -2316,6 +2388,7 @@ export const useProjectStore = defineStore('projects', () => {
    * wholesale array replace. Active rows replace their peers in place.
    */
   function reconcileActiveChats(activeChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
+    chatsHealth.value = readyHealth()
     const merged: ChatInfo[] = []
     const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
     for (const existing of chats.value) {
@@ -2326,7 +2399,7 @@ export const useProjectStore = defineStore('projects', () => {
         merged.push(existing)
         activeById.delete(existing.chat_id)
       } else if (activeById.has(existing.chat_id)) {
-        merged.push(activeById.get(existing.chat_id)!)
+        merged.push(keepLivePendingQuestion(activeById.get(existing.chat_id)!, readStartedAt))
         activeById.delete(existing.chat_id)
       }
       // else: an active row that vanished server-side is dropped.
@@ -2385,7 +2458,13 @@ export const useProjectStore = defineStore('projects', () => {
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
       const listReadStart = terminalOfferReadStart()
-      const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
+      let latestChats: ChatInfo[]
+      try {
+        latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
+      } catch (e) {
+        chatsHealth.value = failedHealth(chatsHealth.value, e)
+        throw e
+      }
       reconcileActiveChats(latestChats, listReadStart)
 
       const chatId = activeChatId.value
@@ -2635,6 +2714,7 @@ export const useProjectStore = defineStore('projects', () => {
     // already pushed this project into the list, so skip the duplicate.
     const exists = projects.value.some(x => x.project_id === p.project_id)
     if (!exists) projects.value.push(p)
+    bumpProjectOrderEpoch()
     return p
   }
 
@@ -2646,17 +2726,63 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // Persist a drag-reordered project sequence for the active workspace.
-  // Optimistically rewrites local `order` so the sidebar reflects the drop
-  // instantly; the server echoes a `projects_reordered` event that reconciles.
-  async function reorderProjects(orderedIds: string[]) {
+  // `orderedIds` is the new sequence of the reorderable projects and
+  // `expectedIds` the sequence the caller saw before the drag: the server
+  // rejects the write when either side has moved. The new order is applied at
+  // once, using the slots the same ids occupied (as the server does); on any
+  // failure the previous values come back and the list is refetched.
+  async function reorderProjects(
+    orderedIds: string[],
+    expectedIds: string[],
+  ): Promise<{ ok: true } | { ok: false; conflict: boolean; message: string }> {
+    const workspace = activeWorkspace.value
+    const previous = projects.value.map(p => [p.project_id, p.order] as const)
+    const byId = new Map(projects.value.map(p => [p.project_id, p]))
+    const slots = orderedIds
+      .map(pid => byId.get(pid)?.order)
+      .filter((order): order is number => order !== undefined)
+      .sort((a, b) => a - b)
+    // The first slot must not tie with a pinned row that sorts at or before it.
+    const pinnedOrders = projects.value
+      .filter(p => p.workspace === workspace && p.is_auto && !orderedIds.includes(p.project_id))
+      .map(p => p.order)
+    if (slots.length) slots[0] = Math.max(slots[0], ...pinnedOrders.filter(o => o <= slots[0]).map(o => o + 1))
+    // Strictly increasing, so projects that tie on `order` still keep the drag.
+    for (let i = 1; i < slots.length; i++) slots[i] = Math.max(slots[i], slots[i - 1] + 1)
     orderedIds.forEach((pid, index) => {
-      const p = projects.value.find(x => x.project_id === pid)
-      if (p) p.order = index
+      const p = byId.get(pid)
+      if (p && slots[index] !== undefined) p.order = slots[index]
     })
-    await api.post('/api/projects/reorder', {
-      workspace: activeWorkspace.value,
-      order: orderedIds,
-    })
+    reorderInFlight = true
+    try {
+      await api.post('/api/projects/reorder', {
+        workspace,
+        order: orderedIds,
+        expected_order: expectedIds,
+      })
+      return { ok: true }
+    } catch (e) {
+      const restore = new Map(previous)
+      projects.value.forEach(p => {
+        const order = restore.get(p.project_id)
+        if (order !== undefined) p.order = order
+      })
+      const conflict = errorPayload(e)?.code === 'project_order_conflict'
+      try {
+        projects.value = await api.get<ProjectInfo[]>('/api/projects')
+      } catch {
+        // The restored snapshot stands until the next refresh.
+      }
+      return {
+        ok: false,
+        conflict,
+        message: conflict
+          ? 'The project order changed elsewhere. It has been refreshed; try the move again.'
+          : apiErrorMessage(e, 'Could not save the project order.'),
+      }
+    } finally {
+      reorderInFlight = false
+    }
   }
 
   // Deliberate delete: drop any draft riding along with these chats now, so
@@ -2673,6 +2799,7 @@ export const useProjectStore = defineStore('projects', () => {
     const activeChatProject = activeChat.value?.project_id
     const report = await api.del<ProjectDeleteReport>(`/api/projects/${projectId}?delete_vault=1`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    bumpProjectOrderEpoch()
     clearDraftsForProject(projectId)
     // The project's chats go with it, and so do the commands they offered.
     clearTerminalOffersForProjects(new Set([projectId]))
@@ -2694,6 +2821,7 @@ export const useProjectStore = defineStore('projects', () => {
       note: closure.note,
     })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    bumpProjectOrderEpoch()
     clearDraftsForProject(projectId)
     // The completed project's chats go with it, and so do their commands.
     clearTerminalOffersForProjects(new Set([projectId]))
@@ -3110,7 +3238,8 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function replaceChat(chat: ChatInfo, readStartedAt: number = terminalOfferClock) {
+  function replaceChat(incoming: ChatInfo, readStartedAt: number = terminalOfferClock) {
+    const chat = keepLivePendingQuestion(incoming, readStartedAt)
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
@@ -3374,7 +3503,16 @@ export const useProjectStore = defineStore('projects', () => {
                   break
                 }
               }
-              if (serverLastUserIdx >= 0) {
+                if (serverLastUserIdx >= 0 && wakeStreaming.value[chatId]) {
+                // A wake follows a settled turn: keep that turn and cut at the
+                // wake's notice row, or nowhere when it has none yet.
+                let noticeIdx = -1
+                for (let i = windowRows.length - 1; i > serverLastUserIdx; i--) {
+                  const row = windowRows[i]
+                  if (row.role === 'system' && !row.tool_name) { noticeIdx = i; break }
+                }
+                if (noticeIdx >= 0) windowRows = windowRows.slice(0, noticeIdx + 1)
+              } else if (serverLastUserIdx >= 0) {
                 windowRows = windowRows.slice(0, serverLastUserIdx + 1)
               }
             }
@@ -3850,6 +3988,31 @@ export const useProjectStore = defineStore('projects', () => {
     // the turn is over whatever the last row is.
     if (!projectStreaming.value[chatId]) clearStreamingState(chatId)
     void loadSubagents(chatId)
+    // But a missing reply is not proof there is none: a fetch that failed
+    // while a resumed phone was still waking its network reads the same as an
+    // empty answer here. Keep checking, more slowly, so the user's own bubble
+    // is never left last until they reload.
+    if (!hasSettledHistory(chatId)) awaitLateReply(chatId)
+  }
+
+  // Follow-up checks for a finished turn whose reply history has not shown:
+  // about two minutes in all, then the turn really ended without one (a stop).
+  const LATE_REPLY_DELAYS_MS = [5000, 10000, 15000, 30000, 60000]
+  const lateReplyTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+  function awaitLateReply(chatId: string, attempt = 0) {
+    cancelTimer(lateReplyTimers[chatId])
+    delete lateReplyTimers[chatId]
+    if (attempt >= LATE_REPLY_DELAYS_MS.length) return
+    if (attempt === 0) console.warn(`chat ${chatId}: turn ended but history has no reply yet; checking again`)
+    lateReplyTimers[chatId] = scheduleTimer(async () => {
+      delete lateReplyTimers[chatId]
+      // Another chat is open, or a new turn owns the timeline: its own result
+      // reconciles it, and the next open of this chat fetches afresh.
+      if (activeChatId.value !== chatId || streaming.value[chatId] || projectStreaming.value[chatId]) return
+      await loadMessages(chatId, { background: true })
+      if (!hasSettledHistory(chatId)) awaitLateReply(chatId, attempt + 1)
+    }, LATE_REPLY_DELAYS_MS[attempt])
   }
 
   // ── Subagents ───────────────────────────────────────────────────────
@@ -3976,12 +4139,21 @@ export const useProjectStore = defineStore('projects', () => {
     return chats.value.some(ch => ch.chat_id === chatId && ch.archived)
   }
 
-  async function ensureWorkspaceForChat(chatId: string) {
+  /**
+   * Put the chat's own workspace on screen before the chat is opened.
+   *
+   * Resolves false when a workspace-switch guard refused the move (an overlay
+   * with a draft that cannot be saved): the caller must not go on to open a
+   * chat that belongs to the workspace it was told to stay out of.
+   */
+  async function ensureWorkspaceForChat(chatId: string): Promise<boolean> {
     const project = projectFor(chatId)
-    if (!project || project.workspace === activeWorkspace.value) return
+    if (!project || project.workspace === activeWorkspace.value) return true
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return false
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = project.workspace
     persistState()
+    return true
   }
 
   async function ensureChatInfo(chatId: string): Promise<void> {
@@ -3998,7 +4170,7 @@ export const useProjectStore = defineStore('projects', () => {
   async function openChatFromDeepLink(chatId: string) {
     await ensureChatInfo(chatId)
     if (!canOpenChat(chatId)) return
-    await ensureWorkspaceForChat(chatId)
+    if (!(await ensureWorkspaceForChat(chatId))) return
     if (activeChatId.value === chatId) {
       // switchChat's "already active" fast path only marks read — fine for
       // e.g. re-clicking the same sidebar entry, but arriving via a
@@ -4033,7 +4205,12 @@ export const useProjectStore = defineStore('projects', () => {
     chatId: string,
     opts?: { skipHistory?: boolean; keepSubView?: boolean },
   ) {
-    await ensureWorkspaceForChat(chatId)
+    if (!(await ensureWorkspaceForChat(chatId))) return
+    // Ask the same guards that veto a workspace switch before anything moves.
+    // A guard belongs to a surface holding a draft it cannot save — the task
+    // overlay is the first — and refusing here is what keeps that draft's view
+    // intact: the URL stays, so the chat under it must stay too.
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
     // currently active).
@@ -4056,7 +4233,11 @@ export const useProjectStore = defineStore('projects', () => {
     // still leaves the sub-view, which is what that click means.
     const keepSubView = Boolean(opts?.keepSubView) && currentRouteChatId === chatId
     if ((currentRouteChatId !== chatId || currentRoute.params.agentId) && !keepSubView) {
-      router.push(`/chat/${chatId}`)
+      // Fire-and-forget: the route is a consequence of this switch, not a gate
+      // on it. The guards above already refused the switch when a surface holds
+      // an unsaveable draft, and a `beforeEach` guard still vetoes Browser
+      // Back/Forward for the same reason.
+      void router.push(`/chat/${chatId}`)
     }
     if (activeChatId.value === chatId) {
       void markRead(chatId)
@@ -4077,9 +4258,11 @@ export const useProjectStore = defineStore('projects', () => {
       if (!opts?.skipHistory) await loadMessages(chatId)
       return
     }
-    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
-    void loadSubagents(chatId)
+    // Attach the socket before history: an engine-started turn's buffered
+    // user_echo must reach the page even while /messages is still pending.
     connectWs(chatId)
+    void loadSubagents(chatId)
+    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
   }
 
   // Set by the open Settings workspace editor so a switch away from unsaved
@@ -4092,12 +4275,47 @@ export const useProjectStore = defineStore('projects', () => {
     if (workspaceSwitchGuard === guard) workspaceSwitchGuard = null
   }
 
-  // Resolves true once the workspace is active (or already was), false when the
-  // settings guard declined: a caller that goes on to act in `ws` must stop.
-  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }): Promise<boolean> {
+  /**
+   * Guards that run after the Settings slot, in registration order.
+   *
+   * A registry rather than a second slot because more than one surface can own
+   * unsaved state at once (the task overlay is the first), and whichever mounts
+   * last must not take the slot from the one before it. `false` keeps the
+   * workspace and stops the switch; the returned function unregisters.
+   */
+  const workspaceSwitchGuards = new Set<(from: WorkspaceName) => Promise<boolean>>()
+  function registerWorkspaceSwitchGuard(guard: (from: WorkspaceName) => Promise<boolean>): () => void {
+    workspaceSwitchGuards.add(guard)
+    return () => { workspaceSwitchGuards.delete(guard) }
+  }
+
+  /** Every guard that must agree before `from` may be left; false refuses the switch. */
+  async function workspaceSwitchAllowed(from: WorkspaceName): Promise<boolean> {
+    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(from))) return false
+    // A snapshot, because a guard that unregisters itself while it runs must
+    // not make the iteration skip the next one.
+    for (const guard of [...workspaceSwitchGuards]) {
+      if (!(await guard(from))) return false
+    }
+    return true
+  }
+
+  // Resolves true once the workspace is active (or already was), false when a
+  // guard declined: a caller that goes on to act in `ws` must stop.
+  //
+  // `isCurrent` lets an asynchronous caller (a deep-link resolver) withdraw: it
+  // is asked before anything else and again once the guards have answered, and
+  // a false answer returns false without touching the scope, so a switch that
+  // was superseded while a guard was open can never apply late.
+  async function switchWorkspace(
+    ws: WorkspaceName,
+    options?: { transition?: boolean; isCurrent?: () => boolean },
+  ): Promise<boolean> {
     const transition = options?.transition !== false
+    if (options?.isCurrent && !options.isCurrent()) return false
     if (activeWorkspace.value === ws) return true
-    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(activeWorkspace.value))) return false
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return false
+    if (options?.isCurrent && !options.isCurrent()) return false
     if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
@@ -4364,6 +4582,12 @@ export const useProjectStore = defineStore('projects', () => {
       if (activeChatId.value) sendFocus(activeChatId.value)
     })
 
+    // A phone resumed from a push can wake before its network does, so the
+    // resume fetches fail. Retry the moment the network is back.
+    listen(window, 'online', () => {
+      void resumeActiveChat()
+    })
+
     listen(document, 'visibilitychange', () => {
       documentVisible.value = document.visibilityState === 'visible'
       if (document.visibilityState === 'visible') {
@@ -4598,6 +4822,7 @@ export const useProjectStore = defineStore('projects', () => {
     const known = new Set(fresh.map(p => p.project_id))
     const dropped = projects.value.filter(p => !known.has(p.project_id)).map(p => p.project_id)
     projects.value = fresh
+    bumpProjectOrderEpoch()
     if (dropped.length) {
       const gone = new Set(dropped)
       dropped.forEach(clearDraftsForProject)
@@ -4629,20 +4854,15 @@ export const useProjectStore = defineStore('projects', () => {
         if (msg.appearance) applyAppearanceSettings(msg.appearance)
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
+        wakeStreaming.value = {}
         for (const entry of msg.active_streams) {
           projectStreaming.value[entry.chat_id] = true
+          if (entry.background) wakeStreaming.value[entry.chat_id] = true
         }
         // Authoritative background-agent counts: replace local state so a
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
-        // Same, for tracked command runs. Authoritative for the same reason,
-        // and it matters more here: a run outlives the turn that started it,
-        // so the snapshot is how a client learns about one that was already
-        // going when it connected. (A server restart does not carry runs
-        // over — the runner resolves them as orphans — so an empty map after
-        // one is the truth, not a gap.)
-        backgroundRuns.value = { ...(msg.background_runs || {}) }
         // Authoritative per-chat pin state for every persisted chat (including
         // closed/archived), so a client that missed a pin/unpin while its socket
         // was down heals to server truth instead of writing stale browser state.
@@ -4685,6 +4905,8 @@ export const useProjectStore = defineStore('projects', () => {
         break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
+        if (msg.background) wakeStreaming.value[msg.chat_id] = true
+        else delete wakeStreaming.value[msg.chat_id]
         // Note: backgroundAgents is NOT cleared here — agents from a prior
         // turn keep running across new turns. The server's JSONL watcher
         // re-announces the count at every turn end (including 0), and the
@@ -4699,6 +4921,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
       case 'chat_streaming_done': {
         delete projectStreaming.value[msg.chat_id]
+        delete wakeStreaming.value[msg.chat_id]
         const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (doneChat) doneChat.last_error = msg.last_error || ''
         if (doneChat && msg.repo_location) doneChat.repo_location = msg.repo_location
@@ -4790,26 +5013,6 @@ export const useProjectStore = defineStore('projects', () => {
         // the Activity view (which fires a visibilitychange).
         if (msg.chat_id === activeChatId.value) {
           void reconcileAfterResult(msg.chat_id)
-        }
-        break
-      }
-      case 'chat_background_runs': {
-        // No transcript to pull and no agent row to refresh, unlike
-        // `chat_subagents_ready`. The finishing run delivers its own wake
-        // turn, which arrives as a normal chat result.
-        if (msg.runs?.length) {
-          backgroundRuns.value[msg.chat_id] = msg.runs
-        } else {
-          delete backgroundRuns.value[msg.chat_id]
-        }
-        if (msg.finished) {
-          const chatId = msg.chat_id
-          finishedBackgroundRuns.value[chatId] = msg.finished
-          cancelTimer(finishedRunTimers.get(chatId))
-          finishedRunTimers.set(chatId, scheduleTimer(() => {
-            delete finishedBackgroundRuns.value[chatId]
-            finishedRunTimers.delete(chatId)
-          }, FINISHED_RUN_NOTICE_MS))
         }
         break
       }
@@ -5007,6 +5210,7 @@ export const useProjectStore = defineStore('projects', () => {
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)
+        bumpProjectOrderEpoch()
         break
       }
       case 'project_updated': {
@@ -5025,6 +5229,7 @@ export const useProjectStore = defineStore('projects', () => {
         // offered.
         clearTerminalOffersForProjects(new Set([msg.project_id]))
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
+        bumpProjectOrderEpoch()
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
         if (selectedChatId) {
           disconnectWs(selectedChatId)
@@ -5043,6 +5248,7 @@ export const useProjectStore = defineStore('projects', () => {
           const next = orderMap.get(p.project_id)
           if (next !== undefined) p.order = next
         })
+        bumpProjectOrderEpoch()
         break
       }
       case 'workspaces_changed': {
@@ -5382,17 +5588,25 @@ export const useProjectStore = defineStore('projects', () => {
     if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
     if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry, sendId)) {
       const msgs = messages.value[chatId] || []
-      msgs.push({
-        role: 'user',
-        content: composed,
-        timestamp: new Date().toISOString(),
-        images: imageRefs,
-        // A deliberate retry is tagged, so the bubble says what the turn is.
-        origin,
-        // The id marks this bubble as the client's own optimistic copy, so
-        // the server's copy of the same turn is never mistaken for it.
-        send_id: sendId,
-      })
+      // A recovery resend reuses the send id and the original optimistic
+      // bubble survives a history reload, so a second push would render the
+      // turn twice.
+      const held = msgs.some(
+        m => m.role === 'user' && m.turn_index == null && typeof m.i !== 'number' && m.send_id === sendId,
+      )
+      if (!held) {
+        msgs.push({
+          role: 'user',
+          content: composed,
+          timestamp: new Date().toISOString(),
+          images: imageRefs,
+          // A deliberate retry is tagged, so the bubble says what the turn is.
+          origin,
+          // The id marks this bubble as the client's own optimistic copy, so
+          // the server's copy of the same turn is never mistaken for it.
+          send_id: sendId,
+        })
+      }
       messages.value[chatId] = msgs
     }
     // Persist immediately so the user's own message survives app close even
@@ -6367,6 +6581,19 @@ export const useProjectStore = defineStore('projects', () => {
             const submission = questionSubmissions.value[chatId]
             if (!submission?.pending) delete questionSubmissions.value[chatId]
             activeQuestions.value[chatId] = qs
+            // Mirror the engine's persisted `pending_question` on the local
+            // chat. The question pause ends the turn and reloads history, and
+            // `rebuildPendingQuestion` would otherwise read the pre-question
+            // snapshot, dismiss this picker and mark it resolved.
+            const askingChat = chats.value.find(c => c.chat_id === chatId)
+            if (askingChat) {
+              askingChat.pending_question = mirroredPendingQuestion(
+                event.tool_input,
+                event.request_id || '',
+                event.session_id || '',
+              )
+              liveQuestionClock[chatId] = nextTerminalOfferClock()
+            }
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
             if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
@@ -6894,16 +7121,16 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
-    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
@@ -6913,12 +7140,12 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,
-    createProject, updateProject, reorderProjects, deleteProject, completeProject,
+    createProject, updateProject, reorderProjects, reorderableProjects, projectOrderEpoch, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

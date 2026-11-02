@@ -367,6 +367,81 @@ Jira project tables, Airtable base/table IDs, and similar skill-specific
 reference data belong next to the workspace skill that uses them, not in this
 repository-wide document.
 
+## Server host signing rehearsal (CI only)
+
+The signed, notarized macOS server host is exercised by a separate manual
+workflow, `.github/workflows/server-host-signing-rehearsal.yml` (#2331), before
+any production activation. It uploads no release asset and distributes nothing:
+the Apple notary submission inside the release build is the only network write,
+and candidate files stay on the runner. `publish.yml` is unchanged and keeps
+publishing the ad-hoc host, so none of these names is needed for an ordinary
+release.
+
+| Name | GitHub storage | Meaning |
+|---|---|---|
+| `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded |
+| `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | p12 import password |
+| `SERVER_HOST_NOTARY_KEY_P8_BASE64` | environment secret | base64 of the App Store Connect API key (`.p8`) used for notarization |
+| `SERVER_HOST_NOTARY_KEY_ID` | protected environment variable | the API key identifier (an identifier, not a secret) |
+| `SERVER_HOST_NOTARY_ISSUER_ID` | protected environment variable | the App Store Connect issuer UUID (an identifier, not a secret) |
+| `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector, never an auto-pick |
+| `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character Apple team |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | existing release secrets | sign the candidate manifest with the unchanged public verifier |
+
+Provisioning is the operator's job, done only in the GitHub environment
+`server-host-signing-rehearsal`: store the three new secrets (certificate data,
+its password and the API key), set the four variables (signing identity, team,
+key id, issuer), reuse the existing manifest-signing secrets, and configure
+required reviewers plus allowed branches (`develop`, `main`). The API key must
+be a notarization-capable App Store Connect API key; its key id and issuer UUID
+are identifiers, not secrets.
+Never put these values in the repository, a `.env`, a workspace, an issue or a
+chat. An agent does not export identities, create the secrets or read keychain
+material; a missing input fails the requested run.
+
+To run it: Actions → `server-host-signing-rehearsal` → Run workflow, pick
+`develop` or `main`, and check `confirm_no_release_upload`. An unchecked box is a
+refusal, not a skipped rehearsal, and the environment approval must come from a
+reviewer. The workflow refuses any other ref before it binds a credential,
+records the dispatched commit, builds the PWA and wheel, installs the wheel in a
+clean Python 3.13 environment and runs `scripts/rehearse-server-host-signing.py`
+with that interpreter. It uses no dependency cache and every npm command runs
+with audits and funding traffic disabled, so the Apple notary submission remains
+the only network write.
+
+The helper creates a temporary random-password keychain and notary profile in a
+per-run scratch directory it created itself, records that exact path in a
+sibling receipt (cleared by the workflow's first `claim-scratch` step, before
+the guard and gated so cleanup runs only when that claim succeeded, so it can
+only describe this job), and restores the prior default keychain and the
+whole prior search list. An interruption first terminates and reaps the
+in-flight tool where the process is still schedulable, and a signal during a
+running restore — first or later — is deferred until cleanup finishes. It deletes its certificate, decoded
+API key, keychain and profile by independent attempts on every recoverable path,
+including an interrupted build and build, notarization, manifest or verification
+failures; an unrecoverable failure (SIGKILL, a filesystem error, a child that
+never exits) is reported and may leave material in the run-scoped directory,
+which the runner discards. Credentials stay out of
+argv: the keychain password is fed to `security` on stdin and the App Store
+Connect API key is passed to `notarytool` as the path to an owner-only file, with
+one accepted residual — `security import -P` takes the p12 passphrase in one
+short-lived process, because Apple's CLI has no stdin option for it. It verifies
+the final extracted app (signature, expected team and requirement, hardened
+runtime, timestamp, entitlements, notarization ticket, staple and Gatekeeper),
+authenticates the exact archive in a signed candidate manifest whose signer is
+installed before any signing credential is present, and writes a sanitized
+`verification.json` plus a summary the workflow may append to the job summary.
+Submissions use only the keychain profile, so no account address, password or
+key material appears in any spawned argv. A failed run writes an explicitly
+incomplete report naming only its stage and code. The workflow's `always()`
+cleanup deletes only the path named by the helper's `.owned` receipt, so a
+pre-existing directory is never adopted.
+
+These are CI inputs, not runtime configuration: no `CIAO_*` variable mirrors
+them, nothing in `ciao` reads them, and setting them in a local `.env` does
+nothing. The rehearsal is prepared and tested, not operationally proven; the
+promotion gate is in [`docs/SERVER_HOST_RELEASE.md`](docs/SERVER_HOST_RELEASE.md).
+
 ## Ciaobot Server Operation
 
 Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
@@ -394,6 +469,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OPENCODE_BIN` (optional): absolute path to an OpenCode CLI installed
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
+- `CIAO_GWS_BIN` (test isolation only): absolute path to an executable that `ciao gws` and the Google token health check run instead of `gws`. Set by `ciao eval tasks` for tasks requiring `gws_fake`, so evals never reach Google. When set it is used as-is, with no lookup and no fallback. It is read from the process environment only, unlike `CIAO_OPENCODE_BIN`, which is read from the workspace configuration. A value that is not an absolute path is an error: `ciao gws` exits 2 with `CIAO_GWS_BIN must be an absolute path`, and the token health check reports the token as invalid with that message. Whitespace-only counts as unset. POSIX only.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
   CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
@@ -423,7 +499,7 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 - `CIAO_WORKSPACE`: set by the service definition (and by `ciao run` started inside a set-up workspace, which is found through its `.runtime/workspaces.json` or, for a pre-1.0 install not yet started on this release, a `.env` with a non-empty `CIAO_WORKSPACES`; setup no longer writes `CIAO_WORKSPACE=.` into `.env`). The filesystem workspace root for operational state, `.runtime/`, `.env`, canonical `skills/`, `subagents/`, and `commands/`, the generated `.claude/` catalog, and the active agent root's `AGENTS.md` (the install root on the shared layout, or a per-workspace root after re-rooting). Default `.`. `.agents/skills/` remains a legacy native-discovery path and is not generated by sync. Setting it inside that `.env` cannot move the install, because the engine finds `.env` inside the folder the service definition names; move it with Settings → Advanced → Ciaobot folder → Move… (on the computer running Ciaobot) or `ciao workspace-move <new folder> [--apply]`; on Linux the administrator runs it with `sudo` (docs/LINUX.md).
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_VAULT_DIR`: legacy vault-directory redirect recognized by installer bootstrap freshness checks; do not inherit it when starting a genuinely fresh install.
-- `CIAO_WORKSPACES`: **retired and no longer read as a workspace source.** It used to override `.runtime/workspaces.json` on every start, so a workspace created, edited or archived in Settings could silently revert on the next restart. The workspace list is now runtime state owned by the app: Settings → Manage workspaces writes `.runtime/workspaces.json`, and that file is the only source. On the first server start after upgrading, an install that still sets the variable has its workspaces imported into the registry once (every one when no registry file exists, otherwise only names the registry does not already define; existing entries are never overwritten, a workspace with an archive in `.archived-workspaces/` is skipped rather than re-registered). A `.runtime/workspaces-env-imported.json` marker makes that import one-shot, so a workspace later removed in Settings stays removed. After that the variable is inert: startup logs a warning and the `legacy-env-ignored` operator tile asks you to remove it from `.env`; Ciaobot does not edit `.env` for you.
+- `CIAO_WORKSPACES`: **retired and no longer read as a workspace source.** It used to override `.runtime/workspaces.json` on every start, so a workspace created, edited or archived in Settings could silently revert on the next restart. The workspace list is now runtime state owned by the app: Settings → Overview → All workspaces writes `.runtime/workspaces.json`, and that file is the only source. On the first server start after upgrading, an install that still sets the variable has its workspaces imported into the registry once (every one when no registry file exists, otherwise only names the registry does not already define; existing entries are never overwritten, a workspace with an archive in `.archived-workspaces/` is skipped rather than re-registered). A `.runtime/workspaces-env-imported.json` marker makes that import one-shot, so a workspace later removed in Settings stays removed. After that the variable is inert: startup logs a warning and the `legacy-env-ignored` operator tile asks you to remove it from `.env`; Ciaobot does not edit `.env` for you.
 - `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `claude_ai_connectors` (boolean, default `true`), `gws_profile` and `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Providers) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**; the workspace File access setting confines the agent and its shell, not the viewer. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.

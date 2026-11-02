@@ -8,6 +8,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -29,6 +30,7 @@ from ciao.web.routes_mcp import (
     mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.loop_watchdog import EventLoopWatchdog, InFlightRequests, RequestTimingMiddleware
 from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -80,8 +82,7 @@ from ciao.web.routes_api import (
     chat_prompt,
     chat_stop,
     chat_move_to_background,
-    chat_background_run_cancel,
-    chat_background_run_log,
+    chat_background_task_stop,
     chat_new_session,
     chat_subagents,
     running_subagents,
@@ -241,6 +242,7 @@ from ciao.web.routes_tasks import (
     task_delete,
     task_get,
     task_list,
+    task_order,
     task_update,
 )
 from ciao.web.routes_webhooks import (
@@ -255,6 +257,9 @@ from ciao.web.routes_webhooks import (
 from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ciao.native_installer import NativeBootstrapContext
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -399,17 +404,23 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None, native_bootstrap: "NativeBootstrapContext | None" = None) -> Starlette:
     import uuid
     if installer_bootstrap and not config.bootstrap_mode:
         raise ValueError("installer bootstrap requires bootstrap-mode config")
+    canonical_run_id: str | None = None
     if installer_bootstrap:
         try:
-            uuid.UUID(installer_run_id or "")
+            canonical_run_id = str(uuid.UUID(installer_run_id or ""))
         except ValueError as exc:
             raise ValueError("installer bootstrap requires a valid run id") from exc
     elif installer_run_id is not None:
         raise ValueError("installer run id requires installer bootstrap mode")
+    if native_bootstrap is not None:
+        if not installer_bootstrap:
+            raise ValueError("native bootstrap requires installer bootstrap mode")
+        if native_bootstrap.run_id != canonical_run_id:
+            raise ValueError("native bootstrap run id does not match the server run id")
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -467,13 +478,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
         Route("/api/chats/{chat_id}/move-to-background", chat_move_to_background, methods=["POST"]),
         Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/log",
-            chat_background_run_log,
-            methods=["GET"],
-        ),
-        Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
-            chat_background_run_cancel,
+            "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
+            chat_background_task_stop,
             methods=["POST"],
         ),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
@@ -544,6 +550,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        Route("/api/tasks/{task_id}/order", task_order, methods=["POST"]),
         Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
         Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
         Route(
@@ -809,7 +816,11 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             )
         routes.append(Route("/{path:path}", _spa_catchall))
 
+    # One registry per app, shared by the timing middleware and the loop watchdog.
+    in_flight_requests = InFlightRequests()
     middleware = [
+        # Outermost, so the timing covers auth and body limits too.
+        Middleware(RequestTimingMiddleware, registry=in_flight_requests),
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer),
         Middleware(ApiRequestBodyLimitMiddleware),
@@ -840,12 +851,15 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             """Close every shell the browser terminal still holds."""
             await terminal_sessions.shutdown()
 
+        watchdog = EventLoopWatchdog(in_flight_requests)
+        watchdog.start()
         try:
             yield
         finally:
+            await watchdog.stop()
             # Shutdown runs even if the lifespan exits by raising or
             # cancellation (not just a normal shutdown message), so provider
-            # subprocesses and background runs are not leaked across an
+            # subprocesses are not leaked across an
             # abnormal restart.
             #
             # The terminal sessions' own shutdown is appended to the
@@ -855,8 +869,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             callbacks.append(_shutdown_terminal_sessions)
             for callback in callbacks:
                 # One failing callback must not skip the ones after it. Shutdown
-                # is the last chance to terminate provider subprocesses and
-                # background runs; leaking them because an earlier hook raised is
+                # is the last chance to terminate provider subprocesses;
+                # leaking them because an earlier hook raised is
                 # how a restart ends up with orphan processes.
                 try:
                     await callback()
@@ -867,9 +881,11 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
 
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
+    app.state.in_flight_requests = in_flight_requests
     app.state.config = config
     app.state.installer_bootstrap = installer_bootstrap
     app.state.installer_run_id = installer_run_id
+    app.state.native_bootstrap = native_bootstrap
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     # The one owner of every terminal shell the browser opens. It is built

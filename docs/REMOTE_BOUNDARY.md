@@ -142,6 +142,31 @@ carried by the session.
   between a signed-in tab and a shell on the engine; it is gone, so a
   signed-in browser is now enough. Anything that relied on that prompt as
   a second barrier has to rely on the session instead.
+- **Workspace diagnostics stop at the workspace.** `ciao context logs` and a
+  user schedule's `{{ISSUE_REPORT}}` see only failed background-job runs
+  whose recorded `extra.workspace` is exactly the caller's/target's
+  workspace. That value is the execution ownership captured at run time, not
+  a chat's or project's current owner, so retargeting or moving a chat cannot
+  relabel an older failure. The engine-wide `server_errors.log`,
+  `server_debug.log` and service stderr log carry no immutable workspace
+  provenance, so they are omitted from both surfaces even on an install with
+  one workspace: there is no content, path, count or "only one workspace"
+  heuristic, and no fallback to current ownership or archived folders.
+  `context logs` keeps `version`, `lines` and the three log fields for API
+  compatibility, but each field is always an empty string and `scope` /
+  `omitted` state the reason; `failed_jobs` keeps only exact matches, and each
+  returned job error is redacted, capped and fenced as untrusted data. A user
+  schedule's `{{ISSUE_REPORT}}` is redacted and bounded to 64,000 characters
+  with an explicit truncation marker before its fence is computed, and it is
+  inserted only when prompt-preparation and execution ownership agree; a
+  retarget during the report build withholds it rather than hand workspace A's
+  failures to workspace B. A user schedule's `{{ERROR_LOG}}` becomes an
+  omission notice, and a clean user run never clears the engine error log.
+  The trusted exceptions are the operator debug report (`GET /api/debug/issues`), startup
+  triage, and packaged `scope=system` routines: they may read engine-wide
+  evidence and clear the consumed error log after a clean run. An
+  agent-created schedule is always `scope=user`; the control plane exposes no
+  field that creates a system one.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
@@ -203,6 +228,10 @@ A workspace-only chat's sandbox makes the linked Google account's credential dir
 ### Residual: readable gh token (#1961)
 
 A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. Because the keychain is outside the sandbox, the engine also reads gh's token and passes it as `GH_TOKEN` in the chat's environment, where the agent can read it. An OpenCode server keeps the `GH_TOKEN` it started with until it restarts, while a Claude chat respawns on a changed token. A token the agent prints, for example via `env`, is stored in the chat transcript.
+
+### Claude task output readable by Read (#2201)
+
+A workspace-only Claude chat's file-tool guard (`claude_file_tool_guard`) also lets Claude's `Read` open `<tmp>/claude-<uid>/*/<session-id>/tasks/*.output` for the chat's own session only, where `<tmp>` is `CLAUDE_CODE_TMPDIR` or `/tmp`. The CLI's tool result for a native background Bash task tells the model to read that file. The session id comes from the hook input the CLI sets, not from the model, and must match `^[0-9A-Za-z-]{8,64}$`. The match is on the fully resolved path (symlinks followed, `..` collapsed), so a planted link or another session's or workspace's directory is refused. Write, Edit, Glob and Grep keep the confinement, so nothing there is writable or listable. The target must also be a regular file with a single link, reached without a final symlink, and a path with surrounding whitespace, a newline, a NUL or a trailing slash is refused. Sandboxed Bash cannot create files, symlinks or hardlinks in that `tasks/` directory (verified 2026-10-27), so a link cannot be planted there; the regular-file, hardlink and whitespace checks are defence in depth, and the remaining check-then-open race is bounded by that write denial. The CLI's own background-Agent outputs there are symlinks into `~/.claude/projects`, and stay denied. This does not widen the boundary: the sandboxed Bash can already read the temp directory, and the file holds output of commands this chat started. OpenCode has no file-tool guard and is unaffected.
 
 ## Verification
 

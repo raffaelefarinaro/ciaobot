@@ -155,6 +155,112 @@ def test_opencode_chat_messages_render_session_history(
     assert rows[-1] == {"role": "assistant", "content": "world"}
 
 
+def test_opencode_chat_messages_render_shell_wakes_as_a_notice_before_the_reply(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_shell_wake")
+
+    def shell(shell_id: str, exit_code: int, output: str, command: str) -> dict:
+        return {
+            "info": {
+                "role": "synthetic",
+                "metadata": {
+                    "source": "shell", "shellID": shell_id, "jobID": shell_id,
+                    "state": "completed", "truncated": False, "exit": exit_code,
+                },
+                "description": command,
+            },
+            "parts": [{
+                "type": "text", "synthetic": True,
+                "text": (
+                    f'<shell id="{shell_id}" state="completed" command="{command}">\n'
+                    f"{output}\n\n\nExited with code {exit_code}\n</shell>"
+                ),
+            }],
+        }
+
+    thread = {
+        "info": {"id": "ses_shell_wake"},
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "go"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "started"}]},
+            shell("sh_a", 3, "PROBE_A_DONE", "probe a"),
+            shell("sh_b", 0, "B_DONE", "probe b"),
+            {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "both done"}]},
+        ],
+    }
+    monkeypatch.setattr(
+        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+    )
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert [row["role"] for row in rows] == ["user", "assistant", "system", "assistant"]
+    notice = rows[2]
+    assert notice["origin"] == "background_run"
+    assert "turn_index" not in notice
+    assert "2 background runs finished" in notice["content"]
+    assert "FAILED, exit 3" in notice["content"]
+    assert "PROBE_A_DONE" in notice["content"]
+    assert rows[3]["content"] == "both done"
+
+
+def test_opencode_chat_messages_split_a_subagent_wake_from_the_turn_before(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The wake's reply must not join the earlier turn and demote its answer."""
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_sub_wake")
+    thread = {
+        "info": {"id": "ses_sub_wake"},
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "go"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "first answer"}]},
+            {
+                "info": {
+                    "role": "synthetic",
+                    "metadata": {
+                        "source": "subagent", "childID": "ses_child",
+                        "agent": "General", "state": "completed",
+                    },
+                    "description": "Review the client",
+                },
+                "parts": [{
+                    "type": "text", "synthetic": True,
+                    "text": (
+                        '<subagent sessionID="ses_child" state="completed" '
+                        'description="Review the client">\nCHILD_REPORT\n</subagent>'
+                    ),
+                }],
+            },
+            {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "follow-up"}]},
+        ],
+    }
+    monkeypatch.setattr(
+        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+    )
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert [row["role"] for row in rows] == ["user", "assistant", "system", "assistant"]
+    assert rows[1]["content"] == "first answer"
+    assert rows[2]["origin"] == "background_run"
+    assert "— Review the client (ses_child, ok)" in rows[2]["content"]
+    assert "CHILD_REPORT" in rows[2]["content"]
+    assert rows[3]["content"] == "follow-up"
+
+
 def test_opencode_chat_messages_skip_synthetic_user_parts(
     tmp_path: Path, monkeypatch,
 ) -> None:

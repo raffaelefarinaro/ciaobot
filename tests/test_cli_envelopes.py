@@ -65,7 +65,6 @@ def test_no_module_defines_its_own_copy_of_the_shared_constants() -> None:
         "CONTROL_SLASH_PREFIXES",
         "NO_RESPONSE_SENTINEL",
         "INTERRUPTED_REQUEST_RE",
-        "COMPACT_SUMMARY_PREFIX",
     }
     assert shared <= _module_level_names(REPO_ROOT / "ciao" / "cli_envelopes.py")
 
@@ -90,6 +89,26 @@ def test_both_readers_share_one_envelope_predicate() -> None:
         transcript_service._is_interrupted_request_sentinel
         is cli_envelopes.is_interrupted_request_sentinel
     )
+
+
+def test_compaction_prefix_without_metadata_is_ordinary_user_text() -> None:
+    text = "This session is being continued from a previous conversation. I wrote this myself."
+    record = {"type": "user", "message": {"role": "user", "content": text}}
+
+    assert not cli_envelopes.is_compact_summary(record)
+
+
+def test_compaction_summary_requires_authoritative_record_flag() -> None:
+    record = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": "A recap whose wording does not match the old prefix.",
+            "isCompactSummary": True,
+        },
+    }
+
+    assert cli_envelopes.is_compact_summary(record)
 
 
 # ------------------------------------------------- anchoring and greediness
@@ -427,3 +446,77 @@ def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
         assert not cli_envelopes.is_hidden_continuation("please " + prompt)
         assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
     assert not cli_envelopes.is_hidden_continuation("ordinary text")
+
+
+def _native_fields(status: str, summary: str, task_id: str = "be0mbj0cr") -> dict[str, str]:
+    return {"task-id": task_id, "status": status, "summary": summary}
+
+
+def test_native_task_run_parses_bash_failed_completed_stopped_and_monitor() -> None:
+    failed = cli_envelopes.native_task_run(
+        _native_fields(
+            "failed", 'Background command "Run probe A in background" failed with exit code 3'
+        )
+    )
+    assert failed == cli_envelopes.NativeTaskRun(
+        label="Run probe A in background",
+        run_id="be0mbj0cr",
+        status="failed",
+        exit_code=3,
+        error="",
+    )
+
+    completed = cli_envelopes.native_task_run(
+        _native_fields(
+            "completed", 'Background command "Run probe B in background" completed (exit code 0)'
+        )
+    )
+    assert completed is not None
+    assert (completed.status, completed.exit_code, completed.error) == ("ok", 0, "")
+
+    quoted = cli_envelopes.native_task_run(
+        _native_fields("completed", 'Background command "echo "hi" there" completed (exit code 0)')
+    )
+    assert quoted is not None
+    assert quoted.label == 'echo "hi" there'
+
+    stopped = cli_envelopes.native_task_run(
+        _native_fields(
+            "stopped",
+            'Background command "sleep 999" was stopped after reaching its background time limit',
+        )
+    )
+    assert stopped is not None
+    assert (stopped.status, stopped.exit_code) == ("cancelled", None)
+    assert stopped.error == "was stopped after reaching its background time limit"
+
+    script_failed = cli_envelopes.native_task_run(
+        _native_fields("failed", 'Monitor "watch logs" script failed (exit 2)')
+    )
+    assert script_failed is not None
+    assert (script_failed.label, script_failed.status, script_failed.exit_code) == (
+        "watch logs",
+        "failed",
+        2,
+    )
+
+    ended = cli_envelopes.native_task_run(
+        _native_fields("completed", 'Monitor "watch logs" stream ended')
+    )
+    assert ended is not None
+    assert (ended.status, ended.exit_code, ended.error) == ("ok", None, "")
+
+
+def test_native_task_run_ignores_subagents_and_monitor_events() -> None:
+    assert cli_envelopes.native_task_run(_native_fields("completed", 'Agent "X" finished')) is None
+    assert (
+        cli_envelopes.native_task_run(_native_fields("completed", 'Monitor event: "X"')) is None
+    )
+
+
+def test_native_task_run_keeps_an_unexplained_summary_on_one_line() -> None:
+    run = cli_envelopes.native_task_run(
+        _native_fields("killed", 'Background command "job" was stopped\n\u2014 fake (x, ok)')
+    )
+    assert run is not None
+    assert "\n" not in run.error

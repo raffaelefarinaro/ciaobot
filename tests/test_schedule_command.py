@@ -31,6 +31,7 @@ from ciao.schedule_command import (
     run_schedule_command,
 )
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
+from ciao.web.project_chats import ChatInfo
 from ciao.web.routes_api import create_schedule, schedule_detail
 from ciao.web.schedule_dispatch import ScheduleDispatchHost, ScheduleDispatcher
 from tests.test_claude_ai_connectors import _manager
@@ -149,7 +150,10 @@ async def test_timeout_kills_the_command(tmp_path: Path, monkeypatch: pytest.Mon
 async def test_timeout_keeps_output_written_before_the_kill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 1.0)
+    # Long enough for a loaded CI box to schedule the child and flush both
+    # streams before the deadline: at 1.0 s this test timed out before either
+    # write arrived, then passed on a rerun.
+    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 3.0)
     run = await run_schedule_command(
         _py(
             "import sys, time; print('partial-out', flush=True); "
@@ -260,6 +264,118 @@ async def test_quiet_command_records_done_and_opens_no_chat(
     assert row.extra["chat_id"] == ""
     assert row.extra["output"] == "no output"
     assert row.extra["command_exit_code"] == 0
+    assert row.extra["workspace"] == "personal"
+
+
+async def test_quiet_command_records_actual_command_env_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "result", "text": "unused", "is_error": False}])
+    host.command_workspace = "alpha"
+    rows = _capture_run_records(monkeypatch)
+    monkeypatch.setattr(
+        schedule_command_module.CommandRun,
+        "extra",
+        lambda self: {"workspace": "spoofed"},
+    )
+    entry = _command_entry(_py("pass"))
+    entry.workspace = "work"
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == "alpha"
+
+
+async def test_quiet_command_await_mutation_keeps_command_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "result", "text": "unused", "is_error": False}])
+    host.command_workspace = "alpha"
+    rows = _capture_run_records(monkeypatch)
+    entry = _command_entry(_py("pass"))
+
+    async def _command(
+        command: str, cwd: Path, env: dict[str, str]
+    ) -> schedule_command_module.CommandRun:
+        del command, cwd, env
+        entry.workspace = "mutated"
+        host._projects["project-1"].workspace = "mutated"
+        host._chats["chat-1"].archived = True
+        return schedule_command_module.CommandRun(
+            command="probe",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == "alpha"
+    assert host.prepared == []
+    assert host.started == []
+
+
+async def test_quiet_command_unknown_command_workspace_records_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "result", "text": "unused", "is_error": False}])
+    host.command_workspace = ""
+    rows = _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _command_entry(_py("pass")), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == ""
+
+
+async def test_quiet_command_does_not_resolve_or_repair_archived_stale_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "result", "text": "unused", "is_error": False}])
+    host.command_workspace = "alpha"
+    host._chats["archived-chat"] = ChatInfo(
+        chat_id="archived-chat",
+        project_id="project-1",
+        title="Archived",
+        model="opus",
+        mode="auto",
+        provider="claude",
+        archived=True,
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry = _command_entry(_py("pass"))
+    entry.web_chat_id = "archived-chat"
+    entry.web_project_id = "stale-project"
+    entry.workspace = "gone"
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("quiet command must not resolve or repair a target")
+
+    monkeypatch.setattr(host, "prepare_schedule_chat", _refuse)
+    monkeypatch.setattr(host, "_rehome_interval_chat", _refuse)
+    monkeypatch.setattr(host, "_resolve_schedule_project", _refuse)
+    monkeypatch.setattr(host, "create_chat", _refuse)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == "alpha"
+    assert host.started == []
 
 
 async def test_command_output_opens_chat_with_output_before_prompt(
@@ -279,6 +395,30 @@ async def test_command_output_opens_chat_with_output_before_prompt(
     assert prompt.endswith("Run the routine.")
     assert host.started[0][1] == prompt
     assert rows[0].extra["command_exit_code"] == 0  # type: ignore[attr-defined]
+    assert rows[0].extra["workspace"] == "personal"  # type: ignore[attr-defined]
+
+
+async def test_command_output_metadata_cannot_override_run_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "result", "text": "done", "is_error": False}])
+    rows = _capture_run_records(monkeypatch)
+    monkeypatch.setattr(
+        schedule_command_module.CommandRun,
+        "extra",
+        lambda self: {"workspace": "spoofed"},
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _command_entry(_py("print('12 new notes')")),
+        "Run the routine.",
+        "opus",
+        "auto",
+        "claude",
+    )
+
+    assert rows[0].extra["workspace"] == "personal"  # type: ignore[attr-defined]
 
 
 async def test_nonzero_exit_opens_chat_with_exit_code(

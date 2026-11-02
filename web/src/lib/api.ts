@@ -108,6 +108,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers,
     credentials: 'same-origin',
     redirect: 'manual',
+    // API JSON carries no Cache-Control header. Never let the browser answer
+    // from its HTTP cache: a resumed PWA would render history from before the
+    // reply it was just notified about.
+    cache: 'no-store',
   }
   if (body !== undefined) {
     opts.body = JSON.stringify(body)

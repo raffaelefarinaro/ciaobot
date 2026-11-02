@@ -25,6 +25,7 @@ from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.execution_modes import is_credential_adjacent
+from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 from ciao.terminal_offer import (
     TERMINAL_OFFER_MAX_BYTES,
     TerminalOfferError,
@@ -42,7 +43,6 @@ AGENT_NOUNS: frozenset[str] = frozenset(
 )
 _REPO_HELP = "Absolute path (or one relative to this shell) of a local git checkout's top level; \"\" unlinks."
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
-    "run": frozenset({"start", "status", "cancel"}),
     "gws": frozenset({"status"}),
 }
 
@@ -51,6 +51,12 @@ _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" 
 _SCHEDULE_FLAG_HELP: dict[str, str] = {
     "--command": "Shell command run before the prompt. Only a bypass-mode chat may set one; "
     "otherwise ask the user to add it in the schedule's Prompt card.",
+    "--days-of-week": "Comma-separated days: mon,tue,wed,thu,fri,sat,sun; full names accepted; "
+    "for --frequency weekly.",
+    "--daily-time": "HH:MM wall-clock time in --timezone.",
+    "--timezone": f"IANA zone name for --daily-time; default {DEFAULT_TIMEZONE}, "
+    "the zone the Automations page uses.",
+    "--frequency": f"One of {', '.join(sorted(FREQUENCIES))}.",
 }
 
 _SCHEDULE_FLAGS: tuple[tuple[str, str, Any], ...] = (
@@ -128,9 +134,9 @@ _PATH_FAILURES = (OSError, RuntimeError, ValueError)
 def is_agent_invocation(argv: list[str]) -> bool:
     """True when ``argv`` (without the program name) is an agent command.
 
-    ``ciao run`` alone is the operator's server launcher and ``ciao gws
-    <profile> <service>`` the gws passthrough; only ``run start|status|cancel``
-    and a bare ``gws status`` belong to the agent surface.
+    ``ciao run`` is the operator's server launcher and ``ciao gws
+    <profile> <service>`` the gws passthrough; only a bare ``gws status``
+    belongs to the agent surface among the shared nouns.
     """
     argv = _strip_json_flag(argv)
     if not argv:
@@ -178,8 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
-    logs = context.add_parser("logs", help="Return Ciaobot's version and recent error, debug and service log tails.")
-    logs.add_argument("--lines", type=int, default=200, help="Lines per log, 1-1000.")
+    logs = context.add_parser("logs", help="Return Ciaobot's version and recent workspace-scoped failed job runs.")
+    logs.add_argument("--lines", type=int, default=200, help="Retained compatibility count, 1-1000; no log tail is read.")
 
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")
@@ -205,7 +211,25 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "delete":
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
 
-    note = _verbs(nouns.add_parser("note", help="Verification of stale vault notes."))
+    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, relate, verify."))
+    create = note.add_parser("create", help="Create a vault note with canonical frontmatter.")
+    create.add_argument("--type", required=True, dest="note_type", help="Category id or alias from VOCABULARY.md.")
+    create.add_argument("--title", required=True, help="The note's title; it also names the file.")
+    # The paths travel exactly as written; the server confines them to this
+    # workspace and caps their size, so prose never rides in argv.
+    create.add_argument(
+        "--description-file", default=None, metavar="FILE",
+        help="A file in this workspace holding the one-line description.",
+    )
+    create.add_argument("--tags", default="", help="Comma-separated tags (default: the type).")
+    create.add_argument(
+        "--body-file", default=None, metavar="FILE",
+        help="A file in this workspace holding the body, without frontmatter.",
+    )
+    create.add_argument(
+        "--path", default="", metavar="DIR",
+        help="Vault-relative folder; overrides the category's folder.",
+    )
     related = note.add_parser("related", help="List the vault notes connected to one note.")
     related.add_argument("path", help="The note, vault-relative (People/Sofia.md).")
     related.add_argument("--limit", type=int, default=15, help="At most this many related notes (1-50).")
@@ -444,19 +468,6 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("trigger_id")
         sub.add_argument("--revision", required=True)
 
-    run = _verbs(nouns.add_parser("run", help="Tracked background command runs."))
-    start = run.add_parser("start", help="Run one command in a tracked background subprocess.")
-    start.add_argument("--cwd", default=None)
-    start.add_argument("--env", action="append", default=[], metavar="K=V")
-    start.add_argument("--timeout-s", type=int, default=None)
-    start.add_argument("--label", default=None)
-    start.add_argument("cmd", nargs=argparse.REMAINDER, help="-- CMD [ARGS...]")
-    status = run.add_parser("status", help="Status and log tail of a run this chat started.")
-    status.add_argument("run_id")
-    status.add_argument("--lines", type=int, default=None)
-    cancel = run.add_parser("cancel", help="Cancel a running background command.")
-    cancel.add_argument("run_id")
-
     gws = _verbs(nouns.add_parser("gws", help="Google Workspace connection status."))
     gws.add_parser("status", help="Report whether the Google Workspace login is valid.")
 
@@ -616,34 +627,11 @@ def _terminal_offer_command(raw: str) -> str:
         raise UsageError("--command-file holds text a command may not contain.") from None
 
 
-def _run_start_arguments(args: argparse.Namespace) -> dict[str, Any]:
-    cmd = list(args.cmd)
-    if cmd[:1] == ["--"]:
-        cmd = cmd[1:]
-    if not cmd:
-        raise UsageError("run start needs a command after `--`.")
-    arguments: dict[str, Any] = {"cmd": cmd}
-    env: dict[str, str] = {}
-    for item in args.env:
-        key, sep, value = str(item).partition("=")
-        if not sep or not key:
-            raise UsageError(f"--env expects K=V, got {item!r}.")
-        env[key] = value
-    if env:
-        arguments["env"] = env
-    for param in ("cwd", "timeout_s", "label"):
-        option = getattr(args, param, None)
-        if option is not None:
-            arguments[param] = option
-    return arguments
-
-
 def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     """Map parsed arguments to ``(operation, arguments)``; ``None`` for help.
 
     Raises :class:`UsageError` for a mistake argparse cannot see (a malformed
-    ``--messages`` document, ``--env`` without ``=``, ``run start`` without a
-    command).
+    ``--messages`` document).
     """
     noun, verb = args.noun, getattr(args, "verb", None)
     if noun == "help":
@@ -678,6 +666,15 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "note":
         if verb == "related":
             return "note_related", {"path": args.path, "limit": args.limit}
+        if verb == "create":
+            return "note_create", {
+                "note_type": args.note_type,
+                "title": args.title,
+                "description_file": args.description_file or "",
+                "tags": [t.strip() for t in args.tags.split(",") if t.strip()],
+                "body_file": args.body_file or "",
+                "path": args.path,
+            }
         # The path crosses to the server as written. Reading the document here
         # and posting the parsed object would move the size cap, the workspace
         # confinement and the "is this actually a file" check into the one place
@@ -880,15 +877,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             "trigger_id": args.trigger_id,
             "expected_revision": args.revision,
         }
-    if noun == "run":
-        if verb == "start":
-            return "background_run_start", _run_start_arguments(args)
-        if verb == "status":
-            arguments = {"run_id": args.run_id}
-            if args.lines is not None:
-                arguments["lines"] = args.lines
-            return "background_run_status", arguments
-        return "background_run_cancel", {"run_id": args.run_id}
     if noun == "gws":
         return "gws_status", {}
     if noun == "workspace":
@@ -926,17 +914,8 @@ def post(op: str, arguments: dict[str, Any], *, url: str, token: str, timeout_s:
 
 
 def _strip_json_flag(argv: list[str]) -> list[str]:
-    """Drop the compatibility ``--json`` from the ``ciao`` part of ``argv`` only.
-
-    Everything after the first bare ``--`` is the background command's own
-    argv (``ciao run start -- python report.py --json``) and is passed through
-    untouched, as the command contract promises.
-    """
-    try:
-        cut = argv.index("--")
-    except ValueError:
-        cut = len(argv)
-    return [token for token in argv[:cut] if token != "--json"] + argv[cut:]
+    """Drop the compatibility ``--json`` flag from ``argv``."""
+    return [token for token in argv if token != "--json"]
 
 
 def main(argv: list[str]) -> int:

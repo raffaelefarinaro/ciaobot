@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SETTINGS_HIDDEN_PAGES, SETTINGS_NAV, SETTINGS_NAV_GROUPS, settingsTabLabel } from './settingsNav'
+import { SETTINGS_NAV, SETTINGS_NAV_GROUPS, settingsTabLabel } from './settingsNav'
 
 describe('settingsTabLabel', () => {
   it('names every settings tab by its sidebar label', () => {
@@ -16,13 +16,12 @@ describe('settingsTabLabel', () => {
   })
 })
 
-describe('SETTINGS_HIDDEN_PAGES', () => {
-  it('keeps Workspaces off the rail but names the page', () => {
+describe('the workspace pages', () => {
+  it('has one Overview page and no separate Manage workspaces page', () => {
     expect(SETTINGS_NAV_GROUPS[0].items.map(i => i.label)).toEqual(['General', 'Appearance', 'Access & devices', 'Providers', 'Advanced'])
-    expect(SETTINGS_NAV.some(i => i.to === '/settings/workspaces')).toBe(false)
-    expect(SETTINGS_HIDDEN_PAGES.map(i => i.to)).toEqual(['/settings/workspaces'])
-    expect(settingsTabLabel('/settings/workspaces')).toBe('Manage workspaces')
     expect(settingsTabLabel('/settings/workspace')).toBe('Overview')
+    expect(SETTINGS_NAV.some(i => i.to === '/settings/workspaces')).toBe(false)
+    expect(settingsTabLabel('/settings/workspaces')).toBe('Settings')
   })
 })
 

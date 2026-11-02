@@ -23,7 +23,7 @@ test.describe('workspace overview', () => {
     const rail = page.locator('.settings-toc-item')
     await expect(rail.first()).toBeVisible()
     const labels = await rail.allTextContents()
-    for (const title of ['Workspace', 'Google account', 'Memory handover', 'Update task history']) {
+    for (const title of ['Workspace', 'Google account', 'Memory handover', 'Update task history', 'All workspaces']) {
       expect(labels).toContain(title)
     }
     const name = page.locator('#workspace-name-input')
@@ -37,24 +37,34 @@ test.describe('workspace overview', () => {
 
   test('the switcher lists the settings entries and Workspace settings opens Overview', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    await boot(page, '/settings/workspaces', READY)
-    await expect(page.locator('.page-tag')).toContainText('Manage workspaces')
+    await boot(page, OVERVIEW, READY)
+    await expect(page.locator('.page-tag')).toContainText('Overview')
     // Workspaces is not a rail item any more.
     await expect(page.locator('.settings-nav, nav').getByRole('link', { name: 'Workspaces', exact: true })).toHaveCount(0)
 
     await activeWorkspaceButton(page).click()
     const items = page.locator('#workspace-scope-menu [role="menuitem"]')
     const texts = (await items.allTextContents()).map(t => t.replace(/^\+\s*/, '').trim())
-    expect(texts.slice(-3)).toEqual(['Workspace settings', 'Manage workspaces', 'New workspace'])
+    expect(texts.slice(-2)).toEqual(['Workspace settings', 'New workspace'])
+    expect(texts).not.toContain('Manage workspaces')
     await page.locator('#workspace-scope-menu').getByRole('menuitem', { name: 'Workspace settings' }).click()
     await expect(page).toHaveURL(/\/settings\/workspace$/)
     await expect(page.locator('.page-tag')).toContainText('Overview')
   })
 
-  test('Rename on Manage workspaces opens Overview with the name field focused', async ({ page }) => {
+  test('Workspace settings in the switcher opens Overview from another settings page', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    await boot(page, '/settings/workspaces', READY)
-    await page.getByRole('button', { name: /^Actions for workspace /i }).first().click()
+    await boot(page, '/settings/skills', READY)
+    await activeWorkspaceButton(page).click()
+    await page.locator('#workspace-scope-menu').getByRole('menuitem', { name: 'Workspace settings' }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace$/)
+    await expect(page.locator('.page-tag')).toContainText('Overview')
+  })
+
+  test('Rename in All workspaces focuses the name field', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, OVERVIEW, READY)
+    await page.getByRole('button', { name: /^Actions for workspace /i }).nth(1).click()
     await page.getByRole('menuitem', { name: /^Rename workspace /i }).click()
     await expect(page).toHaveURL(/\/settings\/workspace#workspace-name$/)
     await expect(page.locator('#workspace-name-input')).toBeFocused()
@@ -98,6 +108,20 @@ test.describe('workspace overview', () => {
     await expect(off).toBeFocused()
   })
 
+  test('the All workspaces card ends the page and Settings \u2191 returns to the top', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 700 })
+    await boot(page, OVERVIEW, READY)
+    const link = page.getByRole('button', { name: /^Settings for workspace / }).first()
+    await link.scrollIntoViewIfNeeded()
+    const body = page.locator('.pane-body')
+    expect(await body.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+    const label = (await link.getAttribute('aria-label')) ?? ''
+    const name = label.replace('Settings for workspace ', '')
+    await link.click()
+    await expect(page.locator('.page-tag')).toContainText(new RegExp(name, 'i'))
+    await expect.poll(() => body.evaluate(el => el.scrollTop)).toBe(0)
+  })
+
   for (const [width, height] of [[390, 844], [640, 450]] as const) {
     test(`does not scroll sideways at ${width}x${height}`, async ({ page }) => {
       await page.setViewportSize({ width, height })
@@ -116,7 +140,7 @@ test.describe('workspace switcher entries on a phone', () => {
   })
 
   test('every menu item is at least 44px tall', async ({ page }) => {
-    await boot(page, '/settings/workspaces', READY)
+    await boot(page, OVERVIEW, READY)
     await page.getByRole('button', { name: 'Open sidebar' }).click()
     await activeWorkspaceButton(page).click()
     const items = page.locator('.workspace-scope-menu [role="menuitem"]')
@@ -128,8 +152,8 @@ test.describe('workspace switcher entries on a phone', () => {
     }
   })
 
-  test('Manage workspaces does not scroll sideways', async ({ page }) => {
-    await boot(page, '/settings/workspaces', READY)
+  test('the merged Overview does not scroll sideways', async ({ page }) => {
+    await boot(page, OVERVIEW, READY)
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
   })

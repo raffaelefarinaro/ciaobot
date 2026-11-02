@@ -12,13 +12,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ciao.config import CiaoConfig
-from ciao.models import ResultEvent
+from ciao.models import ChatContext, ResultEvent
 from ciao.provider_service import ProviderService
 from ciao.providers import opencode as opencode_module
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.project_chats import ProjectChatManager
+from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_chat_subagents import _make_manager
 from tests.test_opencode_background_wake import (
@@ -279,8 +280,68 @@ async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatc
     kinds = [e["type"] for e in published if e.get("chat_id") == chat.chat_id]
     assert "chat_streaming_started" in kinds
     assert "chat_streaming_done" in kinds
+    started = next(e for e in published if e["type"] == "chat_streaming_started")
+    assert started["background"] is True
     assert chat.last_response == "BGDONE"
     assert chat.last_response_status == "success"
+
+
+@pytest.mark.asyncio
+async def test_drain_between_turns_records_the_opencode_wake_turn(tmp_path, monkeypatch):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+    pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+        provider=provider,
+        can_drain=True,
+        drain_events=provider.drain_events,
+        background_work_outstanding=False,
+    )
+
+    await asyncio.wait_for(
+        pcm._drain_between_turns(chat.chat_id, project.project_id), 5
+    )
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    rows = pcm._transcripts.current_messages(ctx, "opencode")
+    assert [row["role"] for row in rows] == ["system", "assistant"]
+    assert rows[0]["origin"] == "background_run"
+    assert "— sleep 20 && echo BGDONE (sh_bgshell, ok, exit 0)" in rows[0]["content"]
+    assert rows[1]["content"] == "BGDONE"
+    transcript = pcm._transcripts._load_current(ctx, "opencode")
+    assert len(transcript["turns"]) == 1
+    assert transcript["turns"][0]["input_kind"] == "task-notification"
+
+
+@pytest.mark.asyncio
+async def test_recording_a_wake_turn_does_not_build_a_full_agent_request(tmp_path, monkeypatch):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+    pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+        provider=provider,
+        can_drain=True,
+        drain_events=provider.drain_events,
+        background_work_outstanding=False,
+    )
+    chat.instructions_inline_pending = True
+    built: list[bool] = []
+    monkeypatch.setattr(
+        pcm, "build_agent_request", lambda *a, **k: built.append(True)
+    )
+
+    await asyncio.wait_for(
+        pcm._drain_between_turns(chat.chat_id, project.project_id), 5
+    )
+
+    assert built == []
+    assert chat.instructions_inline_pending is True
+    ctx = ChatContext.for_web(chat.chat_id)
+    assert len(pcm._transcripts._load_current(ctx, "opencode")["turns"]) == 1
 
 
 async def _watch(pcm, project, chat, provider, monkeypatch, shells):
@@ -516,8 +577,8 @@ async def test_reaper_keeps_a_server_with_outstanding_work_until_the_horizon(tmp
     assert await pcm.reap_idle_providers(force=True) == []
     assert disconnected == []
 
-    # Past the 1 h horizon with no provider activity the server is reclaimed.
-    provider._last_activity = time.monotonic() - opencode_module._OPENCODE_DRAIN_MAX_S - 1
+    # Past the background-work cap with no provider activity the server is reclaimed.
+    provider._last_activity = time.monotonic() - BACKGROUND_WORK_MAX_S - 1
     pcm._provider_last_used[chat.chat_id] = time.monotonic() - 10**6
     assert await pcm.reap_idle_providers(force=True) == [chat.chat_id]
     assert disconnected == [True]

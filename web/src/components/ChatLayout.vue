@@ -268,12 +268,12 @@
         }"
       >
         <PinnedFilePanel v-if="panelPath" ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
-        <TerminalPane v-if="terminalMounted && terminalInTile" in-tile @open="terminalOpen = $event" />
+        <TerminalPane v-if="terminalMounted && terminalInTile" in-tile :chat-id="activePinKey" @open="terminalOpen = $event" />
       </div>
       <!-- The terminal leaves the tile when it cannot have it: a pinned file
            keeps the slot, and the terminal falls back to the drawer over the
            pane. -->
-      <TerminalPane v-if="terminalMounted && !terminalInTile" @open="terminalOpen = $event" />
+      <TerminalPane v-if="terminalMounted && !terminalInTile" :chat-id="activePinKey" @open="terminalOpen = $event" />
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
     <ItemPeekHost v-if="itemPeekMounted" />
@@ -290,6 +290,7 @@ import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
+import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import type ChatPanelComponent from './ChatPanel.vue'
@@ -329,6 +330,7 @@ const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 // for. It stays mounted after that: the screen it holds is the session's,
 // and a hide must not throw it away. The signal that asks for it is its own
 // tiny module, so the app shell does not carry the terminal store.
+// The terminal follows the chat key (activePinKey), as the pin does.
 const TerminalPane = defineAsyncComponent(() => import('./TerminalPane.vue'))
 // The signal is asked for once and stays true for the session, so a shell
 // mounted after that has to read it: a watcher alone only sees the change, and
@@ -555,6 +557,7 @@ function stopSplitDrag() {
 }
 
 const taskStore = useTaskStore()
+const notificationInbox = useNotificationInboxStore()
 const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
@@ -980,8 +983,11 @@ onMounted(async () => {
     // the workspaces are still on their way. The store is not bootstrapped
     // in this state, so the home-boot branch is the honest answer.
     chatLookupPendingId.value = null
+    // Init on this path too, so the inbox's Retry can re-bootstrap.
+    notificationInbox.init()
     return
   }
+  notificationInbox.init()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
   // The route is re-read here, after the awaits, never captured before them.
@@ -1475,6 +1481,7 @@ onBeforeUnmount(() => {
   chatPaneObserver?.disconnect()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()
+  notificationInbox.dispose()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)

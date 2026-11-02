@@ -5,7 +5,8 @@
  * instantly when the iOS keyboard opens/closes. `100dvh` alone does not update
  * on iOS Safari until the user interacts with the page. Also toggles a
  * `.keyboard-open` class so the home-indicator safe-area can collapse while
- * the keyboard is covering it.
+ * the keyboard is covering it. Safe-area insets stay in CSS so the browser
+ * can update them as the standalone viewport settles.
  *
  * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
  * element should measure itself against: with `interactive-widget=resizes-content`

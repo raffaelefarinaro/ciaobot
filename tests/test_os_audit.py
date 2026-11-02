@@ -1269,3 +1269,24 @@ def test_a_clean_search_index_renders_no_section(tmp_path: Path) -> None:
     }
 
     assert "## 7. Search Index" not in format_audit_markdown(report)
+
+
+def test_os_audit_skips_ciaoignored_vault_files(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    (vault / "automations" / "x").mkdir(parents=True)
+    (vault / "automations" / "x" / "report.md").write_text("# Report\n", encoding="utf-8")
+    unreadable = vault / "automations" / "x" / "bad.md"
+    unreadable.write_bytes(b"\xff\xfe")
+    (vault / ".ciaoignore").write_text("automations/\n", encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+    )
+
+    assert report["vault_hygiene"]["frontmatter_errors"] == []
+    assert not any(
+        error["type"] == "unreadable_vault_file" and error["path"] == str(unreadable)
+        for error in report["scan_errors"]
+    )

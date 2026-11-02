@@ -31,6 +31,12 @@ pytestmark = pytest.mark.skipif(
 
 CHILD_HELPER = Path(__file__).resolve().parents[1] / "ciao" / "os_support" / "terminal_child.py"
 
+# How long a spawned shell may take to start a job and write its pid file.
+# Fifteen seconds was not enough while the full suite ran under load (the
+# close test timed out waiting for its second job), and it passed on a rerun;
+# the wait is still finite so a broken spawn fails rather than hangs.
+STARTUP_WAIT_S = 30.0
+
 
 @pytest.fixture(autouse=True)
 def _posix_shell(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,14 +193,24 @@ def test_resize_updates_stty_size(tmp_path: Path) -> None:
         term.close()
 
 
-def test_ctrl_c_interrupts_foreground_job_not_shell(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "ready_delay",
+    [pytest.param(0, id="immediate"), pytest.param(9, id="delayed")],
+)
+def test_ctrl_c_interrupts_foreground_job_not_shell(
+    tmp_path: Path, ready_delay: int
+) -> None:
     """0x03 goes to the foreground job through the line discipline; the shell
-    survives it and answers the next command."""
+    survives it and answers the next command.
+
+    The answer is allowed to be late: a shell under load can take seconds to
+    reach the ready command, and the marker is the observable it answers with.
+    """
     term = _spawn(tmp_path)
     foreground_pid = tmp_path / f"foreground-{secrets.token_hex(6)}.pid"
     try:
         term.write(f"sh -c 'echo $$ > {foreground_pid}; exec sleep 300'\n".encode())
-        _wait_for_file(foreground_pid, 15)
+        _wait_for_file(foreground_pid, STARTUP_WAIT_S)
         pid = int(foreground_pid.read_text().strip())
         assert _running(pid)
 
@@ -203,7 +219,9 @@ def test_ctrl_c_interrupts_foreground_job_not_shell(tmp_path: Path) -> None:
         _wait_until_stopped(pid, 15)
         assert term.poll() is None, "Ctrl-C must not kill the shell"
 
-        out = _send_and_drain(term, b"echo READY-$((6*7))\n", 8.0)
+        ready = b"echo READY-$((6*7))\n"
+        term.write(b"sleep 9\n" + ready if ready_delay else ready)
+        out = _wait_for(term, b"READY-42", 15)
         assert b"READY-42" in out, out
     finally:
         term.close()
@@ -220,8 +238,8 @@ def test_close_kills_foreground_background_and_stopped_job_groups(tmp_path: Path
     try:
         term.write(f"sh -c 'echo $$ > {background_pid}; exec sleep 300' &\n".encode())
         term.write(f"sh -c 'echo $$ > {stopped_pid}; exec sleep 300'\n".encode())
-        _wait_for_file(background_pid, 15)
-        _wait_for_file(stopped_pid, 15)
+        _wait_for_file(background_pid, STARTUP_WAIT_S)
+        _wait_for_file(stopped_pid, STARTUP_WAIT_S)
         background = int(background_pid.read_text().strip())
         stopped = int(stopped_pid.read_text().strip())
         term.write(b"\x1a")  # suspend the foreground job
@@ -380,7 +398,7 @@ def test_a_failed_close_is_reported_again_and_never_silently_succeeds(
     term = _spawn(tmp_path)
     job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
     term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
-    _wait_for_file(job_pid, 15)
+    _wait_for_file(job_pid, STARTUP_WAIT_S)
 
     def refuse(pgid: int, sig: int) -> None:
         raise PermissionError(1, "Operation not permitted")
@@ -402,7 +420,7 @@ def test_a_live_group_that_cannot_be_killed_is_reported_as_a_failure(
     term = _spawn(tmp_path)
     job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
     term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
-    _wait_for_file(job_pid, 15)
+    _wait_for_file(job_pid, STARTUP_WAIT_S)
     job = int(job_pid.read_text().strip())
     session_groups = set(
         terminal_posix._owned_job_groups(term.pid, terminal_posix._list_process_ids())
@@ -434,7 +452,7 @@ def test_a_group_that_holds_only_zombies_is_not_a_failure(
     term = _spawn(tmp_path)
     job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
     term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
-    _wait_for_file(job_pid, 15)
+    _wait_for_file(job_pid, STARTUP_WAIT_S)
 
     def refuse(pgid: int, sig: int) -> None:
         raise PermissionError(1, "Operation not permitted")

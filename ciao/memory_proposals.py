@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
@@ -309,6 +310,18 @@ def _one_line(value: str) -> str:
     re-filing it would dodge the text dedupe.
     """
     return " ".join(value.split())
+
+
+def dedupe_key(text: str) -> str:
+    """The queue's dedupe key: case- and punctuation-insensitive, not fuzzy.
+
+    Every run of non-word characters (punctuation, dashes, quotes) becomes one
+    space. Digits and hex ids survive, so texts naming different revisions stay
+    distinct. Deliberately no similarity matching: paraphrases look too close
+    to be distinct facts.
+    """
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"[\W_]+", " ", folded).strip()
 
 
 DECIDE_REASON_MAX_CHARS = 200
@@ -880,10 +893,32 @@ def accept_region_fact(
     )
 
 
-def _safe_name(name: str) -> str:
+def safe_note_stem(name: str) -> str:
     """A proposal payload as a filename stem, without path separators."""
     cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip().rstrip(".")
     return cleaned[:80]
+
+
+WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
+
+def portable_name_problem(part: str) -> str | None:
+    """Why *part* cannot be a file or folder name on every platform, or None.
+
+    A vault is synced between machines, and ``NUL.md`` or ``a:b`` would be
+    silently discarded or rejected where the note lands next.
+    """
+    if (
+        any(ch in '<>:"|?*' for ch in part)
+        or part.endswith((".", " "))
+        or part.split(".")[0].strip().upper() in WINDOWS_RESERVED_STEMS
+    ):
+        return "is not a valid file name on every platform"
+    return None
 
 
 EntityNoteOutcome = Literal["written", "exists", "refused"]
@@ -968,8 +1003,8 @@ def entity_note_path(
     rules :func:`write_entity_note` applies.
     """
     folder = _entity_folder(registry_root, type_id)
-    stem = _safe_name(name)
-    if folder is None or not stem:
+    stem = safe_note_stem(name)
+    if folder is None or not stem or portable_name_problem(stem):
         return None
     note = vault_root / folder / f"{stem}.md"
     if not _inside(vault_root, note):
@@ -993,7 +1028,7 @@ def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -
         f"type: {type_id}\n"
         f"updated: {today or date.today().isoformat()}\n"
         f"tags: [{type_id}]\n"
-        f"---\n# {_safe_name(name)}\n\n{text}\n"
+        f"---\n# {safe_note_stem(name)}\n\n{text}\n"
     )
 
 
@@ -1602,12 +1637,12 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
     a `promoted_at` key. Reusing it would tell someone their fact had been
     rejected when it was in fact accepted and may already be live.
 
-    Compared through `_one_line`, exactly as `append_proposals` compares.
+    Compared through `dedupe_key`, exactly as `append_proposals` compares.
     """
     out_path = Path(workspace_vault_root) / _PROPOSALS_RELATIVE
     if not out_path.exists():
         return False
-    wanted = _one_line(text)
+    wanted = dedupe_key(text)
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         try:
             raw = out_path.with_suffix(suffix).read_text(encoding="utf-8")
@@ -1636,7 +1671,7 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 # Ledger-only row; it decided nothing, so it must not report
                 # the fact as promoted or dismissed.
                 continue
-            if _one_line(str(entry.get("text", ""))) == wanted:
+            if dedupe_key(str(entry.get("text", ""))) == wanted:
                 return True
     return False
 
@@ -1690,11 +1725,17 @@ def append_proposals(
             existing = _STUB_HEADER
 
         decided = _promoted_texts(out_path) if allow_dismissed else _dismissed_texts(out_path)
-        already = _existing_proposal_texts(existing) | decided
-        # Compare the text exactly as ``as_bullet`` will write it, or a proposal
-        # whose text is only whitespace-different from a queued/dismissed one
-        # slips past dedupe and lands as a visually identical duplicate row.
-        fresh = [p for p in proposals if _one_line(p.text) not in already]
+        # Compare on ``dedupe_key``, so whitespace-, case- and punctuation-only
+        # variants of a queued or decided text, and repeats within this batch,
+        # are dropped instead of landing as visually near-identical rows.
+        already = {dedupe_key(t) for t in _existing_proposal_texts(existing) | decided}
+        fresh: list[MemoryProposal] = []
+        for p in proposals:
+            key = dedupe_key(p.text)
+            if key in already:
+                continue
+            already.add(key)
+            fresh.append(p)
         if not fresh:
             return None
 

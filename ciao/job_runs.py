@@ -86,6 +86,9 @@ RETIRED_JOBS: frozenset[str] = frozenset({
     "skill_evolution",
     # Trajectory capture, the last archive stage: nothing read its records.
     "trajectory",
+    # Engine-owned ``ciao run`` background commands, removed in #2205: the
+    # provider's own background shells are the surface now.
+    "background_run",
 })
 
 # StartupTracker phase name -> (job id, label). Phases not listed are skipped,

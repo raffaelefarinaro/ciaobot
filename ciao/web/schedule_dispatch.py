@@ -610,14 +610,17 @@ class ScheduleDispatcher:
         # by the time the outcome lands (an overlapping manual "Run now"), and
         # that is exactly what the write-back below has to be able to tell.
         _sched_dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
-
-        # A command runs before any chat exists. Exit 0 with nothing printed
-        # ends the run here with no chat; anything else opens the chat below
-        # with the command's outcome in front of the prompt.
+        # A command runs before any chat exists. Its ownership is the
+        # engine-created environment, not a target guess: prepare_schedule_chat
+        # and schedule_command_env resolve a project/fixed-chat pair differently
+        # when both are set.
+        command_requested = bool(entry.command)
+        command_workspace = ""
         command_extra: dict[str, object] = {}
         command_printed = False
-        if getattr(entry, "command", ""):
+        if command_requested:
             command_cwd, command_env = self._host.schedule_command_env(entry)
+            command_workspace = command_env.get("CIAO_ACTIVE_WORKSPACE", "")
             command_run = await run_schedule_command(entry.command, command_cwd, command_env)
             command_extra = command_run.extra()
             if command_run.quiet:
@@ -625,6 +628,7 @@ class ScheduleDispatcher:
                     entry, model, provider, command_run,
                     perf=_sched_perf, started=_sched_started,
                     dispatch_id=_sched_dispatch_id,
+                    workspace=command_workspace,
                 )
             command_printed = True
             prompt = command_run.compose_prompt(prompt)
@@ -643,6 +647,10 @@ class ScheduleDispatcher:
                 return {"status": "missing-chat"}
             return {}
 
+        # Actual prepared-target ownership before prompt processing. The final
+        # execution ownership is checked again immediately before start_stream.
+        _sched_prompt_workspace = self._chat_workspace(target_id)
+
         result: dict[str, str] = {"chat_id": target_id}
         outcome = chat_service.ScheduleRunOutcome()
 
@@ -657,30 +665,117 @@ class ScheduleDispatcher:
             if chat:
                 orig_model, orig_mode = chat.model, chat.mode
 
-        # Substitute error-log placeholder for weekly maintenance schedules
+        # Placeholder inputs differ by schedule scope. A trusted system routine
+        # (startup triage, memory care) may see the engine-wide report; a user
+        # schedule may see only the workspace it dispatches into, and its
+        # {{ERROR_LOG}} is an omission notice rather than another workspace's
+        # log text. Engine-wide inputs taint the run, so it records no
+        # workspace; scoped user inputs do not.
+        system_scope = entry.scope == "system"
         had_error_placeholder = "{{ERROR_LOG}}" in prompt
-        if had_error_placeholder:
-            errors = await asyncio.to_thread(
-                tail_error_log, self._host._config.workspace_root, 200
-            )
-            prompt = prompt.replace(
-                "{{ERROR_LOG}}",
-                errors or "(no errors logged this week)",
-            )
-        # Richer variant: error log + failed background-job runs
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
+        prompt_uses_engine_wide_diagnostics = system_scope and (
+            had_error_placeholder or had_issue_placeholder
+        )
+        # Substitute error-log placeholder for weekly maintenance schedules.
+        if had_error_placeholder:
+            if system_scope:
+                errors = await asyncio.to_thread(
+                    tail_error_log, self._host._config.workspace_root, 200
+                )
+                prompt = prompt.replace(
+                    "{{ERROR_LOG}}",
+                    errors or "(no errors logged this week)",
+                )
+            else:
+                from ciao.debug_report import ERROR_LOG_OMISSION_NOTICE
+
+                prompt = prompt.replace("{{ERROR_LOG}}", ERROR_LOG_OMISSION_NOTICE)
+        # Richer variant: scoped failed job runs for a user schedule, or the
+        # engine-wide error log + failed runs for a trusted system routine.
+        user_issue_report_text: str | None = None
         if had_issue_placeholder:
-            from ciao.debug_report import build_issue_report
+            from ciao.debug_report import (
+                build_issue_report,
+                build_workspace_issue_report,
+            )
             from ciao.startup_triage import TRIAGE_SCHEDULE_ID, fill_triage_prompt
 
-            # Exclude the triage's own past runs so a triage prompt built from
-            # {{ISSUE_REPORT}} never re-triages its own recorded summary.
-            issue_report = await asyncio.to_thread(
-                build_issue_report,
-                self._host._config.workspace_root,
-                exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
+            if system_scope:
+                # Exclude the triage's own past runs so a triage prompt built
+                # from {{ISSUE_REPORT}} never re-triages its own recorded
+                # summary.
+                issue_report = await asyncio.to_thread(
+                    build_issue_report,
+                    self._host._config.workspace_root,
+                    exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
+                )
+                prompt = fill_triage_prompt(prompt, issue_report["report_text"])
+            else:
+                # Scope is the target captured before prompt processing.
+                # Unknown is empty, and the builder then yields no jobs; it
+                # never falls back to engine-wide data. Hold the text until
+                # ownership is re-checked below: the build awaits, and a
+                # retarget during it must not carry this workspace's failures
+                # into the prompt of the workspace the run actually enters.
+                issue_report = await asyncio.to_thread(
+                    build_workspace_issue_report, _sched_prompt_workspace
+                )
+                user_issue_report_text = issue_report["report_text"]
+
+        # Capture the owner right before the call, with no await in between.
+        # Mixed evidence is unknown: command, prompt processing and execution
+        # must all name the same non-empty workspace.
+        _sched_exec_workspace = self._chat_workspace(target_id)
+        if prompt_uses_engine_wide_diagnostics:
+            _sched_workspace = ""
+        elif command_requested:
+            if (
+                command_workspace
+                and _sched_prompt_workspace
+                and _sched_exec_workspace
+                and command_workspace
+                == _sched_prompt_workspace
+                == _sched_exec_workspace
+            ):
+                _sched_workspace = command_workspace
+            else:
+                _sched_workspace = ""
+        else:
+            _sched_workspace = (
+                _sched_prompt_workspace
+                if _sched_prompt_workspace
+                and _sched_prompt_workspace == _sched_exec_workspace
+                else ""
             )
-            prompt = fill_triage_prompt(prompt, issue_report["report_text"])
+
+        # The scoped report goes into the prompt only now, with prompt and
+        # execution ownership proven equal. A retarget during the report build
+        # leaves the placeholder unfilled and turns it into an omission notice
+        # instead. No await may be added between this and start_stream.
+        if user_issue_report_text is not None:
+            from ciao.debug_report import (
+                SCOPED_REPORT_FENCE_LABEL,
+                SCOPED_REPORT_OMISSION_NOTICE,
+            )
+            from ciao.prompt_fence import commonmark_fence
+            from ciao.startup_triage import fence_safe_report
+
+            if (
+                _sched_prompt_workspace
+                and _sched_exec_workspace
+                and _sched_prompt_workspace == _sched_exec_workspace
+            ):
+                report_block = commonmark_fence(
+                    # Job labels/errors are attacker-influenced prompt data.
+                    # Escaping the triage tag also keeps a hostile error from
+                    # closing a fence the user wrapped around the placeholder.
+                    fence_safe_report(user_issue_report_text),
+                    label=SCOPED_REPORT_FENCE_LABEL,
+                )
+            else:
+                report_block = SCOPED_REPORT_OMISSION_NOTICE
+            prompt = prompt.replace("{{ISSUE_REPORT}}", report_block)
 
         try:
             stream = self._host.start_stream(target_id, prompt, unattended=True, origin="schedule")
@@ -705,10 +800,12 @@ class ScheduleDispatcher:
                     outcome.completed = True
                     outcome.is_error = bool(payload.get("is_error"))
                     outcome.final_text = str(payload.get("text") or "")
-            # Clear only after a clean run: a failed triage must not wipe
-            # the backlog it never processed.
+            # Only a trusted system routine consumed engine-wide evidence.
+            # Clear it after a clean run; a failed triage must not wipe the
+            # backlog it never processed, and a user schedule never owns this
+            # shared log, so its success never truncates it.
             if (
-                (had_error_placeholder or had_issue_placeholder)
+                prompt_uses_engine_wide_diagnostics
                 and chat_service._schedule_run_clean(outcome)
             ):
                 await asyncio.to_thread(
@@ -909,6 +1006,8 @@ class ScheduleDispatcher:
                 "question_requested": outcome.question_requested,
                 "retry_pending": outcome.retry_pending,
                 **command_extra,
+                # Authoritative captured ownership, after command metadata.
+                "workspace": _sched_workspace,
             },
         ))
         return result
@@ -934,6 +1033,14 @@ class ScheduleDispatcher:
             # on the user) stays invisible until an unrelated refetch or reload.
             schedule_support.publish_automations_changed(self._host)
 
+    def _chat_workspace(self, chat_id: str) -> str:
+        """Read-only owner lookup. Unknown ids/projects are empty, never guessed."""
+        chat = self._host._chats.get(chat_id)
+        if chat is None:
+            return ""
+        project = self._host._projects.get(chat.project_id)
+        return project.workspace if project is not None else ""
+
     def _finish_quiet_run(
         self,
         entry: ScheduleEntry,
@@ -944,6 +1051,7 @@ class ScheduleDispatcher:
         perf: float,
         started: datetime,
         dispatch_id: str,
+        workspace: str,
     ) -> dict[str, str]:
         """Record a command-only run: exit 0, no output, no chat opened."""
         schedule_id = getattr(entry, "schedule_id", "") or ""
@@ -966,6 +1074,8 @@ class ScheduleDispatcher:
                 "archived_to": None,
                 "output": "no output",
                 **command_run.extra(),
+                # Authoritative captured ownership, after command metadata.
+                "workspace": workspace,
             },
         ))
         return {"status": "ok"}

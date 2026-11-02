@@ -1,4 +1,4 @@
-// Pure helpers for reordering the workspace list (Manage workspaces page).
+// Pure helpers for reordering the workspace list (All workspaces card).
 
 /** A copy of `names` with the entry at `from` moved to index `to`. Indices
  * outside the list, or `from === to`, leave the contents unchanged. When

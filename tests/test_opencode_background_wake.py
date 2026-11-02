@@ -1,8 +1,10 @@
 """OpenCode 2 runs follow-up executions of its own after background work (#1391).
 
-The two fixtures are sanitized 2.0.27 captures: a background shell and a
-background subagent that finish after the foreground turn ended. They pin which
-execution a foreground turn owns and what `drain_events` streams afterwards.
+`background_shell_wake.jsonl` and `background_subagent_wake.jsonl` are sanitized
+2.0.27 captures: a background shell and a background subagent that finish after
+the foreground turn ended. They pin which execution a foreground turn owns and
+what `drain_events` streams afterwards. `foreground_shell_turn.jsonl` is a
+sanitized 2.2.0 capture of a foreground shell call (#2272).
 """
 
 from __future__ import annotations
@@ -194,6 +196,115 @@ async def _drain(provider: OpencodeProvider) -> list:
 
 
 # ── foreground turns ─────────────────────────────────────────────────────
+
+
+def test_foreground_shell_is_not_background_work(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    session = "ses_fgshell_parent"
+    seen_progress = False
+    for line in _fixture_lines("foreground_shell_turn.jsonl"):
+        event = json.loads(line)
+        provider._track_background_event(event, session)
+        if event["type"] == "session.tool.progress":
+            seen_progress = True
+            assert provider.background_work_outstanding is False
+            assert provider._background_shells == set()
+    assert seen_progress
+    assert provider._background_shells == set()
+    assert provider._foreground_shells == set()
+
+
+def test_foreground_shell_moved_to_background_counts(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    session = "ses_fgshell_parent"
+
+    def track(line: str) -> None:
+        provider._track_background_event(json.loads(line), session)
+
+    track(_event(
+        "shell.created",
+        info={"id": "sh_slow", "command": "sleep 99", "metadata": {"sessionID": session}},
+    ))
+    track(_event(
+        "session.tool.progress", sessionID=session, id="call_slow",
+        metadata={"shellID": "sh_slow"},
+    ))
+    assert provider.background_work_outstanding is False
+    track(_event(
+        "session.tool.success", sessionID=session, id="call_slow",
+        metadata={"status": "running", "shellID": "sh_slow"},
+    ))
+    assert provider.background_work_outstanding is True
+    assert provider._background_shells == {"sh_slow"}
+    track(_event("shell.exited", id="sh_slow", exit=0, status="exited"))
+    assert provider.background_work_outstanding is False
+
+
+def _track_all(provider: OpencodeProvider, *lines: str) -> None:
+    for line in lines:
+        provider._track_background_event(json.loads(line), "ses_fgshell_parent")
+
+
+def _slow_created() -> str:
+    return _event(
+        "shell.created",
+        info={
+            "id": "sh_slow", "command": "sleep 99",
+            "metadata": {"sessionID": "ses_fgshell_parent"},
+        },
+    )
+
+
+def _slow_progress() -> str:
+    return _event(
+        "session.tool.progress", sessionID="ses_fgshell_parent", id="call_slow",
+        metadata={"shellID": "sh_slow"},
+    )
+
+
+def _slow_backgrounded() -> str:
+    return _event(
+        "session.tool.success", sessionID="ses_fgshell_parent", id="call_slow",
+        metadata={"status": "running", "shellID": "sh_slow"},
+    )
+
+
+def test_moved_to_background_survives_mid_call_reconcile(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(provider, _slow_created(), _slow_progress())
+    provider._replace_background_shells(set())
+    _track_all(provider, _slow_backgrounded())
+    assert provider._background_shells == {"sh_slow"}
+    assert provider._foreground_shells == set()
+    assert provider.background_work_outstanding is True
+
+
+def test_moved_to_background_without_shell_created(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(provider, _slow_progress(), _slow_backgrounded())
+    assert provider._background_shells == {"sh_slow"}
+
+
+def test_exited_shell_not_promoted_by_late_success(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(
+        provider,
+        _slow_progress(),
+        _event("shell.exited", id="sh_slow", exit=0, status="exited"),
+        _slow_backgrounded(),
+    )
+    assert provider._background_shells == set()
+
+
+@pytest.mark.asyncio
+async def test_refresh_excludes_running_foreground_shell(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path)
+    _attach_live(provider, object(), SHELL_SESSION)
+    provider._foreground_shells = {"sh_fg"}
+    _script(monkeypatch, provider, shells=[{"sh_fg", "sh_bg"}])
+
+    assert await provider.refresh_background_shells() == 1
+    assert provider._background_shells == {"sh_bg"}
 
 
 @pytest.mark.asyncio
@@ -535,6 +646,52 @@ async def test_drain_streams_a_background_shell_wake(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wake_result_carries_the_shell_notice(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+
+    results = [e for e in await _drain(provider) if isinstance(e, ResultEvent)]
+
+    assert len(results) == 1
+    assert results[0].origin == "task-notification"
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+    assert "BGDONE" in results[0].wake_notice
+
+    plain = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION,
+        [
+            _event("session.execution.started", sessionID=SHELL_SESSION),
+            _text(SHELL_SESSION, "msg_x", "NOSHELL"),
+            _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+        ],
+    )
+    plain._background_shells = {"sh_other"}
+    _script(monkeypatch, plain, shells=[{"sh_other"}, set()])
+
+    results = [e for e in await _drain(plain) if isinstance(e, ResultEvent)]
+
+    assert [r.result for r in results] == ["NOSHELL"]
+    assert results[0].wake_notice == ""
+
+
+@pytest.mark.asyncio
+async def test_replayed_shell_enqueue_does_not_double_the_run(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    enqueued = next(line for line in rest if "session.inbox.enqueued" in line)
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION, [enqueued, *rest]
+    )
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+
+    results = [e for e in await _drain(provider) if isinstance(e, ResultEvent)]
+
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+
+
+@pytest.mark.asyncio
 async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     _, rest = _split(_fixture_lines("background_subagent_wake.jsonl"), SUB_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SUB_SESSION, rest)
@@ -550,6 +707,8 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     assert _texts(events) == "SUBDONE"
     results = [event for event in events if isinstance(event, ResultEvent)]
     assert [r.result for r in results] == ["SUBDONE"]
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+    assert "— Run delayed shell command (ses_bgsub_child, ok)" in results[0].wake_notice
     assert provider._background_children == set()
 
 
@@ -873,5 +1032,7 @@ async def test_refresh_background_shells_drops_commands_of_vanished_shells(tmp_p
     _script(monkeypatch, provider, shells=[{"sh_live"}])
 
     assert await provider.refresh_background_shells() == 1
-    assert provider.background_shell_rows() == [{"id": "sh_live", "command": "npm run dev"}]
+    rows = provider.background_shell_rows()
+    assert [(row["id"], row["command"]) for row in rows] == [("sh_live", "npm run dev")]
+    assert isinstance(rows[0]["started_at"], float)
     assert provider._shell_commands == {"sh_live": "npm run dev"}

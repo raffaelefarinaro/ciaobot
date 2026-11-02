@@ -44,8 +44,9 @@ from ciao.provider_service import ProviderService, capabilities_for
 from ciao.providers.opencode import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
-    TranscriptStore,
+    FinalAnswerTracker,
     TextStepJoiner,
+    TranscriptStore,
     TurnJournal,
     _journal_event_record,
 )
@@ -114,6 +115,25 @@ def _unreported_usage(usage: dict[str, str]) -> bool:
     return True
 
 
+def _final_answer_text(
+    result: str, final_text: str | None, tracker: FinalAnswerTracker
+) -> str:
+    """The reply text a preview or push may excerpt for this turn (#2139).
+
+    A provider that names its final segment wins, including an explicit empty
+    string. Otherwise the text the tracker saw after the turn's last top-level
+    tool call is the block the chat renders as the answer. A provider that
+    streams no deltas — a recovered turn, or one that only sends its terminal
+    frame — leaves the terminal result, which is all the host has.
+    """
+    if final_text is not None:
+        return final_text
+    segment = tracker.text
+    if tracker.split and segment:
+        return segment
+    return (result or "").strip() or segment
+
+
 class ChatStreamingHost(Protocol):
     """The complete manager surface used by :class:`ChatStreaming`."""
 
@@ -125,6 +145,7 @@ class ChatStreamingHost(Protocol):
     _broker: ChatStreamBroker
     _events: EventsHub
     _snapshots: SnapshotStore
+    _shutting_down: bool
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -433,6 +454,19 @@ class ChatStreaming:
 
         task.add_done_callback(_clear)
 
+    def _save_at_turn_end(self, chat_id: str) -> None:
+        """Persist the registry at turn end without letting a failed write skip teardown.
+
+        ``_save`` replaces the state file, and on Windows that can fail while another
+        process briefly holds it. A raise in ``drive``'s ``finally`` skipped
+        ``stream.finish()``, so the chat streamed forever. The in-memory state is
+        already right; the next successful save persists it.
+        """
+        try:
+            self._host._save()
+        except OSError:
+            logger.exception("chat registry save failed at turn end for %s", chat_id)
+
     async def drive(
         self,
         *,
@@ -460,6 +494,10 @@ class ChatStreaming:
         began_compact = compact
         turn_unattended = unattended
         last_assistant_text = ""
+        # The last turn's final answer segment, for the unread preview and the
+        # result push. Kept apart from ``last_assistant_text``, which stays the
+        # complete reply for the transcript handover and the title (#2139).
+        last_answer_text = ""
         had_error = False
         # One-line error text that ended the turn, persisted as chat.last_error.
         last_error_text = ""
@@ -479,9 +517,15 @@ class ChatStreaming:
         try:
             while True:
                 turn_assistant_text = ""
+                turn_answer_text = ""
+                # True only once this turn produced a successful terminal (or a
+                # force-closed partial): the selected answer then replaces the
+                # carry-over even when it is empty (#2139 review).
+                turn_answer_ready = False
                 stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
+                turn_segment = FinalAnswerTracker()
                 turn_result_published = False
                 question_paused = False
 
@@ -492,10 +536,10 @@ class ChatStreaming:
                     run_turn_index: int | None = current_turn_index,
                     run_compact: bool = compact,
                 ) -> None:
-                    nonlocal turn_assistant_text
+                    nonlocal turn_assistant_text, turn_answer_text, turn_answer_ready
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
-                    nonlocal last_assistant_text
+                    nonlocal last_assistant_text, last_answer_text
                     # Set once Stop cancelled this turn's prompt: the turn's
                     # bookkeeping was rolled back, so its result must not
                     # recreate any of it.
@@ -605,6 +649,7 @@ class ChatStreaming:
                                 compacted.context_session_id = ""
                                 self._host._save()
                         turn_steps.feed(event)
+                        turn_segment.feed(event)
                         if isinstance(
                             event,
                             (
@@ -737,6 +782,7 @@ class ChatStreaming:
                                 # carry-over so a stopped follow-up cannot
                                 # re-announce the previous turn's answer.
                                 last_assistant_text = ""
+                                last_answer_text = ""
                             elif event.is_error:
                                 had_error = True
                                 result_text = event.result or ""
@@ -789,6 +835,10 @@ class ChatStreaming:
                                     )
                             else:
                                 turn_assistant_text = event.result or ""
+                                turn_answer_text = _final_answer_text(
+                                    event.result or "", event.final_text, turn_segment
+                                )
+                                turn_answer_ready = True
 
                 turn_task: asyncio.Task | None = None
                 if stream.user_stopped:
@@ -801,6 +851,7 @@ class ChatStreaming:
                     # carry-over keeps this turn from inheriting and
                     # re-announcing the previous turn's answer.
                     last_assistant_text = ""
+                    last_answer_text = ""
                     stream.publish(
                         self._host._stop_result_payload(
                             chat_id,
@@ -823,6 +874,12 @@ class ChatStreaming:
                     logger.info("Turn force-closed by user stop for chat %s", chat_id)
                     if not turn_result_published:
                         turn_assistant_text = turn_steps.text
+                        # Same contract as a completed result: what the answer
+                        # block had streamed, else the partial text the user saw.
+                        turn_answer_text = _final_answer_text(
+                            turn_steps.text, None, turn_segment
+                        )
+                        turn_answer_ready = True
                         stream.publish(
                             self._host._stop_result_payload(
                                 chat_id,
@@ -837,6 +894,7 @@ class ChatStreaming:
                         # carry-over so this turn cannot inherit and re-announce
                         # the previous turn's text.
                         last_assistant_text = ""
+                        last_answer_text = ""
                         if not turn_result_published:
                             stream.publish(
                                 self._host._stop_result_payload(
@@ -988,6 +1046,11 @@ class ChatStreaming:
 
                 if turn_assistant_text:
                     last_assistant_text = turn_assistant_text
+                if turn_answer_ready:
+                    # A successful terminal always names this turn's answer,
+                    # including an explicitly empty one: keeping the previous
+                    # turn's text here would re-announce it (#2139 review).
+                    last_answer_text = turn_answer_text
 
                 if question_paused:
                     self._host._fallback_steers(chat_id, stream, "finished")
@@ -1217,6 +1280,12 @@ class ChatStreaming:
                 )
             if current_turn_index is not None:
                 self.discard_turn_perf(chat_id, current_turn_index)
+            # The turn ended in this process, so it is no longer in flight; during
+            # shutdown it did not end, and the stamp stays for the next boot (#2128).
+            if chat_meta is not None and chat_meta.turn_owner and not self._host._shutting_down:
+                chat_meta.turn_owner = ""
+                if compact:
+                    self._save_at_turn_end(chat_id)
             # ``compact`` is still set only when the last pass was the
             # compaction, which leaves the previous reply as the last one.
             if chat_meta is not None and not compact:
@@ -1242,7 +1311,7 @@ class ChatStreaming:
                 # A terminal SSE frame is not proof that a native V2 permission
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
-                self._host._save()
+                self._save_at_turn_end(chat_id)
             repo_loc: dict[str, Any] | None = None
             refresh_cancelled = False
             current = asyncio.current_task()
@@ -1271,7 +1340,7 @@ class ChatStreaming:
                 drain_chat = self._host._chats.get(chat_id)
                 if drain_chat is not None:
                     drain_chat.pending_queue = [*drain_chat.pending_queue, *draining]
-                    self._host._save()
+                    self._save_at_turn_end(chat_id)
                     stream.publish_queue_state(drain_chat.pending_queue)
             stream.finish()
             self._host._broker.clear(chat_id, stream)
@@ -1300,21 +1369,21 @@ class ChatStreaming:
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
-            if not had_error and last_assistant_text.strip():
-                snippet = self._host._result_snippet(last_assistant_text)
+            if not had_error and last_answer_text.strip():
+                snippet = self._host._result_snippet(last_answer_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
                     if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
                         self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
-                    self._host._save()
+                    self._save_at_turn_end(chat_id)
                 title = chat_now.title if chat_now else "Ciaobot"
                 # A turn the user moved to the background (#1413) ends on an interim
                 # reply whatever its wording; the wake carries the real result.
                 interim = follow_up_expected and (
                     stream.moved_to_background
-                    or self._host._is_interim_subagent_text(last_assistant_text)
+                    or self._host._is_interim_subagent_text(last_answer_text)
                 )
                 if interim:
                     self._host._park_result_announce(
@@ -1881,6 +1950,51 @@ class ChatStreaming:
         task = asyncio.create_task(self._host._drain_between_turns(chat_id, project_id))
         self._between_turn_drains[chat_id] = task
 
+    def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
+        """File the execution OpenCode ran after background work finished.
+
+        OpenCode's own session store holds the wake, but the durable transcript
+        is the fallback copy a reload reads when that store is unreadable. The
+        notice is the turn's prompt; ``origin`` keeps it a system row. A wake
+        whose wake item was missed has no notice and records nothing, by design.
+        """
+        chat = self._host._chats.get(chat_id)
+        if (
+            chat is None
+            or chat.provider != "opencode"
+            or event.origin != "task-notification"
+            or not event.wake_notice
+            or not (event.result or "").strip()
+        ):
+            return
+        try:
+            # `record_turn` reads only the model, prompt and mode, so a bare
+            # request is enough; the full builder mints tokens and mutates chat.
+            request = AgentRequest(
+                prompt=event.wake_notice,
+                display_prompt=event.wake_notice,
+                model=chat.model,
+                mode=chat.mode,
+                provider=chat.provider,
+                resume_session=chat.session_id or None,
+            )
+            self._host._transcripts.record_turn(
+                request,
+                ctx=ChatContext.for_web(chat_id),
+                response_text=event.result,
+                effective_model=event.effective_model,
+                session_id=chat.session_id or None,
+                usage=event.usage,
+                quota=event.quota,
+                input_kind="task-notification",
+                context_label=chat.title,
+                provider=chat.provider,
+                is_error=bool(event.is_error),
+                origin="background_run",
+            )
+        except Exception:
+            logger.exception("Failed to record the wake turn for chat %s", chat_id)
+
     async def drain_between_turns(self, chat_id: str, project_id: str) -> None:
         """Publish provider events that arrive while no user turn is active."""
         provider_service = self._host._providers.get(chat_id)
@@ -1907,7 +2021,11 @@ class ChatStreaming:
             stream = None
 
         try:
+            # The final text block of the follow-up execution now streaming.
+            # Reset per terminal result: each wake is its own turn (#2139).
+            drain_segment = FinalAnswerTracker()
             async for event in provider_service.drain_events():
+                drain_segment.feed(event)
                 if (
                     isinstance(event, ResultEvent)
                     and event.origin
@@ -1919,6 +2037,7 @@ class ChatStreaming:
                     # notification it already folded into a turn: no events,
                     # nothing to show, record or announce (#1394).
                     logger.debug("Skipped an empty follow-up result for chat %s", chat_id)
+                    drain_segment = FinalAnswerTracker()
                     continue
                 payload = event_to_json(event)
                 if payload is None:
@@ -1936,6 +2055,9 @@ class ChatStreaming:
                             "type": "chat_streaming_started",
                             "chat_id": chat_id,
                             "project_id": project_id,
+                            # A wake: the turn before it is finished, so the
+                            # client keeps drawing it (no user row follows).
+                            "background": True,
                         }
                     )
                 stream.publish(payload)
@@ -1943,7 +2065,12 @@ class ChatStreaming:
                     self._host._notify_permission(chat_id, event)
                 if isinstance(event, ResultEvent):
                     text = event.result or ""
+                    answer_text = _final_answer_text(
+                        text, event.final_text, drain_segment
+                    )
+                    drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
+                    self._record_opencode_wake_turn(chat_id, event)
                     settled = self._host._background_count_now(chat_id) == 0
                     if settled:
                         self._last_drain_result[chat_id] = (text, is_error)
@@ -1960,10 +2087,10 @@ class ChatStreaming:
                     chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error
-                        and text
-                        and self._host._is_worth_announcing_follow_up(text)
+                        and answer_text
+                        and self._host._is_worth_announcing_follow_up(answer_text)
                     ):
-                        snippet = self._host._result_snippet(text)
+                        snippet = self._host._result_snippet(answer_text)
                         if chat_now is not None:
                             chat_now.last_activity_at = chat_service._now_iso()
                             chat_now.last_snippet = snippet

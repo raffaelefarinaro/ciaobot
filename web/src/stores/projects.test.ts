@@ -817,7 +817,49 @@ describe('unacknowledged send recovery', () => {
       // The retry is itself still tracked (attempt 1), not reset.
       expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
       // And the user bubble is back.
-      expect(store.messages[chatId]?.some(m => m.role === 'user' && m.content === 'lost in suspension')).toBe(true)
+      expect(store.messages[chatId]?.filter(m => m.role === 'user' && m.content === 'lost in suspension')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a recovery resend of a lost send leaves one bubble', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-one-bubble'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'try now', turn_index: 13, i: 0 },
+            { role: 'assistant', content: 'The usage limit has been reached', i: 1 },
+          ],
+          total: 2,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    await store.loadMessages(chatId)
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'continue')
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+
+      const frames = sentMessageFrames()
+      expect(frames).toHaveLength(2)
+      expect(JSON.parse(frames[1]).send_id).toBe(JSON.parse(frames[0]).send_id)
+      expect(
+        store.messages[chatId]?.filter(m => m.role === 'user').map(m => m.content),
+      ).toEqual(['try now', 'continue'])
     } finally {
       vi.useRealTimers()
     }
@@ -1709,6 +1751,132 @@ describe('stopped turns', () => {
     }
   })
 
+  // A finished turn whose reply the history fetches did not show inside the
+  // retry ladder (a fetch that failed while a resumed phone was still waking
+  // its network, a slow read): the spinner comes down, but the client keeps
+  // looking instead of leaving the user's own bubble last until they reload.
+  function finishTurn(store: ReturnType<typeof useProjectStore>, chatId: string) {
+    store.connectEventsWs()
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_streaming_done', chat_id: chatId, project_id: 'p1', is_error: false }),
+    })
+  }
+  const ASK = { role: 'user' as const, content: 'fix the migration', timestamp: '' }
+  const ANSWER = { role: 'assistant' as const, content: 'The grants are already correct.', timestamp: '2026-10-27T00:38:52Z' }
+
+  test('keeps looking for a reply the retry ladder missed', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-late-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return calls <= 7 ? [ASK] : [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(false)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ASK.content)
+
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a history fetch that fails is retried, not read as no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-offline-wake'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        if (calls <= 6) throw new TypeError('Load failed')
+        return [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(40000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('stops looking once the user leaves the chat', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-left'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      store.activeChatId = 'c-elsewhere'
+      const before = calls
+      await vi.advanceTimersByTimeAsync(180000)
+      expect(calls).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('gives up after about two minutes when the turn really has no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-no-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(180000)
+      const settled = calls
+      await vi.advanceTimersByTimeAsync(600000)
+      expect(calls).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('coming back online refetches a chat still waiting on its reply', async () => {
+    const store = useProjectStore()
+    const chatId = 'c-online'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ ...ASK }]
+    apiGet.mockImplementation(async (url: string) => (url.includes('/messages') ? [ASK, ANSWER] : []))
+
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content))
+  })
+
   test('keeps the spinner while the server still reports the chat streaming', async () => {
     // The backstop must not fire on a slow turn: the server is the authority
     // on whether work is still running.
@@ -2222,6 +2390,15 @@ describe('move to background', () => {
     apiPost.mockRejectedValueOnce(new Error('offline'))
     expect(await store.moveChatToBackground('c')).toBe(false)
     expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
+  })
+})
+
+describe('stop a background task', () => {
+  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.stopBackgroundTask('c1', 'task/1')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
   })
 })
 
@@ -4122,6 +4299,96 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('keeps a live AskUserQuestion picker when history reloads before the chat list refreshes', async () => {
+    // The live picker used to set only `activeQuestions`. The question pause
+    // ends the turn and reloads history, which rebuilt from the chat list's
+    // pre-question snapshot (`pending_question: ''`), dismissed the picker and
+    // marked it resolved, so the same question asked again stayed hidden too.
+    const store = useProjectStore()
+    const chatId = 'live-question-reload'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Live question',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'bypass',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+      pending_question: '',
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        tool_input: JSON.stringify({
+          questions: [{ question: 'Pick a color', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+        }),
+      }),
+    })
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId][0].question).toBe('Pick a color')
+  })
+
+  test('a chat-list read that started before a live question does not erase it', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const chatId = 'live-question-stale-list'
+    const row = {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Live question',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'bypass',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+      pending_question: '',
+    }
+    store.chats = [{ ...row }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+
+    // The poll is in flight with the pre-question snapshot when the question lands.
+    let releaseList: (rows: unknown[]) => void = () => {}
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return new Promise(resolve => { releaseList = resolve })
+      }
+      return Promise.resolve([])
+    })
+    const sync = store.syncLatest()
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'req-1',
+        session_id: 's1',
+        tool_input: JSON.stringify({
+          questions: [{ question: 'Pick a color', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+        }),
+      }),
+    })
+    releaseList([{ ...row }])
+    await sync
+
+    const mirrored = JSON.parse(store.chats.find(c => c.chat_id === chatId)?.pending_question || '{}')
+    expect(mirrored.request_id).toBe('req-1')
+    expect(mirrored.session_id).toBe('s1')
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+  })
+
   test('surfaces an empty AskUserQuestion as a free-form fallback', () => {
     const store = useProjectStore()
     const chatId = 'empty-question-chat'
@@ -5124,58 +5391,6 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
-  })
-
-  test('tracked background runs carry their rows, cleared when none are left', () => {
-    vi.useFakeTimers()
-    const store = useProjectStore()
-    const chatId = 'c-run'
-    store.activeChatId = chatId
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const row = (runId: string, over: Record<string, unknown> = {}) => ({
-      run_id: runId, label: 'clone', cmd: ['git', 'clone'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null, ...over,
-    })
-    const fire = (runs: unknown[], finished?: unknown) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', runs, finished }),
-      })
-
-    fire([row('r1')])
-    expect(store.activeBackgroundRuns.map(r => r.run_id)).toEqual(['r1'])
-    expect(store.chatHasBackgroundRuns(chatId)).toBe(true)
-    fire([row('r1'), row('r2')])
-    expect(store.activeBackgroundRuns).toHaveLength(2)
-    fire([], row('r2', { status: 'error', exit_code: 1 }))
-    expect(store.backgroundRuns[chatId]).toBeUndefined()
-    expect(store.chatHasBackgroundRuns(chatId)).toBe(false)
-    // How the last run ended is held briefly for the composer, then dropped.
-    expect(store.finishedBackgroundRuns[chatId]?.exit_code).toBe(1)
-    vi.advanceTimersByTime(6000)
-    expect(store.finishedBackgroundRuns[chatId]).toBeUndefined()
-    // Background agents are a separate signal; a run must not light that pill.
-    expect(store.activeBackgroundAgents).toBe(0)
-    vi.useRealTimers()
-  })
-
-  test('the snapshot re-seeds runs for a client that missed the start', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    store.backgroundRuns['c-stale'] = []
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const live = { run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '', status: 'running', exit_code: null }
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'snapshot',
-        active_streams: [],
-        background_runs: { 'c-live': [live] },
-        chat_pins: {},
-        chat_terminal_offers: {},
-      }),
-    })
-    expect(store.backgroundRuns['c-stale']).toBeUndefined()
-    expect(store.backgroundRuns['c-live']).toEqual([live])
   })
 })
 
@@ -6506,6 +6721,170 @@ describe('workspace and chat transitions', () => {
     expect(newer).toHaveBeenCalled()
     store.clearWorkspaceSwitchGuard(newer)
     expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+  })
+
+  test('registered workspace guards run after the settings guard, in order', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const calls: string[] = []
+    const settings = vi.fn(async () => {
+      calls.push('settings')
+      return true
+    })
+    store.setWorkspaceSwitchGuard(settings)
+    const unregisterFirst = store.registerWorkspaceSwitchGuard(async (from) => {
+      calls.push(`first:${from}`)
+      return true
+    })
+    store.registerWorkspaceSwitchGuard(async () => {
+      calls.push('second')
+      return true
+    })
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    // The slot belongs to Settings and keeps its place; the registry is what
+    // an in-session overlay adds beside it.
+    expect(calls).toEqual(['settings', 'first:work', 'second'])
+    expect(store.activeWorkspace).toBe('personal')
+    unregisterFirst()
+    store.setWorkspaceSwitchGuard(null)
+  })
+
+  test('a registered guard that declines keeps the workspace and stops the later ones', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const later = vi.fn(async () => true)
+    store.registerWorkspaceSwitchGuard(async () => false)
+    store.registerWorkspaceSwitchGuard(later)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(later).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('a registered guard is removed by the function registering it returned', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn(async () => false)
+    const unregister = store.registerWorkspaceSwitchGuard(guard)
+
+    unregister()
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(guard).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
+  test('a predicate that turns false while a guard is pending stops the switch from applying', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-open'
+    window.localStorage.setItem('ciao-active-workspace', 'work')
+    let release: (allowed: boolean) => void = () => {}
+    store.registerWorkspaceSwitchGuard(() => new Promise<boolean>(resolve => { release = resolve }))
+    let current = true
+
+    const switching = store.switchWorkspace('personal', { transition: false, isCurrent: () => current })
+    // The route moved on (A then B) while A's guard was still asking.
+    current = false
+    release(true)
+
+    expect(await switching).toBe(false)
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.activeChatId).toBe('c-open')
+    expect(window.localStorage.getItem('ciao-active-workspace')).toBe('work')
+  })
+
+  test('a predicate that is already false returns before any guard or fast path', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn(async () => true)
+    store.registerWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false, isCurrent: () => false })).toBe(false)
+    // Even a switch to the workspace already active reports the stale caller.
+    expect(await store.switchWorkspace('work', { transition: false, isCurrent: () => false })).toBe(false)
+    expect(guard).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('a declining settings guard stops the registered guards', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const registered = vi.fn(async () => true)
+    store.setWorkspaceSwitchGuard(async () => false)
+    store.registerWorkspaceSwitchGuard(registered)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(registered).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+    store.setWorkspaceSwitchGuard(null)
+  })
+
+  test('a cross-workspace project open asks the registered guards first', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    // Cmd+T into another workspace is a switch like any other: an overlay that
+    // refuses to close must keep the workspace it is drawing.
+    await expect(store.newChatInProject('p-personal')).resolves.toBeUndefined()
+    expect(store.activeWorkspace).toBe('work')
+    expect(apiPost).not.toHaveBeenCalledWith('/api/projects/p-personal/chats', expect.anything())
+  })
+
+  test('a chat in another workspace is not opened while a guard refuses the switch', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c-personal'
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    // A sidebar row, a toast or a deep link into the other workspace is a
+    // switch too: opening its chat would draw it under the overlay that just
+    // refused to close.
+    await store.switchChat('c-work')
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBe('c-personal')
+    expect(routerPush).not.toHaveBeenCalledWith('/chat/c-work')
+  })
+
+  test('a chat switch a guard refuses leaves the open chat and the route alone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p-personal', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p-personal', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c1'
+    // Same workspace, so nothing here is a workspace switch: the guard is about
+    // the view a surface is drawing, and a chat switch replaces that view.
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    await store.switchChat('c2')
+
+    // The draft kept the route, so the chat under it must not move either: a
+    // switched activeChatId under an unchanged URL is the half-state this test
+    // exists to prevent.
+    expect(store.activeChatId).toBe('c1')
+    expect(routerPush).not.toHaveBeenCalledWith('/chat/c2')
   })
 
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
@@ -8271,6 +8650,56 @@ describe('running subagent poll', () => {
       vi.useRealTimers()
     }
   })
+
+  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
+    let rows: unknown[] = shell
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
+      return Promise.resolve([])
+    })
+    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      store.streaming = { c1: false }
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(95_000)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(polls()).toBeGreaterThan(10)
+
+      rows = []
+      await vi.advanceTimersByTimeAsync(8_000)
+      expect(store.runningSubagentsFor('c1')).toEqual([])
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(polls()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a shell row discovered while nothing is working starts the poll', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
+    mockRunning({ c1: shell })
+
+    vi.useFakeTimers()
+    try {
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('running-row reconciliation while the engine count is zero', () => {
@@ -9326,5 +9755,254 @@ describe('reorderWorkspaces', () => {
     })
     expect(optionNames(store)).toEqual(['gamma', 'alpha', 'beta'])
     expect(store.activeWorkspace).toBe('beta')
+  })
+})
+
+describe('reorderProjects', () => {
+  const proj = (id: string, order: number, extra: Record<string, unknown> = {}) => ({
+    project_id: id, name: id, workspace: 'personal', context: '', created_at: '', order, vault_folder: '', ...extra,
+  })
+  const orderOf = (store: ReturnType<typeof useProjectStore>) =>
+    store.projects.map(p => [p.project_id, p.order])
+
+  function seed(store: ReturnType<typeof useProjectStore>) {
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      proj('general', 0, { name: 'General', is_auto: true }),
+      proj('a', 1),
+      proj('cli', 3, { name: 'Claude Code CLI', is_auto: true }),
+      proj('b', 4),
+    ] as typeof store.projects
+  }
+
+  test('sends order and expected_order and reuses the existing slots', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockResolvedValue([])
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result).toEqual({ ok: true })
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/reorder', {
+      workspace: 'personal',
+      order: ['b', 'a'],
+      expected_order: ['a', 'b'],
+    })
+    expect(orderOf(store)).toEqual([['general', 0], ['a', 4], ['cli', 3], ['b', 1]])
+    expect(store.reorderableProjects.map(p => p.project_id)).toEqual(['b', 'a'])
+  })
+
+  test('a drag sticks when the local order values tie', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [proj('a', 5), proj('b', 5), proj('c', 5)] as typeof store.projects
+    apiPost.mockResolvedValue([])
+
+    await store.reorderProjects(['c', 'a', 'b'], ['a', 'b', 'c'])
+
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['c', 'a', 'b'])
+  })
+
+  test('a reordered project never ties with pinned General', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      proj('general', 0, { name: 'General', is_auto: true }),
+      proj('a', 0, { name: 'Alpha' }),
+      proj('b', 0, { name: 'Beta' }),
+    ] as typeof store.projects
+    apiPost.mockResolvedValue([])
+
+    await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['general', 'b', 'a'])
+  })
+
+  test('restores the previous order and refetches when the server answers 409', async () => {
+    const store = useProjectStore()
+    seed(store)
+    const conflict = Object.assign(new Error('conflict'), {
+      status: 409,
+      payload: { error: 'stale', code: 'project_order_conflict', order: ['b', 'a'] },
+    })
+    apiPost.mockRejectedValue(conflict)
+    const fresh = [proj('general', 0, { name: 'General', is_auto: true }), proj('b', 1), proj('a', 2)]
+    apiGet.mockImplementation(async (path: string) => (path === '/api/projects' ? fresh : {}))
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.conflict).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/projects')
+    expect(orderOf(store)).toEqual([['general', 0], ['b', 1], ['a', 2]])
+  })
+
+  test('restores on network failure and returns the message', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockRejectedValue(new Error('offline'))
+    apiGet.mockRejectedValue(new Error('offline'))
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result).toEqual({ ok: false, conflict: false, message: 'offline' })
+    expect(orderOf(store)).toEqual([['general', 0], ['a', 1], ['cli', 3], ['b', 4]])
+  })
+
+  test('projects_reordered from another device bumps projectOrderEpoch; our own in-flight reorder does not', async () => {
+    const store = useProjectStore()
+    seed(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const reordered = { data: JSON.stringify({ type: 'projects_reordered', workspace: 'personal', order: ['general', 'b', 'a'] }) }
+    const before = store.projectOrderEpoch
+
+    events.onmessage?.(reordered)
+    expect(store.projectOrderEpoch).toBe(before + 1)
+
+    let resolvePost: (value: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise(resolve => { resolvePost = resolve }))
+    const pending = store.reorderProjects(['a', 'b'], ['b', 'a'])
+    events.onmessage?.(reordered)
+    expect(store.projectOrderEpoch).toBe(before + 1)
+    resolvePost([])
+    await pending
+  })
+})
+
+describe('chatsHealth', () => {
+  const chat = (id: string) => ({
+    chat_id: id, project_id: 'p1', title: id, model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+  })
+
+  function mockChatList(handler: () => Promise<unknown>) {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') return handler()
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve([])
+    })
+  }
+
+  test('chats_health_initial_checking_then_ready_after_fetch_all', async () => {
+    const store = useProjectStore()
+    expect(store.chatsHealth.status).toBe('checking')
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.fetchAll()
+    expect(store.chatsHealth.status).toBe('ready')
+    expect(Number.isNaN(Date.parse(store.chatsHealth.lastSuccessAt))).toBe(false)
+  })
+
+  test('chats_health_first_failure_unavailable_and_fetch_all_still_rejects', async () => {
+    const store = useProjectStore()
+    mockChatList(() => Promise.reject(new Error('boom')))
+    await expect(store.fetchAll()).rejects.toThrow('boom')
+    expect(store.chatsHealth.status).toBe('unavailable')
+    expect(store.chatsHealth.lastSuccessAt).toBe('')
+  })
+
+  test('chats_health_sync_latest_failure_after_success_is_stale_rows_kept', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.fetchAll()
+    const success = store.chatsHealth.lastSuccessAt
+    mockChatList(() => Promise.reject(new Error('offline')))
+    await expect(store.syncLatest()).resolves.toBeUndefined()
+    expect(store.chatsHealth.status).toBe('stale')
+    expect(store.chatsHealth.lastSuccessAt).toBe(success)
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c1'])
+  })
+
+  test('chats_health_recovers_to_ready', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    mockChatList(() => Promise.reject(new Error('boom')))
+    await expect(store.fetchAll()).rejects.toThrow('boom')
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.syncLatest()
+    expect(store.chatsHealth.status).toBe('ready')
+    expect(store.chatsHealth.error).toBe('')
+  })
+})
+
+describe('stopBackgroundTask', () => {
+  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
+
+  beforeEach(() => {
+    setActivePinia(newPinia())
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true })
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('counts a chat holding only a native shell as busy', () => {
+    const store = useProjectStore()
+    expect(store.anyChatBusy).toBe(false)
+    store.runningSubagents = { c1: [shellRow('b1')] } as never
+    expect(store.anyChatBusy).toBe(true)
+    expect(store.chatIsWorking('c1')).toBe(true)
+  })
+
+  it('posts to the stop route and marks the task stopping, per chat', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
+    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('ignores a second stop while one is pending', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets go of the lock after 15 s so Stop can be retried', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    vi.advanceTimersByTime(14_999)
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(new Error('boom'))
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+  })
+
+  it('releases a task, and its error, once its row leaves the running list', async () => {
+    const store = useProjectStore()
+    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b2')
+    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
+    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await nextTick()
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b2).toBe(true)
+    store.runningSubagents = {}
+    await nextTick()
+    expect(store.stoppingTasks).toEqual({})
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('stops its timers when the store is disposed', async () => {
+    const store = useProjectStore()
+    const before = vi.getTimerCount()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(vi.getTimerCount()).toBe(before + 1)
+    store.$dispose()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

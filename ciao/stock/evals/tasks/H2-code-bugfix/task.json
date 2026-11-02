@@ -1,0 +1,14 @@
+{
+  "id": "H2-code-bugfix",
+  "tier": "hard",
+  "category": "coding",
+  "prompt": "The tests in code/invoice_tool fail. Find and fix the bug in invoice.py; do not change the tests.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {"kind": "command", "argv": ["{python}", "-m", "unittest", "-q", "test_invoice"], "cwd": "code/invoice_tool"},
+    {"kind": "unchanged", "path": "code/invoice_tool/test_invoice.py"}
+  ]
+}

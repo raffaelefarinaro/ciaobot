@@ -7,7 +7,7 @@ import { activeWorkspaceButton, boot, isolate } from '../support/app'
  * landing on the page the order was changed from. jsdom has no focus routing
  * or drag-and-drop, so only a real engine can say the whole path works.
  */
-const MANAGE = '/settings/workspaces'
+const MANAGE = '/settings/workspace'
 const READY = '.settings-main .section-title'
 
 const handle = (page: Page, name: string) => page.locator(`[data-workspace-handle="${name}"]`)
@@ -57,7 +57,7 @@ test.describe('workspace reorder', () => {
 
     await expect(page.locator('.settings-main [role="status"][aria-live="polite"]'))
       .toHaveText('Moved Gamma to position 2 of 3')
-    expect(await switcherOrder(page)).toEqual(['Alpha', 'Gamma', 'Beta'])
+    await expect.poll(() => switcherOrder(page)).toEqual(['Alpha', 'Gamma', 'Beta'])
   })
 
   test('the row menu Move up reorders and returns focus to the handle', async ({ page }) => {

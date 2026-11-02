@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 import os
+
+# A Ciaobot chat (or the bundled app's launcher) exports its own CIAO_*
+# settings - vault root, workspace, agent token, CIAO_BUNDLED_APP - and
+# PWA_AUTH_TOKEN to every command it runs, this suite included. Drop them
+# before any `ciao` module is imported, so code reading them at import time
+# sees a clean environment too; pytest-xdist workers inherit the cleaned one.
+# Tests that need one set it with monkeypatch.
+INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_")
+for _name in [name for name in os.environ if name.startswith(INHERITED_ENV_PREFIXES)]:
+    del os.environ[_name]
+
 import sys
 import pytest
 from pathlib import Path
@@ -10,6 +21,15 @@ from ciao import config as ciao_config
 from ciao import job_runs as jr
 from ciao import transcripts
 from types import SimpleNamespace
+
+# A Ciaobot chat exports the live install's settings and credentials into every
+# command it runs, this suite included. Tests that build a config or call the
+# CLI would read those values instead of their own fixtures, so drop them once,
+# before any test module is collected. Tests that need a value set it with
+# monkeypatch.setenv (#2356).
+_INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_", "GWS_")
+for _key in [key for key in os.environ if key.startswith(_INHERITED_ENV_PREFIXES)]:
+    del os.environ[_key]
 
 # Captured before any fixture runs, so the guard test can prove no test sees it.
 REAL_HOME = Path.home()
@@ -146,15 +166,32 @@ def _reset_exported_dotenv() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _drop_inherited_bundled_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ignore ``CIAO_BUNDLED_APP`` inherited from a Ciaobot.app agent shell.
+def _restore_ciao_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put ``CIAO_*`` / ``PWA_*`` back as the test found them.
 
-    The bundled launcher exports it, so every command a Ciaobot chat runs -
-    including this suite - inherits it, and ``detect_install_mode`` would call
-    the test process a packaged app (``admin_deploy`` then refuses up front).
-    Tests that need it set it explicitly.
+    ``/api/setup/finish`` writes ``CIAO_WORKSPACE``, ``PWA_PORT`` and
+    ``PWA_AUTH_TOKEN`` straight into ``os.environ`` on purpose (a foreground
+    ``ciao run`` re-execs with its environment, see ``_publish_setup_environment``),
+    so a test that drives it leaks them to every later test in the process.
+    ``monkeypatch`` cannot undo a key it never saw set. A later test's implicit
+    workspace resolution then skipped install discovery, because a workspace was
+    already named, and read an unregistered root: ``memory-proposals`` listed
+    nothing, but only in the serial full run, where ``test_installer_handoff``
+    precedes ``test_memory_proposal_cli``.
+
+    Depends on ``monkeypatch`` so it is torn down before it: both then restore
+    to the same pre-test state.
     """
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
+    before = {k: v for k, v in os.environ.items() if k.startswith(INHERITED_ENV_PREFIXES)}
+    yield
+    # Only drop what the test added and revert what it rewrote. A key present
+    # before and gone now was removed by the test's own ``monkeypatch.undo()``
+    # (or ``delenv``) and is not put back.
+    for key in [k for k in os.environ if k.startswith(INHERITED_ENV_PREFIXES)]:
+        if key not in before:
+            del os.environ[key]
+        elif os.environ[key] != before[key]:
+            os.environ[key] = before[key]
 
 
 @pytest.fixture(autouse=True)

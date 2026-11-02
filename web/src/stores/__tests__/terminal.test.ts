@@ -1305,6 +1305,82 @@ describe('terminal store status and grant', () => {
 
 // ── Session lifecycle ────────────────────────────────────────────────────
 
+describe('terminal store first shell', () => {
+  const BOTH = [
+    { location: 'repo', folder: '/Users/someone/repo' },
+    { location: 'workspace', folder: '/Users/someone/workspace' },
+  ]
+
+  function listing(sessions: unknown[], locations: unknown[]): void {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions, locations })
+      return Promise.resolve({})
+    })
+  }
+
+  it('starts a shell when asked to ensure one and the scope has none', async () => {
+    listing([], [{ location: 'workspace', folder: '/Users/someone/workspace' }])
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1' })
+    expect(store.activeSession?.session_id).toBe('s1')
+  })
+
+  it('adopts a running shell instead of starting another', async () => {
+    listing([sessionPayload('s0')], [])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.activeSession?.session_id).toBe('s0')
+  })
+
+  it('starts nothing without ensureSession', async () => {
+    listing([], [])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('asks instead of starting when a repository sits beside the workspace', async () => {
+    listing([], BOTH)
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.locations.map((choice) => choice.location)).toEqual(['repo', 'workspace'])
+  })
+
+  it('sends the chosen location with the create', async () => {
+    listing([], BOTH)
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    await store.createSession('workspace')
+
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1', location: 'workspace' })
+  })
+
+  it('offers no choice from a location list it does not understand', async () => {
+    listing([], [{ location: '/etc', folder: '/etc' }, BOTH[1]])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+
+    expect(store.locations).toEqual([])
+  })
+})
+
 describe('terminal store session lifecycle', () => {
   it('creates a session only when asked, with exactly one scope id', async () => {
     const store = useTerminalStore()
@@ -2586,6 +2662,79 @@ describe('terminal store bounds', () => {
     expect(fakeSockets).toHaveLength(1)
     expect(store.phase).toBe('error')
   })
+
+  describe('render stall', () => {
+    async function stalled(deferred = true) {
+      const store = useTerminalStore()
+      await store.open({ chatId: 'chat-1' })
+      apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+      await store.createSession()
+      const view = makeRenderer('s1', deferred)
+      store.attachRenderer(view.renderer)
+      const socket = fakeSockets[0]
+      socket.ready()
+      return { store, view, socket }
+    }
+
+    it('reports a renderer that stops drawing instead of blaming the shell', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      await vi.advanceTimersByTimeAsync(5000)
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.error).not.toContain('faster than the terminal')
+      expect(store.phase).toBe('error')
+    })
+
+    it('does not report a stall for a write that finishes in time', async () => {
+      const { store, view, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      await vi.advanceTimersByTimeAsync(4000)
+      view.settle()
+      await vi.advanceTimersByTimeAsync(6000)
+
+      expect(store.error).toBe('')
+    })
+
+    it('does not report a stall on a hidden surface', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      store.hide()
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(store.error).toBe('')
+    })
+
+    it('reports a stall that began while hidden once the terminal is shown again', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      store.hide()
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(store.error).toBe('')
+
+      await store.open({ chatId: 'chat-1' })
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.phase).toBe('error')
+    })
+
+    it('an overflow behind a stalled write names the view', async () => {
+      const { store, socket } = await stalled()
+      const chunk = new Uint8Array(64 * 1024)
+      socket.receive({ type: 'output', start: 0, end: 1, data: b64('h') })
+      // Move the clock without running timers, so only the overflow path can notice.
+      vi.setSystemTime(Date.now() + 5000)
+      for (let i = 0; i < 17; i += 1) {
+        socket.receive({
+          type: 'output', start: 1 + i * chunk.length, end: 1 + (i + 1) * chunk.length,
+          data: encodeTerminalBytes(chunk),
+        })
+      }
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.error).not.toContain('faster than the terminal')
+    })
+  })
 })
 
 // ── Close codes and takeover ─────────────────────────────────────────────
@@ -2949,5 +3098,90 @@ describe('terminal store page lifecycle', () => {
       ...addDocument.mock.calls.map((call) => call[0]),
     ].filter((type) => type === 'visibilitychange' || type === 'pageshow')
     expect(terminalListeners).toEqual([])
+  })
+})
+
+describe('the terminal follows the chat on screen', () => {
+  it('does not hide on the first report', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    expect(store.visible).toBe(true)
+  })
+
+  it('hides on leaving and reopens on coming back without starting a shell', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('chat-b')
+    expect(store.visible).toBe(false)
+    expect(store.chatSwitch).toBe(true)
+
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(true)
+    expect(store.target).toEqual({ chatId: 'chat-a' })
+    expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+
+    store.followChat('chat-b')
+    expect(store.visible).toBe(false)
+  })
+
+  it('keeps a chat closed when its terminal was closed there', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.hide()
+    store.followChat('chat-b')
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(false)
+  })
+
+  it('hides on a route with no chat and remembers the chat', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('')
+    expect(store.visible).toBe(false)
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(true)
+  })
+
+  it('hides a project terminal on a chat change and does not restore it', async () => {
+    const store = useTerminalStore()
+    store.followChat('')
+    await store.open({ projectId: 'p1' })
+    store.followChat('chat-a')
+    expect(store.visible).toBe(false)
+    store.followChat('')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(false)
+  })
+
+  it('ignores a report for the chat it already follows', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    const gets = apiGet.mock.calls.length
+    store.followChat('chat-a')
+    expect(store.visible).toBe(true)
+    expect(apiGet.mock.calls.length).toBe(gets)
+  })
+
+  it('clears chatSwitch when the person opens or hides', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('chat-b')
+    expect(store.chatSwitch).toBe(true)
+    await store.open({ chatId: 'chat-b' })
+    expect(store.chatSwitch).toBe(false)
+    store.followChat('chat-c')
+    expect(store.chatSwitch).toBe(true)
+    await store.open({ chatId: 'chat-c' })
+    store.hide()
+    expect(store.chatSwitch).toBe(false)
   })
 })

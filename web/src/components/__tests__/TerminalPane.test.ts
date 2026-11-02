@@ -67,6 +67,9 @@ const screen = vi.hoisted(() => {
     disposed = false
     focused = 0
     resets = 0
+    // A plain public field, not a private one: the test flips it the way the
+    // program on screen flips DECCKM, and the pane must read it from the screen.
+    applicationCursorKeys = false
     writes: Uint8Array[] = []
     onInput: ((bytes: Uint8Array) => void) | null
     onResize: ((cols: number, rows: number) => void) | null
@@ -186,10 +189,14 @@ function sessionInfo(sessionId: string, overrides: Record<string, unknown> = {})
 }
 
 /** The API the store talks to: a status, a session list, and nothing else. */
-function serve(sessions: Record<string, unknown>[] = [], status: Record<string, unknown> = {}) {
+function serve(
+  sessions: Record<string, unknown>[] = [],
+  status: Record<string, unknown> = {},
+  locations: Record<string, unknown>[] = [],
+) {
   apiGet.mockImplementation((path: string) => {
     if (path === '/api/terminal/status') return Promise.resolve(statusPayload(status))
-    if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions })
+    if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions, locations })
     return Promise.resolve({})
   })
 }
@@ -338,6 +345,51 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
+  const BOTH_FOLDERS = [
+    { location: 'repo', folder: '/src/ciaobot' },
+    { location: 'workspace', folder: '/ciao/personal' },
+  ]
+
+  it('asks whether to open the shell in the workspace or the repository', async () => {
+    serve([], {}, BOTH_FOLDERS)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' }, { ensureSession: true })
+    await flushPromises()
+
+    expect(apiPost).not.toHaveBeenCalled()
+    const options = wrapper.findAll('.tp-chooser-option')
+    expect(options.map((option) => option.text())).toEqual([
+      expect.stringContaining('Repository'),
+      expect.stringContaining('Workspace'),
+    ])
+    expect(options[1].text()).toContain('personal')
+
+    await options[1].trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'c1', location: 'workspace' })
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('asks again from the new-session control when a repository is linked', async () => {
+    serve([sessionInfo('s1')], {}, BOTH_FOLDERS)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
+
+    await wrapper.get('button[aria-label="New terminal session"]').trigger('click')
+
+    expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+    expect(wrapper.findAll('.tp-chooser-option')).toHaveLength(2)
+    await wrapper.get('.tp-chooser-cancel').trigger('click')
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('opens a screen for the session and connects it', async () => {
     serve([sessionInfo('s1')])
     const store = useTerminalStore()
@@ -445,6 +497,91 @@ describe('TerminalPane', () => {
     const down = new Event('pointerdown', { bubbles: true, cancelable: true })
     key.dispatchEvent(down)
     expect(down.defaultPrevented).toBe(true)
+    const mouseDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    key.dispatchEvent(mouseDown)
+    expect(mouseDown.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('gives the focus back to the screen when a tap left it on a key', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+    expect(store.phase).toBe('live')
+
+    const key = wrapper.get('[aria-label="Enter"]').element as HTMLButtonElement
+    key.focus()
+    const before = screen.FakeScreen.instances.at(-1)!.focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await flushPromises()
+
+    expect(screen.FakeScreen.instances.at(-1)!.focused).toBe(before + 1)
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\r'))
+    wrapper.unmount()
+  })
+
+  it('leaves the focus alone for a keyboard press and for a tap that did not move it', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+
+    const key = wrapper.get('[aria-label="Enter"]').element as HTMLButtonElement
+    const fake = () => screen.FakeScreen.instances.at(-1)!
+
+    // (a) Enter or Space on the focused key: detail 0, the focus stays on the key.
+    key.focus()
+    const beforeKeyboard = fake().focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }))
+    await flushPromises()
+    expect(fake().focused).toBe(beforeKeyboard)
+    expect(document.activeElement).toBe(key)
+
+    // (b) A tap that did not move the focus: the screen keeps it.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    const beforeTap = fake().focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await flushPromises()
+    expect(fake().focused).toBe(beforeTap)
+
+    const frames = sockets[0].ofType('input').map((f) => f.data)
+    expect(frames.slice(-2)).toEqual([btoa('\r'), btoa('\r')])
+    wrapper.unmount()
+  })
+
+  it('sends application-mode arrows when the screen is in application cursor mode', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+    expect(store.phase).toBe('live')
+
+    screen.FakeScreen.instances.at(-1)!.applicationCursorKeys = true
+    await wrapper.get('[aria-label="Up arrow"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1bOA'))
+    await wrapper.get('[aria-label="Left arrow"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1bOD'))
+    await wrapper.get('[aria-label="Escape"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1b'))
     wrapper.unmount()
   })
 
@@ -452,10 +589,32 @@ describe('TerminalPane', () => {
     // jsdom has no layout engine, so the rules are asserted from the sheet
     // the pane ships: hidden by default, shown for a coarse pointer, and each
     // key at the shared touch size.
-    const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
-    expect(source).toMatch(/\.tp-keys \{[^}]*display:\s*none/)
-    expect(source).toMatch(/@media \(pointer: coarse\) \{\s*\.tp-keys \{ display: flex; \}/)
-    expect(source).toMatch(/\.tp-key \{[^}]*min-width:\s*var\(--touch\)[^}]*min-height:\s*var\(--touch\)/)
+    const row = readFileSync(join(__dirname, '..', 'TerminalKeyRow.vue'), 'utf8')
+    expect(row).toMatch(/\.tp-keys \{[^}]*display:\s*none/)
+    expect(row).toMatch(/@media \(pointer: coarse\) \{\s*\.tp-keys \{ display: flex; \}/)
+    expect(row).toMatch(/\.tp-key \{[^}]*min-width:\s*var\(--touch\)[^}]*min-height:\s*var\(--touch\)/)
+
+    // The pane shows its touch sentence only under the same coarse pointer.
+    const pane = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
+    expect(pane).toMatch(/\.tp-hint-touch \{ display: none; \}/)
+    expect(pane).toMatch(/@media \(pointer: coarse\) \{[^}]*\.tp-hint-touch \{ display: inline; \}/s)
+  })
+
+  it('tells a touch user where the shell\'s keys are', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.tp-hint .tp-hint-touch').text())
+      .toBe('On a touch screen, the keys under the terminal send them.')
+    wrapper.unmount()
   })
 
   it('closes the pane without ending its sessions', async () => {
@@ -731,5 +890,119 @@ describe('TerminalPane', () => {
     expect(sockets).toHaveLength(2)
     expect(sockets[1].closed).toBe(false)
     second.unmount()
+  })
+
+  describe('following the chat on screen', () => {
+    async function mountFor(chatId: string) {
+      const wrapper = mount(TerminalPane, { props: { chatId }, attachTo: document.body })
+      await flushPromises()
+      return wrapper
+    }
+
+    it('reports the chat on screen to the store, and again when it changes', async () => {
+      serve([])
+      const store = useTerminalStore()
+      const follow = vi.spyOn(store, 'followChat')
+      const wrapper = await mountFor('chat-a')
+      expect(follow).toHaveBeenCalledWith('chat-a')
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      expect(follow).toHaveBeenCalledWith('chat-b')
+      wrapper.unmount()
+    })
+
+    it('does not focus the screen when a chat switch shows the terminal', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const focusedAfterOpen = screen.FakeScreen.instances[0].focused
+      expect(focusedAfterOpen).toBeGreaterThan(0)
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await flushPromises()
+      expect(store.visible).toBe(false)
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+
+      expect(store.visible).toBe(true)
+      const focused = screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+      expect(focused).toBe(focusedAfterOpen)
+
+      store.hide()
+      await flushPromises()
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const afterPlainOpen = screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+      expect(afterPlainOpen).toBeGreaterThan(focused)
+      wrapper.unmount()
+    })
+
+    /** Chat A open, chat B opened by hand, then back to A: a restore that changes scope. */
+    async function restoreAcrossScopes() {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      return { store, wrapper }
+    }
+    const focusTotal = () => screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+
+    it('does not focus a new screen when a restore changes scope', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      const before = focusTotal()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      expect(store.visible).toBe(true)
+      expect(store.chatSwitch).toBe(true)
+      expect(focusTotal()).toBe(before)
+      wrapper.unmount()
+    })
+
+    it('focuses the new screen of a session the person starts after a restore', async () => {
+      const { store, wrapper } = await restoreAcrossScopes()
+      const before = focusTotal()
+      serve([sessionInfo('s1'), sessionInfo('s-new')])
+      await store.createSession()
+      await flushPromises()
+      expect(store.chatSwitch).toBe(false)
+      expect(focusTotal()).toBeGreaterThan(before)
+      wrapper.unmount()
+    })
+
+    it('does not move focus to the opener when a chat switch hides the terminal', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const opener = document.createElement('button')
+      document.body.appendChild(opener)
+      const wrapper = await mountFor('chat-a')
+      opener.focus()
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const elsewhere = document.createElement('input')
+      document.body.appendChild(elsewhere)
+      elsewhere.focus()
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await flushPromises()
+
+      expect(store.visible).toBe(false)
+      expect(document.activeElement).toBe(elsewhere)
+      wrapper.unmount()
+    })
   })
 })

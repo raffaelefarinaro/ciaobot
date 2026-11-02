@@ -867,6 +867,39 @@ def test_entity_note_refuses_an_unusable_name(tmp_path: Path) -> None:
     assert unusable is None
 
 
+@pytest.mark.parametrize("name", ["Con", "NUL", "Aux", "com1", "LPT9.txt"])
+def test_entity_note_path_refuses_windows_reserved_names(tmp_path: Path, name: str) -> None:
+    vault = _entity_vault(tmp_path)
+
+    assert mp.entity_note_path(vault, mp.PERSON_TYPE_ID, name, registry_root=vault) is None
+    outcome = mp.write_entity_note(vault, mp.PERSON_TYPE_ID, name, "A fact.", registry_root=vault)
+    assert outcome == "refused"
+    assert not list(vault.rglob("*.md"))
+
+    ok = mp.entity_note_path(vault, mp.PERSON_TYPE_ID, "Sofia Rossi", registry_root=vault)
+    assert ok == vault / "People" / "Sofia Rossi.md"
+
+
+def test_portable_name_problem() -> None:
+    assert mp.portable_name_problem("Sofia Rossi") is None
+    assert mp.portable_name_problem("People") is None
+    for bad in ("a:b", "x?", "trail.", "trail ", "CON", "con.md"):
+        assert isinstance(mp.portable_name_problem(bad), str), bad
+
+
+def test_every_note_stem_writer_checks_portable_names() -> None:
+    import ciao
+
+    offenders: list[str] = []
+    for path in Path(ciao.__file__).parent.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "safe_note_stem(" in text and "portable_name_problem(" not in text:
+            offenders.append(path.as_posix())
+    assert offenders == []
+
+
 def test_entity_note_never_overwrites_an_existing_note(tmp_path: Path) -> None:
     """`exists` is not a boolean failure: the caller merges, so nothing is lost."""
     vault = _entity_vault(tmp_path)
@@ -1773,3 +1806,102 @@ def test_read_decisions_reason_is_empty_for_legacy_rows(tmp_path: Path) -> None:
     before = [mp.history_row_id(r, "personal") for r in rows]
     with_reason = [mp.history_row_id({**r, "reason": "why"}, "personal") for r in rows]
     assert before == with_reason
+
+
+# ---- Normalized dedupe key ------------------------------------------------
+
+
+def test_dedupe_key_ignores_case_punctuation_and_dashes() -> None:
+    """Case, punctuation and dash/quote shape do not make a different fact.
+
+    Hex ids, revisions and numbers are kept, so note-edit bullets that name
+    different revisions stay distinct.
+    """
+    assert mp.dedupe_key("Person: Ada – builder; thread 19f4") == mp.dedupe_key(
+        "person: Ada - builder, thread 19f4"
+    )
+    assert mp.dedupe_key("rev 3d1cba6e entry aa") != mp.dedupe_key("rev 3d1cba6f entry aa")
+
+
+def test_append_proposals_drops_punctuation_variant_of_dismissed(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+    mp.record_dismissal(queue, text="Person: Ada - builder; thread 1")
+
+    out = mp.append_proposals(
+        [mp.MemoryProposal(target="people", text="person: Ada - builder, thread 1", source_section="x")],
+        vault,
+    )
+
+    assert out is None
+    assert "Ada" not in queue.read_text(encoding="utf-8")
+
+
+def test_append_proposals_drops_case_variant_of_queued(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    assert mp.append_proposals(
+        [mp.MemoryProposal(target="review", text="Uses pnpm.", source_section="Decisions")],
+        vault,
+    ) is not None
+
+    out = mp.append_proposals(
+        [mp.MemoryProposal(target="review", text="uses PNPM", source_section="Decisions")],
+        vault,
+    )
+
+    assert out is None
+
+
+def test_append_proposals_dedupes_within_batch(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+
+    out = mp.append_proposals(
+        [
+            mp.MemoryProposal(target="review", text="Fact one.", source_section="Decisions"),
+            mp.MemoryProposal(target="review", text="fact one", source_section="Decisions"),
+        ],
+        vault,
+    )
+
+    assert out is not None
+    assert out.read_text(encoding="utf-8").lower().count("fact one") == 1
+
+
+def test_append_proposals_keeps_distinct_revision_texts(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+
+    out = mp.append_proposals(
+        [
+            mp.MemoryProposal(
+                target="review",
+                text="Note edit: revision 3d1cba6e entry aa changed.",
+                source_section="Decisions",
+            ),
+            mp.MemoryProposal(
+                target="review",
+                text="Note edit: revision 3d1cba6f entry aa changed.",
+                source_section="Decisions",
+            ),
+        ],
+        vault,
+    )
+
+    assert out is not None
+    text = out.read_text(encoding="utf-8")
+    assert "3d1cba6e" in text
+    assert "3d1cba6f" in text
+
+
+def test_was_dismissed_matches_normalized_text(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    queue = vault / mp._PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True)
+    queue.write_text(mp._STUB_HEADER, encoding="utf-8")
+    mp.record_dismissal(queue, text="Ada’s rate is high.")
+
+    assert mp.was_dismissed(vault, "ada's rate is high") is True

@@ -3,6 +3,7 @@
 // typed records for InjectedPromptCard.
 // Pure: no state and no Vue imports. The formats mirror the Python builders
 // named next to each pattern; change them together.
+import { classifyError } from './errorAttribution'
 import type { TurnOrigin } from './types'
 
 export type RunVerdict = 'ok' | 'cancelled' | 'failed'
@@ -18,6 +19,7 @@ export interface BackgroundRunEntry {
 export interface LostCliTask { type: string; description: string; taskId: string; command: string }
 export interface ScheduleCommandOutcome { command: string; exitCode: number | null; timedOut: boolean; output: string }
 export type InjectedPrompt =
+  | { kind: 'compaction'; text: string }
   | { kind: 'background_run'; count: number; runs: BackgroundRunEntry[] }
   | { kind: 'cli_task_wake'; count: number; tasks: LostCliTask[] }
   | { kind: 'schedule'; command: ScheduleCommandOutcome | null; prompt: string }
@@ -25,8 +27,11 @@ export type InjectedPrompt =
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
   | { kind: 'retry' }
+  | { kind: 'restart_resume' }
+  | { kind: 'error'; label: string; copy: string; text: string }
+  | { kind: 'handover'; from: string; to: string; sent: string }
 
-// Mirrors ProjectChatManager._build_background_wake_prompt (ciao/web/project_chats.py).
+// Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
 // Mirrors subagent_tracking.CLI_TASK_WAKE_PREFIX + SubagentWatchers.build_cli_task_wake_prompt.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
@@ -40,6 +45,8 @@ const SCHEDULE_PREAMBLE_RE = /^The scheduled command `([\s\S]*?)` ran before thi
 // Mirrors ciao/task_attempts.py build_resume_prompt.
 const TASK_RESUME_RE = /^This is a continuation of the delegated task you were already given in this chat: (.*)\.$/
 const TASK_RESUME_STATE_RE = /^The previous attempt ended as ([a-z_]+)/
+// Mirrors ciao/web/chat_service.py _handover_marker.
+const HANDOVER_RE = /^Handed over from (.+?) to (.+)\.$/
 // Mirrors ciao/webhook_dispatch.py EVENT_PREAMBLE / EVENT_FENCE_OPEN / _neutralize.
 const WEBHOOK_PREAMBLE = 'The block between the webhook-event tags is the event text'
 
@@ -48,6 +55,13 @@ const VERDICTS: Record<string, RunVerdict> = { ok: 'ok', CANCELLED: 'cancelled',
 /** Undo ciao/prompt_fence.py neutralize(): `&lt;tag` / `&lt;/tag` back to `<tag` / `</tag`. */
 export function unneutralize(tag: string, text: string): string {
   return text.replace(new RegExp(`&lt;(/?)${tag}`, 'gi'), `<$1${tag}`)
+}
+
+// Run logs keep the colour codes test runners print; drawn as text they are noise.
+// eslint-disable-next-line no-control-regex -- matching ESC is the point
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '')
 }
 
 function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
@@ -75,7 +89,7 @@ function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
       const tail: string[] = []
       i++
       while (i < lines.length && lines[i] !== '</run-log-tail>') {
-        tail.push(unneutralize('run-log-tail', lines[i]))
+        tail.push(stripAnsi(unneutralize('run-log-tail', lines[i])))
         i++
       }
       current.tail = tail
@@ -156,8 +170,13 @@ function parseWebhook(content: string): InjectedPrompt {
  * are recognised without an origin (history recorded before the field existed).
  * A retry is recognised by its recorded origin and by nothing else: the
  * resend carries the request it repeats, so the text never says "retry".
+ * A restart resume is recognised the same way, by its recorded origin only.
  */
-export function parseInjectedPrompt(content: string | null | undefined, origin?: string): InjectedPrompt | null {
+export function parseInjectedPrompt(
+  content: string | null | undefined,
+  origin?: string,
+  sentContext?: string,
+): InjectedPrompt | null {
   if (!content) return null
   if (origin === undefined || origin === 'background_run') {
     const m = BACKGROUND_WAKE_RE.exec(content)
@@ -170,21 +189,59 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
     if (origin === 'cli_task_wake') return null
   }
   switch (origin as TurnOrigin | string | undefined) {
+    case 'compaction': return { kind: 'compaction', text: content }
     case 'schedule': return parseSchedule(content)
     case 'task_resume': return parseTaskResume(content)
     case 'webhook': return parseWebhook(content)
     case 'update_task': return { kind: 'update_task' }
     case 'retry': return { kind: 'retry' }
+    case 'restart_resume': return { kind: 'restart_resume' }
+    case 'handover': return parseHandover(content, sentContext)
     default: return null
   }
 }
 
-export interface InjectedSummary { label: string; facts: string; tone: RunVerdict | null }
+function parseHandover(content: string, sentContext: string | undefined): InjectedPrompt | null {
+  const m = HANDOVER_RE.exec(content.trim())
+  if (!m) return null
+  return { kind: 'handover', from: m[1], to: m[2], sent: sentContext ?? '' }
+}
+
+/** A failed turn's error, drawn as a notice labelled with its cause. */
+export function errorNoticePrompt(text: string): InjectedPrompt {
+  const { label, copy } = classifyError(text)
+  return { kind: 'error', label, copy, text }
+}
+
+const ERROR_HINT_MAX = 200
+
+/** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
+function errorHint(text: string): string {
+  const line = text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+  return line.length > ERROR_HINT_MAX ? `${line.slice(0, ERROR_HINT_MAX)}…` : line
+}
+
+/** `hint` is the failure line shown while the card is collapsed. */
+export interface InjectedSummary { label: string; facts: string; tone: RunVerdict | null; hint?: string }
+
+const BARE_EXIT_RE = /^exit -?\d+$/
+
+/** Why a run did not succeed: its error, unless that only repeats the exit code, else its last log line, else nothing. */
+export function runFailureHint(run: BackgroundRunEntry): string {
+  if (run.verdict === 'ok') return ''
+  if (run.error && !BARE_EXIT_RE.test(run.error)) return run.error
+  for (let i = run.tail.length - 1; i >= 0; i--) {
+    const line = run.tail[i].trim()
+    if (line) return line
+  }
+  return ''
+}
 
 const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
 
 export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: string): InjectedSummary {
   switch (prompt.kind) {
+    case 'compaction': return { label: 'Context compacted', facts: 'Conversation summary available', tone: null }
     case 'background_run': {
       const label = prompt.count === 1 ? 'Background run finished' : `${prompt.count} background runs finished`
       const runs = prompt.runs
@@ -200,6 +257,14 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
           .join(' · ')
       }
       const tone = TONE_ORDER.find(v => runs.some(r => r.verdict === v)) ?? null
+      // The first failed run with something to say, else the first cancelled one.
+      for (const verdict of ['failed', 'cancelled'] as const) {
+        for (const run of runs) {
+          if (run.verdict !== verdict) continue
+          const hint = runFailureHint(run)
+          if (hint) return { label, facts, tone, hint: runs.length > 1 ? `${run.label}: ${hint}` : hint }
+        }
+      }
       return { label, facts, tone }
     }
     case 'cli_task_wake':
@@ -222,5 +287,11 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
+    case 'restart_resume':
+      return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
+    case 'error':
+      return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
+    case 'handover':
+      return { label: 'Handed over', facts: `${prompt.from} → ${prompt.to}`, tone: null }
   }
 }

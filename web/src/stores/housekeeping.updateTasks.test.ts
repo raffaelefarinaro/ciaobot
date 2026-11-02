@@ -526,3 +526,281 @@ describe('the two clocks', () => {
     expect(store.updateTasks[0].updated_at).toBe('2026-09-05T18:30:00+00:00')
   })
 })
+
+function held<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (err: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+describe('source health', () => {
+  it('update tasks: first failure is unavailable', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    await expect(store.refreshUpdateTasks('personal')).resolves.toBeUndefined()
+
+    expect(store.updateTasksHealth.status).toBe('unavailable')
+    expect(store.updateTasksHealth.lastSuccessAt).toBe('')
+    expect(store.updateTasksHealth.error).not.toBe('')
+    expect(store.updateTasks).toEqual([])
+  })
+
+  it('update tasks: success with an empty list is ready', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    expect(store.updateTasksHealth.status).toBe('ready')
+    expect(Number.isNaN(Date.parse(store.updateTasksHealth.lastSuccessAt))).toBe(false)
+    expect(store.updateTasksHealth.error).toBe('')
+  })
+
+  it('update tasks: success then failure is stale and keeps rows', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-10-26T10:00:00Z'))
+      const store = useHousekeepingStore()
+      vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+      await store.refreshUpdateTasks('personal')
+      const first = store.updateTasksHealth.lastSuccessAt
+      expect(first).toBe('2026-10-26T10:00:00.000Z')
+
+      vi.setSystemTime(new Date('2026-10-26T10:05:00Z'))
+      vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+      await store.refreshUpdateTasks('personal')
+      expect(store.updateTasksHealth.status).toBe('stale')
+      expect(store.updateTasksHealth.lastSuccessAt).toBe(first)
+      expect(store.updateTasksHealth.error).toBe('offline')
+      expect(store.updateTasks).toHaveLength(1)
+
+      vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+      await store.refreshUpdateTasks('personal')
+      expect(store.updateTasksHealth.status).toBe('ready')
+      expect(store.updateTasksHealth.error).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('update tasks: A, B, A rejects the late A response', async () => {
+    const store = useHousekeepingStore()
+    const a1 = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(a1.promise as never)
+    const slow = store.refreshUpdateTasks('personal')
+
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
+    await store.refreshUpdateTasks('work')
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    a1.resolve(listing([task({ id: 'a1' })]))
+    await slow
+    expect(store.updateTasks.map((row) => row.id)).toEqual(['a2'])
+    expect(store.updateTasksHealth.status).toBe('ready')
+  })
+
+  it('update tasks: A, B, A late rejection does not demote health', async () => {
+    const store = useHousekeepingStore()
+    const a1 = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(a1.promise as never)
+    const slow = store.refreshUpdateTasks('personal')
+
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
+    await store.refreshUpdateTasks('work')
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    a1.reject(new Error('late'))
+    await slow
+    expect(store.updateTasksHealth.status).toBe('ready')
+    expect(store.updateTasksHealth.error).toBe('')
+    expect(store.updateTasksWorkspace).toBe('personal')
+  })
+
+  it('update tasks: workspace switch resets health to checking', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+    expect(store.updateTasksHealth.status).toBe('ready')
+
+    const work = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(work.promise as never)
+    const pending = store.refreshUpdateTasks('work')
+    expect(store.updateTasksHealth.status).toBe('checking')
+    expect(store.updateTasksHealth.lastSuccessAt).toBe('')
+    expect(store.updateTasks).toEqual([])
+
+    work.resolve(listing([]))
+    await pending
+    expect(store.updateTasksHealth.status).toBe('ready')
+  })
+
+  it('update tasks: a refresh in the same workspace never flips ready back to checking', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    const again = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(again.promise as never)
+    const pending = store.refreshUpdateTasks('personal')
+    expect(store.updateTasksHealth.status).toBe('ready')
+    again.resolve(listing([task()]))
+    await pending
+  })
+
+  it('update tasks: a pre-dismiss poll cannot restore the task', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    const poll = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    const slow = store.refreshUpdateTasks('personal')
+
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true,
+      task_id: 'review-legacy-rows',
+      tasks: [task({ status: 'dismissed', suppressed: true })],
+    } as never)
+    await store.dismissUpdateTask(task())
+    expect(store.updateTasksHealth.status).toBe('ready')
+
+    poll.resolve(listing([task()]))
+    await slow
+    expect(store.updateTasks.map((row) => row.status)).toEqual(['dismissed'])
+    expect(store.updateTasksHealth.status).toBe('ready')
+  })
+
+  it('update tasks: a pre-dismiss poll that rejects late is dropped, not stale', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    const poll = held<UpdateTasksResponse>()
+    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    const slow = store.refreshUpdateTasks('personal')
+
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true,
+      task_id: 'review-legacy-rows',
+      tasks: [task({ status: 'dismissed', suppressed: true })],
+    } as never)
+    await store.dismissUpdateTask(task())
+
+    poll.reject(new Error('late'))
+    await slow
+    expect(store.updateTasks.map((row) => row.status)).toEqual(['dismissed'])
+    expect(store.updateTasksHealth.status).toBe('ready')
+    expect(store.updateTasksHealth.error).toBe('')
+  })
+
+  it('update tasks: a dismiss reply that carried rows counts as a fresh read', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    await store.refreshUpdateTasks('personal')
+    expect(store.updateTasksHealth.status).toBe('unavailable')
+
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true,
+      task_id: 'review-legacy-rows',
+      tasks: [task({ status: 'dismissed', suppressed: true })],
+    } as never)
+    await store.dismissUpdateTask(task())
+    expect(store.updateTasksHealth.status).toBe('ready')
+    expect(store.updateTasksHealth.error).toBe('')
+  })
+
+  it('update tasks: coverage gap is distinguishable from zero tasks', async () => {
+    const store = useHousekeepingStore()
+    for (const [reason, blocked] of [
+      ['no_eligible_task', true],
+      ['not_substantiated', true],
+      ['nothing_offered', false],
+    ] as const) {
+      vi.mocked(api.get).mockResolvedValueOnce({
+        tasks: [],
+        coverage_gap: { reason, detail: 'x' },
+      } as never)
+      await store.refreshUpdateTasks('personal')
+      expect(store.updateTasksCoverageBlocked).toBe(blocked)
+      expect(store.updateTasksHealth.status).toBe('ready')
+    }
+  })
+
+  it('actions: first failure is unavailable, then ready, then stale', async () => {
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    await store.refresh()
+    expect(store.actionsHealth.status).toBe('unavailable')
+    expect(store.actionsHealth.lastSuccessAt).toBe('')
+
+    const action = { id: 'x' } as never
+    vi.mocked(api.get).mockResolvedValueOnce({ actions: [action] } as never)
+    await store.refresh()
+    expect(store.actionsHealth.status).toBe('ready')
+    expect(store.actionsHealth.error).toBe('')
+    const first = store.actionsHealth.lastSuccessAt
+
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    await store.refresh()
+    expect(store.actionsHealth.status).toBe('stale')
+    expect(store.actionsHealth.lastSuccessAt).toBe(first)
+    expect(store.actions).toHaveLength(1)
+  })
+
+  it('actions: a refresh opened before a dismiss cannot restore the action', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [{ id: 'x' }] as never
+    const poll = held<{ actions: unknown[] }>()
+    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    const slow = store.refresh()
+
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, actions: [] } as never)
+    await store.dismiss('x')
+    poll.resolve({ actions: [{ id: 'x' }] })
+    await slow
+
+    expect(store.actions).toEqual([])
+    expect(store.actionsHealth.status).toBe('ready')
+  })
+
+  it('actions: a refresh opened before a run cannot restore the action', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [{ id: 'x' }] as never
+    const poll = held<{ actions: unknown[] }>()
+    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    const slow = store.refresh()
+
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, summary: 'done', actions: [] } as never)
+    await store.run('x')
+    poll.resolve({ actions: [{ id: 'x' }] })
+    await slow
+
+    expect(store.actions).toEqual([])
+    expect(store.actionsHealth.status).toBe('ready')
+  })
+
+  it('init: repeated init does not add timers or listeners', async () => {
+    vi.useFakeTimers()
+    try {
+      const interval = vi.spyOn(window, 'setInterval')
+      const listen = vi.spyOn(window, 'addEventListener').mockImplementation(() => {})
+      vi.mocked(api.get).mockImplementation(((path: string) =>
+        Promise.resolve(path === '/api/housekeeping' ? { actions: [] } : { tasks: [] })) as never)
+      const store = useHousekeepingStore()
+      store.init()
+      store.init()
+      store.init()
+
+      expect(interval).toHaveBeenCalledTimes(1)
+      expect(listen.mock.calls.filter(([type]) => type === 'focus')).toHaveLength(1)
+      expect(api.get).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(api.get).toHaveBeenCalledTimes(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

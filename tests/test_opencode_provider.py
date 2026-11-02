@@ -37,6 +37,9 @@ from ciao.providers.opencode import (
     _form_field_active,
     _validate_form_field,
     _projected_message,
+    native_shell_run,
+    native_subagent_run,
+    native_wake_run,
     _log_catalog_change,
     _read_v2_messages,
     _server_version_error,
@@ -761,6 +764,55 @@ def test_v2_flat_messages_normalize_at_the_provider_boundary():
         "reasoning", "text", "tool",
     ]
     assert normalized["parts"][2]["tool"] == "shell"
+
+
+def test_projected_message_keeps_synthetic_shell_items():
+    synthetic = _projected_message({
+        "id": "msg_s",
+        "type": "synthetic",
+        "metadata": {"source": "shell", "shellID": "sh_1", "exit": 3},
+        "description": "CMD",
+        "text": "<shell id=\"sh_1\">\nOUT\n</shell>",
+    })
+    assert synthetic is not None
+    assert synthetic["info"]["role"] == "synthetic"
+    assert synthetic["info"]["metadata"]["shellID"] == "sh_1"
+    assert "text" not in synthetic["info"] and "type" not in synthetic["info"]
+    assert synthetic["parts"] == [
+        {"type": "text", "text": "<shell id=\"sh_1\">\nOUT\n</shell>", "synthetic": True}
+    ]
+    user = _projected_message({"id": "u", "type": "user", "text": "hi"})
+    assert user is not None and user["info"]["role"] == "user"
+    assistant = _projected_message({"id": "a", "type": "assistant", "content": []})
+    assert assistant is not None and assistant["info"]["role"] == "assistant"
+
+
+def test_native_shell_run_verdicts():
+    def run(exit_code, state="completed", body="OUT", source="shell", description="CMD"):
+        text = f'<shell id="sh_1" state="{state}" command="the cmd">\n{body}\n\n</shell>'
+        return native_shell_run(
+            text, description,
+            {"source": source, "shellID": "sh_1", "state": state, "exit": exit_code},
+        )
+
+    ok = run(0)
+    assert ok is not None
+    assert (ok["status"], ok["exit_code"], ok["run_id"], ok["label"]) == ("ok", 0, "sh_1", "CMD")
+    assert ok["last_lines"] == ["OUT"] and ok["error"] == "" and ok["log_path"] is None
+    failed = run(3, body="PROBE_A_DONE\nExited with code 3")
+    assert failed is not None
+    assert failed["status"] == "failed" and failed["exit_code"] == 3
+    assert failed["last_lines"] == ["PROBE_A_DONE"]
+    killed = run(None, state="killed")
+    assert killed is not None and killed["status"] == "cancelled"
+    assert run(0, source="other") is None
+    assert native_shell_run("x", None, None) is None
+    silent = run(0, body="")
+    assert silent is not None and silent["last_lines"] == []
+    no_description = run(0, description=None)
+    assert no_description is not None and no_description["label"] == "the cmd"
+    long = run(0, body="\n".join(f"l{i}" for i in range(80)))
+    assert long is not None and long["last_lines"] == [f"l{i}" for i in range(30, 80)]
 
 
 def test_v2_idle_messages_keep_the_recovery_discriminator():
@@ -5279,3 +5331,38 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
     assert config["skills"]["paths"] == [str(repo / ".claude" / "skills")]
     assert config["tool_output"] == {"max_lines": 1000, "max_bytes": 20_000}
     provider._client = None
+
+
+def test_native_subagent_run_verdicts():
+    def run(state="completed", body="REPORT\nline two", description="Review"):
+        text = (
+            f'<subagent sessionID="ses_c" state="{state}" description="x">\n'
+            f"{body}\n</subagent>"
+        )
+        return native_subagent_run(
+            text, description,
+            {"source": "subagent", "childID": "ses_c", "agent": "General", "state": state},
+        )
+
+    ok = run()
+    assert ok is not None
+    assert (ok["status"], ok["exit_code"], ok["run_id"], ok["label"]) == (
+        "ok", None, "ses_c", "Review"
+    )
+    assert ok["last_lines"] == ["REPORT", "line two"]
+    failed = run(state="error")
+    assert failed is not None and failed["status"] == "failed"
+    cancelled = run(state="cancelled")
+    assert cancelled is not None and cancelled["status"] == "cancelled"
+    assert run(description=None)["label"] == "General"  # type: ignore[index]
+    assert native_subagent_run("x", None, {"source": "shell"}) is None
+    shell = native_wake_run(
+        '<shell id="sh_1" state="completed" command="c">\nOUT\n</shell>', "c",
+        {"source": "shell", "shellID": "sh_1", "state": "completed", "exit": 0},
+    )
+    assert shell is not None and shell["run_id"] == "sh_1"
+    sub = native_wake_run(
+        "<subagent>\nR\n</subagent>", "d",
+        {"source": "subagent", "childID": "c", "state": "completed"},
+    )
+    assert sub is not None and sub["run_id"] == "c"

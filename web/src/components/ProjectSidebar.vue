@@ -31,6 +31,8 @@
         </button>
       </div>
           <span class="history-divider" aria-hidden="true"></span>
+          <NotificationBell @navigate="emit('chat-selected')" />
+          <span class="history-divider" aria-hidden="true"></span>
         </template>
       <button
         class="toggle-btn touch-hit"
@@ -117,15 +119,7 @@
               <span class="workspace-scope-name">Workspace settings</span>
             </router-link>
             <router-link
-              to="/settings/workspaces"
-              role="menuitem"
-              class="workspace-scope-option workspace-scope-link"
-              @click="workspaceScopeOpen = false"
-            >
-              <span class="workspace-scope-name">Manage workspaces</span>
-            </router-link>
-            <router-link
-              to="/settings/workspaces#new-workspace"
+              to="/settings/workspace#new-workspace"
               role="menuitem"
               class="workspace-scope-option workspace-scope-new"
               @click="workspaceScopeOpen = false"
@@ -161,7 +155,7 @@
             :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
             title="Home"
             :data-count="todayCount || undefined"
-            :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
+            :aria-label="(todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : 'Home') + (isAnyChatWorking ? ' (assistant is working)' : '')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -175,7 +169,7 @@
 
             </span>
             <span class="nav-item-label" aria-hidden="true">Home</span>
-            <span v-if="isAnyChatWorking" class="spinner-dot" aria-hidden="true"></span>
+            <ActivityGlyph v-if="isAnyChatWorking" kind="working" />
           </router-link>
           <router-link
             to="/schedules"
@@ -201,7 +195,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
-            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
           </router-link>
           <router-link
             to="/memory"
@@ -253,7 +247,7 @@
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
-               (/settings/providers, /settings/workspaces, ...) and none of them match
+               (/settings/providers, ...) and none of them match
                the /settings record, so active-class left this item inactive on
                nearly every settings page - and with it the label collapsed. The
                sibling links already key off mode for the same reason. -->
@@ -278,7 +272,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
-            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
           </router-link>
         </nav>
 
@@ -307,6 +301,9 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
         </button>
       </div>
+      <!-- 'chat-selected' is a misnomer here: it is the event ChatLayout already
+           maps to collapsing the mobile drawer. -->
+      <NotificationBell class="sidebar-rail-bell" @navigate="emit('chat-selected')" />
     </div>
 
     <!-- No section title here: the nav pill above already names this view.
@@ -341,7 +338,7 @@
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
           </div>
@@ -374,10 +371,9 @@
                 <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
                   title="This automation is working"
-                />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                ><ActivityGlyph kind="working" /></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
         </div>
@@ -398,10 +394,9 @@
                 <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
                   title="This automation is working"
-                />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                ><ActivityGlyph kind="working" /></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
           </div>
@@ -611,12 +606,26 @@
             </svg>
           </button>
         </div>
-        <div class="project-list">
+        <TransitionGroup
+          :ref="setProjectListRoot"
+          tag="div"
+          name="drag-reorder"
+          class="project-list"
+          :class="{ 'drag-settling': projectDrag.settling.value }"
+        >
+          <!-- One element per entry, never a fragment: TransitionGroup moves
+               its direct children, and the placeholder shares that shape. -->
           <div
-            v-for="project in store.workspaceProjects"
-            :key="project.project_id"
-            class="project-group"
+            v-for="{ project } in projectEntries"
+            :key="project?.project_id ?? 'drag-placeholder'"
+            :class="project ? {
+              'project-group': true,
+              'drag-source': projectDrag.isSource(project.project_id),
+            } : 'drag-placeholder'"
+            :data-project-id="project?.project_id"
+            :aria-hidden="project ? undefined : 'true'"
           >
+          <template v-if="project">
             <DropdownMenuRoot
               :open="projectMenu === project.project_id"
               :modal="false"
@@ -627,13 +636,10 @@
                 :class="{
                   'is-system': project.is_auto,
                   'drag-over': isDragOverProject(project),
-                  'dragging': dragProjectId === project.project_id,
                 }"
-                :draggable="isDraggable(project)"
-                @dragstart="onProjectDragStart(project, $event)"
+                v-bind="isReorderable(project) ? projectDrag.surfaceHandlers(project.project_id, PROJECTS_SCOPE) : {}"
                 @dragover.prevent="onProjectDragOver(project)"
                 @drop.prevent="onProjectDrop(project)"
-                @dragend="onProjectDragEnd"
                 @contextmenu.prevent="openProjectMenuAt($event, project)"
               >
                 <button
@@ -648,6 +654,7 @@
                   type="button"
                   class="project-name"
                   :data-workspace-color="colorForProject(project.workspace)"
+                  :data-drag-primary="isReorderable(project) ? '' : undefined"
                   v-if="editingProject !== project.project_id"
                   @click="openProject(project.project_id)"
                   title="Open project page"
@@ -657,7 +664,7 @@
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
                        dot when a chat wants the user (accent if it waits for an
-                       answer), else the working ring - never a count. A chat's
+                       answer), else the working grid - never a count. A chat's
                        background run adds the static run glyph beside either. -->
                   <template v-if="!expandedProjects.has(project.project_id)">
                     <span
@@ -669,18 +676,12 @@
                       :aria-label="projectAttentionLabel(project.project_id)"
                     />
                     <span
-                      v-else-if="store.projectIsStreaming(project.project_id)"
-                      class="rollup-ring"
+                      v-else-if="store.projectChats(project.project_id).some(chat => store.chatIsWorking(chat.chat_id))"
+                      class="project-working"
                       title="A chat in this project is working"
                       aria-label="A chat in this project is working"
-                    ><span class="rollup-ring-core" aria-hidden="true" /></span>
-                    <span
-                      v-if="projectRunCount(project.project_id) > 0"
-                      class="project-run-rollup"
                       role="img"
-                      :title="projectRunsLabel(project.project_id)"
-                      :aria-label="projectRunsLabel(project.project_id)"
-                    ><ActivityGlyph kind="run" /></span>
+                    ><ActivityGlyph kind="working" /></span>
                   </template>
                 </button>
                 <input
@@ -728,10 +729,28 @@
                   :collision-padding="8"
                   :position-strategy="'fixed'"
                   :update-position-strategy="'always'"
+                  @close-auto-focus="onProjectMenuCloseAutoFocus"
                 >
                   <DropdownMenuItem as-child>
                     <button @click="startEditProject(project.project_id)">Rename</button>
                   </DropdownMenuItem>
+                  <template v-if="isReorderable(project)">
+                    <DropdownMenuItem as-child :disabled="projectPosition(project.project_id) <= 0">
+                      <button
+                        :disabled="projectPosition(project.project_id) <= 0"
+                        @click="moveProjectFromMenu(project, 'up')"
+                      >Move up</button>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      as-child
+                      :disabled="projectPosition(project.project_id) >= reorderableIds.length - 1"
+                    >
+                      <button
+                        :disabled="projectPosition(project.project_id) >= reorderableIds.length - 1"
+                        @click="moveProjectFromMenu(project, 'down')"
+                      >Move down</button>
+                    </DropdownMenuItem>
+                  </template>
                   <DropdownMenuItem as-child>
                     <button @click="confirmDeleteProject(project.project_id)">Delete</button>
                   </DropdownMenuItem>
@@ -894,8 +913,10 @@
 
               </template>
             </div>
+          </template>
           </div>
-        </div>
+        </TransitionGroup>
+        <div class="sr-only" role="status" aria-live="polite">{{ projectLiveMessage }}</div>
         </template>
       </div>
 
@@ -950,7 +971,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, shallowRef } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -973,11 +994,14 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
+import { useDragSort, type DragCommit } from '../composables/useDragSort'
+import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
 import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
+import NotificationBell from './NotificationBell.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
@@ -1145,7 +1169,7 @@ const memoryCount = computed(() => {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
   return proposals.scopedRows(workspace).length + retirement
 })
-// Settings has no count. A blocking action is the warning dot like any other
+// Settings has no count. A blocking action is the alert glyph like any other
 // failure; an available update is news, not trouble, so it is a muted word.
 const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
 
@@ -1196,18 +1220,6 @@ function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
   const facts = codeBadgeTitle(chat, repo)
   if (facts) lines.push(facts)
   return lines.join('\n')
-}
-
-// Background command runs across this project's visible chats. A run can sit
-// in a chat for hours (a dev server), so a collapsed project says it has one.
-function projectRunCount(projectId: string): number {
-  return store.projectChats(projectId)
-    .reduce((n, chat) => n + (store.backgroundRuns[chat.chat_id]?.length || 0), 0)
-}
-
-function projectRunsLabel(projectId: string): string {
-  const n = projectRunCount(projectId)
-  return n === 1 ? '1 background run in this project' : `${n} background runs in this project`
 }
 
 function workspaceInitial(workspace: string): string {
@@ -1416,9 +1428,11 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-// One definition, in the store: this used to OR the sources by hand and so
-// missed background runs entirely when they were added.
-const isAnyChatWorking = computed(() => store.anyChatBusy)
+// Match Home's visible chats and selected workspace; the store owns the
+// definition of working, including background agents and shells.
+const isAnyChatWorking = computed(() => store.activeChatsAll.some(
+  chat => store.projectFor(chat.chat_id)?.workspace === store.activeWorkspace && store.chatIsWorking(chat.chat_id),
+))
 
 const hasAutomationWarning = computed(() => {
   // Scoped like `missedCountFor`, so the colour and the count describe the
@@ -1472,6 +1486,7 @@ function contextReference(event: MouseEvent): MenuReference {
 
 function onProjectMenuOpenChange(projectId: string, nextOpen: boolean): void {
   if (nextOpen) {
+    projectMenuAction = false
     projectMenu.value = projectId
     return
   }
@@ -1578,32 +1593,119 @@ function selectChat(chatId: string) {
 }
 
 // ── Drag-to-reorder projects ──────────────────────────────────────────────
-// General is auto-managed and pinned to the top (order 0) by the server, so
-// it isn't draggable; everything else can be dragged into a new order.
-const dragProjectId = ref<string | null>(null)
+// Projects are sorted by the pointer engine (useDragSort) through their header
+// surface, with Move up / Move down in the menu as the keyboard and touch path.
+// General and the auto-managed projects are pinned: they cannot start a drag,
+// are not in the engine's list, and render first. Chats still move between
+// projects with native HTML drag and drop.
+const PROJECTS_SCOPE = 'projects'
 const dragChatId = ref<string | null>(null)
 const dragChatProjectId = ref<string | null>(null)
 const dragOverProjectId = ref<string | null>(null)
 
-function isDraggable(project: ProjectInfo): boolean {
-  return project.name !== 'General' && !project.is_auto
+function isReorderable(project: ProjectInfo): boolean {
+  return !project.is_auto
 }
 
-function onProjectDragStart(project: ProjectInfo, event: DragEvent) {
-  if (!isDraggable(project)) return
-  dragChatId.value = null
-  dragChatProjectId.value = null
-  dragProjectId.value = project.project_id
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    // Firefox requires data to be set for the drag to start.
-    event.dataTransfer.setData('text/plain', project.project_id)
-  }
+const reorderableIds = computed(() => store.reorderableProjects.map(p => p.project_id))
+const projectListRoot = shallowRef<HTMLElement | null>(null)
+// A function ref on the TransitionGroup receives its instance; the engine
+// needs the list element.
+function setProjectListRoot(instance: unknown) {
+  projectListRoot.value = (instance as { $el?: HTMLElement } | null)?.$el ?? null
 }
+const projectSortMessage = ref('')
+
+function projectPosition(projectId: string): number {
+  return reorderableIds.value.indexOf(projectId)
+}
+
+function projectGroupEl(projectId: string): HTMLElement | null {
+  const groups = projectListRoot.value?.querySelectorAll<HTMLElement>('[data-project-id]') ?? []
+  for (const group of groups) if (group.dataset.projectId === projectId) return group
+  return null
+}
+
+function projectActionsTrigger(id: string): HTMLElement | null {
+  return projectGroupEl(id)?.querySelector<HTMLElement>('.project-actions-btn') ?? null
+}
+
+const projectMenuFocus = useMenuFocusReturn()
+/**
+ * True while a Move action owns its own focus return. Reka would otherwise put
+ * focus back on the trigger a tick later, racing the write and stealing focus.
+ */
+let projectMenuAction = false
+
+function onProjectMenuCloseAutoFocus(event: Event): void {
+  // The flag stays set until this menu next opens, so every close-auto-focus a
+  // Move action can produce is prevented, not just the first one.
+  if (projectMenuAction) event.preventDefault()
+}
+
+/**
+ * The project menu's Move up / Move down. The menu closes on the item's click and
+ * focus falls to the document; return it to the row's actions trigger after the
+ * write, unless the user has focused or pressed elsewhere in the meantime.
+ */
+function moveProjectFromMenu(project: ProjectInfo, direction: 'up' | 'down'): void {
+  projectMenuAction = true
+  const action = projectMenuFocus.arm(projectActionsTrigger(project.project_id))
+  void projectDrag.move(project.project_id, PROJECTS_SCOPE, direction).then(async () => {
+    // Let the menu finish closing before deciding where focus is; a move refused
+    // by another in-flight write settles on the same tick as the click.
+    await nextTick()
+    await action.restore(() => projectActionsTrigger(project.project_id))
+  })
+}
+
+async function commitProjectOrder(commit: DragCommit): Promise<boolean> {
+  const expected = reorderableIds.value
+  const ids = expected.filter(id => id !== commit.id)
+  ids.splice(commit.index, 0, commit.id)
+  const result = await store.reorderProjects(ids, expected)
+  if (result.ok) return true
+  projectSortMessage.value = `Could not save the project order. ${result.message}`
+  store.pushErrorToast('Could not save the project order', result.message)
+  return false
+}
+
+const projectDrag = useDragSort({
+  root: projectListRoot,
+  scopes: () => [{ id: PROJECTS_SCOPE, el: () => projectListRoot.value }],
+  itemIds: () => reorderableIds.value,
+  itemEl: projectGroupEl,
+  canDrag: id => reorderableIds.value.includes(id) && editingProject.value !== id,
+  label: id => store.workspaceProjects.find(p => p.project_id === id)?.name ?? 'project',
+  scopeLabel: () => 'projects',
+  onCommit: commitProjectOrder,
+})
+
+// The pinned rows first, as the server orders them, then the sortable ones
+// with the engine's placeholder.
+const projectEntries = computed<Array<{ project: ProjectInfo | null }>>(() => {
+  const byId = new Map(store.workspaceProjects.map(p => [p.project_id, p]))
+  const pinned = store.workspaceProjects.filter(p => !isReorderable(p))
+  const sortable = projectDrag.entriesFor(PROJECTS_SCOPE).map(entry =>
+    entry.kind === 'placeholder' ? null : (byId.get(entry.id) ?? null),
+  )
+  return [...pinned.map(project => ({ project })), ...sortable.map(project => ({ project }))]
+})
+
+// Mine wins over the engine's own text, so a failed save is not overwritten by
+// the engine's generic one; a new pickup clears it.
+const projectLiveMessage = computed(() => projectSortMessage.value || projectDrag.announcement.value)
+watch(() => projectDrag.drag.value?.id, id => { if (id) projectSortMessage.value = '' })
+
+watch(() => store.activeWorkspace, () => projectDrag.cancel())
+watch(() => store.projectOrderEpoch, () => {
+  if (!projectDrag.drag.value) return
+  projectDrag.cancel()
+  projectSortMessage.value = 'Projects were reordered elsewhere, so your move was cancelled.'
+})
 
 function onChatDragStart(chat: ChatInfo, event: DragEvent) {
   if (chat.local === false) return
-  dragProjectId.value = null
   dragChatId.value = chat.chat_id
   dragChatProjectId.value = chat.project_id
   if (event.dataTransfer) {
@@ -1615,42 +1717,21 @@ function onChatDragStart(chat: ChatInfo, event: DragEvent) {
 }
 
 function onProjectDragOver(project: ProjectInfo) {
-  if (dragChatId.value) {
-    if (dragChatProjectId.value === project.project_id) {
-      dragOverProjectId.value = null
-      return
-    }
-    dragOverProjectId.value = project.project_id
+  if (!dragChatId.value) return
+  if (dragChatProjectId.value === project.project_id) {
+    dragOverProjectId.value = null
     return
   }
-  if (dragProjectId.value && dragProjectId.value !== project.project_id) {
-    dragOverProjectId.value = project.project_id
-  }
+  dragOverProjectId.value = project.project_id
 }
 
 function onProjectDrop(target: ProjectInfo) {
   const draggedChatId = dragChatId.value
   const draggedChatProjectId = dragChatProjectId.value
-  if (draggedChatId) {
-    onChatDragEnd()
-    if (!draggedChatProjectId || draggedChatProjectId === target.project_id) return
-    void moveChatToProject(draggedChatId, target.project_id)
-    return
-  }
-  const draggedId = dragProjectId.value
-  onProjectDragEnd()
-  if (!draggedId || draggedId === target.project_id) return
-  const ids = store.workspaceProjects.map(p => p.project_id)
-  const from = ids.indexOf(draggedId)
-  const to = ids.indexOf(target.project_id)
-  if (from < 0 || to < 0 || from === to) return
-  ids.splice(to, 0, ids.splice(from, 1)[0])
-  void store.reorderProjects(ids)
-}
-
-function onProjectDragEnd() {
-  dragProjectId.value = null
-  dragOverProjectId.value = null
+  if (!draggedChatId) return
+  onChatDragEnd()
+  if (!draggedChatProjectId || draggedChatProjectId === target.project_id) return
+  void moveChatToProject(draggedChatId, target.project_id)
 }
 
 function onChatDragEnd() {
@@ -1660,8 +1741,7 @@ function onChatDragEnd() {
 }
 
 function isDragOverProject(project: ProjectInfo): boolean {
-  if (dragOverProjectId.value !== project.project_id) return false
-  return dragProjectId.value !== project.project_id || dragChatProjectId.value !== project.project_id
+  return dragOverProjectId.value === project.project_id
 }
 
 function toggleProject(id: string) {
@@ -1933,7 +2013,14 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .sidebar-header--expanded .toggle-btn {
+  flex: none;
   margin-left: auto;
+}
+
+/* Touch targets grow the row's controls to 44px boxes; the tighter gap keeps
+   the collapse control inside the 320px phone drawer. */
+@media (pointer: coarse) {
+  .sidebar-header--expanded .sidebar-brand-row { gap: 6px; }
 }
 
 /* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
@@ -1970,7 +2057,9 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-history-rail {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   padding: 8px 0;
 }
 .sidebar-history--rail {
@@ -2002,7 +2091,7 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--border);
 }
 /* The history pair already pushes the row's trailing group right. */
-.sidebar-header--expanded .sidebar-history + .history-divider + .toggle-btn { margin-left: 0; }
+.sidebar-header--expanded .history-divider ~ .toggle-btn { margin-left: 0; }
 
 .toggle-btn {
   background: none;
@@ -2021,30 +2110,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
 
-/* Pulsing dot used inline next to project / chat names to signal activity.
-   A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
-   thin two-tone ring spin which is too subtle at this size to notice. */
-.spinner-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-left: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: ciao-pulse 1.1s ease-in-out infinite;
-  vertical-align: middle;
-  flex-shrink: 0;
-}
-
-@keyframes ciao-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinner-dot { animation-duration: 2.2s; }
-}
-
 .workspace-status-dot,
 .rollup-needs-dot {
   width: 8px;
@@ -2052,46 +2117,6 @@ async function confirmDeleteChat(chatId: string) {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--accent);
-}
-
-/* Working, at rollup level. Same treatment as the chat transcript's own
-   activity pulse and ChatSignals: a solid accent dot with a halo plus an
-   expanding ring. The outlined ring this replaced was nearly invisible at this
-   size against the sidebar ground. */
-.rollup-ring,
-.workspace-status-ring {
-  position: relative;
-  display: inline-flex;
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent);
-  animation: ciao-pulse 1.1s ease-in-out infinite;
-}
-
-.rollup-ring::before,
-.workspace-status-ring::before {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.45;
-  animation: ciao-ring 1.1s ease-out infinite;
-  pointer-events: none;
-}
-
-/* The inner core is now the dot itself, so the nested span is decorative. */
-.workspace-status-core,
-.rollup-ring-core {
-  display: none;
-}
-
-@keyframes ciao-ring {
-  0% { transform: scale(0.6); opacity: 0.45; }
-  100% { transform: scale(1.6); opacity: 0; }
 }
 
 /* Scrollable area for chats and projects */
@@ -2284,8 +2309,8 @@ async function confirmDeleteChat(chatId: string) {
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
    carries the full sentence). One colour role per signal: every count is
-   the same muted numeral, a failure is the warning dot (.nav-item-alert),
-   live work is the spinner dot, and the accent marks only the current row.
+   the same muted numeral, a failure is the accent alert glyph (.nav-item-alert),
+   live work is the pixel grid, and the accent marks only the current row.
    Icons never change colour. */
 .nav-item[data-count]::after,
 .nav-item[data-note]::after {
@@ -2298,14 +2323,10 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item[data-note]::after { content: attr(data-note); font-family: var(--font); }
 
 .nav-item-alert {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
-.nav-item .spinner-dot { margin-left: 0; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
@@ -2401,8 +2422,7 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Keep workspace status markers visually separate from the workspace name,
    matching the spacing used by project-level state dots. */
-.workspace-toggle button .workspace-status-dot,
-.workspace-toggle button .workspace-status-ring {
+.workspace-toggle button .workspace-status-dot {
   margin-left: var(--space-2);
 }
 
@@ -2421,6 +2441,8 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   gap: 6px;
   flex-shrink: 0;
+  /* The drag engine overrides this inline with the picked-up group's height. */
+  --drag-item-height: 0px;
 }
 
 .project-group {
@@ -2479,14 +2501,40 @@ async function confirmDeleteChat(chatId: string) {
   }
 }
 
-/* Drag-to-reorder affordances. The header shows a grab cursor when draggable,
-   dims while being dragged, and draws an accent line where a drop will land. */
-.project-header[draggable="true"] {
-  cursor: grab;
+/* A chat dragged over a project header draws an accent line where it will land.
+   Project reordering is useDragSort's: the source group collapses while the
+   overlay stands in for it, and the placeholder holds its height. The group's
+   row gap is cancelled with it, so the rows below already sit where they land. */
+.drag-source {
+  height: 0;
+  margin: 0 0 -6px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  opacity: 0;
 }
-.project-header.dragging {
-  opacity: 0.4;
-  cursor: grabbing;
+.drag-placeholder {
+  height: var(--drag-item-height);
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+}
+/* The commit handoff (useDragSort `settling`): the group takes its target slot
+   as the placeholder leaves, so it vanishes rather than fading (no one-frame
+   gap) and the commit-time FLIP does not replay the move. */
+.drag-placeholder.drag-reorder-leave-active { display: none; }
+.project-list.drag-settling .drag-reorder-move { transition: none; }
+.drag-reorder-move {
+  transition: transform 120ms var(--ease);
+}
+.project-group.drag-overlay {
+  max-height: 60vh;
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+@media (prefers-reduced-motion: reduce) {
+  .drag-reorder-move {
+    transition: none;
+  }
 }
 .project-header.drag-over {
   box-shadow: inset 0 2px 0 0 var(--accent);
@@ -2583,12 +2631,7 @@ async function confirmDeleteChat(chatId: string) {
    pill puts the same marks in a flex row with a gap, where a margin would
    double up. */
 .project-name .rollup-needs-dot,
-.project-name .rollup-ring {
-  margin-left: var(--space-2);
-  vertical-align: middle;
-}
-.project-name .project-run-rollup {
-  display: inline-flex;
+.project-name .project-working {
   margin-left: var(--space-2);
   vertical-align: middle;
 }
@@ -2690,11 +2733,6 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: none;
   letter-spacing: 0;
   vertical-align: middle;
-}
-.badge--missed {
-  margin-left: 0;
-  background: var(--warning);
-  color: var(--bg);
 }
 
 .chat-item:hover {
@@ -2907,13 +2945,6 @@ async function confirmDeleteChat(chatId: string) {
   box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--fg2);
   font-size: var(--text-base);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .rollup-ring,
-  .workspace-status-ring { animation: none; }
-  .rollup-ring::before,
-  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Three-dot chat actions. Hidden by default on desktop, fade in on row
@@ -3169,6 +3200,7 @@ async function confirmDeleteChat(chatId: string) {
     pointer-events: none;
   }
   .sidebar.collapsed .sidebar-header,
+  .sidebar.collapsed .sidebar-history-rail,
   .sidebar.collapsed .project-list {
     visibility: hidden;
   }
@@ -3293,10 +3325,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
   flex-shrink: 0;
 }
 

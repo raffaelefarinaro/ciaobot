@@ -316,15 +316,63 @@
             </div>
           </div>
         </div>
+        <!-- A failed turn: the compact notice card, never a bubble. Both an
+             assistant error and an `Error:` system row land here. The resend
+             actions give way once any later item exists; see errorBubbleAction. -->
+        <div
+          v-else-if="(item.kind === 'assistant' && item.msg.is_error) || (item.kind === 'system' && isErrorMsg(item.msg.content))"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-err-${i}`"
+          :data-msg-index="i"
+          :data-msg-role="item.kind"
+        >
+          <InjectedPromptCard
+            :prompt="errorNoticePrompt(item.msg.content)"
+            :raw="item.msg.content"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :known-paths="knownFilePaths"
+          >
+            <template v-if="errorHasActions(i, item.msg.content)" #actions>
+              <div class="error-actions">
+                <button
+                  v-if="lastUserBefore(i) && !hasLaterItem(i)"
+                  class="retry-btn"
+                  @click="retryFromError(i)"
+                >Retry</button>
+                <!-- See errorBubbleAction for which fix a known error gets. -->
+                <button
+                  v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
+                  class="retry-btn fix-btn"
+                  @click="retryHourlyFromError(i)"
+                >Retry every hour</button>
+                <button
+                  v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
+                  class="retry-btn fix-btn"
+                  :disabled="store.isStreaming"
+                  @click="openRecoveryPicker(i)"
+                >Switch model</button>
+                <button
+                  v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
+                  class="retry-btn fix-btn"
+                  @click="openFixChat(i)"
+                >Fix this error</button>
+              </div>
+              <ProviderSignInHint
+                v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
+                :provider="chat.provider"
+                action-label="Retry"
+                :action-disabled="store.isStreaming"
+                @action="retryFromError(i)"
+              />
+            </template>
+          </InjectedPromptCard>
+        </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
           <div class="message-row">
-            <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
+            <div class="message assistant" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-              <div v-if="item.msg.is_error" class="error-attribution" role="status">
-                <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
-                <span>{{ classifyError(item.msg.content).copy }}</span>
-              </div>
             </div>
             <!-- The reply's own footer: Outputs, Copy, Fork, and the turn's
                  facts. The row always takes its height; Copy, Fork and the
@@ -376,7 +424,6 @@
                 <span>{{ copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy' }}</span>
               </button>
               <button
-                v-if="!item.msg.is_error"
                 type="button"
                 class="message-action-btn"
                 :class="{ 'message-action-btn--busy': forkLoadingKey === `assistant-${i}` }"
@@ -402,76 +449,28 @@
               </div>
             </div>
           </div>
-          <div v-if="item.msg.is_error" class="error-actions">
-            <button
-              v-if="lastUserBefore(i)"
-              class="retry-btn"
-              @click="retryFromError(i)"
-            >Retry</button>
-            <!-- See errorBubbleAction for which fix a known error gets. -->
-            <button
-              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
-              class="retry-btn fix-btn"
-              @click="retryHourlyFromError(i)"
-            >Retry every hour</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
-              class="retry-btn fix-btn"
-              :disabled="store.isStreaming"
-              @click="openRecoveryPicker(i)"
-            >Switch model</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
-              class="retry-btn fix-btn"
-              @click="openFixChat(i)"
-            >Fix this error</button>
-          </div>
-          <ProviderSignInHint
-            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
-            :provider="chat.provider"
-            action-label="Retry"
-            :action-disabled="store.isStreaming"
-            @action="retryFromError(i)"
-          />
         </div>
         <!-- System message (errors, etc) -->
+        <!-- A background shell the provider ran itself: the same card as a
+             `ciao run` wake, drawn from a system row so it never counts as a turn. -->
+        <div
+          v-else-if="item.kind === 'system' && injectedPrompts.get(item.msg)"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`"
+          :data-msg-index="i"
+          data-msg-role="system"
+        >
+          <InjectedPromptCard
+            :prompt="injectedPrompts.get(item.msg)!"
+            :raw="''"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :schedule="injectedSchedule"
+            :known-paths="knownFilePaths"
+          />
+        </div>
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-          <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
-            <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
-            <span>{{ classifyError(item.msg.content).copy }}</span>
-          </div>
-          <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
-            <button
-              v-if="lastUserBefore(i)"
-              class="retry-btn"
-              @click="retryFromError(i)"
-            >Retry</button>
-            <!-- See errorBubbleAction for which fix a known error gets. -->
-            <button
-              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
-              class="retry-btn fix-btn"
-              @click="retryHourlyFromError(i)"
-            >Retry every hour</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
-              class="retry-btn fix-btn"
-              :disabled="store.isStreaming"
-              @click="openRecoveryPicker(i)"
-            >Switch model</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
-              class="retry-btn fix-btn"
-              @click="openFixChat(i)"
-            >Fix this error</button>
-          </div>
-          <ProviderSignInHint
-            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
-            :provider="chat.provider"
-            action-label="Retry"
-            :action-disabled="store.isStreaming"
-            @action="retryFromError(i)"
-          />
         </div>
       </template>
       </template>
@@ -516,7 +515,7 @@
           @click="toggleLiveTrace"
         >
           <svg class="trace-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
-          <span class="activity-spinner"></span>
+          <ActivityGlyph kind="working" />
           <span class="trace-label">Working</span>
           <span class="live-preview" aria-live="polite" aria-atomic="true">
             <Transition name="live-step" mode="out-in">
@@ -943,26 +942,26 @@
               title="Move up"
               aria-label="Move up"
               @click="store.reorderQueued(chat.chat_id, i, i - 1)"
-            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+            ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
             <button
               class="queued-action"
               :disabled="i === store.currentQueued.length - 1"
               title="Move down"
               aria-label="Move down"
               @click="store.reorderQueued(chat.chat_id, i, i + 1)"
-            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+            ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
             <button
               v-if="editingQueueId !== q.id"
               class="queued-action"
               title="Edit"
               aria-label="Edit queued message"
               @click="startEditQueue(q)"
-            ><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
+            ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
             <template v-else>
-              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
-              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
+              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
             </template>
-            <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           </div>
         </div>
       </div>
@@ -1211,15 +1210,16 @@
               <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and command runs, right
+            <!-- Background work the turn left running: agents and shells, right
                  against Send. Fills the bar's free space, so it is also the spacer. -->
             <ComposerActivity
               :chat-id="chat.chat_id"
               :agent-count="composerAgentCount"
               :agents="runningRows"
-              :runs="chatRuns"
-              :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
+              :stop-task="stopShell"
+              :stopping="store.stoppingTasks[chat.chat_id]"
+              :stop-errors="store.stopTaskErrors[chat.chat_id]"
               @open-details="openRunDetails"
             />
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
@@ -1328,14 +1328,14 @@
         />
       </div>
       <section
-        v-if="runningSubagents.length || chatRuns.length"
+        v-if="runningRows.length"
         ref="railRunningEl"
         class="rail-section chat-rail-running"
         aria-labelledby="chat-rail-running"
         tabindex="-1"
       >
         <p id="chat-rail-running" class="rail-label">Running</p>
-        <!-- Agents first: an agent has a transcript to open, a process only a log. -->
+        <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
         <template v-if="runningSubagents.length">
           <p class="chat-rail-subhead">Agents</p>
           <div class="rail-list">
@@ -1345,16 +1345,23 @@
               :to="subagentPath(chat.chat_id, sub.agent_id)"
               class="rail-item chat-rail-agent"
             >
-              <ActivityGlyph kind="agent" />
+              <ActivityGlyph kind="working" />
               <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
               <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
               <span class="chat-rail-agent-arrow" aria-hidden="true">→</span>
             </router-link>
           </div>
         </template>
-        <template v-if="chatRuns.length">
+        <template v-if="runningShells.length">
           <p class="chat-rail-subhead">Processes</p>
-          <BackgroundRunRows :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
+          <ShellRows
+            variant="rail"
+            :rows="runningShells"
+            :now="nowTs"
+            :stop-task="stopShell"
+            :stopping="store.stoppingTasks[chat.chat_id]"
+            :errors="store.stopTaskErrors[chat.chat_id]"
+          />
         </template>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
@@ -1463,7 +1470,7 @@ import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
-import { parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1471,10 +1478,10 @@ import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackg
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
-import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
+import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
-import BackgroundRunRows from './BackgroundRunRows.vue'
+import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -1641,20 +1648,11 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming or while a background run is going, so
-// the live elapsed-time labels (the "Working..." trace meta, a run's age)
-// advance.
+// Ticks once a second while streaming, a background run is going or a native
+// shell is listed (see the watch below `runningRows`), so the live
+// elapsed-time labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
-watch(() => store.isStreaming || store.activeBackgroundRuns.length > 0, (streaming) => {
-  if (streaming && !clockTimer) {
-    nowTs.value = Date.now()
-    clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
-  } else if (!streaming && clockTimer) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
-}, { immediate: true })
 
 const canSend = computed(() =>
   !!(inputText.value.trim()
@@ -1909,8 +1907,10 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
   for (const m of store.activeMessages) {
-    if (m.role !== 'user') continue
-    const parsed = parseInjectedPrompt(m.content, m.origin)
+    // A user turn the engine wrote, or the system row the backend draws for a
+    // background shell the provider ran itself.
+    if (m.role !== 'user' && !(m.role === 'system' && (m.origin === 'background_run' || m.origin === 'compaction' || m.origin === 'handover'))) continue
+    const parsed = parseInjectedPrompt(m.content, m.origin, m.sent_context)
     if (parsed) map.set(m, parsed)
   }
   return map
@@ -2210,7 +2210,23 @@ function compactContext() {
 // composer lists those as processes, everything else counts as an agent.
 const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
-const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
+function stopShell(taskId: string) {
+  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
+}
+const runningShells = computed(() => runningRows.value.filter(isShellRow))
+watch(
+  () => store.isStreaming || runningShells.value.length > 0,
+  (ticking) => {
+    if (ticking && !clockTimer) {
+      nowTs.value = Date.now()
+      clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+    } else if (!ticking && clockTimer) {
+      clearInterval(clockTimer)
+      clockTimer = null
+    }
+  },
+  { immediate: true },
+)
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.
 const composerAgentCount = computed(() => Math.max(store.activeBackgroundAgents, runningSubagents.value.length))
@@ -2340,11 +2356,10 @@ const openTraces = ref<Record<number, boolean>>({})
 // a reference, not part of the reply, and a turn that touched many files used
 // to push the answer off screen behind a wall of pills.
 const openOutputs = ref<Record<number, boolean>>({})
-// The live trace starts compact; explicit expansion is kept through completion.
+// The live trace starts compact.
 // `Reading` means they scrolled away from the tail (transcript or trace body),
 // so the finished trace must not move under them.
 const liveTraceOpen = ref(false)
-const liveTraceTouched = ref(false)
 const liveTraceReading = ref(false)
 const liveBodyAtBottom = ref(true)
 const liveTraceBodyEl = ref<HTMLElement>()
@@ -2552,7 +2567,6 @@ function toggleOutputs(i: number) {
 }
 
 function toggleLiveTrace() {
-  liveTraceTouched.value = true
   liveTraceOpen.value = !liveTraceOpen.value
   if (liveTraceOpen.value) {
     // The body remounts, so it follows its tail again from the top.
@@ -2563,7 +2577,6 @@ function toggleLiveTrace() {
 
 function resetLiveTraceState() {
   liveTraceOpen.value = false
-  liveTraceTouched.value = false
   liveTraceReading.value = false
   liveBodyAtBottom.value = true
   pendingCollapseIdx.value = null
@@ -2613,7 +2626,6 @@ function onLiveTraceBodyClick(e: MouseEvent): void {
   if (isInteractiveTraceChild(e.target)) return
   if (window.getSelection()?.toString()) return
   if (!liveTraceOpen.value) return
-  liveTraceTouched.value = true
   liveTraceOpen.value = false
 }
 
@@ -4282,8 +4294,10 @@ const renderData = computed<{
     // (`store.currentTimeline`), so drop its buffer rather than emitting a
     // second, static copy. Only the trailing turn is in flight — earlier turns
     // keep their trace even when they never produced an answer bubble (the
-    // user hit Stop, or the turn ended in tool calls only).
-    if (isFinal && store.isStreaming) {
+    // user hit Stop, or the turn ended in tool calls only). A wake stream has
+    // no user row of its own, so the trailing turn is the settled one before
+    // it and stays drawn.
+    if (isFinal && store.isStreaming && !store.isWakeStreaming) {
       buffer = []
       return
     }
@@ -4299,7 +4313,7 @@ const renderData = computed<{
     // attachments still have a home adjacent to the answer.
     const needsHost =
       traceSubs.length > 0
-      || (!finalMsg && turnOutputs.length > 0)
+      || ((!finalMsg || finalMsg.is_error) && turnOutputs.length > 0)
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
@@ -4308,7 +4322,7 @@ const renderData = computed<{
     }
     if (host) {
       if (traceSubs.length) host.subs = traceSubs
-      if (!finalMsg && turnOutputs.length) host.outputs = turnOutputs
+      if ((!finalMsg || finalMsg.is_error) && turnOutputs.length) host.outputs = turnOutputs
     }
     for (const it of turnItems) items.push(it)
     if (finalMsg) {
@@ -4316,7 +4330,7 @@ const renderData = computed<{
         kind: 'assistant',
         msg: finalMsg,
         turnIndex: currentTurnIndex ?? undefined,
-        ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
+        ...(turnOutputs.length && !finalMsg.is_error ? { outputs: turnOutputs } : {}),
       }))
     }
     attachTurnMeta(items, turnMeta)
@@ -4445,8 +4459,11 @@ const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.live
 // see loadMessages' `background` option), which could leave an incomplete
 // transcript on screen with no visible signal. Once a turn is actively
 // streaming, the live Activity/typing UI is the better indicator, so that
-// takes over instead of hiding the transcript.
-const blockingHistoryLoad = computed(() => store.messageHistoryLoading && !store.isStreaming)
+// takes over instead of hiding the transcript. With nothing to show yet (an
+// engine-started turn whose echo has not arrived) the live UI has no user turn
+// to sit under, and "Start with a request" would be a lie, so the skeleton stays.
+const blockingHistoryLoad = computed(() =>
+  store.messageHistoryLoading && (!store.isStreaming || transcriptEmpty.value))
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(
@@ -4465,6 +4482,8 @@ watch(
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
   resetLiveTraceState()
+  openTraces.value = {}
+  openOutputs.value = {}
   // The dock disclosure is per-chat state; carrying it across a switch meant a
   // chat you never expanded opened with its dock already open.
   dockExpanded.value = false
@@ -4532,9 +4551,12 @@ watch(
     prevStreaming = streaming
     prevStreamingChatId = store.activeChatId
     if (justFinished) {
-      if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
-        // The reader keeps their place: hold the finished trace open until
-        // they come back to the bottom.
+      if (liveTraceReading.value && (!isNearBottom.value || (liveTraceOpen.value && !liveBodyAtBottom.value))) {
+        // The reader scrolled away from the bottom (of the transcript, or of
+        // the live body while it is still open): hold the finished trace
+        // open until they come back. A reader at the bottom, or one who only
+        // expanded the live trace, gets the collapsed turn and the landing on
+        // the reply.
         nextTick(holdTraceOpen)
         return
       }
@@ -4722,6 +4744,18 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
   }
   return null
 }
+// A later message (user, assistant, system; a trace is not one) means the chat
+// moved on, so resending the failed turn would run it out of order.
+function hasLaterItem(errorIdx: number): boolean {
+  return renderItems.value.slice(errorIdx + 1).some(it => it.kind !== 'trace')
+}
+// Whether the notice's actions slot has anything to draw. The same
+// conditions the template uses for each button and the sign-in hint.
+function errorHasActions(errorIdx: number, content: string): boolean {
+  const canRetry = Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
+  const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
+  return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
+}
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return
   const prior = lastUserBefore(errorIdx)
@@ -4750,13 +4784,15 @@ function retryFromError(errorIdx: number) {
 // A known error gets its own fix instead of a diagnosis chat: a usage limit
 // retries hourly until it resets (nothing while a retry is armed, the retry
 // card owns it), a missing or unsuitable model opens the model picker, and a
-// signed-out provider gets the sign-in steps under the bubble. When that fix
-// cannot run here (archived chat, no prior turn to resend), the bubble falls
-// back to the "Fix this error" chat rather than offering nothing.
+// signed-out provider gets the sign-in steps under the notice. When that fix
+// cannot run here (archived chat, no prior turn to resend), the notice falls
+// back to the "Fix this error" chat rather than offering nothing. A later
+// message supersedes the resend actions; "Fix this error" stays.
 function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 'switch-model' | 'fix' | null {
   const action = errorQuickAction(content)
   if (action === 'fix') return 'fix'
   if (chat.value.archived) return 'fix'
+  if (hasLaterItem(errorIdx)) return null
   if (action === 'switch-model') return 'switch-model'
   if (!lastUserBefore(errorIdx)) return 'fix'
   if (action === 'sign-in') return null
@@ -5639,7 +5675,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
      column on each side and pads it back, so the text stays aligned while
      focus rings are not clipped by the horizontal overflow guard below. */
   margin-inline: -22px;
-  padding: 28px 26px 24px;
+  padding: 28px 22px 24px;
   min-height: 0;
   position: relative;
 }
@@ -6065,10 +6101,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   50% { opacity: 0.35; }
 }
 
-.message.assistant.error {
-  border-color: var(--error);
-}
-
 .message.streaming {
   border-color: var(--accent);
 }
@@ -6100,21 +6132,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex-wrap: wrap;
 }
 
-.error-attribution {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: baseline;
-  margin-top: 8px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.4;
-}
-
-.error-attribution-label {
-  color: var(--error);
-  font-weight: 600;
-}
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
@@ -6201,26 +6218,6 @@ details[open] > .activity-summary::before {
 }
 
 .activity-icon { font-size: var(--text-base); }
-
-/* The live turn's spinner: a small ring, the one moving thing on the line. */
-.activity-spinner {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: activity-spin 0.8s linear infinite;
-}
-
-@keyframes activity-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .activity-spinner { animation-duration: 2.4s; }
-}
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -6448,6 +6445,7 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(user-comment) {
   display: block;
+  white-space: pre-wrap;
   color: var(--fg);
   font-style: normal;
   font-weight: normal;
@@ -7214,7 +7212,7 @@ details[open] > .activity-summary::before {
   padding: 0 2px 0 12px;
 }
 .queued-count {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -7230,7 +7228,9 @@ details[open] > .activity-summary::before {
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  font-size: 13px;
+  /* Same tier as the composer's own text: the queue sat below it at a fixed
+     13px and never answered the Appearance text-size setting. */
+  font-size: var(--text-base);
   color: var(--fg2);
 }
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -7280,7 +7280,7 @@ details[open] > .activity-summary::before {
   flex: 1 0 auto;
 }
 .queued-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -7300,7 +7300,7 @@ details[open] > .activity-summary::before {
   border: none;
   border-radius: calc(var(--radius-sm) - 2px);
   color: var(--fg2);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   padding: 3px 10px;
   cursor: pointer;
@@ -7326,7 +7326,7 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   padding: 4px 10px;
   cursor: pointer;
@@ -7921,18 +7921,27 @@ details[open] > .activity-summary::before {
    bubbles stay readable without extra scroll. */
 @container chat-split (max-width: 560px) {
   .messages {
-    padding: 8px 6px 16px 6px;
+    padding: 8px 22px 16px;
   }
   .message-wrap { width: 96%; max-width: 96%; }
   .message-wrap.assistant { width: 100%; max-width: 100%; }
 }
 @container chat-split (max-width: 400px) {
   .messages {
-    padding: 6px 4px 12px 4px;
+    padding: 6px 22px 12px;
   }
   .message-wrap,
   .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 8px 10px; }
+}
+
+/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
+   the menu already leave the chat, and Chat details' Repository section carries
+   the code mode switch, so neither control is lost. Hidden, not removed, so
+   desktop keeps them. */
+@media (max-width: 767px) {
+  .close-btn,
+  .chat-code-badge { display: none; }
 }
 
 @media (max-width: 768px) {

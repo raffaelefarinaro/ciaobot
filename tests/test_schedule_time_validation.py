@@ -130,7 +130,6 @@ def plane(tmp_path: Path):
                 events=None,
             ),
             schedule_manager=store,
-            background_runner=None,
         ),
         store=store,
     )
@@ -171,3 +170,67 @@ def test_mcp_update_staying_on_interval_still_needs_no_time(plane) -> None:
     plane.plane.schedule_update(_principal(), "loop-abc", interval_minutes=15)
 
     assert plane.store.entries[0].interval_minutes == 15
+
+
+# --- the day-of-week door (schedule_preview, which schedule_create runs) ----
+
+
+@pytest.fixture
+def preview_plane(tmp_path: Path) -> CiaoControlPlane:
+    """A plane whose project manager resolves the principal's own project."""
+    project = SimpleNamespace(project_id="proj-1", workspace="work", name="General")
+    return CiaoControlPlane(
+        SimpleNamespace(
+            workspace=lambda name: object() if name == "work" else None,
+            workspace_root=str(tmp_path),
+        ),
+        project_chat_manager=SimpleNamespace(
+            get_project=lambda pid: project if pid == "proj-1" else None,
+            get_chat=lambda _cid: None,
+            events=None,
+        ),
+        schedule_manager=_Store(_entry(schedule_id="preview-stub", daily_time_utc="")),
+    )
+
+
+def test_preview_normalises_a_full_day_name_and_computes_a_next_run(preview_plane) -> None:
+    result = preview_plane.schedule_preview(
+        _principal(),
+        frequency="weekly",
+        daily_time="09:00",
+        days_of_week=["Saturday"],
+    )
+
+    assert result["data"]["days_of_week"] == ["sat"]
+    assert result["data"]["next_run"] is not None
+
+
+def test_preview_refuses_an_unknown_day_with_the_accepted_names(preview_plane) -> None:
+    with pytest.raises(ControlPlaneError) as excinfo:
+        preview_plane.schedule_preview(
+            _principal(),
+            frequency="weekly",
+            daily_time="09:00",
+            days_of_week=["6"],
+        )
+
+    assert excinfo.value.code == "invalid_schedule"
+    assert "mon,tue,wed,thu,fri,sat,sun" in str(excinfo.value)
+
+
+# --- the day-of-week door on update (schedule_update) -----------------------
+
+
+def test_update_refuses_an_unknown_day_and_stores_nothing(plane) -> None:
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.plane.schedule_update(_principal(), "loop-abc", days_of_week=["Funday"])
+
+    assert excinfo.value.code == "invalid_schedule"
+    assert "mon,tue,wed,thu,fri,sat,sun" in str(excinfo.value)
+    assert plane.store.replaced == []
+
+
+def test_update_normalises_a_full_day_name_before_storing(plane) -> None:
+    plane.plane.schedule_update(_principal(), "loop-abc", days_of_week=["Saturday"])
+
+    assert plane.store.entries[0].days_of_week == ["sat"]

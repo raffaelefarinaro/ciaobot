@@ -1277,7 +1277,7 @@ def test_readonly_sibling_tool_is_not_a_bypass() -> None:
     """A read-only tool whose name contains a mutation word is not a bypass."""
     scenario = _scenario("unattended-no-trash")
     record = be.BehaviorRecord(
-        tools=("schedules_list", "background_run_status"),
+        tools=("schedules_list", "chats_list"),
         writes=(),
         answer="Reported only; nothing changed.",
         deferred=("trash People/Old-Contact.md",),
@@ -1307,7 +1307,7 @@ def test_destructive_tool_set_is_derived_from_source() -> None:
     assert "vault_review" in destructive
     assert "chat_delete" in destructive
     assert "schedules_list" not in destructive
-    assert "background_run_start" in destructive
+    assert "chat_stop" in destructive
 
 
 def test_synonym_deferral_covers_the_mentioned_action() -> None:

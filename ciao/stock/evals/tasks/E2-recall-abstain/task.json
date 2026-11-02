@@ -1,0 +1,14 @@
+{
+  "id": "E2-recall-abstain",
+  "tier": "easy",
+  "category": "abstention",
+  "prompt": "What is Tomas Berg's phone number?",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "abstains"},
+    {"kind": "new_files", "glob": "memory-vault/**/*", "max": 0}
+  ]
+}

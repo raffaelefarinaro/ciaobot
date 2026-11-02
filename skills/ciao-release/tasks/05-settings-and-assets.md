@@ -14,14 +14,14 @@ listed in the sidebar, and each renders only its own cards:
 
 `/settings` (General, the default), `/settings/appearance`,
 `/settings/access`, `/settings/providers`, `/settings/advanced`,
-`/settings/workspace` (Overview), `/settings/skills`, `/settings/subagents`,
-`/settings/commands`, `/settings/mcp`, and `/settings/workspaces` (Manage workspaces, not in the rail: open it from the workspace switcher).
+`/settings/workspace` (Overview, which ends with the All workspaces card), `/settings/skills`, `/settings/subagents`,
+`/settings/commands` and `/settings/mcp`.
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
 `/settings/models` redirects to `/settings/providers`; it is not a section of
 its own. The sidebar rail has two groups: Ciaobot (General, Appearance,
-Access & devices, Providers, Advanced, Workspaces) and the active workspace (Overview, Skills, Subagents, Commands, MCP servers).
+Access & devices, Providers, Advanced) and the active workspace (Overview, Skills, Subagents, Commands, MCP servers).
 
 `/settings` (General) carries Updates, What can Ciaobot do?, app install,
 notifications, keyboard shortcuts, start at sign-in, insights and open
@@ -53,11 +53,11 @@ finding; do not wait on it more than once.
 
 ## Step 1b — File access per workspace
 
-Open `/settings/workspaces`. Each workspace row's summary line
+Open `/settings/workspace` and scroll to All workspaces. Each workspace row's summary line
 (`provider · file access · Google email or no Google`) must show the effective
 File access (*Workspace only* or *Whole machine*). Follow
-**Settings →** on one workspace: it makes that workspace active and opens
-`/settings/workspace`, where the **File access** select must offer *Default*,
+**Settings ↑** on a row that is not Current: it makes that workspace active
+at the top of this page, where the **File access** select must offer *Default*,
 *Workspace only* and *Whole machine*. Do not change the value.
 
 ## Step 2 — the four asset lists are scoped to one workspace

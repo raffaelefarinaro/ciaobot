@@ -55,13 +55,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
 if TYPE_CHECKING:
     import subprocess
 
+from ciao.background_notice import format_finished_runs
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
@@ -967,6 +968,103 @@ def _data(payload: object) -> object:
     return payload
 
 
+_SHELL_COMMAND_RE = re.compile(r'<shell\b[^>]*?\bcommand="([^"]*)"')
+_SHELL_EXIT_LINE_RE = re.compile(r"Exited with code -?\d+\s*$")
+_SHELL_CANCELLED_RE = re.compile(r"kill|cancel|abort|interrupt", re.IGNORECASE)
+_SHELL_TAIL_LINES = 50
+
+
+def native_shell_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """A ``format_finished_runs`` entry for one finished OpenCode shell.
+
+    OpenCode wakes the session with a ``synthetic`` item whose metadata names
+    the shell (``source == "shell"``) and whose text wraps the output in a
+    ``<shell ...>`` element. ``state`` stays ``completed`` for a non-zero
+    exit, so the verdict comes from ``exit``. Returns None for any other item.
+    """
+    if not isinstance(metadata, Mapping) or metadata.get("source") != "shell":
+        return None
+    raw = str(text or "")
+    opened = raw.find("<shell ")
+    start = raw.find(">\n", opened) + 2 if opened >= 0 and raw.find(">\n", opened) >= 0 else 0
+    end = raw.rfind("</shell>")
+    body = raw[start:end] if end >= start else raw[start:]
+    body = _SHELL_EXIT_LINE_RE.sub("", body.rstrip())
+    tail = body.rstrip().splitlines()[-_SHELL_TAIL_LINES:]
+    label = str(description or "").strip()
+    if not label:
+        match = _SHELL_COMMAND_RE.search(raw)
+        label = match.group(1) if match else ""
+    label = " ".join(label.split())[:120]
+    exit_code = metadata.get("exit")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        exit_code = None
+    if exit_code == 0:
+        status = "ok"
+    elif _SHELL_CANCELLED_RE.search(str(metadata.get("state") or "")):
+        status = "cancelled"
+    else:
+        status = "failed"
+    return {
+        "label": label,
+        "run_id": str(metadata.get("shellID") or ""),
+        "exit_code": exit_code,
+        "status": status,
+        "error": "",
+        "log_path": None,
+        "last_lines": tail,
+    }
+
+
+
+_SUBAGENT_BODY_RE = re.compile(r"<subagent\b[^>]*>\n?(.*?)\n?</subagent>\s*$", re.DOTALL)
+
+
+def native_subagent_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """A ``format_finished_runs`` entry for one finished background subagent.
+
+    OpenCode wakes the session with a ``synthetic`` item whose metadata names
+    the child session (``source == "subagent"``) and whose text wraps the
+    child's report in a ``<subagent ...>`` element. Without a notice row the
+    wake's reply joins the turn before it and that turn's answer is drawn as
+    a trace step. Returns None for any other item.
+    """
+    if not isinstance(metadata, Mapping) or metadata.get("source") != "subagent":
+        return None
+    raw = str(text or "")
+    match = _SUBAGENT_BODY_RE.search(raw)
+    body = match.group(1) if match else raw
+    state = str(metadata.get("state") or "")
+    if state == "completed":
+        status = "ok"
+    elif _SHELL_CANCELLED_RE.search(state):
+        status = "cancelled"
+    else:
+        status = "failed"
+    label = " ".join(str(description or metadata.get("agent") or "").split())[:120]
+    return {
+        "label": label,
+        "run_id": str(metadata.get("childID") or ""),
+        "exit_code": None,
+        "status": status,
+        "error": "",
+        "log_path": None,
+        "last_lines": body.rstrip().splitlines()[-_SHELL_TAIL_LINES:],
+    }
+
+
+def native_wake_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The finished-run entry for a shell or subagent wake item, else None."""
+    return native_shell_run(text, description, metadata) or native_subagent_run(
+        text, description, metadata
+    )
+
 def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one flat V2 message into the provider's internal part shape.
 
@@ -1001,6 +1099,18 @@ def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
                 if key != "type"
             } | {"type": message_type},
             "parts": [],
+        }
+    if message_type == "synthetic":
+        return {
+            "info": {
+                key: value for key, value in message.items()
+                if key not in {"type", "text"}
+            } | {"role": "synthetic"},
+            "parts": [{
+                "type": "text",
+                "text": str(message.get("text") or ""),
+                "synthetic": True,
+            }],
         }
     if message_type != "assistant":
         return None
@@ -1685,15 +1795,24 @@ class OpencodeProvider(BaseSDKProvider):
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
         self._background_shells: set[str] = set()
+        # Shells of foreground tool calls still running; OpenCode 2 runs every shell call as a Shell.
+        self._foreground_shells: set[str] = set()
         # Command of each shell seen in `shell.created`, for the composer's
         # process list. A shell found only by `GET /api/shell` has no entry.
         self._shell_commands: dict[str, str] = {}
+        # Epoch seconds at which each running shell was first seen here, for
+        # the composer's elapsed time; cleared with the shell.
+        self._shell_started: dict[str, float] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
         # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
         self._child_sessions: dict[str, str] = {}
         self._background_changed = asyncio.Event()
+        # Finished shells and subagents whose synthetic wake items arrived
+        # since the last execution ended; `_wake_result` turns them into the
+        # notice.
+        self._wake_runs: list[dict[str, Any]] = []
         # Monotonic time of the last event seen from the server; the idle
         # reaper bounds its "work outstanding" protection with it.
         self._last_activity = time.monotonic()
@@ -1734,6 +1853,11 @@ class OpencodeProvider(BaseSDKProvider):
         # empty made replayed opencode chats render blank turns (#295).
         # Dict insertion order doubles as the part order.
         self._answer_parts: dict[str, list[str]] = {}
+        # The turn's visible items in the order they appeared — ("text",
+        # part id) and ("tool", call id) — so the answer can be the text after
+        # the last top-level tool call instead of the last text part (#2139).
+        self._answer_order: list[tuple[str, str]] = []
+        self._answer_known: set[tuple[str, str]] = set()
         # What opencode actually ran, as `providerID/modelID`. A workspace may
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
@@ -1771,6 +1895,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._context_usage = {}
         self._cost = None
         self._answer_parts.clear()
+        self._answer_order.clear()
+        self._answer_known.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
         self._poll_idle_outcome: str = ""
@@ -1841,12 +1967,33 @@ class OpencodeProvider(BaseSDKProvider):
         """Background shells plus subagents tracked for this chat's session."""
         return len(self._background_shells) + len(self._background_children)
 
-    def background_shell_rows(self) -> list[dict[str, str]]:
-        """``{id, command}`` for each live background shell, in id order."""
+    def background_shell_rows(self) -> list[dict[str, Any]]:
+        """``{id, command, started_at}`` for each live background shell, in id order."""
         return [
-            {"id": shell_id, "command": self._shell_commands.get(shell_id, "")}
+            {
+                "id": shell_id,
+                "command": self._shell_commands.get(shell_id, ""),
+                "started_at": self._shell_started.setdefault(shell_id, time.time()),
+            }
             for shell_id in sorted(self._background_shells)
         ]
+
+    def background_child_ids(self) -> list[str]:
+        """Session ids of the background subagents tracked for this chat, sorted."""
+        return sorted(self._background_children)
+
+    async def stop_background_shell(self, shell_id: str) -> bool:
+        """Terminate one tracked background shell (``DELETE /api/shell/:id``).
+
+        False when the shell is not tracked here or the server refused. The
+        shell leaves the tracked set on its ``shell.exited`` event or the next
+        reconcile, not here. A transport failure propagates as ``httpx.HTTPError``.
+        """
+        client = self._client
+        if client is None or shell_id not in self._background_shells:
+            return False
+        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
+        return bool(response.status_code < 400)
 
     @property
     def seconds_since_activity(self) -> float:
@@ -1858,7 +2005,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         Runs before the session filter: ``shell.*`` events carry no top-level
         ``sessionID``, and a child's ``session.created`` and terminal events
-        carry the child's id.
+        carry the child's id. ``session.tool.progress`` and
+        ``session.tool.success`` do carry it and name their shell in
+        ``metadata.shellID``: OpenCode 2 runs every shell call as a Shell, so
+        only a call it reports as still running counts as background work.
         """
         self._last_activity = time.monotonic()
         kind = str(event.get("type") or "")
@@ -1877,13 +2027,35 @@ class OpencodeProvider(BaseSDKProvider):
             ):
                 self._background_shells.add(str(info["id"]))
                 self._shell_commands[str(info["id"])] = str(info.get("command") or "")
+                self._shell_started[str(info["id"])] = time.time()
                 changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
             self._shell_commands.pop(shell_id, None)
+            self._shell_started.pop(shell_id, None)
+            self._foreground_shells.discard(shell_id)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
+        elif kind in {"session.tool.progress", "session.tool.success"}:
+            metadata = props.get("metadata")
+            shell_id = str(metadata.get("shellID") or "") if isinstance(metadata, Mapping) else ""
+            if shell_id and str(props.get("sessionID") or "") == session_id:
+                if kind == "session.tool.progress":
+                    self._foreground_shells.add(shell_id)
+                    if shell_id in self._background_shells:
+                        self._background_shells.discard(shell_id)
+                        changed = True
+                elif (
+                    isinstance(metadata, Mapping)
+                    and metadata.get("status") == "running"
+                    and shell_id in self._foreground_shells
+                ):
+                    # OpenCode moved the call to the background; `shell.exited`
+                    # already dropped an exited shell from the foreground set.
+                    self._foreground_shells.discard(shell_id)
+                    self._background_shells.add(shell_id)
+                    changed = True
         elif kind == "session.created":
             child_id = str(props.get("sessionID") or "")
             parent_id = str(props.get("parentID") or "")
@@ -1939,6 +2111,7 @@ class OpencodeProvider(BaseSDKProvider):
             shells = await _read_running_shells(client, session_id)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
+        shells = shells - self._foreground_shells
         if shells != self._background_shells:
             self._replace_background_shells(shells)
             self._background_changed.set()
@@ -1948,6 +2121,8 @@ class OpencodeProvider(BaseSDKProvider):
         """Take the server's running shells, dropping commands of shells that are gone."""
         self._background_shells = shells
         self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
+        now = time.time()
+        self._shell_started = {k: self._shell_started.get(k, now) for k in shells}
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2105,12 +2280,17 @@ class OpencodeProvider(BaseSDKProvider):
             active = await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
+        shells = shells - self._foreground_shells
         self._replace_background_shells(shells)
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
 
     def _wake_result(self, session_id: str, error: str) -> ResultEvent:
         """Terminal event of one follow-up execution."""
+        notice = ""
+        if self._wake_runs:
+            notice = format_finished_runs(self._wake_runs, tail_lines=_SHELL_TAIL_LINES)[0]
+            self._wake_runs = []
         return ResultEvent(
             type="result",
             result=error or self._answer_text(),
@@ -2120,6 +2300,8 @@ class OpencodeProvider(BaseSDKProvider):
             usage=self._usage,
             cost_usd=self._cost,
             origin="task-notification",
+            final_text=self._answer_final_text(),
+            wake_notice=notice,
         )
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
@@ -2135,6 +2317,7 @@ class OpencodeProvider(BaseSDKProvider):
         client, session_id = self._client, self._session_id
         if client is None or not session_id or not self.has_live_server:
             return
+        self._wake_runs = []
         queue: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
         subscribed = asyncio.Event()
 
@@ -2224,6 +2407,24 @@ class OpencodeProvider(BaseSDKProvider):
                     continue
                 if kind == "session.inbox.enqueued":
                     pending_inbox.add(str(props.get("inboxID") or ""))
+                    item = props.get("item")
+                    payload = item.get("payload") if isinstance(item, Mapping) else None
+                    if (
+                        isinstance(item, Mapping)
+                        and item.get("type") == "synthetic"
+                        and isinstance(payload, Mapping)
+                    ):
+                        run = native_wake_run(
+                            str(payload.get("text") or ""),
+                            payload.get("description"),
+                            payload.get("metadata"),
+                        )
+                        if run is not None and not any(
+                            seen["run_id"] == run["run_id"]
+                            for seen in self._wake_runs
+                        ):
+                            # A replayed enqueue must not double a run.
+                            self._wake_runs.append(run)
                     continue
                 if kind == "session.inbox.delivered":
                     pending_inbox.discard(str(props.get("inboxID") or ""))
@@ -2568,7 +2769,9 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
         self._background_shells.clear()
+        self._foreground_shells.clear()
         self._shell_commands.clear()
+        self._shell_started.clear()
         self._background_children.clear()
         self._child_sessions.clear()
         self._background_changed.set()
@@ -3272,7 +3475,33 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _note_answer(self, part_id: str, text: str) -> None:
         """Accumulate one emitted fragment of the visible reply."""
+        self._mark_answer_text(part_id)
         self._answer_parts.setdefault(part_id, []).append(text)
+
+    def _mark_answer_text(self, part_id: str) -> None:
+        """Record this text part as the visible item now in progress."""
+        key = ("text", part_id)
+        if key not in self._answer_known:
+            self._answer_known.add(key)
+            self._answer_order.append(key)
+
+    def _mark_answer_tool(self, call_id: str) -> None:
+        """Record a top-level tool call.
+
+        Only a call moves the boundary: a completion frame, a duplicate or a
+        replayed call already in the log is not a new visible item.
+        """
+        if not call_id:
+            return
+        key = ("tool", call_id)
+        if key not in self._answer_known:
+            self._answer_known.add(key)
+            self._answer_order.append(key)
+
+    def _reset_answer_order(self) -> None:
+        """Forget the live order: a recovery poll's part list is authoritative."""
+        self._answer_order.clear()
+        self._answer_known.clear()
 
     def _turn_scope(self, messages: list[Any]) -> list[Mapping[str, Any]]:
         """Return this turn's projected rows through its first idle boundary.
@@ -3328,6 +3557,39 @@ class OpencodeProvider(BaseSDKProvider):
                     part for part in message_parts if isinstance(part, Mapping)
                 )
         return parts
+
+    def _apply_recovered_parts(
+        self, messages: list[Any], *, authoritative: bool
+    ) -> list[StreamEvent]:
+        """Replay a recovery poll's parts in their authoritative order.
+
+        Only a poll that carries this turn's user row may replace the live
+        order. It must also be complete for this turn: every text part the
+        live stream already placed in the answer has to appear in the
+        projection. A projection that omits one is incomplete — the SSE drop
+        hid the rest — and replacing the order with it would make earlier
+        narration the answer, so the live order stands until a complete poll
+        arrives. A strict superset is adopted, because it carries text parts
+        the live stream never saw. Rejection never resets the order.
+        """
+        if not authoritative:
+            return []
+        parts = self._turn_assistant_parts(messages)
+        if not parts:
+            return []
+        live_text = {key for kind, key in self._answer_order if kind == "text"}
+        projected_text = {
+            str(part.get("id") or "")
+            for part in parts
+            if str(part.get("type") or "") == "text"
+        }
+        if live_text and not live_text.issubset(projected_text):
+            return []
+        self._reset_answer_order()
+        events: list[StreamEvent] = []
+        for part in parts:
+            events.extend(self._part_updated({"part": dict(part)}))
+        return events
 
     def _restore_turn_metadata(self, messages: list[Any]) -> None:
         """Restore model, usage, cost, and assistant error after SSE loss."""
@@ -3433,9 +3695,13 @@ class OpencodeProvider(BaseSDKProvider):
                 )
                 signature = current or signature
                 self._restore_turn_metadata(messages)
-                for part in self._turn_assistant_parts(messages):
-                    for converted in self._part_updated({"part": dict(part)}):
-                        yield converted
+                # Replay this poll's parts only when it is authoritative: an
+                # empty or not-yet-visible projection must not erase the live
+                # answer order (#2139 review).
+                for converted in self._apply_recovered_parts(
+                    messages, authoritative=user_seen
+                ):
+                    yield converted
                 if quiesced:
                     self._turn_recovered_via_poll = True
                     return
@@ -3453,6 +3719,32 @@ class OpencodeProvider(BaseSDKProvider):
             "".join(chunks).strip() for chunks in self._answer_parts.values()
         )
         return "\n\n".join(part for part in parts if part)
+
+    def _answer_final_text(self) -> str:
+        """The visible answer block after the turn's last top-level tool call.
+
+        ``_answer_text`` joins every part for the durable transcript; a preview
+        or push must not excerpt the narration before the tool. Everything the
+        chat renders after the last tool call is one response block — text
+        parts separated only by thinking included — so join those parts the
+        same way ``_answer_text`` does. A tool call with no text after it means
+        there is no answer block: an explicit empty, never the narration.
+        """
+        boundary = 0
+        for position, (kind, _key) in enumerate(self._answer_order):
+            if kind == "tool":
+                boundary = position + 1
+        parts: list[str] = []
+        for kind, key in self._answer_order[boundary:]:
+            if kind != "text":
+                continue
+            chunks = self._answer_parts.get(key)
+            if not chunks:
+                continue
+            text = "".join(chunks).strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
 
     async def _reload_pending_requests(
         self, client: httpx.AsyncClient, session_id: str
@@ -3570,7 +3862,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         if kind in {"session.reasoning.started", "session.text.started"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
-            self._part_types[_v2_part_key(props, part_kind)] = part_kind
+            key = _v2_part_key(props, part_kind)
+            self._part_types[key] = part_kind
+            if part_kind == "text":
+                self._mark_answer_text(key)
             return []
         if kind in {"session.reasoning.delta", "session.text.delta"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
@@ -3599,6 +3894,9 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         if kind == "session.tool.called":
             call_id = str(props.get("id") or "")
+            # The call is the visible item even when a duplicate frame is
+            # ignored below, so record it before the settled check.
+            self._mark_answer_tool(call_id)
             if call_id in self._settled_tool_ids:
                 return []
             tool = str(props.get("name") or self._tool_calls.get(call_id) or "tool")
@@ -3720,6 +4018,10 @@ class OpencodeProvider(BaseSDKProvider):
             # already exists, so replaying it would duplicate the prompt.
             if part.get("messageID") and part.get("messageID") == self._user_message_id:
                 return []
+            if part_type == "text":
+                # Record the part even when its text was already emitted: the
+                # order is what places it relative to the tool calls.
+                self._mark_answer_text(part_id)
             suffix = self._emit_suffix(part_id, str(part.get("text") or ""))
             if not suffix:
                 return []
@@ -3739,6 +4041,9 @@ class OpencodeProvider(BaseSDKProvider):
     def _tool_part(self, part: Mapping[str, Any]) -> list[StreamEvent]:
         """One tool call, emitted once on start and once on settle."""
         call_id = str(part.get("callID") or part.get("id") or "")
+        # A call is a visible item from the moment its part exists, even when
+        # this frame is a repeat and emits no event.
+        self._mark_answer_tool(call_id)
         tool = str(part.get("tool") or "")
         state = part.get("state")
         state = state if isinstance(state, Mapping) else {}
@@ -4337,6 +4642,9 @@ class OpencodeProvider(BaseSDKProvider):
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
             recovered_with_pending=recovered_with_pending,
+            # The last part, not the joined turn: the preview and push excerpt
+            # this, while `result` above stays the complete durable reply.
+            final_text=self._answer_final_text(),
         )
 
     async def _augment_context_pct(

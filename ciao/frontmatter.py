@@ -12,6 +12,8 @@ _FENCE_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
+_NEEDS_ESCAPE_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
+
 
 def split_frontmatter(text: str) -> tuple[str, str] | None:
     """Return (yaml_block, body) when *text* opens with a fenced block, else None.
@@ -27,10 +29,11 @@ def split_frontmatter(text: str) -> tuple[str, str] | None:
 
 def yaml_scalar(value: object) -> str:
     """One-line YAML for a scalar, quoted only when YAML needs it."""
-    if isinstance(value, str) and any(ord(ch) < 0x20 for ch in value):
-        # safe_dump folds these into a multi-line quoted scalar; JSON's
-        # double-quoted form is valid YAML and always one line.
-        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str) and _NEEDS_ESCAPE_RE.search(value):
+        # C0 controls fold into a multi-line quoted scalar, and C1 controls such
+        # as U+0085 are YAML line breaks that safe_dump emits raw. JSON's
+        # double-quoted form is valid YAML, always one line, and escapes both.
+        return json.dumps(value, ensure_ascii=True)
     dumped: str = yaml.safe_dump(value, default_flow_style=True, allow_unicode=True, width=1_000_000)
     return dumped.removesuffix("\n...\n").rstrip("\n")
 

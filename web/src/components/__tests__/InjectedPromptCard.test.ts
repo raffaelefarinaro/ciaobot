@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { mount, RouterLinkStub } from '@vue/test-utils'
 import InjectedPromptCard from '../InjectedPromptCard.vue'
+import { errorNoticePrompt } from '../../lib/injectedPrompt'
 import type { InjectedPrompt } from '../../lib/injectedPrompt'
 
 const runPrompt: InjectedPrompt = {
@@ -28,6 +29,17 @@ function mountCard(props: Record<string, unknown>) {
 }
 
 describe('InjectedPromptCard', () => {
+  it('keeps a compaction summary collapsed and exposes it in a named scrollable region', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'compaction', text: '**Summary** of the conversation' }, raw: '' })
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.text()).toContain('Context compacted')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.text()).not.toContain('Summary of the conversation')
+    await toggle.trigger('click')
+    const summary = wrapper.get('[aria-label="Conversation summary"]')
+    expect(summary.text()).toBe('Summary of the conversation')
+    expect(summary.attributes('tabindex')).toBe('0')
+  })
   it('is collapsed by default and expands with aria-expanded', async () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
     const toggle = wrapper.get('.injected-card-toggle')
@@ -41,6 +53,24 @@ describe('InjectedPromptCard', () => {
     expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
   })
 
+  it('shows why a run failed while collapsed, and drops the line once open', async () => {
+    const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
+    // runPrompt's error only repeats the exit code, so the line is its last tail line.
+    const hint = wrapper.get('.injected-card-hint')
+    expect(hint.text()).toBe('two')
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.attributes('aria-describedby')).toBe(hint.attributes('id'))
+    await toggle.trigger('click')
+    expect(wrapper.find('.injected-card-hint').exists()).toBe(false)
+    expect(toggle.attributes('aria-describedby')).toBeUndefined()
+  })
+
+  it('shows no failure line for a run that succeeded', () => {
+    const ok: InjectedPrompt = { kind: 'background_run', count: 1, runs: [{ ...runPrompt.runs[0], verdict: 'ok', exitCode: 0, error: '' }] }
+    const wrapper = mountCard({ prompt: ok, raw: '=== raw' })
+    expect(wrapper.find('.injected-card-hint').exists()).toBe(false)
+  })
+
   it("shows each run's status pill, log link and tail", async () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
     await wrapper.get('.injected-card-toggle').trigger('click')
@@ -52,6 +82,21 @@ describe('InjectedPromptCard', () => {
     // A named region, not a bare focusable element: the name has to be
     // supported by a role for a screen reader to announce it.
     expect(tail.attributes('role')).toBe('region')
+  })
+
+  it('hides the full-prompt toggle and the log link when there is no raw prompt or log', async () => {
+    const native: InjectedPrompt = {
+      kind: 'background_run',
+      count: 1,
+      runs: [{ label: 'probe', runId: 'b1', verdict: 'failed', exitCode: 3, error: '', logPath: '', tail: [] }],
+    }
+    const wrapper = mountCard({ prompt: native, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    expect(wrapper.find('.injected-card-log').exists()).toBe(false)
+    expect(wrapper.find('.file-link').exists()).toBe(false)
+    // Without a log nothing says whether the command printed anything.
+    expect(wrapper.text()).not.toContain('No output.')
   })
 
   it('keeps the full prompt behind its own toggle', async () => {
@@ -125,6 +170,18 @@ describe('InjectedPromptCard', () => {
   // A retry is a turn the reader asked to run again, so it reads as a notice
   // like the other engine-written turns, and the request it repeats stays one
   // disclosure away instead of being a second copy of the same words.
+  it('draws a restart resume as a collapsed notice without a prompt toggle', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'restart_resume' }, raw: 'Continue after restart: …' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--restart_resume')
+    expect(card.attributes('aria-label')).toBe('Continue after restart')
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toContain('continue where it left off')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+  })
+
   it('draws a retry as a collapsed notice with the request behind a disclosure', async () => {
     const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: 'Check the video' })
     const card = wrapper.get('.injected-card')
@@ -254,5 +311,82 @@ describe('InjectedPromptCard', () => {
     expect(prose.attributes('tabindex')).toBe('0')
     expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected request')
+  })
+
+  it('renders the actions slot while collapsed, and the cause when expanded', async () => {
+    const prompt = errorNoticePrompt('Error: connection refused')
+    const wrapper = mount(InjectedPromptCard, {
+      props: { prompt, raw: 'Error: connection refused' },
+      slots: { actions: '<button class="retry-btn">Retry</button>' },
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+    expect(wrapper.get('.injected-card-actions .retry-btn').text()).toBe('Retry')
+    expect(wrapper.get('.injected-card-hint').text()).toBe('connection refused')
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toBe((prompt as { copy: string }).copy)
+    expect(wrapper.get('.injected-card-prose').attributes('aria-label')).toBe('Error message')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    expect(wrapper.find('.retry-btn').exists()).toBe(true)
+  })
+
+  it('draws no actions row without the slot', () => {
+    const wrapper = mountCard({ prompt: runPrompt, raw: '' })
+    expect(wrapper.find('.injected-card-actions').exists()).toBe(false)
+  })
+
+  it('announces only an error card\'s hint', () => {
+    const err = mountCard({ prompt: errorNoticePrompt('Error: connection refused'), raw: '' })
+    expect(err.get('.injected-card-hint').attributes('role')).toBe('status')
+    const run = mountCard({ prompt: runPrompt, raw: '' })
+    expect(run.get('.injected-card-hint').attributes('role')).toBeUndefined()
+  })
+})
+
+describe('InjectedPromptCard handover', () => {
+  const handover: InjectedPrompt = {
+    kind: 'handover',
+    from: 'opencode',
+    to: 'Claude',
+    sent: '<provider-handover>\nUser: hi\n</provider-handover>',
+  }
+
+  it('renders the handover collapsed with its label and route', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: 'Handed over from opencode to Claude.' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--handover')
+    expect(card.attributes('aria-label')).toBe('Handed over')
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.text()).toContain('Handed over')
+    expect(toggle.text()).toContain('· opencode → Claude')
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+  })
+
+  it('shows a note and the sent pack behind a named disclosure when expanded', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toContain('fresh session')
+    const details = wrapper.get('details.injected-card-original')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show what the agent received')
+    const region = wrapper.get('details.injected-card-original pre.injected-card-raw')
+    expect(region.text()).toBe(handover.kind === 'handover' ? handover.sent : '')
+    expect(region.attributes('tabindex')).toBe('0')
+    expect(region.attributes('role')).toBe('region')
+    expect(region.attributes('aria-label')).toBe('What the agent received')
+  })
+
+  it('says so and shows no disclosure when no pack was recorded', async () => {
+    const wrapper = mountCard({ prompt: { ...handover, sent: '' }, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toBe('This handover recorded no copy of what was sent.')
+    expect(wrapper.find('details.injected-card-original').exists()).toBe(false)
+  })
+
+  it('draws no full-prompt toggle', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: 'Handed over from opencode to Claude.' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
   })
 })

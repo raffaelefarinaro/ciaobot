@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 from typing import Any
 
@@ -628,6 +628,1352 @@ def test_archive_members_are_ordinary_and_path_safe(tmp_path: Path) -> None:
     assert sorted(p.name for p in (tmp_path / "host").iterdir()) == sorted(
         [BUILD.APP_NAME, BUILD.ARCHIVE_NAME]
     )
+
+
+# --- release signing: Developer ID, hardened runtime, notarization ---------
+
+RELEASE_TEAM_ID = "ABCDE12345"
+RELEASE_IDENTITY = "Developer ID Application: Ciaobot Server (ABCDE12345)"
+RELEASE_PROFILE = "ciaobot-notary"
+
+# Native-shaped fixture data, written out literally and independently of the
+# production constants: a shared change must fail these tests rather than move
+# the builder and its fake together.
+NATIVE_IDENTIFIER = "local.ciaobot.server"
+NATIVE_ARCHS_LINE = "arm64 x86_64\n"
+NATIVE_CODE_DIRECTORY = "v=20500 size=400 flags=0x10000(runtime) hashes=4+3 location=embedded"
+NATIVE_NO_RUNTIME_FLAGS = "v=20500 size=400 flags=0x0(none) hashes=4+3 location=embedded"
+NATIVE_ENTITLEMENTS = {"com.apple.security.automation.apple-events": True}
+NATIVE_ENTITLEMENTS_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    "<plist version=\"1.0\">\n<dict>\n"
+    "\t<key>com.apple.security.automation.apple-events</key>\n\t<true/>\n"
+    "</dict>\n</plist>\n"
+)
+
+# Unique values that must never appear in an error message or in CLI output.
+SENTINEL_IDENTITY = "Developer ID Application: SENTINELIDENTITY4F7A (ABCDE12345)"
+SENTINEL_PROFILE = "SENTINELPROFILE9C2D"
+SENTINEL_TOOL_OUTPUT = "SENTINELTOOLOUTPUT7B3E"
+SENTINEL_TOOL_ERROR = "SENTINELTOOLERROR1D6F"
+SENTINEL_RAW_ARCHS = "SENTINELRAWARCHS5A1C"
+SENTINEL_RAW_FIELD = "SENTINELRAWFIELD2E8B"
+
+# Stand-in for whatever material ``xcrun stapler`` writes into the bundle. The
+# tests never assert a ticket format or path: they assert that the bytes the
+# staple step produced are still in the app when the final archive is written.
+STAPLE_TICKET_RELATIVE = "Contents/TestStapleTicket"
+STAPLE_TICKET_BYTES = b"stapled-ticket"
+
+
+def _release_signing(**overrides: str) -> Any:
+    values = {
+        "identity": RELEASE_IDENTITY,
+        "team_id": RELEASE_TEAM_ID,
+        "keychain_profile": RELEASE_PROFILE,
+    }
+    values.update(overrides)
+    return BUILD.ReleaseSigning(**values)
+
+
+def _release_tool(cmd: list[str]) -> str:
+    """The tool family for exactly-known release argv; fail on anything else."""
+
+    def is_(prefix: list[str], length: int) -> bool:
+        return cmd[: len(prefix)] == prefix and len(cmd) == length
+
+    if is_(["xcrun", "swiftc"], 8):
+        assert cmd[2].endswith("ServerHost.swift"), cmd
+        assert cmd[3] == "-target" and cmd[5] == "-O" and cmd[6] == "-o", cmd
+        return "swiftc"
+    if is_(["lipo", "-create", "-output"], 6):
+        return "lipo-create"
+    if is_(["lipo", "-archs"], 3):
+        return "archs"
+    if is_(["codesign", "--force", "--sign"], 12):
+        assert cmd[4:6] == ["--options", "runtime"], cmd
+        assert cmd[6] == "--timestamp", cmd
+        assert cmd[7] == "--entitlements", cmd
+        assert cmd[9] == "--requirements", cmd
+        return "sign"
+    if is_(["codesign", "--verify", "--strict"], 4):
+        return "verify"
+    if is_(["codesign", "--verify", "--strict", "--test-requirement"], 7):
+        assert cmd[4].startswith("="), cmd
+        assert cmd[5] == "--all-architectures", cmd
+        return "verify-expected"
+    if is_(["codesign", "-dv", "--verbose=4", "--arch"], 6):
+        return "display"
+    if is_(["codesign", "-d", "--entitlements", ":-", "--xml", "--arch"], 8):
+        return "entitlements"
+    if is_(["ditto", "-c", "-k", "--keepParent"], 6):
+        return "ditto"
+    if is_(["xcrun", "notarytool", "submit"], 11):
+        assert cmd[4] == "--keychain-profile", cmd
+        assert cmd[6:] == ["--wait", "--timeout", "30m", "--output-format", "json"], cmd
+        return "notary"
+    if is_(["xcrun", "stapler", "staple"], 4):
+        return "staple"
+    if is_(["xcrun", "stapler", "validate"], 4):
+        return "staple-validate"
+    if is_(["spctl", "--assess", "--type", "execute", "--verbose=2"], 6):
+        return "gatekeeper"
+    raise AssertionError(f"unexpected release argv: {cmd}")
+
+
+def _release_runner(
+    commands: list[list[str]] | None = None,
+    *,
+    calls: list[tuple[list[str], dict[str, Any]]] | None = None,
+    fault: dict[str, Any] | None = None,
+    notary_status: Any = "Accepted",
+    notary_returncode: int = 0,
+    notary_stdout: str | None = None,
+    staple_ticket: bytes | None = None,
+    fail: Callable[[list[str]], bool] | None = None,
+    timeout_at: Callable[[list[str]], bool] | None = None,
+) -> Any:
+    """A strict, native-shaped fake toolchain that rejects unexpected argv.
+
+    ``fault`` overrides one slice/artifact fact and applies only to the selected
+    ``stage`` (``"built"`` or ``"extracted"``) and, when it names one, the
+    selected ``arch``, so artifact- and slice-targeted negative cases stay
+    independent.
+    """
+
+    def complete(
+        cmd: list[str],
+        kwargs: dict[str, Any],
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        if returncode != 0 and kwargs.get("check"):
+            raise subprocess.CalledProcessError(
+                returncode, cmd, output=stdout, stderr=stderr
+            )
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+    def for_stage(path: str, arch: str | None = None) -> dict[str, Any]:
+        if not fault:
+            return {}
+        stage = "extracted" if ".host-verify" in path else "built"
+        if fault.get("stage", "built") != stage:
+            return {}
+        target = fault.get("arch")
+        if target is not None and target != arch:
+            return {}
+        return fault
+
+    def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if commands is not None:
+            commands.append(list(cmd))
+        if calls is not None:
+            calls.append((list(cmd), dict(kwargs)))
+        family = _release_tool(cmd)
+        if fail is not None and fail(cmd):
+            raise subprocess.CalledProcessError(
+                1, cmd, output=SENTINEL_TOOL_OUTPUT, stderr=SENTINEL_TOOL_ERROR
+            )
+        if timeout_at is not None and timeout_at(cmd):
+            raise subprocess.TimeoutExpired(cmd, 1)
+        if family == "swiftc":
+            Path(cmd[7]).write_bytes(b"thin")
+        elif family == "lipo-create":
+            Path(cmd[3]).write_bytes(b"universal-binary")
+        elif family in ("sign", "verify", "verify-expected"):
+            pass
+        elif family == "archs":
+            return complete(
+                cmd, kwargs, stdout=str(for_stage(cmd[2]).get("archs", NATIVE_ARCHS_LINE))
+            )
+        elif family == "display":
+            arch, path = cmd[4], cmd[5]
+            data = for_stage(path, arch)
+            identifier = data.get("identifier", NATIVE_IDENTIFIER)
+            code_directory = data.get("code_directory", NATIVE_CODE_DIRECTORY)
+            runtime_version = data.get("runtime_version", "13.0.0")
+            timestamp = data.get("timestamp", "Oct 30, 2026 at 12:00:00")
+            cdhash = data.get("cdhash", f"native-{arch}")
+            lines: list[str] = []
+            if identifier is not None:
+                lines.append(f"Identifier={identifier}")
+            if code_directory is not None:
+                lines.append(f"CodeDirectory {code_directory}")
+            lines.append(f"Signature={data.get('signature', 'Developer ID Application')}")
+            lines.append(f"TeamIdentifier={data.get('team_id', RELEASE_TEAM_ID)}")
+            if cdhash is not None:
+                lines.append(f"CDHash={cdhash}")
+            if runtime_version is not None:
+                lines.append(f"Runtime Version={runtime_version}")
+            if timestamp is not None:
+                lines.append(f"Timestamp={timestamp}")
+            return complete(cmd, kwargs, stdout="", stderr="\n".join(lines) + "\n")
+        elif family == "entitlements":
+            entitlements = for_stage(cmd[7], cmd[6]).get(
+                "entitlements", NATIVE_ENTITLEMENTS
+            )
+            if entitlements is None:
+                return complete(cmd, kwargs)
+            if isinstance(entitlements, str):
+                return complete(cmd, kwargs, stdout=entitlements)
+            return complete(
+                cmd, kwargs, stdout=plistlib.dumps(entitlements).decode("utf-8")
+            )
+        elif family == "ditto":
+            Path(cmd[5]).write_bytes(b"temporary-zip")
+        elif family == "notary":
+            stdout = (
+                notary_stdout
+                if notary_stdout is not None
+                else json.dumps({"id": "submission-1", "status": notary_status})
+            )
+            return complete(cmd, kwargs, returncode=notary_returncode, stdout=stdout)
+        elif family == "staple":
+            if staple_ticket is not None:
+                ticket = Path(cmd[3]) / STAPLE_TICKET_RELATIVE
+                ticket.parent.mkdir(parents=True, exist_ok=True)
+                ticket.write_bytes(staple_ticket)
+        elif family == "staple-validate":
+            stage = for_stage(cmd[3])
+            return complete(cmd, kwargs, returncode=int(stage.get("staple_validate", 0)))
+        elif family == "gatekeeper":
+            stage = for_stage(cmd[5])
+            return complete(cmd, kwargs, returncode=int(stage.get("gatekeeper", 0)))
+        else:  # pragma: no cover - _release_tool already rejected this
+            raise AssertionError(f"unhandled release argv: {cmd}")
+        return complete(cmd, kwargs)
+
+    return run
+
+
+def _staple_index(commands: list[list[str]]) -> int:
+    return next(
+        index
+        for index, cmd in enumerate(commands)
+        if cmd[:3] == ["xcrun", "stapler", "staple"]
+    )
+
+
+def _cli_targeting_darwin(monkeypatch: pytest.MonkeyPatch, runner: Any = None) -> None:
+    """Run the CLI against an explicit macOS target, optionally with a runner.
+
+    The suite tests the macOS builder, and CI runs it on Linux. Asking ``build``
+    for ``platform_name="darwin"`` is exactly what a macOS caller does; no test
+    changes the interpreter's ``sys.platform``.
+    """
+    original = BUILD.build
+
+    def build_targeting_darwin(
+        path: Path, *, release_signing: Any = None
+    ) -> dict[str, Any]:
+        if runner is None:
+            return original(path, platform_name="darwin", release_signing=release_signing)
+        return original(
+            path,
+            platform_name="darwin",
+            runner=runner,
+            release_signing=release_signing,
+        )
+
+    monkeypatch.setattr(BUILD, "build", build_targeting_darwin)
+
+
+def _cli_with_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
+    """Keep the CLI path, target macOS and inject only the toolchain runner."""
+    _cli_targeting_darwin(monkeypatch, runner)
+
+
+def _simulate_non_macos_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the loaded builder see Linux without touching the real ``sys``.
+
+    ``build`` reads its default platform through the module's ``sys`` global, so
+    replacing that module attribute for one test simulates a non-macOS caller
+    deterministically on any host while the interpreter's own ``sys.platform``
+    stays untouched.
+    """
+    monkeypatch.setattr(
+        BUILD,
+        "sys",
+        SimpleNamespace(platform="linux", version_info=sys.version_info),
+    )
+
+
+def test_release_entitlements_plist_is_minimal() -> None:
+    # The tracked entitlements file is the only entitlement source, and it stays
+    # minimal: no sandbox, JIT, unsigned memory, library-validation-disable,
+    # debug or broad filesystem entitlement.
+    document = plistlib.loads(BUILD.ENTITLEMENTS_SOURCE.read_bytes())
+    assert document == {"com.apple.security.automation.apple-events": True}
+    assert BUILD.ENTITLEMENTS_SOURCE.name == "ServerHost.entitlements.plist"
+
+
+def test_release_build_requires_complete_signing_configuration_before_writes(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "never-created"
+
+    def _no_runner(cmd: list[str], **_kwargs: Any) -> None:
+        raise AssertionError(f"no tool may run for an incomplete release config: {cmd}")
+
+    for overrides in (
+        {"identity": ""},
+        {"identity": "   "},
+        {"identity": "-"},
+        {"team_id": ""},
+        {"team_id": "SHORT"},
+        {"team_id": "abcde12345"},
+        {"team_id": "ABCDE1234"},
+        {"team_id": "ABCDE123456"},
+        {"team_id": "ABCDE 1234"},
+        {"keychain_profile": ""},
+        {"keychain_profile": "   "},
+    ):
+        with pytest.raises(BUILD.BuildError):
+            BUILD.build(
+                output,
+                platform_name="darwin",
+                runner=_no_runner,
+                release_signing=_release_signing(**overrides),
+            )
+        assert not output.exists(), overrides
+
+
+def test_release_build_rejects_a_missing_entitlements_plist_before_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "never-created"
+    monkeypatch.setattr(BUILD, "ENTITLEMENTS_SOURCE", tmp_path / "missing.plist")
+
+    def _no_runner(cmd: list[str], **_kwargs: Any) -> None:
+        raise AssertionError(f"no tool may run without the entitlements file: {cmd}")
+
+    with pytest.raises(BUILD.BuildError):
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_no_runner,
+            release_signing=_release_signing(),
+        )
+    assert not output.exists()
+
+
+def test_release_build_rejects_adhoc_identity(tmp_path: Path) -> None:
+    output = tmp_path / "never-created"
+    commands: list[list[str]] = []
+
+    with pytest.raises(BUILD.BuildError):
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(commands),
+            release_signing=_release_signing(identity="-"),
+        )
+    # An ad-hoc signature can never satisfy the release contract, so it is
+    # refused before anything is compiled, signed or written.
+    assert commands == []
+    assert not output.exists()
+
+
+def test_release_build_signs_with_runtime_timestamp_entitlement_and_stable_requirement(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    result = BUILD.build(
+        tmp_path / "host",
+        platform_name="darwin",
+        runner=_release_runner(commands),
+        release_signing=_release_signing(),
+    )
+
+    signing = BUILD.ReleaseSigning(RELEASE_IDENTITY, RELEASE_TEAM_ID, RELEASE_PROFILE)
+    # Frozen: the release inputs cannot be rebound after construction, and the
+    # value compares and hashes by content.
+    with pytest.raises(AttributeError):
+        signing.identity = "someone else"  # type: ignore[misc]
+    assert signing == BUILD.ReleaseSigning(
+        RELEASE_IDENTITY, RELEASE_TEAM_ID, RELEASE_PROFILE
+    )
+    assert hash(signing) == hash(
+        BUILD.ReleaseSigning(RELEASE_IDENTITY, RELEASE_TEAM_ID, RELEASE_PROFILE)
+    )
+
+    # Exactly one signature, applied once to the assembled app, and the exact
+    # embedding argv: `--requirements` with a requirement-set literal is a
+    # SIGNING option and must not be reused to check the artifact.
+    expression = (
+        f'identifier "{BUILD.BUNDLE_ID}"'
+        " and anchor apple generic"
+        " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
+        " and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */"
+        f' and certificate leaf[subject.OU] = "{RELEASE_TEAM_ID}"'
+    )
+    app = str(result["paths"]["app"])
+    sign_indexes = [
+        index for index, cmd in enumerate(commands) if cmd[:2] == ["codesign", "--force"]
+    ]
+    assert len(sign_indexes) == 1
+    assert commands[sign_indexes[0]] == [
+        "codesign",
+        "--force",
+        "--sign",
+        RELEASE_IDENTITY,
+        "--options",
+        "runtime",
+        "--timestamp",
+        "--entitlements",
+        str(BUILD.ENTITLEMENTS_SOURCE),
+        "--requirements",
+        f"=designated => {expression}",
+        app,
+    ]
+
+    # Verification is the external seam: `--test-requirement` with a single
+    # requirement (not the `=designated =>` set), evaluated for every slice.
+    executable = str(result["paths"]["executable"])
+    expected = f"={expression}"
+    assert ["codesign", "--verify", "--strict", app] in commands
+    assert [
+        "codesign",
+        "--verify",
+        "--strict",
+        "--test-requirement",
+        expected,
+        "--all-architectures",
+        app,
+    ] in commands
+    # `--requirements` never appears on a verification command, and no verify
+    # command omits the external requirement or the all-slices flag.
+    verify_commands = [cmd for cmd in commands if cmd[:2] == ["codesign", "--verify"]]
+    assert verify_commands
+    for cmd in verify_commands:
+        assert "--requirements" not in cmd
+        if cmd != ["codesign", "--verify", "--strict", cmd[-1]]:
+            assert "--test-requirement" in cmd and "--all-architectures" in cmd, cmd
+    extracted_app = next(
+        cmd[-1]
+        for cmd in verify_commands
+        if "--test-requirement" in cmd and ".host-verify" in cmd[-1]
+    )
+    assert [
+        "codesign",
+        "--verify",
+        "--strict",
+        "--test-requirement",
+        expected,
+        "--all-architectures",
+        extracted_app,
+    ] in commands
+
+    # Both slices are inspected for identity, team, runtime, timestamp and
+    # entitlements - for the built app and again for the re-extracted one.
+    display_probes = [cmd for cmd in commands if cmd[:2] == ["codesign", "-dv"]]
+    entitlement_probes = [
+        cmd for cmd in commands if cmd[:2] == ["codesign", "-d"] and "--entitlements" in cmd
+    ]
+    for probes in (display_probes, entitlement_probes):
+        built = [cmd for cmd in probes if cmd[-1] == executable]
+        extracted = [cmd for cmd in probes if cmd[-1] != executable]
+        assert [cmd[cmd.index("--arch") + 1] for cmd in built] == ["arm64", "x86_64"]
+        assert [cmd[cmd.index("--arch") + 1] for cmd in extracted] == ["arm64", "x86_64"]
+        assert all(".host-verify" in cmd[-1] for cmd in extracted)
+
+    metadata = result["metadata"]
+    assert metadata["host_revision"] == BUILD.SIGNED_HOST_REVISION == 5
+    assert metadata["host_protocol"] == 2
+    assert metadata["bundle_id"] == "local.ciaobot.server"
+    assert metadata["per_arch_cdhashes"] == {
+        "arm64": "native-arm64",
+        "x86_64": "native-x86_64",
+    }
+    with (result["paths"]["app"] / "Contents" / "Info.plist").open("rb") as handle:
+        info = plistlib.load(handle)
+    assert info["CFBundleVersion"] == "5"
+    assert info["CFBundleShortVersionString"] == "5"
+    assert info[BUILD.HOST_PROTOCOL_KEY] == 2
+
+
+def test_release_native_tool_argv_and_order_are_exact(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    result = BUILD.build(
+        tmp_path / "host",
+        platform_name="darwin",
+        runner=_release_runner(commands, staple_ticket=STAPLE_TICKET_BYTES),
+        release_signing=_release_signing(),
+    )
+    app = str(result["paths"]["app"])
+
+    ditto = next(cmd for cmd in commands if cmd[:2] == ["ditto", "-c"])
+    zip_path = ditto[5]
+    assert ditto == ["ditto", "-c", "-k", "--keepParent", app, zip_path]
+    assert zip_path.endswith(".zip")
+    assert Path(zip_path).parent == result["paths"]["app"].parent
+
+    notary = [
+        "xcrun",
+        "notarytool",
+        "submit",
+        zip_path,
+        "--keychain-profile",
+        RELEASE_PROFILE,
+        "--wait",
+        "--timeout",
+        "30m",
+        "--output-format",
+        "json",
+    ]
+    notary_index = commands.index(notary)
+    staple_index = commands.index(["xcrun", "stapler", "staple", app])
+    built_validate_index = commands.index(["xcrun", "stapler", "validate", app])
+    sign_index = commands.index(
+        next(cmd for cmd in commands if cmd[:2] == ["codesign", "--force"])
+    )
+    ditto_index = commands.index(ditto)
+    assert sign_index < ditto_index < notary_index < staple_index
+    assert staple_index < built_validate_index
+
+    # The extracted app gets its own staple validation and Gatekeeper
+    # assessment, after its own signature checks - never the built app's paths.
+    extracted_app = next(
+        cmd[-1]
+        for cmd in commands
+        if cmd[:3] == ["xcrun", "stapler", "validate"] and cmd[-1] != app
+    )
+    assert ".host-verify" in extracted_app
+    extracted_validate = ["xcrun", "stapler", "validate", extracted_app]
+    gatekeeper = ["spctl", "--assess", "--type", "execute", "--verbose=2", extracted_app]
+    assert commands.count(extracted_validate) == 1
+    assert commands.count(gatekeeper) == 1
+    last_extracted_verify = max(
+        index
+        for index, cmd in enumerate(commands)
+        if cmd[:2] == ["codesign", "--verify"] and ".host-verify" in cmd[-1]
+    )
+    assert last_extracted_verify < commands.index(extracted_validate)
+    assert commands.index(extracted_validate) < commands.index(gatekeeper)
+
+
+def test_release_fake_rejects_unexpected_argv() -> None:
+    # The fake is strict: a wrong verification flag or a stray argument fails the
+    # test instead of quietly returning success.
+    runner = _release_runner()
+    with pytest.raises(AssertionError):
+        runner(
+            ["codesign", "--verify", "--strict", "--requirements", "=designated => x", "/tmp/app"],
+            check=True,
+        )
+    with pytest.raises(AssertionError):
+        runner(["codesign", "--verify", "--strict", "/tmp/app", "--all-architectures"], check=True)
+    with pytest.raises(AssertionError):
+        runner(["codesign", "--deep", "--verify", "/tmp/app"], check=True)
+
+
+def test_release_signed_subprocesses_are_bounded(tmp_path: Path) -> None:
+    # Every subprocess the release mode adds - including the release-only
+    # `lipo -archs` check - carries an explicit deadline, and the notary wait is
+    # the longest one.
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    BUILD.build(
+        tmp_path / "host",
+        platform_name="darwin",
+        runner=_release_runner(calls=calls),
+        release_signing=_release_signing(),
+    )
+    assert calls
+    signed_calls = [
+        (cmd, kwargs)
+        for cmd, kwargs in calls
+        if not (cmd[0] == "xcrun" and cmd[1] == "swiftc")
+        and cmd[:2] != ["lipo", "-create"]
+    ]
+    assert signed_calls
+    for cmd, kwargs in signed_calls:
+        assert kwargs.get("timeout"), cmd
+    notary = next(
+        kwargs for cmd, kwargs in calls if cmd[:3] == ["xcrun", "notarytool", "submit"]
+    )
+    other_timeouts = [
+        kwargs["timeout"] for cmd, kwargs in signed_calls if cmd[:3] != ["xcrun", "notarytool", "submit"]
+    ]
+    assert notary["timeout"] > max(other_timeouts)
+    # The release-only arch check is one of the bounded calls.
+    arch_checks = [
+        kwargs for cmd, kwargs in calls if cmd[:2] == ["lipo", "-archs"]
+    ]
+    assert len(arch_checks) == 2
+    assert all(kwargs.get("timeout") for kwargs in arch_checks)
+
+
+def test_release_build_rejects_wrong_team_or_certificate_requirement(
+    tmp_path: Path,
+) -> None:
+    # A slice whose leaf certificate names another team...
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError):
+        BUILD.build(
+            tmp_path / "wrong-team",
+            platform_name="darwin",
+            runner=_release_runner(
+                commands, fault={"team_id": "ZZZZZ99999", "stage": "built"}
+            ),
+            release_signing=_release_signing(),
+        )
+    assert not (tmp_path / "wrong-team").exists()
+    # ...and one that does not satisfy the expected requirement at all are both
+    # refused before the artifact is submitted for notarization.
+    assert not any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+
+    commands = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            tmp_path / "wrong-certificate",
+            platform_name="darwin",
+            runner=_release_runner(
+                commands,
+                fail=lambda cmd: cmd[:2] == ["codesign", "--verify"] and "--test-requirement" in cmd,
+            ),
+            release_signing=_release_signing(),
+        )
+    assert "expected requirement" in str(caught.value)
+    assert not (tmp_path / "wrong-certificate").exists()
+    assert not any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"notary_returncode": 1},
+        {"notary_stdout": "not json"},
+        {"notary_stdout": SENTINEL_TOOL_OUTPUT},
+        {"notary_stdout": '{"id": "submission-1"}'},
+        {"notary_status": "Invalid"},
+        {"notary_status": "Rejected"},
+        {"notary_status": "In Progress"},
+        {"notary_status": None},
+        {"notary_status": SENTINEL_TOOL_OUTPUT},
+    ],
+)
+def test_release_build_requires_accepted_notarization_status(
+    tmp_path: Path, kwargs: dict[str, Any]
+) -> None:
+    output = tmp_path / "host"
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(commands, **kwargs),
+            release_signing=_release_signing(),
+        )
+    assert not output.exists()
+    # The rejection never echoes the tool's output, even when that output is
+    # where the status came from.
+    message = str(caught.value)
+    assert SENTINEL_TOOL_OUTPUT not in message
+    # A submission that did not return exactly Accepted is never stapled.
+    assert not any(cmd[:3] == ["xcrun", "stapler", "staple"] for cmd in commands)
+
+
+@pytest.mark.parametrize("stage", ["sign", "submit", "staple", "extracted"])
+def test_release_build_failure_removes_only_its_output(
+    tmp_path: Path, stage: str
+) -> None:
+    sibling = tmp_path / "keep-me.txt"
+    sibling.write_text("unrelated")
+    output = tmp_path / "host"
+
+    def failed(cmd: list[str]) -> bool:
+        if stage == "sign":
+            return cmd[:2] == ["codesign", "--force"]
+        if stage == "submit":
+            return cmd[:3] == ["xcrun", "notarytool", "submit"]
+        if stage == "staple":
+            return cmd[:3] == ["xcrun", "stapler", "staple"]
+        return cmd[:2] == ["codesign", "--verify"] and ".host-verify" in cmd[-1]
+
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(commands, fail=failed),
+            release_signing=_release_signing(),
+        )
+
+    # The failure is sanitized: no tool argv, captured output or raw chain.
+    assert SENTINEL_TOOL_OUTPUT not in str(caught.value)
+    assert SENTINEL_TOOL_ERROR not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    # Only this invocation's fresh output is removed.
+    assert not output.exists()
+    assert sibling.read_text() == "unrelated"
+    # No later stage ran after the failure: no submission for a signing failure,
+    # no staple for a rejected submission, no extraction for a staple failure.
+    submitted = any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+    stapled = any(cmd[:3] == ["xcrun", "stapler", "staple"] for cmd in commands)
+    extracted = any(".host-verify" in cmd[-1] for cmd in commands)
+    if stage == "sign":
+        assert not submitted and not stapled and not extracted
+    elif stage == "submit":
+        assert submitted and not stapled and not extracted
+    elif stage == "staple":
+        assert submitted and stapled and not extracted
+    else:
+        assert submitted and stapled and extracted
+        assert not any(cmd[0] == "spctl" for cmd in commands)
+
+
+_SLICE_FAULTS = [
+    pytest.param("archs", "arm64\n", "must carry exactly", id="archs-missing"),
+    pytest.param("archs", "arm64 x86_64 i386\n", "must carry exactly", id="archs-extra"),
+    pytest.param("identifier", "com.example.other", "bundle identifier", id="identifier-wrong"),
+    pytest.param("team_id", "ZZZZZ99999", "signing team", id="team-wrong"),
+    pytest.param("signature", "adhoc", "ad-hoc", id="signature-adhoc"),
+    pytest.param("code_directory", None, "no CodeDirectory", id="code-directory-missing"),
+    pytest.param(
+        "code_directory", NATIVE_NO_RUNTIME_FLAGS, "hardened-runtime", id="runtime-flag-missing"
+    ),
+    pytest.param("runtime_version", None, "hardened runtime", id="runtime-version-missing"),
+    pytest.param("timestamp", None, "secure timestamp", id="timestamp-missing"),
+    pytest.param("cdhash", None, "no CDHash", id="cdhash-missing"),
+    pytest.param(
+        "entitlements",
+        {
+            "com.apple.security.automation.apple-events": True,
+            "com.apple.security.cs.disable-library-validation": True,
+        },
+        "entitlements",
+        id="entitlements-extra",
+    ),
+    pytest.param("entitlements", {}, "entitlements", id="entitlements-missing"),
+    pytest.param("entitlements", "not a plist", "entitlements", id="entitlements-unparseable"),
+]
+
+# The same slice facts, but faulted only in the second architecture: the arm64
+# probe must pass and the x86_64 probe must be reached and rejected, for the
+# built app and again for the extracted one.
+_SECOND_SLICE_FAULTS = [
+    pytest.param(
+        "code_directory", NATIVE_NO_RUNTIME_FLAGS, "hardened-runtime", id="runtime-flag"
+    ),
+    pytest.param("identifier", "com.example.other", "bundle identifier", id="identifier"),
+    pytest.param("timestamp", None, "secure timestamp", id="timestamp"),
+    pytest.param(
+        "entitlements",
+        {
+            "com.apple.security.automation.apple-events": True,
+            "com.apple.security.cs.disable-library-validation": True,
+        },
+        "entitlements",
+        id="entitlements",
+    ),
+]
+
+
+@pytest.mark.parametrize("stage", ["built", "extracted"])
+@pytest.mark.parametrize("field, value, fragment", _SLICE_FAULTS)
+def test_release_build_rejects_bad_slice_evidence(
+    tmp_path: Path, stage: str, field: str, value: Any, fragment: str
+) -> None:
+    # Every verification input the builder claims to check is rejected
+    # independently, on the built app and again on the re-extracted one.
+    output = tmp_path / "host"
+    sibling = tmp_path / "keep-me.txt"
+    sibling.write_text("kept")
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(commands, fault={field: value, "stage": stage}),
+            release_signing=_release_signing(),
+        )
+    assert fragment in str(caught.value)
+    assert not output.exists()
+    assert sibling.read_text() == "kept"
+    submitted = any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+    extracted = any(".host-verify" in cmd[-1] for cmd in commands)
+    if stage == "built":
+        # Nothing beyond the failed built-artifact checks ran.
+        assert not submitted and not extracted
+        assert not any(cmd[:2] == ["ditto", "-c"] for cmd in commands)
+    else:
+        # The artifact was notarized, stapled and archived; the extracted
+        # re-verification is what rejected it, and no completed artifact remains.
+        assert submitted and extracted
+    assert not (tmp_path / BUILD.ARCHIVE_NAME).exists()
+
+
+@pytest.mark.parametrize("stage", ["built", "extracted"])
+@pytest.mark.parametrize("field, value, fragment", _SECOND_SLICE_FAULTS)
+def test_release_build_enforces_second_slice_independently(
+    tmp_path: Path, stage: str, field: str, value: Any, fragment: str
+) -> None:
+    output = tmp_path / "host"
+    sibling = tmp_path / "keep-me.txt"
+    sibling.write_text("kept")
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(
+                commands, fault={field: value, "stage": stage, "arch": "x86_64"}
+            ),
+            release_signing=_release_signing(),
+        )
+    assert fragment in str(caught.value)
+    assert "x86_64" in str(caught.value)
+    # The arm64 probe passed and the x86_64 probe was reached on the same
+    # artifact: the failure comes from the second slice, not the first.
+    family = ["codesign", "-d"] if field == "entitlements" else ["codesign", "-dv"]
+    probes = [
+        cmd
+        for cmd in commands
+        if cmd[:2] == family and (".host-verify" in cmd[-1]) == (stage == "extracted")
+    ]
+    assert [cmd[cmd.index("--arch") + 1] for cmd in probes] == ["arm64", "x86_64"]
+    assert not output.exists()
+    assert sibling.read_text() == "kept"
+    if stage == "built":
+        assert not any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+    else:
+        assert any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+    assert not (tmp_path / BUILD.ARCHIVE_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "field, fragment, reaches_gatekeeper",
+    [
+        ("staple_validate", "ticket could not be validated", False),
+        ("gatekeeper", "Gatekeeper rejected", True),
+    ],
+)
+def test_release_build_rejects_extracted_only_staple_or_gatekeeper_failure(
+    tmp_path: Path, field: str, fragment: str, reaches_gatekeeper: bool
+) -> None:
+    output = tmp_path / "host"
+    sibling = tmp_path / "keep-me.txt"
+    sibling.write_text("kept")
+    commands: list[list[str]] = []
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(commands, fault={field: 1, "stage": "extracted"}),
+            release_signing=_release_signing(),
+        )
+    assert fragment in str(caught.value)
+    # The built app's own staple validation passed; only the extracted one failed.
+    validates = [cmd for cmd in commands if cmd[:3] == ["xcrun", "stapler", "validate"]]
+    built = [cmd for cmd in validates if ".host-verify" not in cmd[-1]]
+    extracted = [cmd for cmd in validates if ".host-verify" in cmd[-1]]
+    assert len(built) == 1 and len(extracted) == 1
+    assert commands.index(built[0]) < commands.index(extracted[0])
+    assert any(cmd[:3] == ["xcrun", "notarytool", "submit"] for cmd in commands)
+    assert _staple_index(commands) < commands.index(extracted[0])
+    gatekeepers = [cmd for cmd in commands if cmd[0] == "spctl"]
+    if reaches_gatekeeper:
+        assert len(gatekeepers) == 1 and ".host-verify" in gatekeepers[0][-1]
+        assert commands.index(extracted[0]) < commands.index(gatekeepers[0])
+    else:
+        assert not gatekeepers
+    assert not output.exists()
+    assert sibling.read_text() == "kept"
+    assert not (tmp_path / BUILD.ARCHIVE_NAME).exists()
+
+
+def test_release_build_staples_before_final_archive_and_digest(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    result = BUILD.build(
+        tmp_path / "host",
+        platform_name="darwin",
+        runner=_release_runner(commands, staple_ticket=STAPLE_TICKET_BYTES),
+        release_signing=_release_signing(),
+    )
+
+    archive: Path = result["paths"]["archive"]
+    staple = _staple_index(commands)
+    # One signature, and it happens before the ticket is stapled: nothing signs
+    # after stapling.
+    signing = [i for i, cmd in enumerate(commands) if cmd[:2] == ["codesign", "--force"]]
+    assert len(signing) == 1 and signing[0] < staple
+    validate = next(
+        i for i, cmd in enumerate(commands) if cmd[:3] == ["xcrun", "stapler", "validate"]
+    )
+    extracted_verify = next(
+        i
+        for i, cmd in enumerate(commands)
+        if cmd[:2] == ["codesign", "--verify"] and ".host-verify" in cmd[-1]
+    )
+    assert staple < validate < extracted_verify
+    # The archive was written after the staple: it carries the ticket bytes.
+    with tarfile.open(archive, "r:gz") as tar:
+        member = tar.getmember(f"{BUILD.APP_NAME}/{STAPLE_TICKET_RELATIVE}")
+        assert tar.extractfile(member).read() == STAPLE_TICKET_BYTES  # type: ignore[union-attr]
+    # The digests describe the final archive on disk, not an intermediate file.
+    assert result["metadata"]["archive_sha256"] == hashlib.sha256(
+        archive.read_bytes()
+    ).hexdigest()
+    assert result["metadata"]["archive_size"] == archive.stat().st_size
+
+
+def test_release_archive_preserves_stapled_ticket(tmp_path: Path) -> None:
+    result = BUILD.build(
+        tmp_path / "host",
+        platform_name="darwin",
+        runner=_release_runner(staple_ticket=STAPLE_TICKET_BYTES),
+        release_signing=_release_signing(),
+    )
+    app: Path = result["paths"]["app"]
+    archive: Path = result["paths"]["archive"]
+
+    # The staple material is still in the built app and in the archive, under
+    # the fixed archive root, as an ordinary file with no link.
+    assert (app / STAPLE_TICKET_RELATIVE).read_bytes() == STAPLE_TICKET_BYTES
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        ticket = tar.getmember(f"{BUILD.APP_NAME}/{STAPLE_TICKET_RELATIVE}")
+        assert not ticket.issym() and not ticket.islnk()
+        assert tar.extractfile(ticket).read() == STAPLE_TICKET_BYTES  # type: ignore[union-attr]
+    for member in members:
+        assert not member.issym() and not member.islnk()
+        assert not member.name.startswith("/")
+        assert ".." not in Path(member.name).parts
+    assert all(m.name == BUILD.APP_NAME or m.name.startswith(f"{BUILD.APP_NAME}/") for m in members)
+    # The temporary ZIP and the extraction scratch are gone from the output.
+    assert sorted(p.name for p in (tmp_path / "host").iterdir()) == sorted(
+        [BUILD.APP_NAME, BUILD.ARCHIVE_NAME]
+    )
+
+
+def test_release_build_verifies_final_extracted_app(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    def fails_only_on_the_extracted_app(cmd: list[str]) -> bool:
+        return cmd[:2] == ["codesign", "--verify"] and ".host-verify" in cmd[-1]
+
+    output = tmp_path / "host"
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            output,
+            platform_name="darwin",
+            runner=_release_runner(
+                commands, fail=fails_only_on_the_extracted_app
+            ),
+            release_signing=_release_signing(),
+        )
+    assert "extracted app failed strict signature verification" in str(caught.value)
+    assert not output.exists()
+
+    # The original app passed, the artifact was stapled and archived, and only
+    # the independent re-extraction failed: the failure is not the earlier
+    # verification repeating.
+    app = next(
+        cmd[-1]
+        for cmd in commands
+        if cmd[:2] == ["codesign", "--verify"]
+        and "--test-requirement" in cmd
+        and ".host-verify" not in cmd[-1]
+    )
+    extracted = [cmd[-1] for cmd in commands if ".host-verify" in cmd[-1]]
+    assert extracted and all(path != app for path in extracted)
+    assert _staple_index(commands) < commands.index(
+        next(cmd for cmd in commands if cmd[-1] == extracted[0])
+    )
+    # The extracted verification is the last stage reached: no extracted staple
+    # validation, Gatekeeper assessment or completed artifact survives.
+    assert not any(cmd[:3] == ["xcrun", "stapler", "validate"] and ".host-verify" in cmd[-1] for cmd in commands)
+    assert not any(cmd[0] == "spctl" for cmd in commands)
+
+
+@pytest.mark.parametrize(
+    "argv, fragment",
+    [
+        (["--release"], "--release requires"),
+        (["--release", "--signing-identity", RELEASE_IDENTITY], "--release requires"),
+        (["--release", "--team-id", RELEASE_TEAM_ID], "--release requires"),
+        (["--release", "--notary-profile", RELEASE_PROFILE], "--release requires"),
+        (
+            ["--release", "--signing-identity", RELEASE_IDENTITY, "--team-id", RELEASE_TEAM_ID],
+            "--release requires",
+        ),
+        (["--signing-identity", RELEASE_IDENTITY], "require --release"),
+        (["--team-id", RELEASE_TEAM_ID], "require --release"),
+        (["--notary-profile", RELEASE_PROFILE], "require --release"),
+        (
+            [
+                "--release",
+                "--signing-identity",
+                "-",
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                RELEASE_PROFILE,
+            ],
+            "ad-hoc signature",
+        ),
+    ],
+)
+def test_release_cli_rejects_partial_configuration(
+    tmp_path: Path,
+    argv: list[str],
+    fragment: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The suite tests the macOS builder and CI runs it on Linux, so the CLI is
+    # pointed at its macOS target explicitly. Without this, a non-macOS host
+    # answers with the platform refusal before the signing validation runs.
+    _cli_targeting_darwin(monkeypatch)
+    output = tmp_path / "host"
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(["--output", str(output), *argv])
+    assert caught.value.code == 2, argv
+    # The refusal names the real rule, so an unknown-option rejection cannot
+    # stand in for it.
+    assert fragment in capsys.readouterr().err, argv
+    assert not output.exists(), argv
+
+
+def test_release_cli_passes_complete_configuration_to_the_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "host"
+    captured: dict[str, Any] = {}
+
+    def fake_build(path: Path, *, release_signing: Any = None) -> dict[str, Any]:
+        captured["path"] = path
+        captured["signing"] = release_signing
+        return {
+            "paths": {"app": output / BUILD.APP_NAME, "archive": output / BUILD.ARCHIVE_NAME},
+            "metadata": {"host_revision": BUILD.SIGNED_HOST_REVISION},
+        }
+
+    monkeypatch.setattr(BUILD, "build", fake_build)
+    assert (
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                RELEASE_IDENTITY,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                RELEASE_PROFILE,
+            ]
+        )
+        == 0
+    )
+    signing = captured["signing"]
+    assert isinstance(signing, BUILD.ReleaseSigning)
+    assert (signing.identity, signing.team_id, signing.keychain_profile) == (
+        RELEASE_IDENTITY,
+        RELEASE_TEAM_ID,
+        RELEASE_PROFILE,
+    )
+    printed = capsys.readouterr().out
+    # Authentication-bearing values never reach the output.
+    assert RELEASE_PROFILE not in printed
+    assert RELEASE_IDENTITY not in printed
+
+
+@pytest.mark.parametrize(
+    "identity, profile",
+    [
+        (SENTINEL_IDENTITY + "\n", SENTINEL_PROFILE),
+        (SENTINEL_IDENTITY, SENTINEL_PROFILE + "\n"),
+    ],
+    ids=["bad-identity", "bad-profile"],
+)
+def test_release_cli_never_echoes_signing_inputs_on_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    identity: str,
+    profile: str,
+) -> None:
+    # Target macOS so the signing validation itself answers on every host.
+    _cli_targeting_darwin(monkeypatch)
+    output = tmp_path / "host"
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                identity,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                profile,
+            ]
+        )
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert SENTINEL_IDENTITY not in err
+    assert SENTINEL_PROFILE not in err
+    assert "Traceback" not in err
+    assert not output.exists()
+
+
+def test_release_cli_signing_validation_runs_when_the_host_is_not_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression for the CI #2332 failure: the release CLI tests must exercise
+    # the macOS signing validation even when the host is Linux. The host is
+    # simulated through the builder's module-local platform seam - the real
+    # interpreter's sys.platform is never changed.
+    output = tmp_path / "host"
+    argv = [
+        "--output",
+        str(output),
+        "--release",
+        "--signing-identity",
+        "-",
+        "--team-id",
+        RELEASE_TEAM_ID,
+        "--notary-profile",
+        RELEASE_PROFILE,
+    ]
+    _simulate_non_macos_host(monkeypatch)
+
+    # Unchanged production behaviour: an unscoped build on a non-macOS host is
+    # refused for the platform before the signing configuration is validated.
+    with pytest.raises(SystemExit) as platform_refusal:
+        BUILD.main(argv)
+    assert platform_refusal.value.code == 2
+    platform_err = capsys.readouterr().err
+    assert "requires macOS" in platform_err
+    assert not output.exists()
+
+    # With the explicit macOS target the same CLI runs the intended signing
+    # validation on this non-macOS host: the seam the release suite relies on.
+    _cli_targeting_darwin(monkeypatch)
+    with pytest.raises(SystemExit) as signing_refusal:
+        BUILD.main(argv)
+    assert signing_refusal.value.code == 2
+    signing_err = capsys.readouterr().err
+    assert "ad-hoc signature" in signing_err
+    assert "requires macOS" not in signing_err
+    assert not output.exists()
+
+
+def test_release_cli_never_echoes_signing_inputs_on_signing_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "host"
+    _cli_with_runner(
+        monkeypatch, _release_runner(fail=lambda cmd: cmd[:2] == ["codesign", "--force"])
+    )
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                SENTINEL_IDENTITY,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                SENTINEL_PROFILE,
+            ]
+        )
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    for sentinel in (
+        SENTINEL_IDENTITY,
+        SENTINEL_PROFILE,
+        SENTINEL_TOOL_OUTPUT,
+        SENTINEL_TOOL_ERROR,
+    ):
+        assert sentinel not in err
+    assert "Traceback" not in err
+    assert "could not be applied" in err
+    assert not output.exists()
+
+
+def test_release_cli_never_echoes_notary_inputs_on_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "host"
+    commands: list[list[str]] = []
+    _cli_with_runner(
+        monkeypatch,
+        _release_runner(
+            commands,
+            timeout_at=lambda cmd: cmd[:3] == ["xcrun", "notarytool", "submit"],
+        ),
+    )
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                SENTINEL_IDENTITY,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                SENTINEL_PROFILE,
+            ]
+        )
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    for sentinel in (
+        SENTINEL_IDENTITY,
+        SENTINEL_PROFILE,
+        SENTINEL_TOOL_OUTPUT,
+        SENTINEL_TOOL_ERROR,
+    ):
+        assert sentinel not in err
+    assert "did not finish" in err
+    assert "Traceback" not in err
+    assert not any(cmd[:3] == ["xcrun", "stapler", "staple"] for cmd in commands)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("stage", ["sign", "notary-timeout", "notary-output"])
+def test_release_failures_are_sanitized_and_unchained(tmp_path: Path, stage: str) -> None:
+    commands: list[list[str]] = []
+    if stage == "sign":
+        runner = _release_runner(
+            commands, fail=lambda cmd: cmd[:2] == ["codesign", "--force"]
+        )
+    elif stage == "notary-timeout":
+        runner = _release_runner(
+            commands,
+            timeout_at=lambda cmd: cmd[:3] == ["xcrun", "notarytool", "submit"],
+        )
+    else:
+        runner = _release_runner(commands, notary_stdout=SENTINEL_TOOL_OUTPUT)
+
+    with pytest.raises(BUILD.BuildError) as caught:
+        BUILD.build(
+            tmp_path / "host",
+            platform_name="darwin",
+            runner=runner,
+            release_signing=_release_signing(
+                identity=SENTINEL_IDENTITY, keychain_profile=SENTINEL_PROFILE
+            ),
+        )
+
+    error = caught.value
+    text = str(error)
+    for sentinel in (
+        SENTINEL_IDENTITY,
+        SENTINEL_PROFILE,
+        SENTINEL_TOOL_OUTPUT,
+        SENTINEL_TOOL_ERROR,
+    ):
+        assert sentinel not in text
+    # Neither the tool argv nor the captured output is part of the message.
+    assert "--sign" not in text
+    assert "--keychain-profile" not in text
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+    assert not (tmp_path / "host").exists()
+
+
+@pytest.mark.parametrize(
+    "status", [[], {}, 0, True], ids=["list", "object", "number", "bool"]
+)
+def test_release_cli_rejects_a_non_string_notary_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: Any,
+) -> None:
+    # Valid JSON whose status is not a string must fail sanitized, not raise
+    # TypeError out of the status check.
+    output = tmp_path / "host"
+    commands: list[list[str]] = []
+    _cli_with_runner(monkeypatch, _release_runner(commands, notary_status=status))
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                SENTINEL_IDENTITY,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                SENTINEL_PROFILE,
+            ]
+        )
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert "an unrecognized status" in err
+    assert "TypeError" not in err
+    assert "Traceback" not in err
+    for sentinel in (SENTINEL_IDENTITY, SENTINEL_PROFILE, SENTINEL_TOOL_OUTPUT):
+        assert sentinel not in err
+    assert not any(cmd[:3] == ["xcrun", "stapler", "staple"] for cmd in commands)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "raw_field, fragment",
+    [
+        ({"archs": SENTINEL_RAW_ARCHS + "\n"}, "must carry exactly"),
+        ({"identifier": SENTINEL_RAW_FIELD}, "bundle identifier"),
+        ({"team_id": SENTINEL_RAW_FIELD}, "signing team"),
+        ({"entitlements": {SENTINEL_RAW_FIELD: True}}, "entitlements"),
+    ],
+    ids=["archs", "identifier", "team", "entitlements"],
+)
+def test_release_cli_never_echoes_raw_tool_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw_field: dict[str, Any],
+    fragment: str,
+) -> None:
+    # Malformed native-tool fields (architecture, identifier, team, entitlement
+    # keys) may not echo their content, the identity or the profile.
+    output = tmp_path / "host"
+    _cli_with_runner(
+        monkeypatch, _release_runner(fault={**raw_field, "stage": "built"})
+    )
+    with pytest.raises(SystemExit) as caught:
+        BUILD.main(
+            [
+                "--output",
+                str(output),
+                "--release",
+                "--signing-identity",
+                SENTINEL_IDENTITY,
+                "--team-id",
+                RELEASE_TEAM_ID,
+                "--notary-profile",
+                SENTINEL_PROFILE,
+            ]
+        )
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert fragment in err
+    for sentinel in (
+        SENTINEL_IDENTITY,
+        SENTINEL_PROFILE,
+        SENTINEL_RAW_ARCHS,
+        SENTINEL_RAW_FIELD,
+        SENTINEL_TOOL_OUTPUT,
+        SENTINEL_TOOL_ERROR,
+    ):
+        assert sentinel not in err
+    assert "Traceback" not in err
+    assert not output.exists()
 
 
 @requires_macos_tools
@@ -1321,16 +2667,27 @@ def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: 
                 )
                 time.sleep(delay)
                 forked_before = _host_forked(queue.control(None, 8, 0))
+                stopped_at = time.monotonic()
                 host.send_signal(signal.SIGTERM)
-                # A fork within a few milliseconds of the stop was already under
-                # way (spawning takes about a millisecond). A launch that ignored
-                # the stop waits for the event loop, tens of milliseconds later.
-                racing = queue.control(None, 8, 0.005)
+                # A fork soon after the stop may come from a launch decided just
+                # before it: the host polls its stop queue, then spawns, and a
+                # contended runner can preempt it between the two for a whole
+                # scheduler slice. Spawning takes about a millisecond on an idle
+                # Mac, but a 5 ms window failed a loaded macOS CI runner (#2156).
+                # The exact ordering, a stop pending at the decision means no
+                # fork, is proved by test_host_startup_stop_precedes_child_launch;
+                # this sweep only checks the shipped binary against real startup
+                # timing, so it gives a racing launch one scheduler slice plus
+                # margin.
+                racing = queue.control(None, 8, 0.05)
                 forked_racing = _host_forked(racing)
                 events: list[Any] = list(racing)
+                forked_after = None
                 while not any(event.fflags & select.KQ_NOTE_EXIT for event in events):
                     batch = queue.control(None, 8, 45)
                     assert batch, "host did not exit after a startup stop"
+                    if forked_after is None and _host_forked(batch):
+                        forked_after = time.monotonic() - stopped_at
                     events.extend(batch)
                 code = host.wait(timeout=5)
             finally:
@@ -1340,7 +2697,10 @@ def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: 
                 # Killed before the handlers existed, or launched before the stop.
                 continue
             handled += 1
-            assert not _host_forked(events), f"a child was launched after a stop at {delay}s"
+            assert not _host_forked(events), (
+                f"a child was launched after a stop at {delay}s "
+                f"(fork seen {forked_after}s after the stop)"
+            )
     finally:
         time.sleep(0.2)
         if pids.exists():

@@ -1,0 +1,13 @@
+{
+  "id": "E3-schedule-create",
+  "tier": "easy",
+  "category": "schedule_create",
+  "prompt": "Every Saturday at 09:00, remind me to water the garden.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "new_schedules", "count": 1, "frequency": "weekly", "days_of_week": ["sat"], "time": "09:00", "prompt_contains": ["water"]}
+  ]
+}

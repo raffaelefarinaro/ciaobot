@@ -83,19 +83,45 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_bootstrap and args.supervised:
         print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
         return 2
+    if args.installer_native_workspace is not None and not args.installer_bootstrap:
+        print("--installer-native-workspace requires --installer-bootstrap", file=sys.stderr)
+        return 2
+    if args.installer_native_fd is not None and not args.installer_bootstrap:
+        print("--installer-native-fd requires --installer-bootstrap", file=sys.stderr)
+        return 2
+    if args.installer_native_fd is not None and args.installer_native_fd < 3:
+        print("--installer-native-fd must be a non-stdio descriptor", file=sys.stderr)
+        return 2
+    if args.installer_native_workspace is not None and args.installer_native_fd is None:
+        print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
+        return 2
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
         return _run_server(supervised=args.supervised)
     if not args.installer_run_id:
         # A person resumed setup by hand (the installers print this command for
         # a cancelled run), so there is no installer parent to activate the
-        # service: this process becomes one.
+        # service: this process becomes one. A native notification descriptor
+        # has no parent left to read it, so that combination is refused above.
+        if args.installer_native_fd is not None:
+            print("--installer-native-fd requires --installer-run-id", file=sys.stderr)
+            return 2
         return _resume_installer_bootstrap(args.installer_suggest_workspace)
+    if args.installer_native_fd is None:
+        # The legacy call shape, unchanged; the exact-kwargs tests pin it.
+        return _run_server(
+            supervised=args.supervised,
+            installer_bootstrap=True,
+            installer_run_id=args.installer_run_id,
+            installer_suggest_workspace=args.installer_suggest_workspace,
+        )
     return _run_server(
         supervised=args.supervised,
         installer_bootstrap=True,
         installer_run_id=args.installer_run_id,
         installer_suggest_workspace=args.installer_suggest_workspace,
+        installer_native_fd=args.installer_native_fd,
+        installer_native_workspace=args.installer_native_workspace,
     )
 
 
@@ -158,17 +184,29 @@ def _run_server(
     installer_bootstrap: bool = False,
     installer_run_id: str | None = None,
     installer_suggest_workspace: str | None = None,
+    installer_native_fd: int | None = None,
+    installer_native_workspace: str | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap:
+        if installer_bootstrap and installer_native_fd is None:
+            # The legacy bootstrap keeps its exact call shape.
             server_main(
                 supervised=supervised,
                 installer_bootstrap=True,
                 installer_run_id=installer_run_id,
                 installer_suggest_workspace=installer_suggest_workspace,
+            )
+        elif installer_bootstrap:
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+                installer_native_fd=installer_native_fd,
+                installer_native_workspace=installer_native_workspace,
             )
         else:
             server_main(supervised=supervised)
@@ -397,7 +435,16 @@ def _write_launchd_plist(
     confirm_repoint: bool = False,
     host: HostOwnership | None = None,
     host_python: str | None = None,
+    exclusive: bool = False,
 ) -> Path:
+    """Render the server plist and write it, or refuse.
+
+    ``exclusive`` is the native installer's one addition: it creates the
+    definition with ``O_CREAT | O_EXCL`` and ``O_NOFOLLOW`` at ``0o600`` so an
+    existing name, a symlink or a concurrent creator is a refusal instead of an
+    overwrite. The legacy ``ciao setup`` and ``ciao service`` callers leave it
+    False and keep the byte-for-byte ``write_text`` path.
+    """
     if not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -425,20 +472,70 @@ def _write_launchd_plist(
                     )
     plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_text(
-        _render_launchd_plist(
-            workspace=workspace,
-            python_path=python_path,
-            engine_path=engine_path,
-            runtime_root=runtime_root,
-            port=port,
-            path=path,
-            template_name=f"{plist_name}.tmpl",
-            host=host,
-            host_python=host_python,
-            ),
-        encoding="utf-8", newline="",
+    rendered = _render_launchd_plist(
+        workspace=workspace,
+        python_path=python_path,
+        engine_path=engine_path,
+        runtime_root=runtime_root,
+        port=port,
+        path=path,
+        template_name=f"{plist_name}.tmpl",
+        host=host,
+        host_python=host_python,
     )
+    if not exclusive:
+        plist.write_text(rendered, encoding="utf-8", newline="")
+        return plist
+    # The native path never replaces a definition. O_EXCL is the creation
+    # itself; O_NOFOLLOW refuses a symlink at the name. A failure before the
+    # open creates nothing, and a failure after it removes only the file this
+    # call created.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(plist, flags, 0o600)
+    except FileExistsError:
+        raise RuntimeError(
+            f"a service definition already exists at {plist.name}; the native "
+            "installer never overwrites one"
+        ) from None
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not create the service definition {plist.name}: {exc}"
+        ) from exc
+    try:
+        # umask may have stripped the requested mode; the native definition is
+        # exactly owner-only, like the ownership record it is bound to.
+        chmod_fd = getattr(os, "fchmod", None)
+        if chmod_fd is None:  # pragma: no cover - Windows uses the task branch
+            raise OSError("this platform has no fchmod")
+        chmod_fd(descriptor, 0o600)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+            plist.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"could not secure the service definition {plist.name}: {exc}"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            descriptor = -1
+            handle.write(rendered)
+    except OSError as exc:
+        try:
+            plist.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"could not write the service definition {plist.name}: {exc}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return plist
 
 
@@ -1121,6 +1218,8 @@ def setup_workspace(
     confirm_repoint: bool = False,
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
+    exclusive_service_definition: bool = False,
+    verified_host: HostOwnership | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1159,12 +1258,20 @@ def setup_workspace(
                         "launch_agents_dir to isolate."
                     )
     # The one host decision, shared by the guard below and the plist write
-    # further down, so the check and the write can never disagree.
+    # further down, so the check and the write can never disagree. The native
+    # bootstrap passes the snapshot it already verified at capture, so setup
+    # cannot silently downgrade to the direct shape if the host changed while
+    # the wizard was open; the native recorder re-verifies the bundle after the
+    # write.
     host: HostOwnership | None = None
     if write_launchd and sys.platform != "win32":
         from ciao.setup_status import tcc_protected_location
 
-        host = _verified_host_if_installed()
+        host = (
+            verified_host
+            if verified_host is not None
+            else _verified_host_if_installed()
+        )
         # Non-None only on macOS.
         protected = tcc_protected_location(root)
         if protected and host is None:
@@ -1452,7 +1559,7 @@ def setup_workspace(
     # First-run wizard names the user's first logical workspace. Writing a
     # real registry (instead of relying on the legacy personal+work fallback)
     # means new installs start with exactly one workspace; more are added in
-    # Settings → Manage workspaces. The explicit vault_root also keeps the legacy
+    # Settings → Overview → All workspaces. The explicit vault_root also keeps the legacy
     # personal/work nested-vault special case from ever triggering.
     #
     # If the vault already holds nested workspace directories (e.g.
@@ -1543,6 +1650,21 @@ def setup_workspace(
             scaffold_vault_path / "projects" / "active" / "general" / "general.md",
             "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
         )
+        # The memory pass types every new note from VOCABULARY.md's Categories
+        # section, and nothing else writes that file before the first vault
+        # index run. A failure here is reported, never fatal to setup.
+        try:
+            from ciao.vault_index import ensure_vocabulary_file
+
+            vocabulary = ensure_vocabulary_file(scaffold_vault_path)
+        except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
+            print(
+                f"vocabulary not written for {scaffold_vault_path}: {exc}",
+                file=sys.stderr,
+            )
+        else:
+            if vocabulary is not None:
+                written.append(vocabulary)
         (scaffold_vault_path / "Logs" / "Chats").mkdir(parents=True, exist_ok=True)
         written.append(scaffold_vault_path)
         # Onboarding an existing folder is the one path that adopts notes this
@@ -1632,6 +1754,7 @@ def setup_workspace(
                             if host is not None
                             else None
                         ),
+                        exclusive=exclusive_service_definition,
                     ))
                 except ValueError as exc:
                     # The render-time refusal B2 defines (a host given without
@@ -4287,6 +4410,110 @@ def _resolve_workspace_and_vaults(
     return workspace, resolved, resolved, name
 
 
+def _proposal_review_owner(args: argparse.Namespace, workspace: Path, vault: Path) -> str | None:
+    """The registered workspace whose vault is ``vault``, named for review links only.
+
+    The vault a command reads or writes is decided by ``_resolve_workspace_and_vaults``
+    and never by this. A registry or config that cannot be read leaves the link
+    metadata null, and the command proceeds exactly as it did before links existed.
+    """
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    if getattr(args, "workspace", None) or os.environ.get("CIAO_WORKSPACE", "").strip():
+        env_source = dict(os.environ)
+        env_source["CIAO_WORKSPACE"] = str(workspace)
+    else:
+        env_source = installed_workspace_env(os.environ)
+        if not env_source.get("CIAO_WORKSPACE", "").strip():
+            env_source["CIAO_WORKSPACE"] = str(workspace)
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        # A placeholder, so reading the registry never mints a session secret.
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    try:
+        config = CiaoConfig.from_env(env_source)
+        return _registered_owner(config, vault.resolve())
+    except (ValueError, OSError):
+        return None
+
+
+def _review_link_for(owner: str, bullet: Any) -> tuple[str, str]:
+    """``(review_key, review_path)`` for one parsed queue bullet of ``owner``."""
+    from ciao import proposal_tracking
+
+    review_key = proposal_tracking.proposal_review_key(
+        owner, bullet.kind, bullet.text, bullet.source, bullet.target, bullet.request
+    )
+    return review_key, proposal_tracking.proposal_review_path(owner, review_key)
+
+
+def _listed_proposal_rows(queue: Path, owner: str | None) -> list[dict[str, Any]]:
+    """The pending rows ``memory-proposals`` lists, each with its review identity.
+
+    One walk of the queue, the same one the PWA scan uses, so the id here is the
+    action id the review tab hands out. Every identity field is ``None`` when no
+    registered workspace owns the vault.
+    """
+    from ciao import proposal_tracking
+
+    if not queue.exists():
+        return []
+    rel_path = Path(owner or "").joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    rows: list[dict[str, Any]] = []
+    for entry in proposal_tracking.walk_proposal_queue(
+        owner or "", rel_path, queue.read_text(encoding="utf-8")
+    ):
+        bullet = entry.bullet
+        row: dict[str, Any] = {
+            "kind": bullet.kind,
+            "text": bullet.text,
+            "source": bullet.source,
+            "target": bullet.target,
+            "request": bullet.request,
+            "decider": bullet.decider or "",
+            "decide_reason": bullet.decide_reason,
+            "id": None,
+            "review_key": None,
+            "review_path": None,
+        }
+        if owner is not None:
+            row["id"] = entry.proposal_id
+            row["review_key"], row["review_path"] = _review_link_for(owner, bullet)
+        rows.append(row)
+    return rows
+
+
+def _queued_review_identity(
+    vault: Path,
+    owner: str | None,
+    proposal: Any,
+    *,
+    dismissed: bool,
+    promoted: bool,
+) -> tuple[str | None, str | None, str | None]:
+    """``(id, review_key, review_path)`` for the pending bullet a fact was queued as.
+
+    Only a pending row has a review question. The bullet is matched on its parsed
+    fields, so a fact the queue did not store as written (text dedupe suppressed
+    it) gets no link rather than another row's.
+    """
+    from ciao import proposal_tracking
+
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    expected = proposal_kinds.parse_bullet(proposal.as_bullet())
+    if owner is None or dismissed or promoted or expected is None or not queue.is_file():
+        return None, None, None
+    rel_path = Path(owner).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    wanted = (expected.kind, expected.text, expected.source, expected.target, expected.request)
+    for entry in proposal_tracking.walk_proposal_queue(
+        owner, rel_path, queue.read_text(encoding="utf-8")
+    ):
+        bullet = entry.bullet
+        if (bullet.kind, bullet.text, bullet.source, bullet.target, bullet.request) == wanted:
+            review_key, review_path = _review_link_for(owner, bullet)
+            return entry.proposal_id, review_key, review_path
+    return None, None, None
+
+
 #: Proposals `ciao memory-proposals` prints per page unless `--limit` says otherwise.
 MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
 
@@ -4361,7 +4588,6 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     and thereby keeps memory improving across sessions.
     """
     from ciao.control_plane import PAGE_MAX_LIMIT, page_of, validate_page
-    from ciao.memory_proposals import list_proposals
 
     try:
         validate_page(args.limit, args.offset, maximum=PAGE_MAX_LIMIT)
@@ -4370,7 +4596,7 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
         return 2
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
-    rows = list_proposals(path)
+    rows = _listed_proposal_rows(path, _proposal_review_owner(args, workspace, vault))
     from ciao.proposal_predictions import REGION_KINDS, latest_predictions, prediction_key
 
     predictions = latest_predictions(path)
@@ -4403,6 +4629,8 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
                 else ""
             )
             print(f"- [{row['kind']}] {row['text']}{tag}{decide}{predicted}")
+            if row["review_path"]:
+                print(f"  review: {row['review_path']}")
         if "next_offset" in page:
             print(
                 f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
@@ -4585,6 +4813,13 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     # earlier decision that their request had landed when no row exists.
     dismissed = path is None and was_dismissed(vault, text)
     promoted = path is None and not dismissed and was_promoted(vault, text)
+    proposal_id, review_key, review_path = _queued_review_identity(
+        vault,
+        _proposal_review_owner(args, workspace, vault),
+        proposal,
+        dismissed=dismissed,
+        promoted=promoted,
+    )
     if args.json:
         json.dump(
             {
@@ -4593,6 +4828,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "dismissed_before": dismissed,
                 "promoted_before": promoted,
                 "path": str(path) if path else None,
+                "id": proposal_id,
+                "review_key": review_key,
+                "review_path": review_path,
                 "text": text,
                 "request": request,
                 "decide": decide,
@@ -4618,6 +4856,8 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         print(f"Already in the queue; nothing added for {text!r}.")
     else:
         print(f"Queued [{kind}] proposal in {path}.")
+    if review_path and not args.json:
+        print(f"  review: {review_path}")
     return 0
 
 
@@ -4868,7 +5108,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
     the workspace guide first, then this dismiss removes the resolved item
     so the queue stops re-asking. TEXT matches one proposal by a unique
-    substring.
+    substring. A skill-draft row is refused (exit 2): it is settled with
+    ``skill-draft-approve`` / ``skill-draft-reject``, never dismissed here.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -4988,6 +5229,17 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from ciao.upstream_drafts import DRAFT_KIND, decision_text
+
+        if parsed.kind == DRAFT_KIND and parsed.target and parsed.source == decision_text(parsed.target):
+            print(
+                f"this row is skill draft {parsed.target}, not a memory proposal: the queue "
+                f"cannot settle it. Use `ciao skill-draft-approve {parsed.target}` to file or "
+                f"link the issue, or `ciao skill-draft-reject {parsed.target} --reason R` to "
+                "turn it down. Do not re-file it with `ciao skill-draft-add`.",
+                file=sys.stderr,
+            )
+            return 2
         if args.handover:
             refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
             if refusal:
@@ -5392,6 +5644,87 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     return label_hygiene.main(module_args)
 
 
+def _eval_tasks_command(args: argparse.Namespace) -> int:
+    """``ciao eval tasks``: the agentic task eval (catalog, isolated runs, report, compare)."""
+    from functools import partial
+
+    from ciao import task_eval
+
+    action = getattr(args, "tasks_action", "")
+    if action == "list":
+        tasks = task_eval.load_tasks()
+        rows = [
+            {
+                "id": task.id,
+                "tier": task.tier,
+                "category": task.category,
+                "entry": task.entry["kind"],
+                "requires": task.requires,
+            }
+            for task in tasks
+        ]
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            for row in rows:
+                print(f"{row['id']}\t{row['tier']}\t{row['category']}\t{','.join(row['requires']) or '-'}")
+        return 0
+    if action == "run":
+        mismatch = task_eval.cli_package_mismatch()
+        if mismatch:
+            print(mismatch, file=sys.stderr)
+            return 2
+        tiers = {item.strip() for item in args.tier.split(",") if item.strip()}
+        include = {item.strip() for item in args.include.split(",") if item.strip()}
+        selected = [
+            task
+            for task in task_eval.load_tasks()
+            if (not tiers or task.tier in tiers) and (not include or task.id in include)
+        ]
+        if not selected:
+            print("no tasks selected", file=sys.stderr)
+            return 2
+        out = args.out or task_eval.default_report_path(args.label)
+        rows = task_eval.run_suite(
+            selected,
+            provider=args.provider,
+            model=args.model,
+            label=args.label,
+            repeats=args.repeats,
+            jobs=args.jobs,
+            out=out,
+            mode=args.mode,
+            session_factory=partial(
+                task_eval.IsolatedEngine.boot,
+                provider=args.provider,
+                model=args.model,
+                keep_workdir=args.keep_workdir,
+                mode=args.mode,
+            ),
+            capabilities=task_eval.available_capabilities(),
+        )
+        print(task_eval.render_summary(task_eval.summarize(rows)))
+        print(f"wrote {len(rows)} run(s) to {out}")
+        return 1 if rows and all(row["status"] == "error" for row in rows) else 0
+    if action == "report":
+        summary = task_eval.summarize(task_eval.read_jsonl(args.files))
+        if args.json:
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+        else:
+            print(task_eval.render_summary(summary))
+        return 0
+    if action == "compare":
+        comparison = task_eval.compare(
+            task_eval.read_jsonl([args.baseline]), task_eval.read_jsonl([args.candidate])
+        )
+        if args.json:
+            print(json.dumps(comparison, indent=2, ensure_ascii=False))
+        else:
+            print(task_eval.render_comparison(comparison))
+        return 0
+    raise SystemExit(f"unknown eval tasks action: {action!r}")
+
+
 def _eval_command(args: argparse.Namespace) -> int:
     """Versioned behavioral evaluations for prompts, providers, and guides.
 
@@ -5403,6 +5736,8 @@ def _eval_command(args: argparse.Namespace) -> int:
     from ciao import behavioral_eval
 
     action = getattr(args, "eval_action", "")
+    if action == "tasks":
+        return _eval_tasks_command(args)
     if action == "contracts":
         contract_report = behavioral_eval.run_contract_checks()
         if args.json:
@@ -6512,6 +6847,11 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     evidence goes in ``private_evidence`` and stays in this workspace; ``body`` is
     refused if it carries a transcript excerpt, a path, a name or a credential,
     because a public issue is public.
+
+    ``same_as`` (an existing draft id of the same skill, to fold this sighting
+    into) and ``distinct_from`` (every existing draft id of that skill when this is
+    a different defect) are optional. A filing for a skill that already has drafts
+    is refused until one of them is given.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -6541,6 +6881,8 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
             version=str(payload.get("version") or ""),
             private_evidence=str(payload.get("private_evidence") or ""),
             origins=origins,
+            same_as=str(payload.get("same_as") or "").strip(),
+            distinct_from=[str(x).strip() for x in payload.get("distinct_from") or []],
         )
     except DraftError as exc:
         print(f"cannot file the draft: {exc}", file=sys.stderr)
@@ -6642,6 +6984,13 @@ def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
     for field in ("body", "repository", "version", "private_evidence", "rationale"):
         if field in payload and not isinstance(payload[field], str):
             return None, f'{path} "{field}" must be a string'
+    if "same_as" in payload and not isinstance(payload["same_as"], str):
+        return None, f'{path} "same_as" must be a string'
+    if "distinct_from" in payload and not (
+        isinstance(payload["distinct_from"], list)
+        and all(isinstance(item, str) for item in payload["distinct_from"])
+    ):
+        return None, f'{path} "distinct_from" must be a list of draft ids'
     return payload, ""
 
 
@@ -7469,6 +7818,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
     )
     run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
+    # Internal native-installer handover (#2340). Not operator surface: the
+    # native coordinator passes the inherited private notification descriptor
+    # and, when it has fixed the choice, the one accepted workspace. Hidden
+    # from --help, and the legacy installer passes neither.
+    run_parser.add_argument(
+        "--installer-native-fd", type=int, default=None, help=argparse.SUPPRESS
+    )
+    run_parser.add_argument(
+        "--installer-native-workspace",
+        type=_absolute_installer_path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
@@ -9487,6 +9849,79 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the structured comparison as JSON."
     )
     eval_compare.set_defaults(func=_eval_command)
+
+    eval_tasks = eval_sub.add_parser(
+        "tasks",
+        help=(
+            "Agentic task eval: boot an isolated engine per run, let Ciaobot act on a "
+            "synthetic vault, grade the workspace, and record usage. 'run' makes real model calls."
+        ),
+    )
+    tasks_sub = eval_tasks.add_subparsers(dest="tasks_action", required=True)
+    tasks_list = tasks_sub.add_parser("list", help="List the task catalog.")
+    tasks_list.add_argument("--json", action="store_true", help="Emit the catalog as JSON.")
+    tasks_list.set_defaults(func=_eval_command)
+
+    tasks_run = tasks_sub.add_parser(
+        "run",
+        help="Run catalog tasks on isolated engines (explicit; makes real model calls).",
+    )
+    tasks_run.add_argument("--provider", default="claude", choices=["claude", "opencode"])
+    tasks_run.add_argument(
+        "--model",
+        required=True,
+        help="Provider model id to run. Required; the runner never defaults it.",
+    )
+    tasks_run.add_argument(
+        "--label", default="candidate", help="Run label recorded on every row."
+    )
+    tasks_run.add_argument(
+        "--repeats", type=int, default=3, help="Runs per task; the summary shows medians."
+    )
+    tasks_run.add_argument(
+        "--jobs", type=int, default=1, help="Engines booted concurrently (each is a full engine)."
+    )
+    tasks_run.add_argument(
+        "--include", default="", help="Comma-separated task ids (default: the whole catalog)."
+    )
+    tasks_run.add_argument(
+        "--tier", default="", help="Comma-separated tiers: easy, medium, hard (default: all)."
+    )
+    from ciao.config import PERMISSION_MODES  # noqa: PLC0415
+
+    tasks_run.add_argument(
+        "--mode", choices=PERMISSION_MODES, default=None,
+        help=(
+            "Permission mode the run's chats start in (default per provider: "
+            "claude auto, opencode bypass). Recorded on every row."
+        ),
+    )
+    tasks_run.add_argument(
+        "--out", type=Path, default=None,
+        help="JSONL report path (default: .runtime/evals/tasks/<stamp>-<label>.jsonl).",
+    )
+    tasks_run.add_argument(
+        "--keep-workdir", action="store_true",
+        help="Keep each run's throwaway workspace on disk for debugging.",
+    )
+    tasks_run.set_defaults(func=_eval_command)
+
+    tasks_report = tasks_sub.add_parser(
+        "report", help="Summarize one or more task-eval JSONL reports."
+    )
+    tasks_report.add_argument("files", nargs="+", type=Path)
+    tasks_report.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
+    tasks_report.set_defaults(func=_eval_command)
+
+    tasks_compare = tasks_sub.add_parser(
+        "compare", help="Compare a baseline and a candidate task-eval JSONL report."
+    )
+    tasks_compare.add_argument("--baseline", type=Path, required=True)
+    tasks_compare.add_argument("--candidate", type=Path, required=True)
+    tasks_compare.add_argument(
+        "--json", action="store_true", help="Emit the comparison as JSON."
+    )
+    tasks_compare.set_defaults(func=_eval_command)
 
     skills_parser = subparsers.add_parser(
         "skills",

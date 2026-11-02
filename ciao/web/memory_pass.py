@@ -78,7 +78,9 @@ MEMORY_PASS_PROMPT = (
     "would: read the transcript, check what the vault and memory already "
     "hold, update existing notes (people, projects, the project doc), create a "
     "note only for a genuinely new entity, promote durable facts to memory "
-    "with the ciao CLI, and queue anything uncertain for review. When new "
+    "with the ciao CLI, and queue anything uncertain for review. "
+    "Never queue a status snapshot (what is enabled, filed, merged or pending): status belongs in the project doc. "
+    "When new "
     "advice supersedes guidance a note already stores, rewrite that note so "
     "the surviving line carries one instruction plus the source and date, and "
     "remove the superseded line rather than annotating it. When the two "
@@ -116,12 +118,17 @@ REPO_DOC_FENCE_CLOSE = "</repo-agents-md>"
 REPO_SECTION_PROMPT = (
     "\n\nThis conversation's project is linked to the code repository at {repo}. "
     "{doc}\n\nRoute what the conversation taught you about code:\n"
-    "- A fact specific to this repository (a build, test or run command, a convention, "
-    "where something lives, a trap in its code) that the AGENTS.md text above does not "
-    "already say: queue it for the user with {command}, where PAYLOAD is a scratch file "
-    "holding exactly the repository path above and FILE holds the fact as one present-tense "
-    "sentence. File nothing the AGENTS.md text already says. Never edit the repository's "
-    "AGENTS.md yourself: it changes only when the user accepts the proposal.\n"
+    "- A fact about this repository that an agent needs before it opens the code and could not "
+    "learn from it: a convention or command that differs from the obvious one, a trap that spans "
+    "files, tools or hosted services, or the reason behind a non-obvious choice. Proposing nothing "
+    "is the normal outcome. Do not file what reading one file answers (a version, which file sets "
+    "something, what a function does); a trap confined to one function or file, which belongs in a "
+    "code comment there, written with the fix; or a status (what is enabled, filed, merged or "
+    "pending), which belongs in the project doc. When a statement mixes a durable warning with "
+    "status, file only the warning. Queue it for the user with {command}, where PAYLOAD is a "
+    "scratch file holding exactly the repository path above and FILE holds the fact as one "
+    "present-tense sentence. File nothing the AGENTS.md text already says. Never edit the "
+    "repository's AGENTS.md yourself: it changes only when the user accepts the proposal.\n"
     "- An outcome, decision or status of the project: the project doc, as above.\n"
     "- A coding lesson that holds across repositories: Workspace/Learnings.md (`--kind learnings`), "
     "not the repository."
@@ -448,7 +455,9 @@ LESSON_ROUTING_PROMPT = Template(
     "the instruction it should carry. A person creates the file, reads it back "
     "and syncs it; you do not create a directory, and you do not aim the "
     "edit-only `ciao skill-proposal-add` at a name that does not exist yet, "
-    "because it refuses that on purpose. Either way the draft is where your "
+    "because it refuses that on purpose. "
+    "If the command refuses because the skill already has drafts, read the listed titles and re-file once: with \"same_as\": \"<id>\" when one of them is this defect, or with \"distinct_from\" listing every listed id only when none of them is. "
+    "Either way the draft is where your "
     "turn ends: you do not open the issue or create the skill, and neither may "
     "the nightly Workspace care run, which files the same drafts and reports "
     "them for a person to approve.\n"
@@ -854,12 +863,7 @@ class MemoryPassCoordinator:
         if chat.last_response_status == "success" and chat.last_response.strip():
             self._set_state(chat, "done")
             self._set_source_step(source_chat_id, "ok", chat_id)
-            outcome = await host.archive_chat(chat_id)
-            if outcome is not None:
-                project = host._projects.get(chat.project_id)
-                # The recursion guard is `is_memory_pass_chat`: this pass is
-                # never enqueued for another pass.
-                host.run_archive_postprocess(chat_id, outcome, chat, project)
+            await self._archive_finished(chat)
             self.pump(workspace)
             return True
 
@@ -868,14 +872,17 @@ class MemoryPassCoordinator:
         self.pump(workspace)
         return False
 
-    def resume(self) -> None:
+    async def resume(self) -> None:
         """Reconcile the queue with a freshly started process.
 
         A pass recorded as ``running`` was streaming when the previous process
-        died, so nothing is driving it: it needs the owner, not a retry. The
-        queue is otherwise untouched and pumped again.
+        died, so nothing is driving it: it needs the owner, not a retry. A pass
+        recorded as ``done`` but not archived was interrupted between settling
+        and archiving, so resume finishes the archive. The queue is otherwise
+        untouched and pumped again.
         """
         workspaces: set[str] = set()
+        finished: list[ChatInfo] = []
         for chat in list(self._host._chats.values()):
             if chat.archived:
                 continue
@@ -890,10 +897,28 @@ class MemoryPassCoordinator:
                 )
             elif state == "queued":
                 workspaces.add(self._workspace_of(chat))
+            elif state == "done":
+                finished.append(chat)
+        for chat in finished:
+            try:
+                await self._archive_finished(chat)
+            except Exception:
+                logger.exception(
+                    "Archiving finished memory pass %s failed on resume", chat.chat_id
+                )
         for workspace in sorted(workspaces):
             self.pump(workspace)
 
     # ── internals ───────────────────────────────────────────────────────
+
+    async def _archive_finished(self, chat: ChatInfo) -> None:
+        host = self._host
+        outcome = await host.archive_chat(chat.chat_id)
+        if outcome is not None:
+            project = host._projects.get(chat.project_id)
+            # The recursion guard is `is_memory_pass_chat`: this pass is
+            # never enqueued for another pass.
+            host.run_archive_postprocess(chat.chat_id, outcome, chat, project)
 
     @staticmethod
     def _helper(chat: ChatInfo) -> dict:

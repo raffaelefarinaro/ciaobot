@@ -164,7 +164,7 @@ def test_mcp_system_timing_uses_existing_aliases_and_persists(tmp_path: Path) ->
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     principal = McpPrincipal("token", "chat", "project", "personal", "claude")
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
@@ -207,7 +207,7 @@ def test_mcp_same_default_selection_survives_packaged_definition_change(tmp_path
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
     selected_time, selected_zone = entry.daily_time_utc, entry.timezone_name
@@ -225,7 +225,7 @@ def test_mcp_timezone_only_edit_and_conflicting_aliases(tmp_path: Path) -> None:
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     principal = McpPrincipal("token", "chat", "project", "personal", "claude")
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
@@ -241,7 +241,7 @@ def test_mcp_system_timing_keeps_workspace_authorization(tmp_path: Path) -> None
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name in {"personal", "work"} else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@work"))
     principal = McpPrincipal("token", "chat", "project", "personal", "claude")
@@ -256,7 +256,7 @@ def test_mcp_system_rejects_non_ascii_clock_digit_without_write(tmp_path: Path) 
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
     state_path = tmp_path / ".runtime" / "system_schedules_state.json"
@@ -274,7 +274,7 @@ def test_mcp_user_schedule_rejects_non_ascii_clock_digit(tmp_path: Path) -> None
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
                             "workspace_root": str(tmp_path)})(),
-        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+        project_chat_manager=_Pcm(), schedule_manager=manager,
     )
     store_path = tmp_path / ".runtime" / "schedules.json"
     before = store_path.read_bytes()

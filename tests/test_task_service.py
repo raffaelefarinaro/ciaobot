@@ -30,6 +30,7 @@ import pytest
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import AgentPrincipal, ControlPlaneError, CiaoControlPlane
 from ciao.task_decisions import read_decisions
+from tests import test_task_delegation as delegation
 
 TASK_ID_CHARS = "0123456789abcdef"
 
@@ -1075,7 +1076,7 @@ def test_agent_complete_on_a_done_task_says_it_is_already_done(tmp_path: Path) -
     assert read_decisions(plane.config.workspace_vault_root("personal")) == []
 
 
-@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task", "restart_resume"])
 def test_agent_delete_and_complete_refuse_a_turn_the_person_did_not_type(
     tmp_path: Path, origin: str
 ) -> None:
@@ -1210,3 +1211,224 @@ def test_agent_complete_refuses_an_unattended_turn(tmp_path: Path) -> None:
         expected_revision=created["revision"], status="in_progress",
     )
     assert moved["data"]["status"] == "in_progress"
+
+
+# ── Task order (#2087) ───────────────────────────────────────────────────
+
+
+def _placed(before: str | None = None, after: str | None = None, version: int = 0) -> dict[str, Any]:
+    return {"before_id": before, "after_id": after, "expected_order_version": version}
+
+
+def _version(plane: CiaoControlPlane, workspace: str = "personal") -> int:
+    version: int = plane.workspace_task_order(workspace)["order"]["version"]
+    return version
+
+
+def _sequences(plane: CiaoControlPlane, workspace: str = "personal") -> dict[str, list[str]]:
+    sequences: dict[str, list[str]] = plane.workspace_task_order(workspace)["order"]["sequences"]
+    return sequences
+
+
+def test_task_order_read_matches_board_baseline(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    late = _create(plane, "personal", title="Zulu")
+    early = _create(plane, "personal", title="Alpha")
+    dated = _create(plane, "personal", title="Mike", due="2026-10-20")
+    # Creates append to the stored order; with no order file the board is the baseline.
+    (plane.config.workspace_vault_root("personal") / "Workspace" / "task-order.json").unlink()
+
+    read = plane.workspace_task_order("personal")
+    assert read["order_error"] is None
+    assert read["order"]["version"] == 0
+    assert read["order"]["sequences"]["backlog"] == [dated["id"], early["id"], late["id"]]
+    assert [row["id"] for row in plane.workspace_task_list("personal")] == [
+        dated["id"], early["id"], late["id"],
+    ]
+    for status in ("in_progress", "in_review", "done"):
+        assert read["order"]["sequences"][status] == []
+
+
+def test_update_with_placement_commits_status_and_order_atomically(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    b = _create(plane, "personal", title="Beta")
+    c = _create(plane, "personal", title="Gamma")
+    base = _version(plane)
+    _update(plane, "personal", a["id"], expected_revision=a["revision"],
+            changes={"status": "in_progress"}, actor="user", placement=_placed(version=base))
+    placed = _update(
+        plane, "personal", b["id"], expected_revision=b["revision"],
+        changes={"status": "in_progress"}, actor="user",
+        placement=_placed(before=a["id"], version=base + 1),
+    )
+    assert placed["status"] == "in_progress"
+    order = plane.workspace_task_order("personal")["order"]
+    assert order["version"] == base + 2
+    assert order["sequences"]["in_progress"] == [b["id"], a["id"]]
+    assert order["sequences"]["backlog"] == [c["id"]]
+
+
+def test_update_placement_without_status_change_rejected(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    base = _version(plane)
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _update(plane, "personal", a["id"], expected_revision=a["revision"],
+                changes={"title": "Renamed"}, actor="user", placement=_placed(version=base))
+    assert excinfo.value.code == "task_order_invalid"
+    assert _get(plane, "personal", a["id"])["title"] == "Alpha"
+    assert _version(plane) == base
+
+
+def test_a_malformed_placement_is_task_order_invalid(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    for bad in ("x", {"expected_order_version": True}, {"before_id": 3, "expected_order_version": 0}, {}):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            _update(plane, "personal", a["id"], expected_revision=a["revision"],
+                    changes={"status": "in_progress"}, actor="user", placement=bad)
+        assert excinfo.value.code == "task_order_invalid", bad
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _action(plane, "personal", "reassign", a["id"], expected_revision=a["revision"],
+                assignee="me", actor="user", placement=_placed())
+    assert excinfo.value.code == "invalid_action"
+
+
+def test_complete_with_placement_appends_completion_and_places_card(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    b = _create(plane, "personal", title="Beta")
+    base = _version(plane)
+    first = _action(plane, "personal", "complete", a["id"], expected_revision=a["revision"],
+                    actor="user", placement=_placed(version=base))
+    second = _action(plane, "personal", "complete", b["id"], expected_revision=b["revision"],
+                     actor="user", placement=_placed(before=a["id"], version=base + 1))
+    assert second["status"] == "done"
+    assert _sequences(plane)["done"] == [b["id"], a["id"]]
+    body = _get(plane, "personal", b["id"])
+    assert len(body["completions"]) == 1
+    stamp = body["completions"][0]["completed_at"]
+
+    plane.workspace_task_reorder("personal", b["id"], before_id=None, after_id=a["id"],
+                                 expected_order_version=base + 2)
+    assert _sequences(plane)["done"] == [a["id"], b["id"]]
+    after = _get(plane, "personal", b["id"])
+    assert len(after["completions"]) == 1
+    assert after["completions"][0]["completed_at"] == stamp
+    assert first["status"] == "done"
+
+
+async def test_complete_reviewed_approval_honours_placement(tmp_path: Path) -> None:
+    plane, pcm = delegation._world(tmp_path)
+    other = delegation._create(plane, title="Already done")
+    plane.workspace_task_action("personal", "complete", other["id"],
+                                expected_revision=other["revision"], actor="user")
+    task = delegation._create(plane, title="Reviewed work")
+    delegation._delegate(plane, task)
+    delegation._agent_says_done(plane)
+    await delegation._end_turns(pcm)
+    row = plane.workspace_task_get("personal", task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+
+    version = plane.workspace_task_order("personal")["order"]["version"]
+    done = plane.workspace_task_action(
+        "personal", "complete", task["id"], expected_revision=row["revision"], actor="user",
+        placement=_placed(before=other["id"], version=version),
+    )
+    assert done["status"] == "done"
+    assert _sequences(plane)["done"] == [task["id"], other["id"]]
+
+
+def test_agent_actor_cannot_complete_via_placement(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    base = _version(plane)
+    for call in (
+        lambda: _action(plane, "personal", "complete", a["id"], expected_revision=a["revision"],
+                        actor="agent", placement=_placed(version=base)),
+        lambda: _action(plane, "personal", "move", a["id"], expected_revision=a["revision"],
+                        status="done", actor="agent", placement=_placed(version=base)),
+        lambda: _update(plane, "personal", a["id"], expected_revision=a["revision"],
+                        changes={"status": "done"}, actor="agent", placement=_placed(version=base)),
+    ):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            call()
+        assert excinfo.value.code == "task_completion_requires_user"
+    assert _get(plane, "personal", a["id"])["status"] == "backlog"
+    assert _version(plane) == base
+
+
+def test_reorder_stale_version_is_task_order_conflict(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    b = _create(plane, "personal", title="Beta")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_reorder("personal", b["id"], before_id=a["id"], after_id=None,
+                                     expected_order_version=_version(plane) + 5)
+    assert excinfo.value.code == "task_order_conflict"
+    assert excinfo.value.retryable is True
+    assert _sequences(plane)["backlog"] == [a["id"], b["id"]]
+
+
+def test_reorder_does_not_touch_task_revision(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    b = _create(plane, "personal", title="Beta")
+    result = plane.workspace_task_reorder("personal", b["id"], before_id=a["id"], after_id=None,
+                                          expected_order_version=_version(plane))
+    assert result["order"]["sequences"]["backlog"] == [b["id"], a["id"]]
+    assert result["task"]["revision"] == b["revision"]
+    assert _get(plane, "personal", a["id"])["revision"] == a["revision"]
+
+
+def test_reorder_refuses_foreign_or_missing_ids(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    mine = _create(plane, "personal", title="Mine")
+    mine2 = _create(plane, "personal", title="Mine too")
+    theirs = _create(plane, "work", title="Theirs")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_reorder("personal", theirs["id"], before_id=None, after_id=None,
+                                     expected_order_version=_version(plane))
+    assert excinfo.value.code == "task_not_found"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_reorder("personal", mine["id"], before_id=theirs["id"], after_id=None,
+                                     expected_order_version=_version(plane))
+    assert excinfo.value.code == "task_order_invalid"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_reorder("personal", mine["id"], before_id="f" * 32, after_id=None,
+                                     expected_order_version=_version(plane))
+    assert excinfo.value.code == "task_order_invalid"
+    assert mine2["id"] in _sequences(plane)["backlog"]
+
+
+async def test_tasks_changed_published_once_per_reorder(tmp_path: Path) -> None:
+    plane, pcm = delegation._world(tmp_path)
+    published: list[dict[str, Any]] = []
+    pcm.events = SimpleNamespace(publish=published.append)
+    a = delegation._create(plane, title="Alpha")
+    b = delegation._create(plane, title="Beta")
+    for _ in range(5):
+        await asyncio.sleep(0)
+    published.clear()
+
+    plane.workspace_task_reorder("personal", b["id"], before_id=a["id"], after_id=None,
+                                 expected_order_version=_version(plane))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert published == [{"type": "tasks_changed", "workspace": "personal"}]
+
+
+def test_unreadable_order_file_is_reported_not_raised_on_read(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    a = _create(plane, "personal", title="Alpha")
+    b = _create(plane, "personal", title="Beta")
+    path = plane.config.workspace_vault_root("personal") / "Workspace" / "task-order.json"
+    path.write_text("{broken", encoding="utf-8")
+    read = plane.workspace_task_order("personal")
+    assert isinstance(read["order_error"], str) and read["order_error"]
+    assert read["order"]["version"] == -1
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_reorder("personal", b["id"], before_id=a["id"], after_id=None,
+                                     expected_order_version=-1)
+    assert excinfo.value.code == "task_order_unreadable"

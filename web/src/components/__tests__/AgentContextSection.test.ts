@@ -19,9 +19,11 @@ const PROJECT = {
 async function mountSection(props: Partial<InstanceType<typeof AgentContextSection>['$props']> = {}) {
   setActivePinia(createPinia())
   vi.stubGlobal('fetch', vi.fn(async (url: string) => (
-    url.includes(encodeURIComponent('work/AGENTS.md'))
-      ? new Response('x'.repeat(4000), { status: 200 })
-      : new Response('', { status: 404 })
+    url === '/api/system-prompt'
+      ? new Response(JSON.stringify({ text: '' }), { status: 200 })
+      : url.includes(encodeURIComponent('work/AGENTS.md'))
+        ? new Response('x'.repeat(4000), { status: 200 })
+        : new Response('', { status: 404 })
   )))
   const wrapper = mount(AgentContextSection, {
     props: { project: PROJECT, contextPct: null, compacting: false, compactDisabled: false, ...props },
@@ -75,10 +77,11 @@ describe('AgentContextSection', () => {
     expect(toggle.attributes('aria-controls')).toBe(wrapper.get('.agent-context-system-body').attributes('id'))
   })
 
-  it('hides the system prompt row when the fetch fails', async () => {
+  it('shows an error row, not a partial total, when the fetch fails', async () => {
     const wrapper = await mountWithSystemPrompt(() => new Response('boom', { status: 500 }))
     expect(wrapper.find('.agent-context-system').exists()).toBe(false)
-    expect(wrapper.get('.agent-context-summary .agent-context-meta').text()).toBe('1k tokens')
+    expect(wrapper.get('.agent-context-system-error').text()).toContain('Could not be read just now')
+    expect(wrapper.find('.agent-context-summary .agent-context-meta').exists()).toBe(false)
   })
 
   it('hides the system prompt row when the text is empty', async () => {
@@ -237,6 +240,7 @@ describe('AgentContextSection', () => {
     setActivePinia(createPinia())
     let failing = true
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/system-prompt') return new Response(JSON.stringify({ text: '' }), { status: 200 })
       if (failing) throw new Error('network down')
       return url.includes(encodeURIComponent('work/AGENTS.md'))
         ? new Response('guide', { status: 200 })

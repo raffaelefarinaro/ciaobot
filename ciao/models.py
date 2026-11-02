@@ -416,6 +416,16 @@ class ResultEvent(StreamEvent):
     # Ciaobot's own prompt, "task-notification" for a follow-up turn the CLI ran
     # on its own after background work finished (#1394).
     origin: str = ""
+    # The provider's last assistant text segment — the block the chat renders
+    # as the turn's answer — when that differs from ``result``, which stays the
+    # whole turn for the durable transcript, the handover and the schedule
+    # classifier. ``None`` means the provider does not distinguish a final
+    # segment; an empty string is an explicit "no answer block" (#2139).
+    # Internal normalized metadata: ``event_to_json`` does not publish it.
+    final_text: str | None = None
+    # OpenCode only: the "background runs finished" notice for the shells that
+    # woke this execution. Recorded with the wake turn; never serialised.
+    wake_notice: str = ""
 
 
 @dataclass(slots=True)

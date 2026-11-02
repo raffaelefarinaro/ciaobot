@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// Settings > Manage workspaces: each row's summary line shows its effective
+// Settings > All workspaces: each row's summary line shows its effective
 // File access. An explicit choice shows as chosen; a workspace with no choice
 // shows the engine's default_agent_fs_scope.
 
@@ -20,6 +20,21 @@ vi.mock('../../lib/api', () => {
     if (path === '/api/integrations/gws') {
       return Promise.resolve({ installed: false, binary_path: '', cli_available: false, profiles: [] })
     }
+    // The merged page also renders the active workspace's Overview cards.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'explicit',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     return Promise.resolve({})
   })
   return {
@@ -59,7 +74,7 @@ async function mountWorkspacesTab() {
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspaces')
+  await router.push('/settings/workspace')
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
@@ -81,7 +96,7 @@ function cardFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: 
   return card!
 }
 
-describe('Settings > Manage workspaces summary shows file access', () => {
+describe('Settings > All workspaces summary shows file access', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })

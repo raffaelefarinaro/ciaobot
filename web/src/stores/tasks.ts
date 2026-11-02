@@ -51,13 +51,13 @@ export const useTaskStore = defineStore('tasks', () => {
   const schedulesLoaded = ref(false)
   let scheduleRequestId = 0
 
-  // Interval schedules bound to one existing chat -- the cadence that replaced
-  // loops. Kept as one shared lookup because Home, the sidebar, and the chat
-  // banner must agree about both the count and whether any of them is live.
-  const intervalsByChat = computed(() => {
+  // Automations of any cadence bound to one existing chat. Kept as one shared
+  // lookup because every list that shows a chat must agree about both the
+  // count and whether any of them is live.
+  const schedulesByChat = computed(() => {
     const byChat = new Map<string, { count: number; running: boolean }>()
     for (const s of schedules.value) {
-      if (s.frequency !== 'interval' || !s.web_chat_id) continue
+      if (!s.web_chat_id) continue
       const previous = byChat.get(s.web_chat_id)
       byChat.set(s.web_chat_id, {
         count: (previous?.count || 0) + 1,
@@ -193,7 +193,7 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, intervalsByChat, status, models, stats, loading,
+    schedules, schedulesByChat, status, models, stats, loading,
     scheduleLoading, scheduleLoadError, schedulesLoaded,
     fetchSchedules, fetchStatus, fetchModels, fetchStats, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,

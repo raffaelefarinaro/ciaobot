@@ -1,7 +1,7 @@
 <template>
   <ul v-if="subs.length" class="subagent-rows" role="list">
     <li v-for="sub in subs" :key="sub.agent_id" class="subagent-row" :class="sub.status">
-      <ActivityGlyph v-if="sub.status === 'running'" kind="agent" />
+      <ActivityGlyph v-if="sub.status === 'running'" kind="working" />
       <span class="subagent-row-name">{{ nameOf(sub) }}</span>
       <span v-if="sub.subagent_type" class="subagent-row-type">{{ sub.subagent_type }}</span>
       <span class="subagent-row-status">{{ statusWord(sub.status) }}<template v-if="duration(sub)"> &middot; {{ duration(sub) }}</template></span>

@@ -1,5 +1,104 @@
-import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate } from '../support/app'
+import { expect, test, type Page } from '@playwright/test'
+import { boot, COMPOSER, isolate, quiesce } from '../support/app'
+
+/**
+ * #2274: the Chat details rail is docked from a ResizeObserver on
+ * `.chat-panel` (ChatPanel's `isWidePane`), not from the viewport itself. A
+ * resize therefore changes the pane width in one frame and removes the rail a
+ * task later, and two separate `boundingBox()` round-trips can land on either
+ * side of that: at 390 the transcript measured 352px narrower than the
+ * composer (the docked rail's 320px plus its 32px gap), which is the number CI
+ * reported.
+ *
+ * `HOLD_CHAT_PANEL_OBSERVER` holds only that one callback, leaving every other
+ * ResizeObserver on the page alone, so a test can resize while the rail is
+ * certain to still be docked and release it at the point it wants to study.
+ */
+const HOLD_CHAT_PANEL_OBSERVER = () => {
+  const Native = window.ResizeObserver
+  const held: Array<() => void> = []
+  const harness = window as unknown as { heldResizeCallbacks: () => number; releaseResize: () => void }
+  harness.heldResizeCallbacks = () => held.length
+  harness.releaseResize = () => { held.splice(0).forEach((run) => run()) }
+  window.ResizeObserver = class extends Native {
+    constructor(cb: ResizeObserverCallback) {
+      super((entries, observer) => {
+        if (!entries.some((entry) => (entry.target as Element).classList?.contains('chat-panel'))) {
+          cb(entries, observer)
+          return
+        }
+        held.push(() => cb(entries, observer))
+      })
+    }
+  }
+}
+
+type ObserverHarness = { heldResizeCallbacks: () => number; releaseResize: () => void }
+
+const heldResizeCallbacks = (page: Page) =>
+  page.evaluate(() => (window as unknown as ObserverHarness).heldResizeCallbacks())
+
+/** Deliver the held pane-width callback once the resize has queued one. */
+async function releaseHeldResize(page: Page): Promise<void> {
+  await expect.poll(() => heldResizeCallbacks(page)).toBeGreaterThan(0)
+  await page.evaluate(() => (window as unknown as ObserverHarness).releaseResize())
+}
+
+/**
+ * Both boxes in one page evaluation, with the rail state they were laid out
+ * against. Reading them in two round-trips is what mixed the frames: the
+ * browser can relayout between one call and the next.
+ */
+const readReadingColumn = (page: Page) => page.evaluate(() => {
+  const box = (selector: string) => {
+    const el = document.querySelector(selector)
+    if (!el) throw new Error(`missing ${selector}`)
+    const r = el.getBoundingClientRect()
+    return { x: r.x, width: r.width }
+  }
+  return {
+    transcript: box('.messages-content'),
+    composer: box('.composer-surface'),
+    rail: document.querySelector('.chat-panel--rail') !== null,
+  }
+})
+
+interface ReadingColumnStep {
+  width: number
+  /** Which side of the 940px pane switch this width is on: rail docked or not. */
+  rail: boolean
+}
+
+const READING_COLUMN_STEPS: ReadingColumnStep[] = [
+  { width: 1440, rail: true },
+  { width: 390, rail: false },
+]
+
+/**
+ * Wait for the rail state this width implies, then read both boxes from one
+ * frame and assert the pair. `railTimeout` bounds the rail wait so a test can
+ * prove the measurement has to block on it; `onMeasured` fires once the boxes
+ * have been read. Both thresholds from the original check are unchanged.
+ */
+async function measureReadingColumn(
+  page: Page,
+  step: ReadingColumnStep,
+  options: { railTimeout?: number; onMeasured?: () => void } = {},
+) {
+  await expect(page.locator('.chat-panel--rail'), `Chat details rail at ${step.width}px`)
+    .toHaveCount(step.rail ? 1 : 0, options.railTimeout ? { timeout: options.railTimeout } : undefined)
+  await quiesce(page)
+  const { transcript, composer, rail } = await readReadingColumn(page)
+  options.onMeasured?.()
+  expect(rail, `Chat details rail sampled with the boxes at ${step.width}px`).toBe(step.rail)
+  expect(Math.abs(transcript.x - composer.x), `left edges at ${step.width}px`).toBeLessThanOrEqual(1)
+  // A non-overlay scrollbar reserves space inside the transcript.
+  expect(
+    Math.abs(transcript.x + transcript.width - composer.x - composer.width),
+    `right edges at ${step.width}px`,
+  ).toBeLessThanOrEqual(12)
+  return { transcript, composer, rail }
+}
 
 /**
  * Prototype A at a desktop width: layout facts jsdom cannot see. The review
@@ -68,6 +167,56 @@ test.describe('workbench layout', () => {
     await expect(rail).toBeVisible()
     const box = await rail.evaluate(r => ({ left: r.scrollLeft, over: r.scrollWidth - r.clientWidth }))
     expect(box).toEqual({ left: 0, over: 0 })
+  })
+
+  test('transcript and composer share a reading column at wide and narrow widths', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-2', COMPOSER)
+    for (const step of READING_COLUMN_STEPS) {
+      await page.setViewportSize({ width: step.width, height: 900 })
+      await measureReadingColumn(page, step)
+    }
+  })
+
+  /**
+   * #2274's regression: the pane-width observer is held, so after each resize
+   * the rail is still in the previous width's state - absent at 1440 (not yet
+   * docked), docked at 390 (not yet removed). That docked 390 frame is where
+   * the old two-read check measured a 6px transcript against a 358px composer,
+   * 352px apart, exactly the CI failure.
+   *
+   * The measurement is started while the observer is held. With the rail held
+   * in the previous state the measurement must not settle - its own rail wait
+   * is bounded here so the test observes the block instead of assuming one -
+   * and no read may have happened. The release is an explicit handshake, not a
+   * delay; only then does the measurement settle, read both boxes from one
+   * frame, and run the original edge thresholds against the expected rail
+   * state.
+   */
+  test('the reading column measurement waits for the Chat details rail to follow the width', async ({ page }) => {
+    await page.addInitScript(HOLD_CHAT_PANEL_OBSERVER)
+    await boot(page, '/chat/alpha-chat-2', COMPOSER)
+
+    for (const step of READING_COLUMN_STEPS) {
+      await page.setViewportSize({ width: step.width, height: 900 })
+      await expect.poll(() => heldResizeCallbacks(page)).toBeGreaterThan(0)
+      // The rail has not followed this width yet: the previous state is still
+      // on screen, so the measurement below has nothing to settle on.
+      await expect(page.locator('.chat-panel--rail'), `rail before the observer runs at ${step.width}px`)
+        .toHaveCount(step.rail ? 0 : 1)
+
+      let measured = false
+      const blocked = await measureReadingColumn(page, step, { railTimeout: 1000, onMeasured: () => { measured = true } })
+        .then(() => null, (err: Error) => err)
+      expect(blocked, `the measurement settled at ${step.width}px while the rail was held`).not.toBeNull()
+      expect(blocked!.message, `the measurement blocked on the rail state at ${step.width}px`)
+        .toContain('.chat-panel--rail')
+      expect(measured, `a measurement ran at ${step.width}px while the rail was still in the old state`).toBe(false)
+
+      await releaseHeldResize(page)
+      const read = await measureReadingColumn(page, step, { onMeasured: () => { measured = true } })
+      expect(read.rail, `rail sampled with the boxes at ${step.width}px`).toBe(step.rail)
+      expect(measured, `the measurement ran once the rail followed ${step.width}px`).toBe(true)
+    }
   })
 
   test('Home separates its sections by one gap, whatever is open', async ({ page }) => {

@@ -10,6 +10,7 @@ refused before that same call.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import plistlib
@@ -17,11 +18,13 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -56,6 +59,21 @@ needs_local_tools = pytest.mark.skipif(
     shutil.which("curl") is None or shutil.which("shasum") is None,
     reason="needs curl (for file:// downloads) and shasum",
 )
+
+
+def _system_tool(name: str) -> str:
+    """The command the shipped script pins on macOS, when this runner has it.
+
+    The installer names `/usr/bin/stat` and `/usr/bin/shasum` explicitly so a
+    user-writable directory earlier on PATH cannot choose them. The fixtures run
+    that same absolute path when it exists, so the tests exercise the production
+    target rather than a differently-resolved copy; only a runner without it
+    falls back to the command the environment provides.
+    """
+    pinned = Path("/usr/bin") / name
+    if pinned.is_file():
+        return str(pinned)
+    return shutil.which(name) or name
 
 
 def _function_source(name: str) -> str:
@@ -99,10 +117,19 @@ def _manifest_bytes(filename: str = WHEEL_NAME, payload: bytes = WHEEL_BYTES) ->
     ).encode()
 
 
-def _host_manifest_bytes(host_archive: Path) -> bytes:
+def _host_manifest_bytes(
+    host_archive: Path, *, signing_team: str | None = None
+) -> bytes:
     """A schema-1 manifest naming the wheel and `host_archive`."""
     from ciao.release_manifest import server_host_artifact_entry
 
+    entry = server_host_artifact_entry(host_archive)
+    if signing_team is not None:
+        from ciao.server_host import DeveloperIDSigning
+
+        entry = server_host_artifact_entry(
+            host_archive, signing=DeveloperIDSigning(signing_team)
+        )
     return json.dumps(
         build_manifest(
             VERSION,
@@ -115,7 +142,7 @@ def _host_manifest_bytes(host_archive: Path) -> bytes:
                     "sha256": hashlib.sha256(WHEEL_BYTES).hexdigest(),
                     "size": len(WHEEL_BYTES),
                 },
-                server_host_artifact_entry(host_archive),
+                entry,
             ],
             created="2026-09-25T10:00:00+00:00",
         )
@@ -158,10 +185,28 @@ def test_verification_happens_before_install() -> None:
     # Handing a wheel to a tool environment and only then discovering it is not
     # the one the release signed would be no check at all, so both the signature
     # verification and the digest comparison have to come first.
+    #
+    # Both are anchored to the wheel, not to the first `shasum -a 256` in the
+    # file: the uv bootstrap (#2338) hashes its archive earlier, and an anchor on
+    # that digest would pass this test on a check that never looked at the wheel.
+    signature = SCRIPT_TEXT.index("$(read_manifest)")
+    # The digest command may be the pinned `$SHASUM`, but the *wheel* has to be
+    # the file it hashes: the uv bootstrap hashes its own archive earlier.
+    wheel_digest_line = next(
+        line
+        for line in SCRIPT_TEXT.splitlines()
+        if line.startswith("actual_sha=$(") and '"$wheel"' in line
+    )
+    wheel_digest = SCRIPT_TEXT.index(wheel_digest_line)
+    comparison = SCRIPT_TEXT.index('[ "$actual_sha" = "$wheel_sha" ]')
     install = SCRIPT_TEXT.index("tool install --force")
 
-    assert SCRIPT_TEXT.index("$(read_manifest)") < install
-    assert SCRIPT_TEXT.index("shasum -a 256") < install
+    assert '"$wheel"' in wheel_digest_line
+    assert '"$SHASUM"' in wheel_digest_line
+    assert signature < wheel_digest
+    # That digest is compared with the value the signed manifest printed, which
+    # is what makes checking it before the install mean anything.
+    assert wheel_digest < comparison < install
 
 
 def test_setup_reloads_launch_agent_before_start() -> None:
@@ -285,6 +330,16 @@ esac
 case "${1:-}" in
     run)
         # `run --quiet --no-project --python 3.13 --with <pin> python - args`
+        # Remember the wheel this run is authenticated against: a rollback must run
+        # while that file still exists, and the EXIT handler deletes it only after
+        # its attempt.
+        previous=
+        for argument in "$@"; do
+            if [ "$previous" = "--with" ]; then
+                printf '%s\n' "$argument" > "$HOME/native-host-wheel"
+            fi
+            previous=$argument
+        done
         shift
         while [ "$#" -gt 0 ]; do
             if [ "$1" = "python" ]; then
@@ -315,6 +370,16 @@ case "${1:-}" in
         case "$*" in
             "-I -m ciao.server_host_install install "*)
                 printf '%s\\n' "$*" >> "$HOME/server-host-install.log"
+                # The outer installer's own pid, which binds a deferred upgrade
+                # to this run; the fake journal below reports it back so the
+                # shell's ownership check is exercised for real.
+                previous=
+                for argument in "$@"; do
+                    if [ "$previous" = "--owner-pid" ]; then
+                        printf '%s\\n' "$argument" > "$HOME/native-host-owner-pid"
+                    fi
+                    previous=$argument
+                done
                 if [ -f "$HOME/fail-server-host-install" ]; then
                     printf 'server-host-install-failed\\n' >> "$HOME/trace.log"
                     exit 1
@@ -334,6 +399,131 @@ case "${1:-}" in
                 if [ -f "$HOME/warn-install-server-host" ]; then
                     printf 'Error: the ownership record could not be written: No space left on device\\n' >&2
                     exit 3
+                fi
+                # A legacy-to-signed replacement a --no-start run refused: the
+                # module's own status for "the migration completes on a later
+                # normal run", with nothing replaced.
+                if [ -f "$HOME/defer-required-server-host" ]; then
+                    printf 'warning: this host can only be upgraded as a recoverable transaction\\n' >&2
+                    exit 4
+                fi
+                # A deferred upgrade: the old host and its exact record are
+                # retained and the journal is installed. The fake journal is what
+                # `transaction-status` reports back, so the shell's commit and
+                # rollback wiring is exercised end to end.
+                if [ -f "$HOME/defer-server-host-install" ]; then
+                    if [ ! -f "$HOME/native-host-owner-pid" ]; then
+                        printf 'deferred install needs --owner-pid\\n' >&2
+                        exit 1
+                    fi
+                    # The old app and its exact record are retained, then replaced:
+                    # the same pair a real deferred upgrade keeps in its journal.
+                    mkdir -p "$HOME/server-host-before"
+                    if [ -d "$HOME/Applications/Ciaobot Server.app" ]; then
+                        rm -rf "$HOME/server-host-before/app"
+                        cp -pR "$HOME/Applications/Ciaobot Server.app" \
+                            "$HOME/server-host-before/app"
+                    fi
+                    if [ -f "$HOME/.local/state/ciaobot/server-host.json" ]; then
+                        cp -p "$HOME/.local/state/ciaobot/server-host.json" \
+                            "$HOME/server-host-before/record"
+                    fi
+                    mkdir -p "$HOME/Applications/Ciaobot Server.app/Contents"
+                    printf 'candidate\\n' \
+                        > "$HOME/Applications/Ciaobot Server.app/Contents/build"
+                    mkdir -p "$HOME/.local/state/ciaobot"
+                    printf '{"schema": 2, "candidate": true}\\n' \
+                        > "$HOME/.local/state/ciaobot/server-host.json"
+                    printf '0123456789abcdef0123456789abcdef\\n' > "$HOME/native-host-pending"
+                    if [ -f "$HOME/unreadable-status-after-install" ]; then
+                        : > "$HOME/native-host-status-unreadable"
+                    fi
+                    if [ -f "$HOME/interrupt-after-deferred-install" ]; then
+                        rm -f "$HOME/interrupt-after-deferred-install"
+                        # The shell is signalled after the durable install landed and
+                        # before it could record the operation itself.
+                        kill -TERM "$PPID"
+                        exit 143
+                    fi
+                    exit 0
+                fi
+                exit 0
+                ;;
+            "-I -m ciao.server_host_install transaction-status")
+                if [ -f "$HOME/native-host-status-unreadable" ]; then
+                    printf 'Error: the host upgrade journal is unreadable\\n' >&2
+                    exit 1
+                fi
+                if [ -f "$HOME/native-host-pending" ]; then
+                    printf '{"operation": "%s", "owner_alive": %s, "owner_pid": %s, "pending": true, "phase": "installed"}\\n' \\
+                        "$(cat "$HOME/native-host-pending")" \\
+                        "$(cat "$HOME/native-host-owner-alive" 2>/dev/null || echo true)" \\
+                        "$(cat "$HOME/native-host-owner-pid")"
+                else
+                    printf '{"pending": false}\\n'
+                fi
+                exit 0
+                ;;
+            "-I -m ciao.server_host_install executable "*)
+                # The kernel executable identity is libproc on a real Mac. The
+                # shell contract runs on every platform, so this records the
+                # question and answers as the kernel would. The expected path is
+                # echoed only on a match, exactly like the module.
+                printf '%s\\n' "$*" >> "$HOME/native-host-executable.log"
+                if [ -f "$HOME/host-executable-indeterminate" ]; then
+                    printf 'Error: the kernel cannot name the executable of the launched host\\n' >&2
+                    exit 1
+                fi
+                if [ -f "$HOME/host-executable-wrong" ]; then
+                    printf 'Error: the launched host runs /usr/bin/python3\\n' >&2
+                    exit 1
+                fi
+                expected=
+                previous=
+                for argument in "$@"; do
+                    if [ "$previous" = "--expect" ]; then expected=$argument; fi
+                    previous=$argument
+                done
+                printf '%s\\n' "$expected"
+                exit 0
+                ;;
+            "-I -m ciao.server_host_install commit-upgrade "*)
+                printf '%s\\n' "$*" >> "$HOME/native-host-transaction.log"
+                printf 'native-host-commit\\n' >> "$HOME/trace.log"
+                if [ -f "$HOME/fail-native-host-commit" ]; then exit 1; fi
+                rm -f "$HOME/native-host-pending"
+                if [ -f "$HOME/leftover-native-host-commit" ]; then
+                    printf 'Error: the before-images could not be removed\\n' >&2
+                    exit 5
+                fi
+                exit 0
+                ;;
+            "-I -m ciao.server_host_install rollback-upgrade "*)
+                printf '%s\\n' "$*" >> "$HOME/native-host-transaction.log"
+                printf 'native-host-rollback\\n' >> "$HOME/trace.log"
+                # The wheel this command runs out of still has to be on disk.
+                if [ -f "$HOME/native-host-wheel" ] &&
+                    [ -f "$(cat "$HOME/native-host-wheel")" ]; then
+                    printf 'native-host-wheel-present\\n' >> "$HOME/trace.log"
+                fi
+                if [ -f "$HOME/fail-native-host-rollback" ]; then exit 1; fi
+                if [ -d "$HOME/server-host-before/app" ]; then
+                    rm -rf "$HOME/Applications/Ciaobot Server.app"
+                    cp -pR "$HOME/server-host-before/app" \
+                        "$HOME/Applications/Ciaobot Server.app"
+                fi
+                if [ -f "$HOME/server-host-before/record" ]; then
+                    mkdir -p "$HOME/.local/state/ciaobot"
+                    cp -p "$HOME/server-host-before/record" \
+                        "$HOME/.local/state/ciaobot/server-host.json"
+                fi
+                printf 'native-host-restored\\n' >> "$HOME/trace.log"
+                rm -f "$HOME/native-host-pending"
+                # The pair is back but the retained material could not be removed:
+                # the module's distinct "settled with a leftover" status.
+                if [ -f "$HOME/leftover-native-host-rollback" ]; then
+                    printf 'Error: the before-images could not be removed\\n' >&2
+                    exit 5
                 fi
                 exit 0
                 ;;
@@ -419,6 +609,52 @@ EOF
 #!/bin/sh
 printf 'ciao %s\n' "$*" >> "$HOME/trace.log"
 printf '%s\n' "$*" >> "$HOME/ciao-calls.log"
+# One engine start: a fresh run id, the launched `Ciaobot Server` process launchd
+# holds, the Python child that holds the socket, and the runtime lock that names
+# both - the identity the installer's health gate binds to.
+engine_start() {
+    if [ -f "$HOME/unrelated-responder" ]; then
+        # Something else answers the port; nothing of ours started. The unrelated
+        # responder's own run id changes, which is what makes a "changed unrelated
+        # responder" observable.
+        printf 'ffffffffffff4ccc8dddeeeeeeeeee02\n' > "$HOME/unrelated-startup-id"
+        return 0
+    fi
+    count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    echo "$count" > "$HOME/engine-start-count"
+    printf '4343\n' > "$HOME/host-pid"
+    printf '5151\n' > "$HOME/engine-pid"
+    printf '4747\n' > "$HOME/engine-parent-pid"
+    : > "$HOME/engine-started"
+    runtime=$1/.runtime
+    mkdir -p "$runtime"
+    "__PYTHON__" - "$runtime/server.lock" "$count" "$2" "$1" <<'LOCK'
+import json
+import pathlib
+import sys
+
+path, count, port, workspace = sys.argv[1:5]
+runtime = pathlib.Path(path).parent
+pathlib.Path(path).write_text(
+    json.dumps(
+        {
+            "pid": 5151,
+            "port": int(port),
+            "workspace": workspace,
+            "runtime": str(runtime),
+            "status": "running",
+            "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeee%02d" % int(count),
+        }
+    ),
+    encoding="utf-8",
+)
+LOCK
+    chmod 600 "$runtime/server.lock" 2>/dev/null || true
+    if [ -f "$HOME/lock-mode-0644" ]; then
+        chmod 644 "$runtime/server.lock" 2>/dev/null || true
+    fi
+}
 case "${1:-}" in
     setup)
         # An interrupted install, the way a user hits Ctrl-C or the laptop lid
@@ -430,7 +666,28 @@ case "${1:-}" in
             exit 143
         fi
         if [ -f "$HOME/fail-ciao-setup" ]; then exit 1; fi
-        if [ -f "$HOME/setup-generates-password" ]; then mkdir -p "$HOME/Ciaobot/.runtime" && : > "$HOME/Ciaobot/.runtime/welcome-pending"; fi
+        if [ -f "$HOME/setup-generates-password" ] || [ -f "$HOME/fail-ciao-setup-after-password" ]; then
+            # `ciao setup` prints every path it wrote, one per line. A generated
+            # password is what writes the welcome-pending marker, so that path
+            # is in the list; an update keeps any older marker and prints
+            # nothing for it.
+            setup_workspace=$HOME/Ciaobot
+            previous=
+            for argument in "$@"; do
+                if [ "$previous" = "--workspace" ]; then setup_workspace=$argument; fi
+                previous=$argument
+            done
+            mkdir -p "$setup_workspace/.runtime"
+            : > "$setup_workspace/.runtime/welcome-pending"
+            printf '%s\n' "$setup_workspace/.runtime/welcome-pending"
+        fi
+        if [ -f "$HOME/fail-ciao-setup-after-password" ]; then
+            # Setup wrote the password, then failed for a reason the installer
+            # treats as hard. Whatever it printed is already captured and may
+            # hold a sign-in credential; it must not reach the terminal.
+            printf '%s\n' "__SETUP_STDOUT_SENTINEL__"
+            exit 1
+        fi
         # `ciao setup` reporting a workspace whose memory regions could not be
         # set up: its own exit code, with the warning on stderr, and every other
         # step of the workspace in place.
@@ -448,6 +705,20 @@ case "${1:-}" in
             if [ "$previous" = "--python" ]; then program=$argument; fi
             previous=$argument
         done
+        # `--load-launchd` reloads and starts the job: a new engine process, so a
+        # new startup id.
+        case " $* " in
+            *" --load-launchd "*)
+                setup_workspace=$HOME/Ciaobot
+                previous=
+                for argument in "$@"; do
+                    if [ "$previous" = "--workspace" ]; then setup_workspace=$argument; fi
+                    previous=$argument
+                done
+                engine_start "$setup_workspace" \
+                    "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
+                ;;
+        esac
         if [ -n "$program" ]; then
             "__PYTHON__" - "$program" "$HOME/Library/LaunchAgents/com.ciao.server.plist" <<'PLIST'
 import pathlib
@@ -511,6 +782,10 @@ with path.open("wb") as handle:
 PLIST
         ;;
     installer)
+        if [ "${2:-}" = activate ]; then
+            engine_start "$(cat "$HOME/bootstrap-workspace" 2>/dev/null || echo "$HOME/Ciaobot")" \
+                "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
+        fi
         if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then
             printf '{"ok":false,"error":"activation refused"}\n'
             exit 1
@@ -523,6 +798,15 @@ PLIST
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
+        service_workspace=$HOME/Ciaobot
+        previous=
+        for argument in "$@"; do
+            if [ "$previous" = "--workspace" ]; then service_workspace=$argument; fi
+            previous=$argument
+        done
+        engine_start "$service_workspace" \
+            "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
+        if [ -f "$HOME/deny-workspace-access" ]; then : > "$HOME/denial-armed"; fi
         ;;
     setup-url)
         echo "http://localhost:8443/?setup=tok"
@@ -544,11 +828,18 @@ EOF
 esac
 """
 
+# A fake `ciao setup` prints this after the welcome marker it wrote, standing in
+# for the sign-in credential setup's stdout can carry. A failed install must
+# never echo the captured output (#2162).
+SETUP_STDOUT_SENTINEL = "SYNTHETIC-SETUP-CREDENTIAL-2162-do-not-echo"
+
+
 def _fake_uv() -> str:
     return (
         _UV_STUB.replace("__REPO_ROOT__", str(REPO_ROOT))
         .replace("__PYTHON__", sys.executable)
         .replace("__VERSION__", VERSION)
+        .replace("__SETUP_STDOUT_SENTINEL__", SETUP_STDOUT_SENTINEL)
     )
 
 
@@ -568,6 +859,17 @@ def _fake_uv() -> str:
 _CURL_STUB = """#!/bin/sh
 printf 'curl %s\\n' "$*" >> "$HOME/trace.log"
 engine_port=$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)
+# Every engine start bumps this counter, and the startup id is derived from it:
+# the same id on two answers means the same running engine, which is how the
+# installer can tell the candidate it started from an unrelated server that
+# reports the same version.
+engine_start=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
+startup_id=$(printf 'aaaaaaaabbbb4ccc8dddeeeeeeeeee%02d' "$engine_start")
+if [ -f "$HOME/unrelated-responder" ]; then
+    startup_id=$(cat "$HOME/unrelated-startup-id" 2>/dev/null \\
+        || echo ffffffffffff4ccc8dddeeeeeeeeee01)
+fi
+
 response_output=
 previous=
 for arg in "$@"; do
@@ -582,6 +884,33 @@ for arg in "$@"; do
                 *":$engine_port/"*) ;;
                 *) exit 7 ;;
             esac
+            if [ -f "$HOME/no-pre-responder" ] && [ ! -f "$HOME/engine-started" ]; then
+                # Only the installer's own pre-start capture carries this marker;
+                # the port availability check has to keep seeing an answer.
+                probe=$(ls -d "${TMPDIR:-/tmp}"/ciaobot-engine.* 2>/dev/null | head -1)
+                if [ -n "$probe" ] && [ -f "$probe/pre-responder-probe" ]; then
+                    printf 'responder=absent\\n' >> "$HOME/responders.log"
+                    exit 7
+                fi
+            fi
+            printf 'responder=%s\\n' "$startup_id" >> "$HOME/responders.log"
+            # macOS denied the workspace folder: the supervisor writes its one
+            # denial line and exits, so the engine never answers this probe again.
+            # Armed only once the service was started, like the real prompt, so the
+            # earlier port check still sees a normal engine.
+            if [ -f "$HOME/deny-workspace-access" ] && [ -f "$HOME/denial-armed" ]; then
+                if [ ! -f "$HOME/denial-written" ]; then
+                    : > "$HOME/denial-written"
+                    # The installer compares this file's mtime with the marker it
+                    # wrote before the wait, and a shell without sub-second `-nt`
+                    # needs the two to be in different seconds.
+                    [ -x /bin/sleep ] && /bin/sleep 1
+                    mkdir -p "$HOME/.local/state/ciaobot"
+                    printf 'Ciaobot Server was denied access to the workspace folder\n' \
+                        > "$HOME/.local/state/ciaobot/workspace-access-denied.txt"
+                fi
+                exit 7
+            fi
             version=$(cat "$HOME/startup-version" 2>/dev/null || echo "__VERSION__")
             count=$(cat "$HOME/startup-response-count" 2>/dev/null || echo 0)
             count=$((count + 1))
@@ -596,11 +925,11 @@ for arg in "$@"; do
             fi
             if [ -f "$HOME/startup-port-in-use" ]; then
                 port=$(cat "$HOME/startup-port-in-use")
-                printf '{"phases": [{"name": "server_starting", "status": "failed", "message": "port %s is already in use by another program. Free port %s, or set PWA_PORT in the workspace .env to serve on a different port.", "started_at": null, "finished_at": "2026-10-25T12:00:00+00:00"}], "overall_ready": true, "port_in_use": true, "version": "%s", "desktop_api_version": 1, "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeeeee", "pid": 123, "latest_version": null, "update_available": false}\\n' "$port" "$port" "$version"
+                printf '{"phases": [{"name": "server_starting", "status": "failed", "message": "port %s is already in use by another program. Free port %s, or set PWA_PORT in the workspace .env to serve on a different port.", "started_at": null, "finished_at": "2026-10-25T12:00:00+00:00"}], "overall_ready": true, "port_in_use": true, "version": "%s", "desktop_api_version": 1, "startup_id": "'"$startup_id"'", "pid": 123, "latest_version": null, "update_available": false}\\n' "$port" "$port" "$version"
                 exit 0
             fi
             # Shaped like the real response, which has keys before `version`.
-            printf '{"phases": [{"name": "server_starting", "status": "done", "message": "", "started_at": "2026-10-25T12:00:00+00:00", "finished_at": "2026-10-25T12:00:01+00:00"}], "overall_ready": true, "port_in_use": false, "version": "%s", "desktop_api_version": 1, "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeeeee", "pid": 123, "latest_version": null, "update_available": false}\\n' "$version"
+            printf '{"phases": [{"name": "server_starting", "status": "done", "message": "", "started_at": "2026-10-25T12:00:00+00:00", "finished_at": "2026-10-25T12:00:01+00:00"}], "overall_ready": true, "port_in_use": false, "version": "%s", "desktop_api_version": 1, "startup_id": "'"$startup_id"'", "pid": 123, "latest_version": null, "update_available": false}\\n' "$version"
             exit 0
             ;;
     esac
@@ -609,13 +938,20 @@ exec "__CURL__" "$@"
 """
 
 
-def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, Any]:
+def _harness(
+    tmp_path: Path,
+    *,
+    host_archive: Path | None = None,
+    signed_team: str | None = None,
+) -> dict[str, Any]:
     """A signed release on `file://`, fake tools, a fake `$HOME`, and the script
     itself with the embedded key swapped for the test key.
 
     ``host_archive`` stages a signed ``server-host`` entry beside the wheel: the
     archive is copied into the release under its fixed name, and the manifest is
-    rebuilt to authenticate it with the same test key.
+    rebuilt to authenticate it with the same test key. ``signed_team`` selects the
+    explicitly signed revision-5 host entry instead of the production one; the
+    team is always a fake one.
     """
     home = (tmp_path / "home").resolve()
     (home / ".local" / "bin").mkdir(parents=True)
@@ -630,7 +966,7 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
     if host_archive is None:
         raw = _manifest_bytes()
     else:
-        raw = _host_manifest_bytes(host_archive)
+        raw = _host_manifest_bytes(host_archive, signing_team=signed_team)
         shutil.copyfile(host_archive, release / SERVER_HOST_FILENAME)
     (release / "ciaobot-engine-manifest.json").write_bytes(raw)
     (release / "ciaobot-engine-manifest.json.sig").write_text(
@@ -640,9 +976,35 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
 
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
-    _write_exec(fakebin / "uname", "#!/bin/sh\necho Darwin\n")
+    # `uname` answers per flag: the installer asks `-s` for its macOS guard and
+    # `-m` for the uv archive it may bootstrap. Answering "Darwin" to both, as
+    # this stub used to, would make the architecture unknowable. This fixture is
+    # the whole-script macOS simulation, so `-s` is Darwin on every runner; the
+    # uv stub below keeps it out of the publish path. The publish and inode
+    # helpers have their own fixtures, which keep the running kernel's name so
+    # they choose the real `stat` spelling.
+    _write_exec(
+        fakebin / "uname",
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        "    -m) echo arm64 ;;\n"
+        "    -s) echo Darwin ;;\n"
+        "    *) echo Darwin ;;\n"
+        "esac\n",
+    )
     _write_exec(fakebin / "sw_vers", '#!/bin/sh\n[ "$1" = "-productVersion" ] && echo 14.5\n')
     _write_exec(fakebin / "uv", _fake_uv())
+    # The pinned system tools are rewritten to these wrappers above; they only
+    # delegate, so the shipped digest and identity commands are still the real
+    # ones on the runner.
+    _write_exec(
+        fakebin / "stat",
+        f"#!/bin/sh\nexec {shlex.quote(_system_tool('stat'))} \"$@\"\n",
+    )
+    _write_exec(
+        fakebin / "shasum",
+        f"#!/bin/sh\nexec {shlex.quote(_system_tool('shasum'))} \"$@\"\n",
+    )
     _write_exec(
         fakebin / "curl", _CURL_STUB.replace("__CURL__", shutil.which("curl") or "curl")
         .replace("__VERSION__", VERSION)
@@ -656,13 +1018,44 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         '#!/bin/sh\n'
         'printf \'launchctl %s\\n\' "$*" >> "$HOME/trace.log"\n'
         'printf \'%s\\n\' "$*" >> "$HOME/launchctl.log"\n'
+        '# Which label the call names. `print` and `bootout` take it from the\n'
+        '# target, `bootstrap` from the plist it loads, `kickstart` from the target.\n'
+        'label=\n'
+        'case "$1" in\n'
+        '    print|bootout|enable|disable) label=${2##*/} ;;\n'
+        '    bootstrap) name=${3##*/}; label=${name%.plist} ;;\n'
+        '    kickstart) label=${3##*/} ;;\n'
+        'esac\n'
         '# A knob per subcommand, optionally narrowed to one label, so a test\n'
         '# can make launchctl refuse exactly the call it is about.\n'
-        'label=${2##*/}\n'
         'if [ -f "$HOME/fail-launchctl-$1-$label" ] || [ -f "$HOME/fail-launchctl-$1" ]; then\n'
         '    printf \'launchctl-failed %s\\n\' "$*" >> "$HOME/trace.log"\n'
         '    exit 1\n'
         'fi\n'
+        '# launchd state, so the installer has to ask rather than assume: `print`\n'
+        '# succeeds only for a label launchd holds, and bootstrap/bootout move it.\n'
+        'case "$1" in\n'
+        '    print)\n'
+        '        if [ -f "$HOME/launchctl-print-indeterminate" ]; then\n'
+        '            printf \'launchctl: Operation not permitted\\n\' >&2\n'
+        '            exit 1\n'
+        '        fi\n'
+        '        if [ -f "$HOME/loaded-$label" ]; then\n'
+        '            printf \'%s = {\\n\' "$label"\n'
+        '            printf \'\\tactive count = 1\\n\'\n'
+        '            if [ -f "$HOME/host-pid" ]; then\n'
+        '                printf \'\\tpid = %s\\n\' "$(cat "$HOME/host-pid")"\n'
+        '            fi\n'
+        '            printf \'}\\n\'\n'
+        '            exit 0\n'
+        '        fi\n'
+        '        printf \'Could not find service "%s" in domain for user gui: 501\\n\' \\\n'
+        '            "$label" >&2\n'
+        '        exit 113\n'
+        '        ;;\n'
+        '    bootstrap) : > "$HOME/loaded-$label" ;;\n'
+        '    bootout) rm -f "$HOME/loaded-$label" ;;\n'
+        'esac\n'
         '# An interruption in the middle of a retirement: launchd has done what\n'
         '# it was asked and the process goes away before the next call, which is\n'
         '# what a Ctrl-C there looks like. From here the label is unloaded.\n'
@@ -670,6 +1063,120 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         '    rm -f "$HOME/interrupt-after-$1-$label"\n'
         '    kill -TERM "$PPID"\n'
         'fi\n'
+        'exit 0\n',
+    )
+    # `lsof` answers one question the health gate asks: which single pid holds
+    # the listening socket (plain `-t`, one pid per line, nonzero when nothing
+    # matches). The listener can be replaced while a request is in flight, so
+    # that is a knob. The executable identity is *not* asked here any more: on
+    # Darwin `lsof -d txt` lists every mapped executable segment, not the binary
+    # the process was launched from, so this fake emits the real many-record
+    # shape for that query and a test asserts the installer never sends it.
+    _write_exec(
+        fakebin / "lsof",
+        "#!/bin/sh\n"
+        'printf \'lsof %s\\n\' "$*" >> "$HOME/trace.log"\n'
+        'if [ -f "$HOME/lsof-cannot-run" ]; then exit 1; fi\n'
+        'executable=\n'
+        'for argument in "$@"; do\n'
+        '    case "$argument" in\n'
+        '        -d) executable=1 ;;\n'
+        '    esac\n'
+        'done\n'
+        'if [ -n "$executable" ]; then\n'
+        '    # A signed universal host maps dyld, the system libraries and its own\n'
+        '    # two slices; the old "exactly one n record" rule can never match.\n'
+        '    printf \'p%s\\n\' "$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)"\n'
+        '    printf \'fcwd\\n\'\n'
+        '    printf \'n/usr/lib/dyld\\n\'\n'
+        '    printf \'n/usr/lib/libSystem.B.dylib\\n\'\n'
+        '    printf \'n/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation\\n\'\n'
+        '    printf \'n%s\\n\' \\\n'
+        '        "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '    printf \'n/usr/lib/libobjc.A.dylib\\n\'\n'
+        '    exit 0\n'
+        'fi\n'
+        'if [ -f "$HOME/listener-replaced" ]; then\n'
+        '    # The socket changes owner on every lookup: an unrelated listener and\n'
+        '    # the candidate take turns, so no single request sees the same listener\n'
+        '    # on both sides of it.\n'
+        '    count=$(cat "$HOME/listener-replaced-count" 2>/dev/null || echo 0)\n'
+        '    count=$((count + 1))\n'
+        '    echo "$count" > "$HOME/listener-replaced-count"\n'
+        '    if [ $((count % 2)) -eq 1 ]; then\n'
+        '        printf \'9999\\n\'\n'
+        '    else\n'
+        '        cat "$HOME/engine-pid" 2>/dev/null || exit 1\n'
+        '    fi\n'
+        '    exit 0\n'
+        'fi\n'
+        'if [ -f "$HOME/engine-started" ]; then\n'
+        '    if [ -f "$HOME/listener-pid" ]; then\n'
+        '        cat "$HOME/listener-pid"\n'
+        '        exit 0\n'
+        '    fi\n'
+        '    cat "$HOME/engine-pid" 2>/dev/null || exit 1\n'
+        '    exit 0\n'
+        'fi\n'
+        'if [ -f "$HOME/pre-listener-pid" ]; then\n'
+        '    cat "$HOME/pre-listener-pid"\n'
+        '    exit 0\n'
+        'fi\n'
+        'exit 1\n',
+    )
+    # The process table the health check walks: the engine's Python child, an
+    # intermediate parent, and the `Ciaobot Server` process launchd spawned. The
+    # job pid is never the socket holder, exactly as on a real install.
+    _write_exec(
+        fakebin / "ps",
+        "#!/bin/sh\n"
+        'printf \'ps %s\\n\' "$*" >> "$HOME/trace.log"\n'
+        'if [ -f "$HOME/ps-cannot-run" ]; then exit 1; fi\n'
+        'field=\n'
+        'target=\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        '        -o) field=$2; shift 2 ;;\n'
+        '        -p) target=$2; shift 2 ;;\n'
+        '        *) shift ;;\n'
+        '    esac\n'
+        'done\n'
+        'engine=$(cat "$HOME/engine-pid" 2>/dev/null || echo 5151)\n'
+        'middle=$(cat "$HOME/engine-parent-pid" 2>/dev/null || echo 4747)\n'
+        'host=$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)\n'
+        'case "$field" in\n'
+        '    ppid=)\n'
+        '        if [ -f "$HOME/deep-chain" ]; then\n'
+        '            # Six hops to the launched host: deeper than the bounded walk.\n'
+        '            case "$target" in\n'
+        '                "$engine") echo 6100 ;;\n'
+        '                6100) echo 6101 ;;\n'
+        '                6101) echo 6102 ;;\n'
+        '                6102) echo 6103 ;;\n'
+        '                6103) echo 6104 ;;\n'
+        '                6104) echo "$host" ;;\n'
+        '                "$host") echo 1 ;;\n'
+        '                *) echo 1 ;;\n'
+        '            esac\n'
+        '            exit 0\n'
+        '        fi\n'
+        '        case "$target" in\n'
+        '            "$engine") echo "$middle" ;;\n'
+        '            "$middle") echo "$host" ;;\n'
+        '            "$host") echo 1 ;;\n'
+        '            *) echo 1 ;;\n'
+        '        esac\n'
+        '        ;;\n'
+        '    comm=)\n'
+        '        if [ "$target" = "$host" ]; then\n'
+        '            printf \'%s\\n\' \\\n'
+        '                "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '        else\n'
+        '            printf \'python3.13\\n\'\n'
+        '        fi\n'
+        '        ;;\n'
+        '    *) exit 1 ;;\n'
+        'esac\n'
         'exit 0\n',
     )
     _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
@@ -700,6 +1207,9 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         fakebin / "pgrep",
         '#!/bin/sh\n'
         'printf \'pgrep %s\\n\' "$*" >> "$HOME/trace.log"\n'
+        '# A `pgrep` that could not answer is not "no match": the installer has to\n'
+        '# treat it as an unanswered question and refuse to revert anything.\n'
+        'if [ -f "$HOME/pgrep-cannot-run" ]; then exit 3; fi\n'
         'if [ -f "$HOME/desktop-running" ]; then exit 0; fi\n'
         'exit 1\n',
     )
@@ -722,9 +1232,28 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         flags=re.MULTILINE,
     )
     rewritten = re.sub(
-        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|CURL|SLEEP)=.*$",
+        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|LSOF|PS|CURL|SLEEP)=.*$",
         lambda m: f"{m.group(1)}={fakebin / m.group(1).lower()}",
         rewritten,
+        flags=re.MULTILINE,
+    )
+    # The publish's system tools are pinned to absolute macOS paths in the
+    # shipped script. This whole-script fixture simulates a Mac on every runner,
+    # so point them at the runner's real tools: the publish path itself is kept
+    # out of these runs by the `uv` stub, but the wheel and host digests still
+    # have to be computed.
+    rewritten = re.sub(
+        r"^STAT=.*$",
+        f"STAT={fakebin / 'stat'}",
+        rewritten,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    rewritten = re.sub(
+        r"^SHASUM=.*$",
+        f"SHASUM={fakebin / 'shasum'}",
+        rewritten,
+        count=1,
         flags=re.MULTILINE,
     )
     # A fresh install probes its port with the engine's own bind; 8443 is
@@ -1358,6 +1887,26 @@ WELCOME_LINE = (
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_installer_update_does_not_announce_an_existing_password(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    env_path = workspace / ".env"
+    env_path.write_text("PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n", encoding="utf-8")
+    marker = workspace / ".runtime" / "welcome-pending"
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    original_env = env_path.read_bytes()
+    original_marker = marker.read_bytes()
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert env_path.read_bytes() == original_env
+    assert marker.read_bytes() == original_marker
+    assert WELCOME_LINE not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     _existing_install(harness)
@@ -1369,6 +1918,139 @@ def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert WELCOME_LINE in result.stdout
     assert f"  workspace: {home / 'Ciaobot'}" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("generated", id="new-password"),
+        pytest.param("generated-memory-warning", id="new-password-with-tolerated-exit-3"),
+        pytest.param("stale-marker", id="update-with-stale-marker"),
+        pytest.param("no-marker", id="update-without-marker"),
+        pytest.param("literal-path", id="literal-path-with-spaces-and-metacharacters"),
+    ],
+)
+def test_installer_password_announcement_tracks_this_setup(
+    tmp_path: Path, case: str
+) -> None:
+    # The announcement is about this run, not about a marker an older install
+    # left behind: only setup's own written-files output can say whether a
+    # password was generated now (#2162).
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    args = ["--version", VERSION, "--no-start"]
+    password_generated = case in {
+        "generated",
+        "generated-memory-warning",
+        "literal-path",
+    }
+    if case == "literal-path":
+        # A literal full-line match, not a pattern: these are real characters
+        # in a real folder name.
+        workspace = _existing_install(harness, home / "Ciaobot [draft] * (copy)")
+        args += ["--workspace", str(workspace)]
+    else:
+        workspace = _existing_install(harness)
+    marker = workspace / ".runtime" / "welcome-pending"
+
+    if password_generated:
+        (home / "setup-generates-password").write_text("", encoding="utf-8")
+    else:
+        # An update keeps the password it already has, and an unacknowledged
+        # marker from the run that generated it can still be on disk.
+        (workspace / ".env").write_text(
+            "PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n",
+            encoding="utf-8",
+        )
+        if case == "stale-marker":
+            marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    if case == "generated-memory-warning":
+        # Setup generated the password, then reported memory regions it could
+        # not scaffold; exit 3 is tolerated and the password still exists.
+        (home / "fail-ciao-setup-memory").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, *args)
+
+    assert result.returncode == 0, result.stderr
+    if password_generated:
+        assert WELCOME_LINE in result.stdout
+        assert marker.is_file()
+    else:
+        assert WELCOME_LINE not in result.stdout
+        if case == "stale-marker":
+            # The marker the earlier run left is untouched, and this run does
+            # not mistake it for a password it created.
+            assert marker.read_text(encoding="utf-8") == "2026-01-01T00:00:00+00:00\n"
+        else:
+            assert not marker.exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_ready_update_keeps_sign_in_link_without_password_announcement(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    (workspace / ".env").write_text(
+        "PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n",
+        encoding="utf-8",
+    )
+    marker = workspace / ".runtime" / "welcome-pending"
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
+    assert WELCOME_LINE not in result.stdout
+    assert marker.read_bytes() == original_marker
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_failed_setup_never_announces_a_password(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _existing_install(harness)
+    home: Path = harness["home"]
+    (home / "setup-generates-password").write_text("", encoding="utf-8")
+    (home / "fail-ciao-setup").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode != 0
+    assert "ciao setup failed" in result.stderr
+    assert WELCOME_LINE not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_failed_setup_after_writing_password_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    # Setup can write the password and its welcome marker, then fail before the
+    # workspace is complete. The install fails, so nothing may claim a password
+    # was created - and setup's captured stdout can carry a sign-in credential,
+    # so a hard failure must never echo it either (#2162).
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    home: Path = harness["home"]
+    (home / "fail-ciao-setup-after-password").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "ciao setup failed" in result.stderr
+    assert WELCOME_LINE not in result.stdout
+    assert WELCOME_LINE not in result.stderr
+    assert SETUP_STDOUT_SENTINEL not in result.stdout
+    assert SETUP_STDOUT_SENTINEL not in result.stderr
+    # The marker really was written before the failure, so the old
+    # marker-existence check would have had something to misread.
+    assert (workspace / ".runtime" / "welcome-pending").is_file()
 
 
 @runs_the_sh_installer
@@ -1636,13 +2318,15 @@ def test_verification_precedes_host_acquisition() -> None:
 def test_host_acquisition_follows_the_read_only_preflight() -> None:
     # A preflight refusal (a bad --as-client, an untrusted receipt, a foreign
     # `ciao` on PATH) must still leave this Mac untouched, so the host is only
-    # installed after every read-only check, and before the migration changes
-    # anything.
+    # touched after every read-only check, and before the migration changes
+    # anything. That includes recovering a previous run's abandoned upgrade: it
+    # moves the host, so it happens in the same window.
     preflight = SCRIPT_TEXT.index("exists and was not installed by Ciaobot")
-    host_install = SCRIPT_TEXT.index("-m ciao.server_host_install install")
+    recover = SCRIPT_TEXT.index("    native_host_recover\n")
+    host_install = SCRIPT_TEXT.index("        native_host_run install \\")
     migration = SCRIPT_TEXT.index("# --- the migration ---")
 
-    assert preflight < host_install < migration
+    assert preflight < recover < host_install < migration
 
 
 @runs_the_sh_installer
@@ -1901,6 +2585,1098 @@ def test_the_host_install_gets_the_verified_manifest_archive_and_embedded_key(
     assert Path(options["--archive"]).name == SERVER_HOST_FILENAME
     assert Path(options["--archive"]).parent == Path(options["--manifest"]).parent
     assert options["--public-key"] == harness["public_key"]
+
+
+# ── the transactional signed-host upgrade (#2330) ───────────────────────────
+
+_SIGNED_TEAM = "TESTTEAM01"
+
+
+def _installed_host_record(home: Path) -> Path:
+    """The ownership record of the legacy host the fake Mac already runs."""
+    record = home / ".local" / "state" / "ciaobot" / "server-host.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"schema": 1, "host_revision": 3}\n', encoding="utf-8")
+    os.chmod(record, 0o600)
+    build = home / "Applications" / "Ciaobot Server.app" / "Contents" / "build"
+    build.parent.mkdir(parents=True, exist_ok=True)
+    build.write_text("legacy\n", encoding="utf-8")
+    return record
+
+
+def _signed_host_harness(
+    tmp_path: Path, *, installed_revision: int | None = 3
+) -> dict[str, Any]:
+    """A signed release whose host entry names a Developer ID team, over a legacy
+    host that is already installed at ``installed_revision``.
+
+    ``installed_revision=None`` installs no host at all. The fake module records a
+    deferred upgrade (the journal the shell has to commit or roll back) instead of
+    moving a real bundle, so what is asserted here is the shell's ordering:
+    warning, install, health, commit or rollback.
+    """
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive, signed_team=_SIGNED_TEAM)
+    if installed_revision is not None:
+        _write_host_plist(harness["home"], str(installed_revision))
+        # The app and record this Mac already has, plus the job launchd holds for
+        # it: a real migration replaces those, and a rollback has to bring them
+        # back before the old engine definition is reloaded.
+        _installed_host_record(harness["home"])
+        (harness["home"] / "loaded-com.ciao.server").write_text("")
+    return harness
+
+
+def _engine_definition(harness: dict[str, Any]) -> Path:
+    """An ordinary installer-managed engine plist, so this Mac is not "fresh".
+
+    The classifier reads it as an installer-managed engine (its program is the
+    `ciao` console, not a `.app`), so a run with `--workspace` takes the CLI setup
+    path rather than the browser bootstrap.
+    """
+    home: Path = harness["home"]
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    plist = agents / "com.ciao.server.plist"
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "com.ciao.server",
+                "ProgramArguments": [str(home / ".local" / "bin" / "ciao"), "run"],
+                "WorkingDirectory": str(home / "Ciaobot"),
+            }
+        )
+    )
+    return plist
+
+
+def _defer(harness: dict[str, Any]) -> None:
+    """Make the fake module answer a deferred upgrade with a pending journal."""
+    (harness["home"] / "defer-server-host-install").write_text("")
+
+
+def _trace_index(harness: dict[str, Any], needle: str) -> int:
+    trace = _log(harness, "trace.log").splitlines()
+    return trace.index(needle)
+
+
+def _last_trace_index(harness: dict[str, Any], needle: str) -> int:
+    trace = _log(harness, "trace.log").splitlines()
+    return max(index for index, line in enumerate(trace) if line == needle)
+
+
+def _last_health_index(harness: dict[str, Any]) -> int:
+    trace = _log(harness, "trace.log").splitlines()
+    return max(index for index, line in enumerate(trace) if "startup-status" in line)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_signed_upgrade_warning_precedes_any_identity_change(tmp_path: Path) -> None:
+    # A signed candidate over an older host is the replacement macOS evaluates a
+    # new identity for. The user is told once, before anything is replaced, and
+    # without a promise that existing grants carry over - a permission warning
+    # printed after the swap is a permission warning printed too late.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("Accessibility") == 1
+    assert "Automation" in result.stderr
+    assert "Desktop, Documents and Downloads" in result.stderr
+    assert "not transferred automatically" in result.stderr
+    # In the shipped script the warning is emitted before the command that
+    # replaces the host, not after it.
+    assert SCRIPT_TEXT.index("Existing permissions are not transferred") < (
+        SCRIPT_TEXT.index("        native_host_run install \\")
+    )
+    argv = _log(harness, "server-host-install.log").splitlines()[0].split(" ")
+    assert "--defer-commit" in argv
+    assert argv[argv.index("--owner-pid") + 1].isdigit()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_fresh_or_current_host_never_warns_about_permissions(tmp_path: Path) -> None:
+    # Nothing is being replaced, so nothing is warned about: no installed host at
+    # all, and an installed host of the revision this release selects.
+    from ciao.server_host import SIGNED_HOST_REVISION
+
+    fresh = _signed_host_harness(tmp_path / "fresh", installed_revision=None)
+    _existing_install(fresh)
+    result = _run_installer(fresh, "--version", VERSION)
+    assert result.returncode == 0, result.stderr
+    assert "Accessibility" not in result.stderr
+
+    current = _signed_host_harness(
+        tmp_path / "current", installed_revision=SIGNED_HOST_REVISION
+    )
+    _existing_install(current)
+    result = _run_installer(current, "--version", VERSION)
+    assert result.returncode == 0, result.stderr
+    assert "Accessibility" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_pending_native_upgrade_commits_only_after_exact_engine_health(
+    tmp_path: Path,
+) -> None:
+    # An old engine answering on the configured port is not the engine this run
+    # installed. Until the exact new version answers, the host transaction stays
+    # uncommitted and a failure gives the previous host back.
+    failing = _signed_host_harness(tmp_path / "failing")
+    _defer(failing)
+    _existing_install(failing)
+    (failing["home"] / "startup-version").write_text("9.9.9\n")
+
+    result = _run_installer(failing, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "rollback-upgrade" in _log(failing, "native-host-transaction.log")
+    assert "commit-upgrade" not in _log(failing, "native-host-transaction.log")
+    assert "with version" in result.stderr
+    # The journal stayed pending for the whole health wait and was only released
+    # by the rollback this failure caused.
+    assert _last_health_index(failing) < _trace_index(failing, "native-host-rollback")
+    assert (failing["home"] / "native-host-pending").exists() is False
+
+    healthy = _signed_host_harness(tmp_path / "healthy")
+    _defer(healthy)
+    _existing_install(healthy)
+
+    result = _run_installer(healthy, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "commit-upgrade" in _log(healthy, "native-host-transaction.log")
+    assert "rollback-upgrade" not in _log(healthy, "native-host-transaction.log")
+    # Committed once, and only after the exact version answered.
+    assert _trace_index(healthy, "native-host-commit") > _last_health_index(healthy)
+    assert _log(healthy, "trace.log").count("native-host-commit") == 1
+    assert not (healthy["home"] / "native-host-pending").exists()
+    # The responder really changed between the pre-start probe and the health
+    # answer, and the one that passed is the engine run the runtime lock names.
+    home = healthy["home"]
+    responders = (home / "responders.log").read_text().splitlines()
+    assert len(responders) >= 2
+    assert responders[0] != responders[-1]
+    lock = json.loads((home / "Ciaobot/.runtime/server.lock").read_text())
+    assert responders[-1] == f"responder={lock['startup_id']}"
+    # The launched host and the socket holder are distinct processes, as on a real
+    # install: launchd runs `Ciaobot Server`, which posix_spawns Python.
+    assert (home / "host-pid").read_text().strip() != (
+        home / "engine-pid"
+    ).read_text().strip()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_native_upgrade_commits_after_desktop_retirement(tmp_path: Path) -> None:
+    # A desktop hand-over can still roll the engine back while it retires the
+    # app's agent, so the host is committed only after that succeeded - and the
+    # commit is what releases the before-images.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _desktop_install(harness, tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    retirement = _trace_index(harness, "launchctl bootout gui/%d/Ciaobot" % os.getuid())
+    assert _trace_index(harness, "native-host-commit") > retirement
+    assert _migration_receipt(harness)["phase"] == "migrated"
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "knob,extra",
+    [
+        pytest.param("fail-ciao-setup", (), id="setup"),
+        pytest.param("fail-ciao-service-start", (), id="start"),
+        pytest.param("startup-port-in-use", ("8443",), id="port-conflict"),
+        pytest.param("fail-launchctl-bootout-Ciaobot", (), id="retirement"),
+        pytest.param("deny-workspace-access", (), id="folder-denial"),
+    ],
+)
+def test_late_native_upgrade_failure_rolls_back_before_service_restore(
+    tmp_path: Path, knob: str, extra: tuple[str, ...]
+) -> None:
+    # Every failure that lands after the host was replaced but before the new
+    # engine is proven gives the previous host back - the observed app and record
+    # bytes, not just a marker - and, in a hand-over, before the old engine
+    # definition is reloaded.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _desktop_install(harness, tmp_path)
+    (harness["home"] / knob).write_text("".join(extra))
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode != 0
+    transcript = _log(harness, "native-host-transaction.log")
+    assert "rollback-upgrade" in transcript
+    assert transcript.count("rollback-upgrade") == 1
+    assert "commit-upgrade" not in transcript
+    # The previous app and its record are back, byte for byte, and the restore
+    # event was observed.
+    home = harness["home"]
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    assert (home / ".local/state/ciaobot/server-host.json").read_text() == (
+        '{"schema": 1, "host_revision": 3}\n'
+    )
+    restored = _trace_index(harness, "native-host-restored")
+    # The old engine definition is reloaded only after the host pair is back.
+    reload_line = next(
+        line
+        for line in _log(harness, "trace.log").splitlines()
+        if line.startswith("launchctl bootstrap")
+        and line.endswith("com.ciao.server.plist")
+    )
+    trace = _log(harness, "trace.log").splitlines()
+    assert restored < trace.index(reload_line)
+    if knob == "deny-workspace-access":
+        assert "denied access" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_health_timeout_with_a_pending_upgrade_rolls_back(tmp_path: Path) -> None:
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _desktop_install(harness, tmp_path)
+    (harness["home"] / "startup-version").write_text("9.9.9\n")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode != 0
+    assert "with version" in result.stderr
+    assert "rollback-upgrade" in _log(harness, "native-host-transaction.log")
+    assert _trace_index(harness, "native-host-rollback") < _last_trace_index(
+        harness, "launchctl bootout gui/%d/com.ciao.server" % os.getuid()
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_unexpected_exit_and_signal_roll_back_before_temp_cleanup(
+    tmp_path: Path,
+) -> None:
+    # A signal ends the run without any `fail` call at all. The one EXIT handler
+    # still gives the previous host back - exactly once - using the wheel that is
+    # deleted only afterwards, and the original status survives.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    workspace = _desktop_install(harness, tmp_path)
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (harness["home"] / "interrupt-after-bootout-Ciaobot").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 130
+    transcript = _log(harness, "native-host-transaction.log").splitlines()
+    assert len(transcript) == 1
+    assert "rollback-upgrade" in transcript[0]
+    # The rollback ran while the wheel still existed (a marker the fake module
+    # writes only when that file is still on disk), and the temporary directory it
+    # lives in is only deleted afterwards.
+    trace = _log(harness, "trace.log").splitlines()
+    assert "native-host-rollback" in trace
+    assert trace.index("native-host-rollback") < trace.index("native-host-restored")
+    assert "native-host-wheel-present" in trace
+    assert not list(Path(harness["env"]["TMPDIR"]).glob("ciaobot-engine.*"))
+    # The previous pair is back.
+    home = harness["home"]
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unexpected_set_e_exit_rolls_back_before_temp_cleanup(
+    tmp_path: Path,
+) -> None:
+    # A command that fails under `set -e` - here a workspace that cannot be
+    # created - ends the script without any `fail` call. The same EXIT handler
+    # rolls back once, keeps the original status, and does it while the wheel
+    # exists.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "notadir").write_text("not a directory\n")
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--workspace",
+        str(harness["home"] / "notadir" / "Ciaobot"),
+    )
+
+    assert result.returncode == 1
+    transcript = _log(harness, "native-host-transaction.log").splitlines()
+    assert len(transcript) == 1
+    assert "rollback-upgrade" in transcript[0]
+    trace = _log(harness, "trace.log").splitlines()
+    assert "native-host-wheel-present" in trace
+    assert "native-host-restored" in trace
+    assert not list(Path(harness["env"]["TMPDIR"]).glob("ciaobot-engine.*"))
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_signal_inside_the_install_call_still_binds_its_own_operation(
+    tmp_path: Path,
+) -> None:
+    # The reviewed window: the child finished the durable install and the shell is
+    # signalled before `native_host_begin` recorded anything. The EXIT handler
+    # discovers the operation from the journal, proves it owns it (owner pid plus
+    # nonce), and rolls it back instead of leaving it behind.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "interrupt-after-deferred-install").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 130
+    transcript = _log(harness, "native-host-transaction.log").splitlines()
+    assert len(transcript) == 1
+    assert "rollback-upgrade" in transcript[0]
+    assert not (harness["home"] / "native-host-pending").exists()
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unreadable_status_retains_the_journal_and_reports_incomplete_recovery(
+    tmp_path: Path,
+) -> None:
+    # Discovery itself fails: the status cannot be read, so the shell must not
+    # guess. It keeps the journal, says the recovery was not made, and stays
+    # nonzero - deleting the journal or rolling back blind would both be worse.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "unreadable-status-after-install").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "could not be read" in result.stderr
+    assert "NOT rolled back" in result.stderr
+    assert "server-host-upgrade.json" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    # The operation is still there for the next run.
+    assert (home / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_indeterminate_launchctl_query_fails_closed(tmp_path: Path) -> None:
+    # `launchctl print` failed for an operational reason (a permission error, a
+    # broken tool), not because the job is gone. That is uncertainty, not proof, so
+    # the identity is not reverted and the journal is kept.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / "launchctl-print-indeterminate").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was NOT replaced by the previous host" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert (home / "native-host-pending").exists()
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_confirmed_absent_job_still_lets_the_rollback_proceed(tmp_path: Path) -> None:
+    # The contrast: launchd explicitly says it has no such job ("Could not find
+    # service", status 113). That *is* proof, so the rollback runs and the previous
+    # pair is restored.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / "loaded-com.ciao.server").unlink()
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    transcript = _log(harness, "native-host-transaction.log")
+    assert transcript.count("rollback-upgrade") == 1
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    assert not (home / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_failing_status_query_in_the_exit_handler_keeps_the_status(
+    tmp_path: Path,
+) -> None:
+    # The run is interrupted inside the install call, so the EXIT handler has to
+    # discover its own operation - and the status query fails. Under `set -e` an
+    # unguarded failure would abort the trap and lose the original status; the
+    # journal must stay and the run must still report the interruption.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "interrupt-after-deferred-install").write_text("")
+    (home / "unreadable-status-after-install").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 130
+    assert "could not be read" in result.stderr
+    assert "NOT rolled back" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert (home / "native-host-pending").exists()
+    # The temporary directory was cleaned anyway, which is only reached when the
+    # trap survived the failed discovery.
+    assert not list(Path(harness["env"]["TMPDIR"]).glob("ciaobot-engine.*"))
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_failed_native_rollback_stops_the_service_restoration(
+    tmp_path: Path,
+) -> None:
+    # The native rollback itself failed. Reloading the previous engine definition
+    # now would put the old engine back on top of a candidate that may still be
+    # running, over before-images that are the only way back. The run stops,
+    # keeps the material and says the rollback was incomplete.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _desktop_install(harness, tmp_path)
+    home = harness["home"]
+    (home / "fail-native-host-rollback").write_text("")
+    (home / "startup-version").write_text("9.9.9\n")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode != 0
+    assert "could not be restored" in result.stderr
+    assert "NOT reloaded" in result.stderr
+    assert "incomplete rollback" in result.stderr
+    # Exactly one attempt, and no engine definition was reloaded.
+    assert _log(harness, "native-host-transaction.log").count("rollback-upgrade") == 1
+    assert "bootstrap" not in _log(harness, "launchctl.log")
+    # The candidate is still installed and the journal is still there to recover.
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
+    assert (home / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_same_version_unrelated_server_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # The port is held by a process that is not the job launchd started, and it
+    # reports the exact new version. A version string says nothing about *which*
+    # process answered; the pid binding does.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "unrelated-responder").write_text("")
+    (harness["home"] / "listener-pid").write_text("9999\n")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was not proven" in result.stderr
+    transcript = _log(harness, "native-host-transaction.log")
+    assert "commit-upgrade" not in transcript
+    assert transcript.count("rollback-upgrade") == 1
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    # The scenario is a genuinely different engine run: its own startup id answers
+    # while this install's runtime lock names another, and the launched host and the
+    # socket holder are distinct processes.
+    home = harness["home"]
+    # Nothing of this install's ever started, so no runtime lock exists, and the
+    # port answered a foreign run both before the start and during the health wait.
+    assert not (home / "Ciaobot/.runtime/server.lock").exists()
+    responders = (home / "responders.log").read_text().splitlines()
+    foreign = "responder=ffffffffffff4ccc8dddeeeeeeeeee01"
+    assert foreign in responders
+    assert responders[-1].startswith("responder=ffffffffff")
+    assert "responder=absent" not in responders
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unrelated_responder_without_an_earlier_answer_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # Nothing answered the port before this run started one, and then an unrelated
+    # same-version server appears. "No earlier answer" is not permission to accept
+    # whatever answers now: the responder has to be the job launchd started.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "unrelated-responder").write_text("")
+    (harness["home"] / "no-pre-responder").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was not proven" in result.stderr
+    assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    # The pre-start response really was absent, and the post-start one is somebody
+    # else's: a scenario with no earlier answer is not permission to accept it.
+    responders = (harness["home"] / "responders.log").read_text().splitlines()
+    # The pre-start capture itself was answered by nothing, and the health wait then
+    # saw somebody else's run: the absent answer is what that scenario exercises.
+    assert "responder=absent" in responders
+    assert responders.index("responder=absent") < len(responders) - 1
+    assert responders[-1].startswith("responder=ffffffffff")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_changed_unrelated_responder_does_not_commit(tmp_path: Path) -> None:
+    # An unrelated server answered before the start and a *different* unrelated
+    # server answers after it. Something changed, but not into the job this run
+    # started - so nothing is committed.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "unrelated-responder").write_text("")
+    (harness["home"] / "pre-listener-pid").write_text("7777\n")
+    (harness["home"] / "unrelated-startup-id").write_text(
+        "ffffffffffff4ccc8dddeeeeeeeeee01\n"
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was not proven" in result.stderr
+    assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    # Both responses were observed and they differ: something changed on the port,
+    # but not into the engine run this install started.
+    responders = (harness["home"] / "responders.log").read_text().splitlines()
+    assert any(entry.endswith("01") for entry in responders)
+    assert responders[-1].endswith("02")
+    assert responders.index(next(e for e in responders if e.endswith("01"))) < (
+        len(responders) - 1
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "knob",
+    [
+        # launchd still holds the job after the bootout was asked for.
+        pytest.param("fail-launchctl-bootout-com.ciao.server", id="bootout-refused"),
+        # the process never leaves within the bounded wait.
+        pytest.param("desktop-running", id="still-running"),
+        # the process lookup itself could not answer.
+        pytest.param("pgrep-cannot-run", id="lookup-failed"),
+    ],
+)
+def test_quiescence_fails_closed_and_retains_the_recovery_material(
+    tmp_path: Path, knob: str
+) -> None:
+    # A candidate that may still be running is never replaced and never reported
+    # as rolled back: no rollback command is sent, no service is restarted, the
+    # before-images and the journal stay, and the run is nonzero.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    legacy_plist = (
+        home / "Applications/Ciaobot Server.app/Contents/Info.plist"
+    ).read_bytes()
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / knob).write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was NOT replaced by the previous host" in result.stderr
+    assert "server-host-upgrade.json" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert "native-host-restored" not in _log(harness, "trace.log")
+    assert "launchctl bootstrap" not in _log(harness, "launchctl.log")
+    # The candidate is still what is installed, and the journal is still there.
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
+    assert (home / "native-host-pending").exists()
+    # The retained before-images are byte-exact: nothing was half-restored while
+    # the candidate may still be running.
+    before = home / "server-host-before"
+    assert (before / "app/Contents/build").read_text() == "legacy\n"
+    assert (before / "app/Contents/Info.plist").read_bytes() == legacy_plist
+    assert (before / "record").read_text() == '{"schema": 1, "host_revision": 3}\n'
+    assert stat.S_IMODE((before / "record").stat().st_mode) == 0o600
+
+
+def _assert_identity_probes_ask_launchd_job(harness: dict[str, Any]) -> None:
+    """Every kernel identity probe asked about launchd's job pid and the host.
+
+    The health gate retries the candidate probe until its deadline, so the log
+    holds one line per attempt, not one line per run. What is asserted is that
+    each attempt is the same question: the listener is pid 5151 in this harness
+    and launchd's job is 4343, so every probe must carry 4343 and the expected
+    installed host, and at least one must have been asked.
+    """
+    identity_calls = _log(harness, "native-host-executable.log").splitlines()
+    assert identity_calls
+    expect = (
+        f"--expect {harness['home']}/Applications/Ciaobot Server.app"
+        "/Contents/MacOS/Ciaobot Server"
+    )
+    for call in identity_calls:
+        assert "--pid 4343" in call
+        assert expect in call
+
+
+def _assert_no_commit_and_legacy_pair(
+    harness: dict[str, Any], result: subprocess.CompletedProcess[str], *, step: str
+) -> None:
+    """The shared shape of every unproven-candidate failure."""
+    home = harness["home"]
+    assert result.returncode != 0
+    assert "was not proven" in result.stderr
+    assert step in result.stderr
+    transcript = _log(harness, "native-host-transaction.log")
+    assert "commit-upgrade" not in transcript
+    assert transcript.count("rollback-upgrade") == 1
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    assert (home / ".local/state/ciaobot/server-host.json").read_text() == (
+        '{"schema": 1, "host_revision": 3}\n'
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
+    # The ancestry reaches launchd's pid, but the kernel says that process runs a
+    # different executable. argv[0], `ps -o comm=` and a mapped `lsof` record could
+    # all be made to agree with the installed host; the kernel executable cannot.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "host-executable-wrong").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="executable")
+    _assert_identity_probes_ask_launchd_job(harness)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unreadable_kernel_executable_probe_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # The kernel could not name the job's executable at all. An unknown identity
+    # is not the installed host, so the before-images and the journal stay.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "host-executable-indeterminate").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(
+        harness, result, step="kernel executable identity"
+    )
+    _assert_identity_probes_ask_launchd_job(harness)
+
+
+def test_the_engine_runtime_lock_is_created_private_under_a_typical_umask(
+    tmp_path: Path,
+) -> None:
+    # The installer's health gate refuses a runtime lock that is not 0600, so the
+    # engine has to *create* it that way: `open()` honours the umask, and the usual
+    # 022 would leave a fresh lock group/world readable without the fchmod in
+    # `WorkspaceInstanceLock.acquire`. The harness chmods its fake lock explicitly,
+    # so this exercises the real engine code instead of that fixture.
+    if sys.platform == "win32":
+        pytest.skip("a POSIX mode is what this asserts")
+    from ciao.instance_lock import WorkspaceInstanceLock
+
+    runtime = tmp_path / "Ciaobot" / ".runtime"
+    runtime.mkdir(parents=True)
+    lock = WorkspaceInstanceLock(
+        runtime, workspace_root=tmp_path / "Ciaobot", port=8443
+    )
+    previous_umask = os.umask(0o022)
+    try:
+        lock.acquire()
+    finally:
+        os.umask(previous_umask)
+    try:
+        info = os.lstat(lock.path)
+        assert stat.S_ISREG(info.st_mode)
+        assert stat.S_IMODE(info.st_mode) == 0o600
+        assert info.st_uid == os.getuid()
+        metadata = json.loads(lock.path.read_text(encoding="utf-8"))
+        assert metadata["status"] == "running"
+        assert metadata["pid"] == os.getpid()
+        assert metadata["port"] == 8443
+        assert metadata["startup_id"] == lock.startup_id
+    finally:
+        lock.release()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_many_mapped_executable_segments_do_not_hide_a_correct_host(
+    tmp_path: Path,
+) -> None:
+    # The macOS defect: `lsof -a -p <pid> -d txt -Fn` reports every mapped
+    # executable segment (dyld, system libraries, both universal slices), not the
+    # one binary the process was launched from. Requiring exactly one `n` record
+    # therefore refused every real signed host. The identity now comes from the
+    # kernel through libproc, so this run commits even though the fake `lsof`
+    # answers in the real many-record shape - and the installer never asks it.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "commit-upgrade" in _log(harness, "native-host-transaction.log")
+    assert "rollback-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert not (harness["home"] / "native-host-pending").exists()
+    lsof_calls = [
+        line for line in _log(harness, "trace.log").splitlines()
+        if line.startswith("lsof ")
+    ]
+    assert lsof_calls
+    assert not any("-d txt" in line for line in lsof_calls)
+    # The listener query is still asked: plain `-t` on the TCP listen socket.
+    assert any(
+        "-iTCP" in line or "-t" in line.split() for line in lsof_calls
+    )
+    identity_calls = _log(harness, "native-host-executable.log").splitlines()
+    assert len(identity_calls) == 1
+    assert "--pid 4343" in identity_calls[0]
+    assert (
+        f"--expect {harness['home']}/Applications/Ciaobot Server.app"
+        "/Contents/MacOS/Ciaobot Server"
+    ) in identity_calls[0]
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_indeterminate_process_lookup_does_not_commit(tmp_path: Path) -> None:
+    # `ps` could not answer at all. An unknown ancestry is not a proven one, so the
+    # before-images are not released.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "ps-cannot-run").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    # The reason names the unreadable lookup itself, not a chain that merely
+    # stopped early: "could not ask" and "asked and got nothing" are different
+    # failures for an operator.
+    _assert_no_commit_and_legacy_pair(
+        harness, result, step="readable process ancestry"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_over_deep_ancestor_chain_does_not_commit(tmp_path: Path) -> None:
+    # The listener really is a descendant of launchd's job, but six hops away. The
+    # walk is bounded at four, so the chain does not reach the job and nothing is
+    # proven.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "deep-chain").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="ancestry")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_listener_replaced_during_the_request_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # An unrelated listener answers the health request and exits; the candidate
+    # binds the socket before the second capture. The readable lock metadata would
+    # have matched, which is exactly why the listener identity is captured on both
+    # sides of the request.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "listener-replaced").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="listener")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unsafe_runtime_lock_does_not_commit(tmp_path: Path) -> None:
+    # The lock names the right engine but is group/world readable, so it is not
+    # trusted as this install's private identity.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "lock-mode-0644").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="runtime lock")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_committed_host_with_unremovable_before_images_is_reported_and_fails(
+    tmp_path: Path,
+) -> None:
+    # The module committed the host but could not remove its retained material. The
+    # settled state is kept - nothing rolls a committed host back - but the
+    # installer result is a failure, because the leftover blocks the next host
+    # transaction until a later run removes it.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "leftover-native-host-commit").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was committed, but its retained before-images could not be removed" in (
+        result.stderr
+    )
+    transcript = _log(harness, "native-host-transaction.log")
+    assert "commit-upgrade" in transcript
+    # No second attempt at either terminal command, and the committed host stays.
+    assert transcript.count("commit-upgrade") == 1
+    assert "rollback-upgrade" not in transcript
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_restored_host_with_unremovable_before_images_is_not_a_failed_rollback(
+    tmp_path: Path,
+) -> None:
+    # The rollback restored the pair but could not remove the retained material.
+    # The run still fails for its original reason, and the message must not claim
+    # the host could not be restored.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / "leftover-native-host-rollback").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was restored, but its retained before-images could not be removed" in (
+        result.stderr
+    )
+    assert "could NOT be fully restored" not in result.stderr
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_failed_candidate_quiescence_retains_native_upgrade_recovery_material(
+    tmp_path: Path,
+) -> None:
+    # The candidate's service may still be running. Reverting the bytes under a
+    # live signed process is what this transaction exists to prevent, so a
+    # quiescence that fails keeps the before-images and the journal, reports an
+    # incomplete rollback and stays nonzero. It never claims a rollback it did not
+    # do.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    (harness["home"] / "desktop-running").write_text("")
+    (harness["home"] / "startup-version").write_text("9.9.9\n")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "rollback-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert "was NOT replaced by the previous host" in result.stderr
+    assert "server-host-upgrade.json" in result.stderr
+    # The recoverable material is still there for the next run.
+    assert (harness["home"] / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_no_start_defers_legacy_to_signed_upgrade(tmp_path: Path) -> None:
+    # --no-start never starts the engine, so it cannot prove the new host is the
+    # one serving. It keeps the previous host and says the upgrade completes on a
+    # later normal run: no fabricated health, no commit, no service call.
+    harness = _signed_host_harness(tmp_path)
+    _existing_install(harness)
+    (harness["home"] / "defer-required-server-host").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "later installer run without --no-start" in result.stderr
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+    argv = _log(harness, "server-host-install.log").splitlines()[0].split(" ")
+    assert "--defer-commit" not in argv
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert not (harness["home"] / "native-host-pending").exists()
+    assert "launchctl" not in _log(harness, "launchctl.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_previous_unfinished_upgrade_is_recovered_before_the_new_one(
+    tmp_path: Path,
+) -> None:
+    # A journal a killed run left. Its owner is gone, so this run restores the
+    # previous host from that material before it installs anything new - never
+    # committing or adopting the abandoned operation.
+    harness = _signed_host_harness(tmp_path)
+    _existing_install(harness)
+    home = harness["home"]
+    (home / "native-host-pending").write_text("0123456789abcdef0123456789abcdef")
+    (home / "native-host-owner-pid").write_text("999999")
+    (home / "native-host-owner-alive").write_text("false")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "did not finish" in result.stderr
+    assert "rollback-upgrade" in _log(harness, "native-host-transaction.log")
+    assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert not (home / "native-host-pending").exists()
+    assert "server-host-install.log" in [path.name for path in home.iterdir()]
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_live_installer_owns_its_unfinished_upgrade(tmp_path: Path) -> None:
+    # The first installer is still running between its subprocess calls. A second
+    # one refuses instead of rolling that live operation back, and touches no host
+    # at all.
+    harness = _signed_host_harness(tmp_path)
+    _existing_install(harness)
+    home = harness["home"]
+    (home / "native-host-pending").write_text("0123456789abcdef0123456789abcdef")
+    (home / "native-host-owner-pid").write_text("4321")
+    (home / "native-host-owner-alive").write_text("true")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "still upgrading" in result.stderr
+    assert _log(harness, "server-host-install.log") == ""
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert (home / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_client_and_wheel_only_paths_never_begin_native_upgrade(
+    tmp_path: Path,
+) -> None:
+    # A wheel-only release has no host at all, and a client runs no engine to
+    # host: neither may download a host, read a journal or start a transaction.
+    wheel_only = _harness(tmp_path / "wheel-only")
+    result = _run_installer(wheel_only, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert SERVER_HOST_FILENAME not in _log(wheel_only, "trace.log")
+    assert _log(wheel_only, "server-host-install.log") == ""
+    assert _log(wheel_only, "native-host-transaction.log") == ""
+    assert "transaction-status" not in _log(wheel_only, "uv-run-calls.log")
+
+    host_archive = tmp_path / "client-host" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    client = _harness(tmp_path / "client", host_archive=host_archive, signed_team=_SIGNED_TEAM)
+    _desktop_install(
+        client, tmp_path / "client", {"role": "standby", "host_url": "https://host.example"}
+    )
+
+    result = _run_installer(
+        client,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-client",
+        "https://host.example",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _log(client, "server-host-install.log") == ""
+    assert _log(client, "native-host-transaction.log") == ""
+    assert "transaction-status" not in _log(client, "uv-run-calls.log")
 
 
 @runs_the_sh_installer
@@ -2604,7 +4380,9 @@ def test_migrate_refuses_running_app_after_timeout(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "still running" in result.stderr
-    assert "nothing on this Mac has been changed" in result.stderr
+    # The before-images and the receipt have already been written by this point,
+    # so the message may only claim the engine and its service are unchanged.
+    assert "engine and its service are unchanged" in result.stderr
     assert "tool install" not in _log(harness, "uv-calls.log")
     # Not one label was booted out or disabled, and the receipt says why rather
     # than claiming a migration that did not happen.
@@ -4753,3 +6531,1693 @@ def test_installer_still_prints_the_link_when_the_engine_came_up(
 
     assert result.returncode == 0, result.stderr
     assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
+
+
+# --- uv bootstrap (#2338) ---------------------------------------------------
+#
+# A missing uv is bootstrapped from the pinned upstream release archive, and
+# the reviewed sha256 literals are its trust root. These tests run the shipped
+# shell functions against local tar fixtures through a curl double: nothing is
+# downloaded, nothing is installed on the machine running them, and the
+# fixture's `uv` is a script that would record its own execution.
+
+UV_VERSION = "0.12.17"
+
+# The six published sha256 values for that release, reviewed into the installer.
+# This copy exists so a fixture substitution in a test copy of the table cannot
+# hide a production-table typo.
+UV_SHA256 = {
+    "uv-aarch64-apple-darwin.tar.gz": (
+        "85f00cbdc6dd3e97eba4c31b4d014375a9fdfe8f570023b84e5102fc3456896b"
+    ),
+    "uv-x86_64-apple-darwin.tar.gz": (
+        "8dcf05a8c809bb3c471d2b614788ba27a6e41298fc8c31ac84b5f4339fd468e5"
+    ),
+    "uv-x86_64-unknown-linux-gnu.tar.gz": (
+        "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63"
+    ),
+    "uv-aarch64-unknown-linux-gnu.tar.gz": (
+        "d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c"
+    ),
+    "uv-x86_64-unknown-linux-musl.tar.gz": (
+        "6401c4665d8fa2a9893e087c91f585430738e3170f5398a1141483efb4a93310"
+    ),
+    "uv-aarch64-unknown-linux-musl.tar.gz": (
+        "a6096da273d548cb9f277d237a01ac7344a39ef0f455c0e148e4dc9737c1596b"
+    ),
+}
+
+UV_EXECUTED = "uv-executed.log"
+UVX_EXECUTED = "uvx-executed.log"
+# Each archive executable records every run at a fixed path this harness passes
+# in the environment, and again under HOME. The fixed path cannot be redirected
+# by a run that changes HOME, so an execution attempt is traced even when the
+# rest of the environment is not what the fixture expected.
+UV_BOOTSTRAP_BODY = (
+    "#!/bin/sh\n"
+    'printf \'uv\\n\' >> "${UV_EXEC_TRACE:-/dev/null}"\n'
+    f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
+).encode()
+UVX_BODY = (
+    "#!/bin/sh\n"
+    'printf \'uvx\\n\' >> "${UV_EXEC_TRACE:-/dev/null}"\n'
+    f"printf 'executed\\n' >> \"$HOME/{UVX_EXECUTED}\"\n"
+).encode()
+
+
+def _uv_archive(
+    path: Path,
+    entries: list[tuple[str, str, bytes]],
+    *,
+    archive_format: int = tarfile.USTAR_FORMAT,
+) -> Path:
+    """Write a gzip tar of `(name, kind, payload)` entries.
+
+    `kind` is "file", "dir", "symlink", "hardlink" or "fifo"; for the two link
+    kinds `payload` is the link target. The format is USTAR by default so a
+    fixture has no extension members; PAX and GNU long-name fixtures pass their
+    own format explicitly.
+    """
+    with tarfile.open(path, "w:gz", format=archive_format) as archive:
+        for name, kind, payload in entries:
+            info = tarfile.TarInfo(name)
+            if kind == "file":
+                info.size = len(payload)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(payload))
+                continue
+            if kind == "dir":
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+            elif kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = payload.decode()
+            elif kind == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = payload.decode()
+            elif kind == "fifo":
+                info.type = tarfile.FIFOTYPE
+            else:
+                raise AssertionError(f"unknown tar entry kind: {kind}")
+            archive.addfile(info)
+    return path
+
+
+def _uv_entries(triple: str) -> list[tuple[str, str, bytes]]:
+    """The three members a real uv release archive carries."""
+    return [
+        (f"uv-{triple}/", "dir", b""),
+        (f"uv-{triple}/uv", "file", UV_BOOTSTRAP_BODY),
+        (f"uv-{triple}/uvx", "file", UVX_BODY),
+    ]
+
+
+def _assert_nothing_executed(paths: dict[str, Any]) -> None:
+    """Neither archive executable ran: each would have left its own marker."""
+    home: Path = paths["home"]
+    trace: Path = paths["exec_trace"]
+    recorded = trace.read_text(encoding="utf-8") if trace.exists() else ""
+    assert recorded == "", f"the archive's executables ran: {recorded!r}"
+    assert not (home / UV_EXECUTED).exists(), "the archive's uv was executed"
+    assert not (home / UVX_EXECUTED).exists(), "the archive's uvx was executed"
+
+
+def _fixture_digests(archive: Path) -> dict[str, str]:
+    """The fixture archive's digest under every table key.
+
+    Only the Darwin entries are ever selected; using one fixture digest for all
+    six keeps the test copy a complete, syntactically valid table without
+    inventing five archives.
+    """
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    return {asset: digest for asset in UV_SHA256}
+
+
+def _uv_bootstrap_digest_source(digests: dict[str, str]) -> str:
+    """The shipped table with the fixture's digests substituted in the test copy.
+
+    The shipping literals are asserted separately (they are the trust root), so
+    this rewrite exists only to point the same code at local fixtures.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        asset = match.group(1)
+        return f"{asset}) printf '%s\\n' {digests[asset]} ;;"
+
+    rewritten, count = re.subn(
+        r"(uv-[a-z0-9_-]+\.tar\.gz)\) printf '%s\\n' [0-9a-f]{64} ;;",
+        replace,
+        _function_source("uv_archive_sha256"),
+    )
+    assert count == 6, "the sha256 table no longer has one line per archive"
+    return rewritten
+
+
+def _kernel_uname_stub(arch: str) -> str:
+    """A `uname` double that fakes the archive architecture and nothing else.
+
+    The bootstrap fixture parametrizes the uv triple, so `uname -m` has to
+    answer the requested `arch`. Every other flag - notably `-s`, which the
+    inode helpers use to pick BSD or GNU `stat` - has to come from the running
+    kernel. A stub that answered Darwin on a Linux runner would send the
+    helpers to GNU `stat -f`, which is filesystem status rather than an inode:
+    it prints the status to stdout and then fails on the stray `%i`, so the
+    identity check would compare whatever that status printed. The full-script
+    fixture simulates the Darwin host
+    separately, for the installer's own platform guard, and its uv stub keeps
+    that run out of the publish path.
+    """
+    real_uname = shlex.quote(shutil.which("uname") or "uname")
+    return (
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        f"    -m) echo {shlex.quote(arch)} ;;\n"
+        f'    *) exec {real_uname} "$@" ;;\n'
+        "esac\n"
+    )
+
+
+def _uv_bootstrap_run(
+    tmp_path: Path,
+    *,
+    arch: str,
+    archive: Path,
+    digests: dict[str, str],
+    download: bool = True,
+    entry: str = "bootstrap_verified_uv",
+    poison_awk: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Run the shipped bootstrap functions against `archive`, hermetically.
+
+    `entry` is the function called by name: the helper alone, or the shipped
+    `find_uv` missing-uv branch that also publishes it. `poison_awk` puts a
+    lying `awk` first on PATH; the digest check must not parse `shasum` output
+    through a command PATH can choose.
+    """
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    tmp.chmod(0o700)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    trace = tmp_path / "trace.log"
+    exec_trace = tmp_path / "exec-trace.log"
+
+    _write_exec(fakebin / "uname", _kernel_uname_stub(arch))
+    if poison_awk:
+        # A PATH-chosen parser must not be able to replace the digest `shasum`
+        # printed with the one the table expects.
+        _write_exec(fakebin / "awk", "#!/bin/sh\nprintf '%s\\n' " + "0" * 64 + "\n")
+    # A curl double: it records the request, then serves the fixture (or
+    # refuses), so no test reaches GitHub.
+    download_body = (
+        f"cp {shlex.quote(str(archive))} \"$out\"\n" if download
+        else "printf 'download-refused\\n' >&2\nexit 22\n"
+    )
+    _write_exec(
+        fakebin / "curl",
+        "#!/bin/sh\n"
+        f"printf 'curl %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "out=\n"
+        "previous=\n"
+        'for arg in "$@"; do\n'
+        '    if [ "$previous" = -o ]; then out=$arg; fi\n'
+        "    previous=$arg\n"
+        "done\n"
+        '[ -n "$out" ] || exit 2\n' + download_body,
+    )
+    # A tar double: every invocation is recorded, plus a normalized "extract"
+    # line when any extraction spelling is requested, so a check does not
+    # depend on how the flags happen to be spelled. The real system tar then
+    # does the work, so the tests exercise the shipped invocation.
+    _write_exec(
+        fakebin / "tar",
+        "#!/bin/sh\n"
+        f"printf 'tar %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "extracting=0\n"
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        "        --extract|--get) extracting=1 ;;\n"
+        "        --*) ;;\n"
+        '        -*) case "$arg" in *x*) extracting=1 ;; esac ;;\n'
+        "    esac\n"
+        "done\n"
+        'if [ "$extracting" -eq 1 ]; then\n'
+        f"    printf 'extract %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "fi\n"
+        f'exec {shlex.quote(shutil.which("tar") or "tar")} "$@"\n',
+    )
+
+    body_parts = [
+        "set -eu",
+        f"tmp={shlex.quote(str(tmp))}",
+        f"CURL={shlex.quote(str(fakebin / 'curl'))}",
+        f"TAR={shlex.quote(str(fakebin / 'tar'))}",
+        # The shipped script pins these to the macOS system paths. The fixtures
+        # use the runner's real commands so this exercises the same command line.
+        f"STAT={shlex.quote(_system_tool('stat'))}",
+        f"SHASUM={shlex.quote(_system_tool('shasum'))}",
+        f"UV_VERSION={UV_VERSION}",
+        "verified_uv=",
+        _function_source("fail"),
+        _uv_bootstrap_digest_source(digests),
+        _function_source("uv_archive_asset"),
+        _function_source("bootstrap_verified_uv"),
+    ]
+    if entry != "bootstrap_verified_uv":
+        # The helper alone must be runnable without the publishing branch, so
+        # its tests cannot pass by borrowing that code.
+        body_parts.append(_function_source("path_inode"))
+        body_parts.append(_function_source("descriptor_inode"))
+        body_parts.append(_function_source("publish_verified_uv"))
+        body_parts.append(_function_source("write_published_uv"))
+        body_parts.append(_function_source("discard_published_uv"))
+    if entry == "find_uv":
+        body_parts.append(_function_source("find_uv"))
+    body_parts += [
+        entry,
+        'printf "uv=%s\\n" "$uv"',
+        'printf "verified_uv=%s\\n" "$verified_uv"',
+    ]
+    body = "\n".join(body_parts)
+    # The helper alone never consults PATH. The find_uv entry must not find a
+    # real uv on the developer's machine, so its PATH is the fixture bin plus
+    # the system directories, where uv does not live.
+    path = (
+        f"{fakebin}{os.pathsep}{os.environ['PATH']}"
+        if entry == "bootstrap_verified_uv"
+        else f"{fakebin}:/usr/bin:/bin"
+    )
+    result = subprocess.run(
+        ["sh", "-c", body],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": path,
+            "UV_EXEC_TRACE": str(exec_trace),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, {"home": home, "tmp": tmp, "trace": trace, "exec_trace": exec_trace}
+
+
+def _tar_trace(trace: Path) -> list[str]:
+    if not trace.exists():
+        return []
+    return [
+        line for line in trace.read_text(encoding="utf-8").splitlines()
+        if line.startswith("tar ")
+    ]
+
+
+def _tar_extractions(trace: Path) -> list[str]:
+    """Extraction attempts as the tar double normalized them.
+
+    The double recognizes `-x...`, `--extract` and `--get`, so a test does not
+    depend on the shipped spelling of the extraction flag.
+    """
+    if not trace.exists():
+        return []
+    return [
+        line for line in trace.read_text(encoding="utf-8").splitlines()
+        if line.startswith("extract ")
+    ]
+
+
+def _assert_only_uv_extracted(paths: dict[str, Any], triple: str) -> None:
+    """Exactly one extraction, naming the uv member and never uvx.
+
+    The tar double normalizes any extraction spelling, so this asserts which
+    members and archive were requested rather than how the flags were written.
+    """
+    extractions = _tar_extractions(paths["trace"])
+    assert len(extractions) == 1, extractions
+    requested = extractions[0].split()
+    assert f"uv-{triple}/uv" in requested
+    assert f"{paths['tmp']}/uv-{triple}.tar.gz" in requested
+    assert "uvx" not in extractions[0]
+
+
+def test_uv_bootstrap_digest_table_matches_reviewed_01217_assets() -> None:
+    """The six literals are the trust root: a typo here authenticates nothing."""
+    assert re.search(r"^UV_VERSION=0\.12\.17$", SCRIPT_TEXT, re.MULTILINE)
+    # The allowlist inspection must not use a tar chosen by PATH, and neither the
+    # digest check nor the identity check may use a PATH-chosen command.
+    assert re.search(r"^TAR=/usr/bin/tar$", SCRIPT_TEXT, re.MULTILINE)
+    assert re.search(r"^STAT=/usr/bin/stat$", SCRIPT_TEXT, re.MULTILINE)
+    assert re.search(r"^SHASUM=/usr/bin/shasum$", SCRIPT_TEXT, re.MULTILINE)
+    assert 'shasum -a 256' not in SCRIPT_TEXT
+    assert re.search(r"(?m)^\s*stat\s", SCRIPT_TEXT) is None
+    body = "\n".join(
+        [
+            _function_source("fail"),
+            _function_source("uv_archive_sha256"),
+            *[f"uv_archive_sha256 {asset}" for asset in UV_SHA256],
+        ]
+    )
+
+    result = subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [UV_SHA256[asset] for asset in UV_SHA256]
+    # No runtime installer download and no piped shell remains.
+    assert "uv-installer" not in SCRIPT_TEXT
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    ("arch", "triple"),
+    [("arm64", "aarch64-apple-darwin"), ("x86_64", "x86_64-apple-darwin")],
+)
+def test_uv_bootstrap_verifies_before_execution(
+    tmp_path: Path, arch: str, triple: str
+) -> None:
+    """A valid archive installs only its `uv`, privately, and runs nothing."""
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch=arch, archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+    # Only uv is extracted: the archive's uvx never becomes a file.
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE((stage / "uv").stat().st_mode) == 0o700
+    _assert_nothing_executed(paths)
+    # The helper returns the private staged executable and publishes nothing.
+    assert f"uv={stage / 'uv'}" in result.stdout
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+
+    trace = paths["trace"].read_text(encoding="utf-8")
+    assert (
+        f"https://github.com/astral-sh/uv/releases/download/"
+        f"{UV_VERSION}/uv-{triple}.tar.gz"
+    ) in trace
+    assert "--proto =https" in trace
+    assert "--proto-redir =https" in trace
+    _assert_only_uv_extracted(paths, triple)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_uv_bootstrap_digest_does_not_trust_a_path_awk(tmp_path: Path) -> None:
+    """A lying `awk` earlier on PATH cannot substitute the reviewed digest.
+
+    The digest is the trust root, so it is compared from `shasum`'s own output
+    rather than through a parser the caller's PATH chooses. A pipeline through
+    `awk` here would let that double answer with the expected digest and
+    authenticate an archive that never matched it.
+    """
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+        poison_awk=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (paths["tmp"] / "uv-bootstrap" / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_only_uv_extracted(paths, triple)
+    _assert_nothing_executed(paths)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_uv_bootstrap_leaves_an_existing_uv_untouched(tmp_path: Path) -> None:
+    """A native mode can verify uv without replacing the one this Mac has."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+    home = tmp_path / "home"
+    existing = home / ".local" / "bin" / "uv"
+    existing.parent.mkdir(parents=True)
+    # If anything executed or replaced it, both the bytes and this marker
+    # would say so.
+    sentinel = (
+        "#!/bin/sh\n"
+        f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
+        "# the uv this Mac already had\n"
+    ).encode()
+    existing.write_bytes(sentinel)
+    existing.chmod(0o750)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert existing.read_bytes() == sentinel
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o750
+    _assert_nothing_executed(paths)
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
+    """Only the legacy branch writes ~/.local/bin/uv, from the verified copy."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+        entry="find_uv",
+    )
+
+    assert result.returncode == 0, result.stderr
+    dest = paths["home"] / ".local" / "bin" / "uv"
+    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+    # Publishing is for the next run. This one goes on executing the private
+    # staged copy, so replacing ~/.local/bin/uv after the publish cannot change
+    # the uv this install runs.
+    assert f"uv={stage / 'uv'}" in result.stdout
+    assert f"uv={dest}" not in result.stdout
+    _assert_nothing_executed(paths)
+
+
+PUBLISH_SENTINEL = b"do not touch\n"
+# A mode no publish may change: 0640 is neither the 0600 an exclusive create
+# with umask 077 leaves nor the 0700 the published uv has to carry, so a test
+# that sees it afterwards knows a path-based write or chmod reached the file.
+PUBLISH_VICTIM_MODE = 0o640
+
+
+def _run_publish(
+    tmp_path: Path,
+    *,
+    dest_kind: str | None = None,
+    fail_write: bool = False,
+    chmod_fails: bool = False,
+    race: str | None = None,
+    home: Path | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Run the shipped publish step against a prepared destination.
+
+    `dest_kind` says what already occupies ~/.local/bin/uv: nothing, a regular
+    file, a directory, a symlink to a file, a symlink to a directory, a dangling
+    symlink, or a hardlink to a file outside ~/.local/bin. The directory a
+    followed link would resolve to already holds a file with the destination's
+    own name, so a publish that moved or wrote *through* the destination would
+    land on it - the fixtures assert it is never written or deleted.
+
+    `race` substitutes the destination from inside a double, at the one window a
+    test needs: "symlink-before-copy" and "file-before-copy" replace it from the
+    `cat` that fills the created file, "symlink-before-chmod" and
+    "file-before-chmod" replace it from the `chmod` that follows, and
+    "file-before-copy-fail" both substitutes and fails the write so the cleanup
+    path is exercised with a file it does not own. "file-before-identity" makes
+    the `stat` that reads the created inode plant a stranger's file first, so the
+    identity is sampled after a substitution. "identity-unreadable" makes that
+    same `stat` fail outright, which is the status-11 branch: nothing can prove
+    the created file is this run's, so nothing is claimed or taken back.
+    `fail_write` makes the copy fail
+    after the destination was created, and `chmod_fails` makes the protect step
+    fail while the created file is still this run's. `home` reuses an existing
+    HOME, so a test can run the next install over a failed one.
+    """
+    home = tmp_path / "home" if home is None else home
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    staged = tmp_path / "staged-uv"
+    staged.write_bytes(UV_BOOTSTRAP_BODY)
+    staged.chmod(0o700)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir(exist_ok=True)
+    # A retry over the same fixture must not inherit the previous run's doubles.
+    for stale in ("cat", "chmod", "stat"):
+        (fakebin / stale).unlink(missing_ok=True)
+    trace = tmp_path / "trace.log"
+
+    target_dir = home / "existing-dir"
+    target_dir.mkdir(exist_ok=True)
+    same_named = target_dir / "uv"
+    same_named.write_bytes(PUBLISH_SENTINEL)
+    target_file = home / "existing-target"
+    target_file.write_bytes(PUBLISH_SENTINEL)
+    target_file.chmod(PUBLISH_VICTIM_MODE)
+    target_mode = stat.S_IMODE(target_file.stat().st_mode)
+
+    dest = bin_dir / "uv"
+    if dest_kind == "file":
+        dest.write_bytes(PUBLISH_SENTINEL)
+    elif dest_kind == "empty-file":
+        # What an interrupted exclusive publish leaves behind: the create
+        # succeeded, then the process died before (or while) the verified bytes
+        # were written. 0600 is the mode umask 077 gave the create.
+        dest.write_bytes(b"")
+        dest.chmod(0o600)
+    elif dest_kind == "hardlink":
+        os.link(target_file, dest)
+    elif dest_kind == "directory":
+        dest.mkdir()
+    elif dest_kind == "symlink":
+        dest.symlink_to(target_file)
+    elif dest_kind == "symlink-to-directory":
+        dest.symlink_to(target_dir)
+    elif dest_kind == "dangling-symlink":
+        dest.symlink_to(home / "nowhere")
+    elif dest_kind is not None:
+        raise AssertionError(f"unknown destination kind: {dest_kind}")
+    dest_inode = dest.lstat().st_ino if os.path.lexists(dest) else None
+
+    real_cat = shlex.quote(shutil.which("cat") or "cat")
+    real_chmod = shlex.quote(shutil.which("chmod") or "chmod")
+    real_stat = shlex.quote(_system_tool("stat"))
+    plant_symlink = (
+        'rm -f "$PUBLISH_DEST"\n'
+        'ln -s "$HOME/existing-target" "$PUBLISH_DEST"\n'
+    )
+    plant_file = (
+        'rm -f "$PUBLISH_DEST"\n'
+        'printf "foreign\\n" > "$PUBLISH_DEST"\n'
+        f'chmod {PUBLISH_VICTIM_MODE:o} "$PUBLISH_DEST"\n'
+    )
+    # The destination is still empty when `cat` runs: the publish has just
+    # created it and holds its descriptor. A double there acts inside the window
+    # between that create and everything the function does with the file, which
+    # is where a path-based write or chmod could still be fooled.
+    if race == "symlink-before-copy":
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n" + plant_symlink + f"exec {real_cat} \"$@\"\n",
+        )
+    elif race == "file-before-copy":
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n" + plant_file + f"exec {real_cat} \"$@\"\n",
+        )
+    elif race == "file-before-copy-fail":
+        # The write fails after a stranger's file has taken the path, so the
+        # cleanup has to prove ownership before it removes anything.
+        _write_exec(fakebin / "cat", "#!/bin/sh\n" + plant_file + "exit 1\n")
+    elif race == "file-before-identity":
+        # The substitution happens before the identity is sampled at all: the
+        # `stat` that reads it plants the stranger's file first, then reports the
+        # descriptor it was asked about. A path-sampled identity would record the
+        # stranger; a descriptor-bound one still reports the created file.
+        _write_exec(
+            fakebin / "stat",
+            "#!/bin/sh\n" + plant_file + f'exec {real_stat} "$@"\n',
+        )
+    elif race == "identity-unreadable":
+        # Only the descriptor read fails; every other `stat` this publish could
+        # make still answers, so the run is refused for the one reason under
+        # test and not because the fixture broke the tool.
+        _write_exec(
+            fakebin / "stat",
+            "#!/bin/sh\n"
+            'for arg in "$@"; do [ "$arg" = /dev/fd/3 ] && exit 1; done\n'
+            f'exec {real_stat} "$@"\n',
+        )
+    elif fail_write:
+        _write_exec(fakebin / "cat", "#!/bin/sh\nprintf 'partial\\n'\nexit 1\n")
+    if chmod_fails or race in ("symlink-before-chmod", "file-before-chmod"):
+        plant = ""
+        if race == "symlink-before-chmod":
+            plant = plant_symlink
+        elif race == "file-before-chmod":
+            plant = plant_file
+        tail = "exit 1\n" if chmod_fails else f'exec {real_chmod} "$@"\n'
+        _write_exec(fakebin / "chmod", "#!/bin/sh\n" + plant + tail)
+
+    # Only the two identity-race knobs need a `stat` double; every other run
+    # uses the real command the shipped script would use.
+    stat_tool = (
+        fakebin / "stat"
+        if race in ("file-before-identity", "identity-unreadable")
+        else Path(_system_tool("stat"))
+    )
+
+    body = "\n".join(
+        [
+            "set -eu",
+            f"HOME={shlex.quote(str(home))}",
+            f"verified_uv={shlex.quote(str(staged))}",
+            # The shipped script pins this to the macOS system path; a race test
+            # that needs a `stat` double points it at the double instead.
+            f"STAT={shlex.quote(str(stat_tool))}",
+            f"SHASUM={shlex.quote(_system_tool('shasum'))}",
+            # find_uv's missing-uv branch: the bootstrap helper has already set
+            # both of these to the private staged copy before publishing.
+            "uv=$verified_uv",
+            _function_source("fail"),
+            _function_source("path_inode"),
+            _function_source("descriptor_inode"),
+            _function_source("publish_verified_uv"),
+            _function_source("write_published_uv"),
+            _function_source("discard_published_uv"),
+            "publish_verified_uv",
+            'printf "uv=%s\\n" "$uv"',
+        ]
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        "PUBLISH_DEST": str(dest),
+    }
+    result = subprocess.run(
+        ["sh", "-c", body], env=env, capture_output=True, text=True, check=False
+    )
+    return result, {
+        "home": home,
+        "bin_dir": bin_dir,
+        "dest": dest,
+        "dest_inode": dest_inode,
+        "target_dir": target_dir,
+        "same_named": same_named,
+        "target_file": target_file,
+        "target_mode": target_mode,
+        "staged": staged,
+    }
+
+
+def _assert_publish_touched_nothing_else(paths: dict[str, Any]) -> None:
+    """Nothing was written into or deleted from any path the fixture prepared."""
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The file a follow-the-link write or a BSD `mv` would have overwritten.
+    assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
+    assert [entry.name for entry in paths["target_dir"].iterdir()] == ["uv"]
+    # No temporary is left beside the destination either.
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+
+
+def _run_inode_functions(script: str) -> subprocess.CompletedProcess[str]:
+    """Run the shipped inode helpers in a plain POSIX shell, nothing else.
+
+    Only the two functions are extracted, so this exercises the shipped text
+    without the bootstrap, the download, or the publish around it.
+    """
+    body = "\n".join(
+        [
+            "set -eu",
+            f"STAT={shlex.quote(_system_tool('stat'))}",
+            _function_source("path_inode"),
+            _function_source("descriptor_inode"),
+            script,
+        ]
+    )
+    return subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+
+
+@runs_the_sh_installer
+def test_path_inode_reads_the_path_with_lstat(tmp_path: Path) -> None:
+    """The path helper reports the path's own inode, in decimal and nothing else.
+
+    A final symlink is not followed: the link's lstat inode is what a
+    substituted destination has to be compared against. A stat spelling that
+    printed filesystem information instead would show up as an extra or
+    non-decimal line here.
+    """
+    target = tmp_path / "target"
+    target.write_bytes(b"target\n")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    result = _run_inode_functions(
+        f"path_inode {shlex.quote(str(target))}\n"
+        f"path_inode {shlex.quote(str(link))}\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        str(target.lstat().st_ino),
+        str(link.lstat().st_ino),
+    ]
+    assert link.lstat().st_ino != target.lstat().st_ino
+
+
+@runs_the_sh_installer
+def test_path_inode_prints_nothing_when_the_path_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """A failed read is a failed command, not a guessed number on stdout."""
+    missing = tmp_path / "missing"
+
+    result = _run_inode_functions(f"path_inode {shlex.quote(str(missing))}")
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+@runs_the_sh_installer
+def test_descriptor_inode_reads_the_open_file_not_the_descriptor(
+    tmp_path: Path,
+) -> None:
+    """The descriptor helper returns the open file's inode on macOS and on GNU.
+
+    GNU exposes /dev/fd/N as a symlink into /proc/self/fd, so lstat'ing it gives
+    the link's inode and only a following `stat -L` gives the file's; macOS
+    resolves the descriptor itself. After the path is replaced the descriptor
+    still names the file this process opened, which is what makes the identity
+    it recorded trustworthy.
+    """
+    opened = tmp_path / "opened"
+    opened.write_bytes(b"opened\n")
+    original = opened.lstat().st_ino
+    moved = tmp_path / "moved"
+
+    result = _run_inode_functions(
+        "exec 3< " + shlex.quote(str(opened)) + "\n"
+        'if [ -L /dev/fd/3 ]; then printf "symlink\\n"; else printf "not-symlink\\n"; fi\n'
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        'printf "%s\\n" "$(path_inode /dev/fd/3)"\n'
+        f"mv {shlex.quote(str(opened))} {shlex.quote(str(moved))}\n"
+        f"printf 'foreign\\n' > {shlex.quote(str(opened))}\n"
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        f'printf "%s\\n" "$(path_inode {shlex.quote(str(opened))})"\n'
+        "exec 3<&-\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    kind, descriptor_before, path_before, descriptor_after, path_after = (
+        result.stdout.splitlines()
+    )
+    assert int(descriptor_before) == original
+    assert int(descriptor_after) == original
+    assert moved.lstat().st_ino == original
+    replacement = opened.lstat().st_ino
+    assert int(path_after) == replacement
+    assert replacement != original
+    if sys.platform == "darwin":
+        # macOS resolves /dev/fd/N to the open file, so lstat'ing it is already
+        # the file's inode - the fdesc node is not a symlink.
+        assert kind == "not-symlink"
+        assert int(path_before) == original
+    else:
+        # GNU's path helper lstat's the /proc/self/fd symlink; only the
+        # descriptor helper follows it to the created file.
+        assert kind == "symlink"
+        assert int(path_before) != original
+
+
+@runs_the_sh_installer
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="GNU stat -f is filesystem status; -f -c prints the id, and macOS has BSD stat",
+)
+def test_path_inode_is_not_gnu_filesystem_status(tmp_path: Path) -> None:
+    """On GNU, -f is filesystem status and cannot stand in for an inode.
+
+    GNU reads `stat -f '%i'` as filesystem status plus an extra operand: it
+    prints the status of the real file to stdout and then exits nonzero because
+    no file named `%i` exists. A helper written as `stat -f ... || stat -c ...`
+    would therefore leave that status on stdout before the fallback ran.
+    `stat -f -c '%i'` is the filesystem id; the helper has to choose the kernel's
+    spelling up front instead.
+    """
+    target = tmp_path / "target"
+    target.write_bytes(b"target\n")
+    fs_id = subprocess.run(
+        ["stat", "-f", "-c", "%i", str(target)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result = _run_inode_functions(f"path_inode {shlex.quote(str(target))}")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(target.lstat().st_ino)
+    # The filesystem id is hexadecimal and is not this file's inode. (Equality
+    # would be a one-in-2**64 coincidence; the inode assertion above is the
+    # real one.)
+    assert int(result.stdout.strip()) != int(fs_id, 16)
+
+    # The fallback spelling itself is why the kernel picks instead: it fails,
+    # but only after it has already put output on stdout for the real operand.
+    fallback = subprocess.run(
+        ["stat", "-f", "%i", str(target)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert fallback.returncode != 0
+    assert fallback.stdout != ""
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_bootstrap_fixture_fakes_only_the_archive_architecture(
+    tmp_path: Path, arch: str
+) -> None:
+    """`uname -m` is the fixture's; `uname -s` has to stay the running kernel.
+
+    The inode helpers choose their `stat` spelling from `uname -s`. If this
+    double answered Darwin on a Linux runner, `path_inode` would run GNU
+    `stat -f`, which prints filesystem status rather than an inode and then
+    fails on the stray `%i`, so the identity checks would compare whatever was
+    printed instead of testing anything.
+    """
+    stub = tmp_path / "uname"
+    _write_exec(stub, _kernel_uname_stub(arch))
+
+    machine = subprocess.run(
+        [str(stub), "-m"], capture_output=True, text=True, check=True
+    )
+    kernel = subprocess.run(
+        [str(stub), "-s"], capture_output=True, text=True, check=True
+    )
+
+    assert machine.stdout.strip() == arch
+    assert kernel.stdout.strip() == os.uname().sysname
+
+
+@runs_the_sh_installer
+def test_descriptor_writes_and_protects_after_the_path_is_replaced(
+    tmp_path: Path,
+) -> None:
+    """The operation the publish relies on: fd 3 still names the created file.
+
+    The destination is created, a stranger replaces the path so the created
+    inode is unlinked, and the bytes and the mode still have to reach the file
+    this run opened - never the file now at the path. On GNU, `/dev/fd/3` is a
+    link into `/proc/self/fd`, whose magic link resolves to the open file even
+    after unlink, and on macOS the fdesc entry names it directly. This test runs
+    on both and fails rather than skips if that stops holding: the publish's
+    write, chmod and identity check all depend on it.
+    """
+    opened = tmp_path / "opened"
+    opened.write_bytes(b"created by this run\n")
+    opened.chmod(0o600)
+    original = opened.lstat().st_ino
+    moved = tmp_path / "moved"
+    replacement_mode = 0o640
+
+    result = _run_inode_functions(
+        "exec 3> " + shlex.quote(str(opened)) + "\n"
+        f"mv {shlex.quote(str(opened))} {shlex.quote(str(moved))}\n"
+        f"printf 'foreign\\n' > {shlex.quote(str(opened))}\n"
+        f"chmod {replacement_mode:o} {shlex.quote(str(opened))}\n"
+        "printf 'written through the descriptor\\n' >&3\n"
+        "chmod 700 /dev/fd/3\n"
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        "exec 3>&-\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.strip()) == original
+    # The write and the chmod went to the file this run opened, which is now
+    # only reachable through the path it was moved to.
+    assert moved.read_bytes() == b"written through the descriptor\n"
+    assert stat.S_IMODE(moved.stat().st_mode) == 0o700
+    # The stranger's file kept its own bytes and its own mode.
+    assert opened.read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(opened.stat().st_mode) == replacement_mode
+
+
+def test_inode_helpers_choose_stat_flavour_before_running_it() -> None:
+    """No `stat -f || stat -c`: the kernel name picks the spelling up front."""
+    path = _function_source("path_inode")
+    descriptor = _function_source("descriptor_inode")
+    for source in (path, descriptor):
+        assert "|| stat" not in source
+        assert "uname -s" in source
+    # The command is the pinned `$STAT`, not whatever PATH resolves first: a
+    # user-writable directory earlier on PATH must not decide the identity check.
+    assert '"$STAT" -f \'%i\' "$1"' in path
+    assert '"$STAT" -c \'%i\' "$1"' in path
+    assert "stat -L" not in path
+    assert '"$STAT" -f \'%i\' "$1"' in descriptor
+    assert '"$STAT" -L -c \'%i\' "$1"' in descriptor
+    # The identity is the descriptor's; the destination is only ever lstat'ed.
+    write = _function_source("write_published_uv")
+    assert "descriptor_inode /dev/fd/3" in write
+    assert 'path_inode "$uv_dest"' in write
+    assert 'path_inode "$uv_dest"' in _function_source("discard_published_uv")
+    assert "file_inode" not in SCRIPT_TEXT
+
+
+@runs_the_sh_installer
+def test_publish_creates_only_the_destination(tmp_path: Path) -> None:
+    """A missing uv is published in place: one file, 0700, nothing beside it."""
+    result, paths = _run_publish(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    dest = paths["dest"]
+    assert dest.is_file()
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    # The clean control for the substitution tests: the same harness, with no
+    # double in the way, touches no fixture path and publishes only the uv.
+    _assert_publish_touched_nothing_else(paths)
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+    # Publishing is for the next run: this one keeps executing the private
+    # staged copy, so a substitution of the published path cannot reach it.
+    assert f"uv={paths['staged']}" in result.stdout
+
+
+@runs_the_sh_installer
+def test_publish_takes_back_only_its_own_partial_after_a_failed_write(
+    tmp_path: Path,
+) -> None:
+    """A write that fails leaves no blocking partial: the next run publishes."""
+    home = tmp_path / "home"
+    failed, paths = _run_publish(tmp_path, fail_write=True, home=home)
+
+    assert failed.returncode != 0
+    assert "could not publish" in failed.stderr
+    # The descriptor proved the half-written file was this run's, so it is
+    # taken back instead of blocking every later install.
+    assert list(paths["bin_dir"].iterdir()) == []
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+    # The retry over the same HOME starts from a clean ~/.local/bin and works.
+    result, paths = _run_publish(tmp_path, home=home)
+
+    assert result.returncode == 0, result.stderr
+    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+
+
+@runs_the_sh_installer
+def test_publish_claims_nothing_when_the_identity_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """No inode, no ownership: status 11 leaves the file it made alone.
+
+    The publish only takes a file back while the descriptor still proves that
+    file is this run's. When `stat` cannot read the descriptor there is no such
+    proof, so `write_published_uv` returns 11 before it claims (`uv_created`
+    stays 0), copies, chmods or discards anything. The empty 0600 file the
+    exclusive create made is left at the path and the run refuses, naming the
+    publish rather than a write or a mode it never attempted.
+    """
+    home = tmp_path / "home"
+    failed, paths = _run_publish(tmp_path, race="identity-unreadable", home=home)
+
+    assert failed.returncode != 0
+    # Status 11's own message, not the write (12), protect (13) or mismatch (14)
+    # one: a run that reports any of those here would have claimed the file.
+    assert "could not identify the published uv" in failed.stderr
+    assert "could not publish" not in failed.stderr
+    # The create's file is still there, empty, with the mode umask 077 gave it:
+    # no bytes from the staged uv, and no 0700.
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b""
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o600
+    # Untouched: the staged copy was never read out to the destination.
+    assert paths["staged"].read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_publish_touched_nothing_else(paths)
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+    # And nothing later quietly deletes it either: a retry over the same HOME
+    # refuses the path instead of unlinking a file it cannot prove it made. That
+    # is the cost of status 11, pinned here so a "clean up the leftover" change
+    # cannot start unlinking somebody else's file on this branch.
+    retry, retry_paths = _run_publish(tmp_path, home=home)
+
+    assert retry.returncode != 0
+    assert "already exists" in retry.stderr
+    assert retry_paths["dest"].read_bytes() == b""
+    assert stat.S_IMODE(retry_paths["dest"].stat().st_mode) == 0o600
+
+
+@runs_the_sh_installer
+def test_publish_keeps_a_substituted_file_when_its_own_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Cleanup never unlinks a path that is no longer the created inode."""
+    result, paths = _run_publish(tmp_path, race="file-before-copy-fail")
+
+    assert result.returncode != 0
+    assert "could not publish" in result.stderr
+    # Somebody else's file is still there, with its own bytes and its own mode.
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_regular_file_substituted_while_writing(
+    tmp_path: Path,
+) -> None:
+    """A stranger's regular file can neither take this run's bytes nor its mode.
+
+    This is the race a path-sampled identity missed: the destination is a
+    regular file again by the time anything reads the path, so only the
+    descriptor the create returned can say the write went somewhere else.
+    """
+    result, paths = _run_publish(tmp_path, race="file-before-copy")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    # Not overwritten with the staged uv, and not chmodded to 0700.
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_does_not_sample_identity_from_the_path(tmp_path: Path) -> None:
+    """A substitution made before the identity is read cannot become the identity.
+
+    The `stat` double plants a stranger's file at the destination on every call,
+    including the one that reads the created inode. The identity still has to be
+    the descriptor's file, so the run refuses and the stranger keeps its bytes
+    and its mode.
+    """
+    result, paths = _run_publish(tmp_path, race="file-before-identity")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize(
+    ("dest_kind", "message"),
+    [
+        # A destination that is not a regular file is refused before the write.
+        ("symlink", "not a regular file"),
+        ("symlink-to-directory", "not a regular file"),
+        ("dangling-symlink", "not a regular file"),
+        ("directory", "not a regular file"),
+        # A regular file - or a hardlink to one elsewhere - is refused by the
+        # exclusive create itself, which is the only atomic answer to whether
+        # the path is free.
+        ("file", "already exists"),
+        ("hardlink", "already exists"),
+    ],
+)
+def test_publish_refuses_any_preexisting_destination(
+    tmp_path: Path, dest_kind: str, message: str
+) -> None:
+    """A path this run did not create is neither replaced nor written through."""
+    result, paths = _run_publish(tmp_path, dest_kind=dest_kind)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    _assert_publish_touched_nothing_else(paths)
+    if dest_kind == "directory":
+        assert list(paths["dest"].iterdir()) == []
+    elif dest_kind == "hardlink":
+        # Still the same inode it was linked to, and still linked to it.
+        assert paths["dest"].stat().st_nlink == 2
+        assert paths["dest"].stat().st_ino == paths["dest_inode"]
+        assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
+    elif dest_kind == "dangling-symlink":
+        assert paths["dest"].is_symlink()
+        assert not paths["dest"].exists()
+    elif dest_kind == "symlink-to-directory":
+        assert paths["dest"].is_symlink()
+    elif dest_kind == "symlink":
+        assert paths["dest"].is_symlink()
+    else:
+        assert paths["dest"].stat().st_ino == paths["dest_inode"]
+        assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("dest_kind", ["file", "hardlink"])
+def test_publish_never_deletes_a_destination_it_did_not_create(
+    tmp_path: Path, dest_kind: str
+) -> None:
+    """A create refused by someone else's file leaves that file exactly there.
+
+    A regular file skips the non-regular pre-check, so the refusal comes from
+    the exclusive create - the branch where claiming ownership before the create
+    unlinked a file this run had not made.
+    """
+    result, paths = _run_publish(tmp_path, dest_kind=dest_kind)
+
+    assert result.returncode != 0
+    # The security property first: somebody else's file is still there, still
+    # the same inode, still its own bytes.
+    assert paths["dest"].exists()
+    assert paths["dest"].stat().st_ino == paths["dest_inode"]
+    assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
+    if dest_kind == "hardlink":
+        assert paths["dest"].stat().st_nlink == 2
+    _assert_publish_touched_nothing_else(paths)
+    assert "already exists" in result.stderr
+
+
+@runs_the_sh_installer
+def test_publish_refuses_an_interrupted_leftover_with_actionable_guidance(
+    tmp_path: Path,
+) -> None:
+    """A leftover from an interrupted publish is reported, never auto-removed.
+
+    The create can succeed and the process die before (or while) the verified
+    bytes are written, leaving an empty 0600 file this run cannot prove it made.
+    The next run must leave it alone and tell the operator how to decide whether
+    it is safe to remove by hand - not guess, and not delete it for them.
+    """
+    home = tmp_path / "home"
+    result, paths = _run_publish(tmp_path, dest_kind="empty-file", home=home)
+
+    assert result.returncode != 0
+    assert "already exists" in result.stderr
+    assert "interrupted" in result.stderr
+    # The guidance has to say both what to inspect and that removal is only for
+    # a confirmed leftover; a bare "already exists" leaves the operator stuck.
+    assert "inspect" in result.stderr.lower()
+    assert "only if you are sure" in result.stderr.lower()
+    assert "remove" in result.stderr.lower()
+    # And the file is still exactly what the interrupted run left: same inode,
+    # no bytes, still 0600. Nothing here unlinks a file it cannot prove it made.
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].stat().st_ino == paths["dest_inode"]
+    assert paths["dest"].read_bytes() == b""
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o600
+    _assert_publish_touched_nothing_else(paths)
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+
+@runs_the_sh_installer
+def test_publish_takes_back_only_its_own_file_when_chmod_fails(tmp_path: Path) -> None:
+    """With the descriptor still proving the inode, a failed chmod removes it."""
+    home = tmp_path / "home"
+    result, paths = _run_publish(tmp_path, chmod_fails=True, home=home)
+
+    assert result.returncode != 0
+    assert "could not protect" in result.stderr
+    assert list(paths["bin_dir"].iterdir()) == []
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+    assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
+
+    # The partial was taken back, so the retry over the same HOME is not
+    # blocked by it and publishes the verified uv.
+    result, paths = _run_publish(tmp_path, home=home)
+
+    assert result.returncode == 0, result.stderr
+    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_symlink_substituted_before_the_copy(tmp_path: Path) -> None:
+    """A link planted right after the create is refused, and nothing is deleted."""
+    result, paths = _run_publish(tmp_path, race="symlink-before-copy")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    # The substituted link is left where the writer put it.
+    assert paths["dest"].is_symlink()
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The mode change went through the descriptor, so it never reached the link
+    # or the file the link names.
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_symlink_substituted_before_the_chmod(tmp_path: Path) -> None:
+    """A link that appears before the chmod is detected, and its victim keeps its mode."""
+    result, paths = _run_publish(tmp_path, race="symlink-before-chmod")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_symlink()
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The regression: a chmod naming the path would have followed the link and
+    # changed the victim's mode to 0700. The descriptor kept it untouched.
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+    # Nothing is deleted on a mismatch: the link stays where the writer put it.
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_file_substituted_before_the_chmod(tmp_path: Path) -> None:
+    """A foreign file swapped in before the chmod is refused, bytes and mode intact."""
+    result, paths = _run_publish(tmp_path, race="file-before-chmod")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    # A path-based chmod would have made the stranger's file executable.
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    _assert_publish_touched_nothing_else(paths)
+
+
+def test_trust_boundary_is_not_per_user_isolation() -> None:
+    """The header and the docs say what 0700 staging does and does not buy."""
+    header = " ".join(SCRIPT_TEXT.split("repo=raffaelefarinaro/ciaobot", 1)[0].split())
+    assert "not per-user isolation" in header
+    assert "the same user" in header
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "not per-user isolation" in doc
+    assert "the same user" in doc
+
+
+def test_no_refusal_claims_an_untouched_machine_after_the_uv_publish() -> None:
+    """`find_uv` can publish a uv before any later refusal message.
+
+    Every "nothing on this Mac has been changed" left in the flow would be a
+    false claim on a Mac that had no uv: the publish is a real write, and it is
+    deliberately outside the migration transaction. The messages now name the
+    engine and its service, which are what the migration would have replaced.
+    """
+    for stale in (
+        "nothing on this Mac has been changed",
+        "nothing has been changed",
+        "nothing was changed",
+        "nothing is changed at all",
+    ):
+        assert stale not in SCRIPT_TEXT
+
+    # The same section must not overclaim that an interrupted publish is
+    # cleaned up by the next run, nor that the publish is part of the rollback.
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "a half-written file does not block the next install" not in doc
+    assert "at most one `uv-<triple>/` directory" in doc
+    assert "not a promise of full rollback" in doc
+
+
+def test_migrate_help_does_not_call_the_published_uv_a_before_image() -> None:
+    """A uv this run published is outside the migration and survives a rollback.
+
+    Before-images are the two LaunchAgents, the shim, the install receipt and any
+    uv tool environment that already existed. The help used to say "before-images
+    of all of those" over a list that included `~/.local/bin/uv`, promising a
+    rollback that the code does not perform.
+    """
+    usage = SCRIPT_TEXT[SCRIPT_TEXT.index("Usage: install-engine.sh") :]
+    usage = usage[: usage.index("\nUSAGE")]
+    text = " ".join(usage.split())
+
+    assert "Before-images of all of those" not in text
+    assert (
+        "Before-images of the LaunchAgents, the shim, the install receipt and "
+        "any existing uv tool environment are kept in "
+        "~/.local/state/ciaobot/migration/before/"
+    ) in text
+    assert (
+        "a uv this run had to publish is not one of them and stays after a "
+        "rollback"
+    ) in text
+
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "a `uv` this run bootstrapped is not one of the before-images" in doc
+    assert "leaves the published `uv` where it is" in doc
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_uv_bootstrap_mismatch_executes_nothing(tmp_path: Path) -> None:
+    """A digest mismatch stops before inspection, extraction or installation."""
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz", _uv_entries("aarch64-apple-darwin")
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests={asset: "0" * 64 for asset in UV_SHA256},
+    )
+
+    assert result.returncode != 0
+    assert "reviewed sha256" in result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert _tar_trace(paths["trace"]) == []
+    _assert_nothing_executed(paths)
+
+
+UNSAFE_UV_ARCHIVES: list[
+    tuple[Callable[[str], list[tuple[str, str, bytes]]], str]
+] = [
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"../uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "traversing",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"/tmp/uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "absolute",
+    ),
+    (
+        lambda triple: [
+            (name, "symlink", b"uv")
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: [
+            (name, "hardlink", f"uv-{triple}/uvx".encode())
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "exactly one",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/README", "file", b"unexpected")],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (name, "dir" if name == f"uv-{triple}/uv" else kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (f"{name} ", kind, payload)
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unsafe member name",
+    ),
+    (
+        lambda triple: [
+            (name, "fifo", payload)
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/uvx", "file", UVX_BODY)],
+        "more than one uvx",
+    ),
+    (
+        lambda triple: [
+            (name, "dir" if name == f"uv-{triple}/uvx" else kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (name, "symlink", b"uv") if name == f"uv-{triple}/uvx"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: _uv_entries(triple) + [(f"uv-{triple}/", "dir", b"")],
+        "more than one",
+    ),
+]
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(("entries", "reason"), UNSAFE_UV_ARCHIVES)
+def test_uv_bootstrap_rejects_unsafe_archive_members(
+    tmp_path: Path,
+    entries: Callable[[str], list[tuple[str, str, bytes]]],
+    reason: str,
+) -> None:
+    """The allowlist is exact: no other path, type or name reaches extraction."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode != 0
+    assert reason in result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert _tar_extractions(paths["trace"]) == []
+    _assert_nothing_executed(paths)
+
+
+@needs_local_tools
+def test_uv_bootstrap_rejects_unknown_architecture(tmp_path: Path) -> None:
+    """An unknown machine refuses before any download or archive inspection."""
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz", _uv_entries("aarch64-apple-darwin")
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="riscv64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+    )
+
+    assert result.returncode != 0
+    assert "architecture" in result.stderr
+    assert _tar_trace(paths["trace"]) == []
+    # Neither the curl double nor the tar double ran: nothing was downloaded.
+    assert not paths["trace"].exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_uv_bootstrap_accepts_an_archive_without_uvx(tmp_path: Path) -> None:
+    """uvx is optional; an archive with only the directory and uv is valid."""
+    triple = "aarch64-apple-darwin"
+    entries = [
+        entry for entry in _uv_entries(triple)
+        if entry[0] != f"uv-{triple}/uvx"
+    ]
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_only_uv_extracted(paths, triple)
+    _assert_nothing_executed(paths)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_uv_bootstrap_accepts_an_archive_without_the_directory(
+    tmp_path: Path,
+) -> None:
+    """A tar producer may omit the directory entry; the `uv` member is enough.
+
+    The allowlist is still exact - at most one directory entry, exactly one
+    regular `uv` and optionally one regular `uvx` - but requiring the directory
+    would refuse an otherwise genuine archive that lists only its files.
+    """
+    triple = "aarch64-apple-darwin"
+    entries = [
+        entry for entry in _uv_entries(triple)
+        if entry[0] != f"uv-{triple}/"
+    ]
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_only_uv_extracted(paths, triple)
+    _assert_nothing_executed(paths)
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize(
+    ("name", "kind", "archive_format", "reasons"),
+    [
+        # PAX and GNU store a long name in an extension member; the long entry
+        # is still not one of the three allowed names.
+        (
+            "uv-aarch64-apple-darwin/" + "a" * 140,
+            "file", tarfile.PAX_FORMAT, ("unexpected member",),
+        ),
+        (
+            "uv-aarch64-apple-darwin/" + "b" * 140,
+            "file", tarfile.GNU_FORMAT, ("unexpected member",),
+        ),
+        # A `./` segment and a trailing slash must not be normalized into an
+        # allowed name.
+        (
+            "uv-aarch64-apple-darwin/./uv",
+            "file", tarfile.USTAR_FORMAT, ("unexpected member",),
+        ),
+        (
+            "uv-aarch64-apple-darwin/uv/",
+            "dir", tarfile.USTAR_FORMAT, ("unexpected member",),
+        ),
+        # tar escapes a newline into `\n` in some listings and splits it into
+        # two lines in others. On this platform it is escaped, so the name is
+        # refused; a listing that split it instead would duplicate the allowed
+        # `uv` name and be refused by the count. Either way one hostile member
+        # cannot be assembled into an allowed one, and no extraction is made.
+        (
+            "uv-aarch64-apple-darwin/uv\nuv-aarch64-apple-darwin/uvx",
+            "file", tarfile.USTAR_FORMAT,
+            ("unsafe member name", "exactly one", "ambiguous"),
+        ),
+        # A backslash is an escape in some listings and an ordinary byte in
+        # others; it is never inside the allowlist.
+        (
+            "uv-aarch64-apple-darwin/uv\\x",
+            "file", tarfile.USTAR_FORMAT, ("unsafe member name",),
+        ),
+    ],
+)
+@needs_local_tools
+def test_uv_bootstrap_rejects_relocated_or_ambiguous_names(
+    tmp_path: Path,
+    name: str,
+    kind: str,
+    archive_format: int,
+    reasons: tuple[str, ...],
+) -> None:
+    """Names tar could normalize, join or split are refused before extraction."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz",
+        _uv_entries(triple) + [(name, kind, b"x")],
+        archive_format=archive_format,
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert any(reason in result.stderr for reason in reasons), result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert _tar_extractions(paths["trace"]) == []
+    _assert_nothing_executed(paths)
+
+
+def _run_find_uv_selection(
+    tmp_path: Path, *, on_path: bool, in_home: bool
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the shipped find_uv with a stubbed verified bootstrap.
+
+    PATH is narrowed to the fixture bin plus /usr/bin:/bin so a real uv on the
+    developer's machine cannot decide the branch being tested.
+    """
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    if on_path:
+        _write_exec(fakebin / "uv", "#!/bin/sh\necho path-uv\n")
+    if in_home:
+        _write_exec(home / ".local" / "bin" / "uv", "#!/bin/sh\necho home-uv\n")
+
+    body = "\n".join(
+        [
+            "set -eu",
+            f"HOME={shlex.quote(str(home))}",
+            f"PATH={shlex.quote(str(fakebin))}:/usr/bin:/bin",
+            "export HOME PATH",
+            _function_source("fail"),
+            "bootstrap_verified_uv() {",
+            '    printf "bootstrap-called\\n" >> "$HOME/bootstrap.log"',
+            '    : > "$HOME/.local/bin/uv"',
+            '    chmod 700 "$HOME/.local/bin/uv"',
+            "    uv=$HOME/.local/bin/uv",
+            "}",
+            "publish_verified_uv() {",
+            '    printf "publish-called\\n" >> "$HOME/bootstrap.log"',
+            "    uv=$HOME/.local/bin/uv",
+            "}",
+            _function_source("find_uv"),
+            "find_uv",
+            'printf "uv=%s\\n" "$uv"',
+        ]
+    )
+    result = subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+    return result, home
+
+
+@runs_the_sh_installer
+def test_existing_uv_legacy_selection_is_unchanged(tmp_path: Path) -> None:
+    """An ordinary CLI install still reuses the uv it already has."""
+    # `command -v uv` wins even when ~/.local/bin/uv is also there: the order
+    # of find_uv's selection is unchanged by the verified bootstrap.
+    result, home = _run_find_uv_selection(tmp_path, on_path=True, in_home=True)
+    assert result.returncode == 0, result.stderr
+    assert f"uv={tmp_path / 'fakebin' / 'uv'}" in result.stdout
+    assert not (home / "bootstrap.log").exists()
+
+    # Without one on PATH, the installer-managed ~/.local/bin/uv is reused.
+    result, home = _run_find_uv_selection(
+        tmp_path / "home-only", on_path=False, in_home=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
+    assert not (home / "bootstrap.log").exists()
+
+    # Only a missing uv reaches the verified bootstrap, and only that branch
+    # publishes; never uv-installer.sh.
+    result, home = _run_find_uv_selection(
+        tmp_path / "missing", on_path=False, in_home=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
+    assert (home / "bootstrap.log").read_text(encoding="utf-8") == (
+        "bootstrap-called\npublish-called\n"
+    )

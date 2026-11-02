@@ -30,10 +30,12 @@ const open = ref(false)
 const rawOpen = ref(false)
 const detailOpen = ref(false)
 const bodyId = useId()
+const hintId = useId()
 const detailId = useId()
 const rawId = useId()
 
 const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
+  compaction: 'doc',
   background_run: 'activity',
   cli_task_wake: 'activity',
   schedule: 'clock',
@@ -41,11 +43,16 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   webhook: 'comment',
   update_task: 'spark',
   retry: 'activity',
+  restart_resume: 'activity',
+  error: 'activity',
+  handover: 'activity',
 }
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
 const icon = computed(() => ICONS[props.prompt.kind])
+// A notice the engine did not write (a provider's own shell) has no prompt to show.
 const hasRawToggle = computed(() =>
+  props.raw.length > 0 &&
   ['background_run', 'cli_task_wake', 'schedule', 'webhook'].includes(props.prompt.kind),
 )
 const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
@@ -59,6 +66,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         class="injected-card-toggle"
         :aria-expanded="open ? 'true' : 'false'"
         :aria-controls="bodyId"
+        :aria-describedby="!open && summary.hint ? hintId : undefined"
         @click="open = !open"
       >
         <AppIcon :name="icon" :size="14" />
@@ -75,7 +83,13 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
       <time v-if="timestamp" class="injected-card-time" :datetime="timestamp">{{ formatTime(timestamp) }}</time>
     </div>
 
+    <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint" :role="prompt.kind === 'error' ? 'status' : undefined">{{ summary.hint }}</p>
+
+    <!-- Recovery actions stay reachable while the card is collapsed. -->
+    <div v-if="$slots.actions" class="injected-card-actions"><slot name="actions" /></div>
+
     <div v-if="open" :id="bodyId" class="injected-card-body">
+      <div v-if="prompt.kind === 'compaction'" class="injected-card-prose" tabindex="0" role="region" aria-label="Conversation summary" v-html="md(prompt.text)"></div>
       <template v-if="prompt.kind === 'background_run'">
         <ul class="injected-card-runs">
           <li v-for="(run, idx) in prompt.runs" :key="`${run.runId}-${idx}`">
@@ -96,7 +110,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
               role="region"
               :aria-label="`Last ${run.tail.length} lines of ${run.label}`"
             >{{ run.tail.join('\n') }}</pre>
-            <p v-else class="injected-card-muted">No output.</p>
+            <p v-else-if="run.logPath" class="injected-card-muted">No output.</p>
           </li>
         </ul>
       </template>
@@ -170,6 +184,26 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
           <div class="injected-card-prose" tabindex="0" role="region" aria-label="Original request" v-html="md(raw)"></div>
         </details>
+      </template>
+
+      <template v-else-if="prompt.kind === 'restart_resume'">
+        <p class="injected-card-note">Ciaobot restarted while the previous turn was running, so it asked the agent to continue where it left off.</p>
+      </template>
+
+      <!-- The pack is the exact text the new provider received, kept one
+           disclosure away so the reader can check what it was given. -->
+      <template v-else-if="prompt.kind === 'handover'">
+        <p class="injected-card-note">{{ prompt.sent ? 'The new agent starts a fresh session with the recent messages above as context.' : 'This handover recorded no copy of what was sent.' }}</p>
+        <details v-if="prompt.sent" class="injected-card-original">
+          <summary>Show what the agent received</summary>
+          <pre class="injected-card-raw" tabindex="0" role="region" aria-label="What the agent received">{{ prompt.sent }}</pre>
+        </details>
+      </template>
+
+      <template v-else-if="prompt.kind === 'error'">
+        <p class="injected-card-note">{{ prompt.copy }}</p>
+        <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Error message" v-html="md(prompt.text)"></div>
       </template>
 
       <template v-if="hasRawToggle">
@@ -283,6 +317,19 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 }
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
+.injected-card-hint {
+  margin: 0 0 8px;
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.injected-card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+.injected-card-actions :slotted(.retry-btn) { margin-top: 0; }
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }
 .injected-card-prose :deep(> :first-child) { margin-top: 0; }
@@ -348,6 +395,7 @@ pre {
   .injected-card-link {
     min-height: var(--touch);
   }
+  .injected-card-actions :slotted(button) { min-height: var(--touch); }
   .injected-card-link { display: inline-flex; align-items: center; }
   .injected-card-original > summary { min-height: var(--touch); padding: 12px 0; }
 }

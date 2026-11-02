@@ -424,6 +424,48 @@ def _parse_disabled_listing(stdout: str) -> dict[str, bool] | None:
     return states
 
 
+def strict_disabled_override(stdout: str, label: str) -> bool | None:
+    """Whether launchd's listing explicitly disables ``label``, or None if unknown.
+
+    This is the strict sibling of :func:`_parse_disabled_listing` for a caller
+    that is about to act on the answer. Every property of the listing that the
+    lenient reader treats as "unknown" is still unknown, and two more are added:
+    a label named more than once is refused even when the copies agree, and an
+    entry-shaped line outside the ``disabled services`` section is refused even
+    when it names another label. Output that repeats or leaks past its section
+    is not a listing this reader can account for, and a job activation must not
+    guess. A readable listing that does not name the label at all says the label
+    is explicitly not disabled (``False``) — that is different from output that
+    cannot be read at all (``None``). The "not named" answer is read from the
+    recorded empty section (the shape a Mac with no overrides writes: the
+    header, no entries, the closing brace), never from output that lacks the
+    section entirely.
+    """
+    if sum(
+        1 for line in stdout.splitlines() if _DISABLED_SECTION_HEADER.match(line)
+    ) != 1:
+        return None
+    body = _disabled_section(stdout)
+    if body is None:
+        return None
+    entries = _DISABLED_ENTRY.findall(body)
+    # Every entry-shaped line in the whole answer must be one inside the
+    # section. A `"label" => disabled` after the closing brace is output this
+    # reader cannot account for, and it could repeat (or contradict) the entry
+    # being decided on.
+    if _DISABLED_ENTRY.findall(stdout) != entries:
+        return None
+    if _DISABLED_ENTRY.sub("", body).replace(",", "").strip():
+        return None
+    states: dict[str, bool] = {}
+    for entry_label, value in entries:
+        word = value.strip().lower()
+        if word not in _DISABLED_WORDS or entry_label in states:
+            return None
+        states[entry_label] = _DISABLED_WORDS[word]
+    return states.get(label, False)
+
+
 def _disabled_overrides(uid: int) -> tuple[dict[str, bool] | None, str]:
     """launchd's per-label overrides, and why they are unreadable.
 

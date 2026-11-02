@@ -543,3 +543,111 @@ async def test_force_reaps_even_a_warm_claude_provider(tmp_path: Path) -> None:
     _attach_claude(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
 
     assert await manager.reap_idle_providers(force=True) == [chat_id]
+
+
+def _claude_service(tmp_path: Path, *, task: bool, silent_for: float | None = None):
+    from claude_agent_sdk import TaskStartedMessage
+
+    from ciao.provider_service import ProviderService
+    from ciao.providers.claude import ClaudeProvider
+
+    provider = ClaudeProvider(tmp_path)
+    if task:
+        provider._observe_message(
+            TaskStartedMessage(
+                subtype="task_started", data={}, task_id="bash-1",
+                description="sleep 9000", uuid="u", session_id="s",
+                task_type="local_bash",
+            )
+        )
+        if silent_for is not None:
+            provider._last_activity = time.monotonic() - silent_for
+    service = ProviderService(
+        CiaoConfig(
+            pwa_auth_token="t",
+            workspace_root=tmp_path,
+            state_path=tmp_path / "state.json",
+            media_root=tmp_path / "media",
+        ),
+        provider="claude",
+    )
+    service._provider = provider  # type: ignore[assignment]
+    disconnected: list[bool] = []
+
+    async def disconnect() -> None:
+        disconnected.append(True)
+
+    service.disconnect = disconnect  # type: ignore[method-assign]
+    return service, disconnected
+
+
+@pytest.mark.asyncio
+async def test_claude_native_task_holds_provider_past_idle_and_warm_limit(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    service, disconnected = _claude_service(tmp_path, task=True)
+    manager._providers[chat_id] = service  # type: ignore[assignment]
+    stale = time.monotonic() - manager._provider_idle_timeout * 10
+    manager._provider_last_used[chat_id] = stale
+
+    assert await manager.reap_idle_providers(force=True) == []
+    assert disconnected == []
+    # Busy providers get their stamp refreshed, so they are not reclaimed the
+    # instant the task ends.
+    assert manager._provider_last_used[chat_id] > stale
+
+    # Without the task the same provider is reclaimed.
+    service._provider._native_tasks.clear()  # type: ignore[union-attr]
+    manager._provider_last_used[chat_id] = stale
+    assert await manager.reap_idle_providers(force=True) == [chat_id]
+
+
+@pytest.mark.asyncio
+async def test_silent_background_work_older_than_one_hour_still_holds_provider(
+    tmp_path: Path,
+) -> None:
+    from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    service, disconnected = _claude_service(tmp_path, task=True, silent_for=7200)
+    manager._providers[chat_id] = service  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+
+    assert await manager.reap_idle_providers(force=True) == []
+    assert disconnected == []
+
+    # Past the cap with no provider activity the provider is reclaimed.
+    service._provider._last_activity = (  # type: ignore[union-attr]
+        time.monotonic() - BACKGROUND_WORK_MAX_S - 1
+    )
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+    assert await manager.reap_idle_providers(force=True) == [chat_id]
+    assert disconnected == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_native_task_does_not_pin_the_provider_behind_a_live_drain(
+    tmp_path: Path,
+) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    service, disconnected = _claude_service(tmp_path, task=True)
+    manager._providers[chat_id] = service  # type: ignore[assignment]
+    manager._streaming.has_live_drain = lambda _cid: True  # type: ignore[method-assign]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+
+    # A fresh task behind a live drain holds the provider.
+    assert await manager.reap_idle_providers(force=True) == []
+
+    # One that never reported a terminal state is dropped after the cap.
+    service._provider._native_tasks["bash-1"]["started_mono"] = (  # type: ignore[union-attr]
+        time.monotonic() - BACKGROUND_WORK_MAX_S - 1
+    )
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+    assert await manager.reap_idle_providers(force=True) == [chat_id]
+    assert disconnected == [True]

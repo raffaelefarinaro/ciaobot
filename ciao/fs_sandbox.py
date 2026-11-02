@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import shutil
 import site
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -479,50 +481,212 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
 
     Relative paths resolve against *cwd*, ``~`` expands, and symlinks resolve,
     so a link inside a root that points outside it counts as outside. Glob
-    characters cut the path at the last literal directory.
+    characters cut the path at the last literal directory. A path that cannot
+    be resolved (a NUL byte, an unknown ``~user``) counts as outside, so the guard
+    denies it rather than raising: a hook that raises is not a deny.
     """
     text = _static_prefix(value.strip())
-    candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    resolved = candidate.resolve()
-    return not any(resolved.is_relative_to(root.resolve()) for root in roots)
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        resolved = candidate.resolve()
+        resolved_roots = [root.resolve() for root in roots]
+    except (ValueError, OSError, RuntimeError):
+        return True
+    return not any(resolved.is_relative_to(root) for root in resolved_roots)
 
 
-def claude_file_tool_guard(*, cwd: Path, roots: list[Path]) -> Any:
+_TASK_SESSION_ID = re.compile(r"[0-9A-Za-z-]{8,64}")
+
+
+def claude_task_output_path_allowed(
+    value: str, *, session_id: str, cwd: Path, tmp_base: str | None, uid: int
+) -> bool:
+    """Whether *value* is this session's own native background-task output file.
+
+    Exactly ``<tmp base>/claude-<uid>/<one segment>/<session_id>/tasks/<name>.output``
+    after resolving symlinks and ``..``; anything else, or a missing or
+    malformed *session_id*, is refused. The target must be a regular file with
+    one link, reached without a final symlink, and *value* is not trimmed.
+    """
+    if not _TASK_SESSION_ID.fullmatch(session_id):
+        return False
+    if value != value.strip() or value.endswith("/"):
+        return False
+    if any(char in value for char in "*?[{\x00\n\r"):
+        return False
+    base = Path(tmp_base or "/tmp").expanduser().resolve() / f"claude-{uid}"
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        if os.path.islink(candidate):
+            return False
+        resolved = candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return False
+    depth = len(base.parts)
+    if not (
+        resolved.is_relative_to(base)
+        and len(resolved.parts) == depth + 4
+        and resolved.parts[depth + 1] == session_id
+        and resolved.parts[depth + 2] == "tasks"
+        and resolved.name.endswith(".output")
+    ):
+        return False
+    try:
+        info = resolved.stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
+def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
+    """The path a tool argument names, resolved as ``path_outside_roots`` resolves it.
+
+    None when it cannot be resolved (a NUL byte, an unknown ``~user``).
+    """
+    text = _static_prefix(value.strip())
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        return candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def _case_key(path: Path) -> tuple[str, ...]:
+    """The path's components, case-folded where the filesystem ignores case."""
+    if sys.platform in ("darwin", "win32"):
+        return tuple(part.casefold() for part in path.parts)
+    return path.parts
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Inode identity: a case variant or a hardlink of the same file matches."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_read_only_target(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is, or sits inside, one of the read-only *entries* (#2459).
+
+    An existing target is compared by identity, with each of its ancestors, so a
+    case variant of a pinned file or folder, or a hardlink to one, still matches.
+    A target that does not exist has no identity yet, so it is compared by its
+    components, case-folded on macOS and Windows.
+    """
+    if target.exists():
+        chain = [target, *target.parents]
+        return any(_same_file(node, entry) for entry in entries for node in chain)
+    key = _case_key(target)
+    return any(key[: len(entry_key)] == entry_key for entry_key in (_case_key(e) for e in entries))
+
+
+def _is_read_only_file(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is exactly one of the read-only *entries* that is a file."""
+    return any(entry.is_file() and _same_file(target, entry) for entry in entries)
+
+
+def _resolved_read_only(paths: Sequence[Path]) -> list[Path]:
+    """The read-only entries, resolved. An entry that cannot resolve grants nothing."""
+    resolved: list[Path] = []
+    for path in paths:
+        try:
+            resolved.append(path.resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return resolved
+
+
+# Claude's file tools, split by what they do to the path. A read-only path is
+# readable by the read tools and writable by none of them.
+_CLAUDE_READ_TOOLS = frozenset({"Read", "Grep", "Glob", "LS"})
+_CLAUDE_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def claude_file_tool_guard(
+    *,
+    cwd: Path,
+    roots: list[Path],
+    cli_tmp_base: str | None = None,
+    read_only: Sequence[Path] = (),
+) -> Any:
     """PreToolUse hook denying Claude's file tools any path outside *roots*.
 
     Claude's plan directory is allowed as well: plan mode writes its plan file
-    there, outside every workspace root.
+    there, outside every workspace root. Read (only) may also open the output
+    files of this chat's own native background tasks under the CLI temp
+    directory *cli_tmp_base*, matched by the session id the CLI puts in the
+    hook input; the CLI's tool result tells the model to Read them.
+
+    *read_only* paths (#2459) are never writable, inside a root or not, by any
+    write tool. Outside the roots, a read tool may open an exact *read-only file*
+    (a folder grant does not extend to its files), which is what lets a memory
+    pass read its source archive.
     """
     if not roots:
         raise ValueError("roots must not be empty")
     allowed = ", ".join(str(root) for root in roots)
     reachable = [*roots, Path.home() / ".claude" / "plans"]
+    uid = getattr(os, "getuid", lambda: 0)()
+    read_only_paths = _resolved_read_only(read_only)
 
     async def on_pre_tool_use(
         input_data: dict[str, Any], tool_use_id: str | None, context: Any
     ) -> dict[str, Any]:
         del tool_use_id, context  # unused
-        keys = CLAUDE_FILE_TOOL_PATH_KEYS.get(str(input_data.get("tool_name") or ""), ())
+        tool_name = str(input_data.get("tool_name") or "")
+        session_id = str(input_data.get("session_id") or "")
+        keys = CLAUDE_FILE_TOOL_PATH_KEYS.get(tool_name, ())
         tool_input = input_data.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            tool_input = {}
         for key in keys:
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
+                resolved = _resolved_tool_path(value, cwd=cwd)
+                if (
+                    tool_name in _CLAUDE_WRITE_TOOLS
+                    and resolved is not None
+                    and _is_read_only_target(resolved, read_only_paths)
+                ):
+                    return _claude_guard_deny(f"{value} is read-only.")
                 if path_outside_roots(value, cwd=cwd, roots=reachable):
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                f"This workspace is confined to {allowed}; "
-                                f"{value} is outside it."
-                            ),
-                        }
-                    }
+                    if (
+                        tool_name in _CLAUDE_READ_TOOLS
+                        and resolved is not None
+                        and _is_read_only_file(resolved, read_only_paths)
+                    ):
+                        continue
+                    if (
+                        tool_name == "Read"
+                        and key == "file_path"
+                        and claude_task_output_path_allowed(
+                            value, session_id=session_id, cwd=cwd, tmp_base=cli_tmp_base, uid=uid
+                        )
+                    ):
+                        continue
+                    return _claude_guard_deny(
+                        f"This workspace is confined to {allowed}; {value} is outside it."
+                    )
         return {}
 
     return on_pre_tool_use
+
+
+def _claude_guard_deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def _quote_seatbelt_subpath(root: str) -> str:
@@ -553,13 +717,14 @@ def _seatbelt_profile(
     # and `(deny default)` needs `(allow file-read* (literal "/"))` or every
     # child aborts (SIGABRT) resolving any path. The literal matches only `/`
     # itself, so traversal works and nothing extra becomes readable.
-    # `/var` and `/tmp` are symlinks into `/private`. A path spelled through
-    # one (`$TMPDIR` is `/var/folders/...`) needs the link itself readable, or
-    # every access under it is refused even where the target is allowed.
+    # `/var`, `/tmp` and `/etc` are symlinks into `/private`. A path spelled
+    # through one (`$TMPDIR` is `/var/folders/...`, and `ciao gws`'s PATH probe
+    # reads `/etc/paths.d`, #2448) needs the link itself readable, or every
+    # access under it is refused even where the target is allowed.
     lines = [
         "(version 1)",
         "(deny default)",
-        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))',
+        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp") (literal "/etc"))',
     ]
     # Tools resolve every directory above where they run (a realpath walk, a
     # search for project files), so each ancestor of a granted path is

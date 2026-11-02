@@ -511,3 +511,11 @@ describe('toolIcon', () => {
     expect(toolIcon('SomethingElse')).toBe('⚙️')
   })
 })
+
+describe('toChatMessage sent_context', () => {
+  test('carries the handover pack the engine recorded on the marker', () => {
+    expect(toChatMessage({ role: 'system', content: 'Handed over from A / a to B / b.', origin: 'handover', sent_context: '<provider-handover>x</provider-handover>' }).sent_context)
+      .toBe('<provider-handover>x</provider-handover>')
+    expect(toChatMessage({ role: 'system', content: 'Handed over from A / a to B / b.' }).sent_context).toBeUndefined()
+  })
+})

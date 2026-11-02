@@ -30,6 +30,14 @@ describe('same-origin request containment', () => {
     )
   })
 
+  it('bypasses the HTTP cache so a resumed page never reads stale history', async () => {
+    // API JSON carries no Cache-Control header; a WebKit PWA resumed from a
+    // push must not answer /messages from a copy taken before the reply.
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await api.get('/api/chats/c1/messages?limit=50')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ cache: 'no-store' })
+  })
+
   it('keeps encoded path segments byte-for-byte', async () => {
     fetchMock.mockResolvedValue(jsonResponse({}))
     await api.get('/api/workspaces/my%20ws/files/a%2Fb')

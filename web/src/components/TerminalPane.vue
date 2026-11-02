@@ -21,6 +21,11 @@
  * **Close is not End.** Closing the pane leaves every shell running on the
  * engine; closing an individual session tab ends only that shell.
  *
+ * **The terminal belongs to the chat on screen.** The layout names the chat
+ * (`chatId`, `''` off a chat route) and the store's `followChat` hides the
+ * terminal when it changes and shows it again on return, if it was open when
+ * the person left. A switch moves no focus.
+ *
  * **The keyboard belongs to the shell while the terminal has focus.**
  * Escape, Tab, the arrows, Ctrl+C and Ctrl+D are the shell's, so the pane
  * does not claim them — and it does not use the app's modal Escape capture
@@ -41,15 +46,19 @@
  *
  * **A soft keyboard has no Escape.** A phone or tablet cannot produce
  * Escape, Tab, the arrows, Ctrl+C or Ctrl+D, so on a coarse pointer the
- * pane shows a row of on-screen keys under the screen (#1894). Each one
- * sends the byte sequence a hardware key would, through the same input path
- * as a keystroke, and none of them takes the focus from the shell: a tap
- * that moved the focus would also dismiss the soft keyboard.
+ * pane shows a row of on-screen keys under the screen (#1894). The row is
+ * `TerminalKeyRow.vue`; the bytes come from `lib/terminalKeys.ts`, and the
+ * arrows follow the screen's cursor-key mode. Each key goes through the same
+ * input path as a keystroke, and none of them takes the focus from the
+ * shell: a tap that moved the focus would also dismiss the soft keyboard.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useTerminalStore } from '../stores/terminal'
 import type { TerminalSessionInfo } from '../lib/terminalProtocol'
+import type { TerminalFolderChoice, TerminalLocation } from '../stores/terminal'
 import type { TerminalRenderer } from '../lib/terminalRenderer'
+import { terminalKeyBytes, type TerminalKey } from '../lib/terminalKeys'
+import TerminalKeyRow from './TerminalKeyRow.vue'
 
 const store = useTerminalStore()
 
@@ -60,8 +69,11 @@ const store = useTerminalStore()
  * it when no file has and the pane has room for both columns. The pane only
  * draws the shape it is told — the tile when it is in the slot, the drawer
  * over the pane when it is not.
+ *
+ * `chatId` is the chat on screen, as the layout names it (`''` off a chat
+ * route); the terminal follows it.
  */
-const props = withDefaults(defineProps<{ inTile?: boolean }>(), { inTile: false })
+const props = withDefaults(defineProps<{ inTile?: boolean; chatId?: string }>(), { inTile: false, chatId: '' })
 const emit = defineEmits<{ open: [boolean] }>()
 
 /** The element the screen is mounted into. It exists for the pane's whole life. */
@@ -155,7 +167,7 @@ async function openScreen(sessionId: string): Promise<void> {
   rendererSession = sessionId
   store.attachRenderer(created)
   applyInputState()
-  if (store.visible) created.focus()
+  if (store.visible && !store.chatSwitch) created.focus()
 }
 
 /**
@@ -176,26 +188,6 @@ function focusScreen(): void {
 
 // ── On-screen keys ──────────────────────────────────────────────────────
 
-/**
- * The keys a soft keyboard cannot produce, as the bytes a hardware key sends.
- *
- * The arrows are the normal-mode CSI sequences. A full-screen program that
- * switched the terminal to application cursor mode expects SS3 (`ESC O A`)
- * instead; readline and every shell prompt accept CSI, which is what the
- * row exists for. Enter is a carriage return, as the terminal's own Enter is.
- */
-const ON_SCREEN_KEYS: ReadonlyArray<{ label: string; name: string; bytes: string }> = [
-  { label: 'Esc', name: 'Escape', bytes: '\x1b' },
-  { label: 'Tab', name: 'Tab', bytes: '\t' },
-  { label: 'Ctrl+C', name: 'Control C', bytes: '\x03' },
-  { label: 'Ctrl+D', name: 'Control D', bytes: '\x04' },
-  { label: '\u2191', name: 'Up arrow', bytes: '\x1b[A' },
-  { label: '\u2193', name: 'Down arrow', bytes: '\x1b[B' },
-  { label: '\u2190', name: 'Left arrow', bytes: '\x1b[D' },
-  { label: '\u2192', name: 'Right arrow', bytes: '\x1b[C' },
-  { label: 'Enter', name: 'Enter', bytes: '\r' },
-]
-
 const keyEncoder = new TextEncoder()
 
 /** Only a screen that may type may press a key for the user. */
@@ -206,24 +198,25 @@ const keysEnabled = computed(() => renderer.value !== null && store.unlocked && 
  *
  * The bytes go through `store.sendInput`, the path the renderer's own
  * keystrokes take, so they obey the same size and back-pressure rules and
- * never bypass the connection's acknowledgement.
+ * never bypass the connection's acknowledgement. The arrows follow the
+ * screen's cursor-key mode, read at the moment of the press.
+ *
+ * A tap is not supposed to move the focus (the row prevents it), but if a
+ * browser moved it onto the key anyway, it goes back to the screen so the
+ * soft keyboard stays with the shell. A keyboard activation keeps the
+ * focus on the key, so a keyboard user can press it again.
  */
-function pressKey(bytes: string): void {
-  if (!keysEnabled.value) return
-  store.sendInput(keyEncoder.encode(bytes))
+function pressKey(key: TerminalKey, pointer: boolean): void {
+  const current = renderer.value
+  if (!current || !keysEnabled.value) return
+  store.sendInput(keyEncoder.encode(terminalKeyBytes(key, current.applicationCursorKeys)))
+  if (pointer && keyRowHasFocus()) focusScreen()
 }
 
-/**
- * Keep the focus where it is when a key is tapped.
- *
- * A button takes the focus on pointer down; here that would pull the
- * keyboard off the shell and, on a phone, close the soft keyboard the user
- * is typing with. Preventing the default keeps the focus on the screen while
- * the click still fires. Keyboard activation (Tab to the row, Enter) is not
- * a pointer event and is left alone.
- */
-function onKeyPointerDown(event: PointerEvent): void {
-  event.preventDefault()
+/** True when the focus sits on one of the on-screen keys. */
+function keyRowHasFocus(): boolean {
+  const active = document.activeElement
+  return active instanceof HTMLElement && active.closest('.tp-keys') !== null
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────
@@ -237,8 +230,41 @@ async function end(session: TerminalSessionInfo): Promise<void> {
   await store.endSession(session.session_id)
 }
 
+/**
+ * The "where" question, asked when a scope offers two folders.
+ *
+ * A chat with a linked repository can start a shell in the workspace or in
+ * the repository, and neither is the obvious one, so the pane asks: on its
+ * own when no shell is running, and after "+" when one is.
+ */
+const choosing = ref(false)
+const offersChoice = computed(() => store.locations.length > 1)
+/** Phases with a live grant and a listed scope: a pick can be acted on. */
+const CHOOSER_PHASES = new Set<string>(['ready', 'connecting', 'live', 'reconnecting', 'ended'])
+const showChooser = computed(() => offersChoice.value
+  && CHOOSER_PHASES.has(store.phase)
+  && (choosing.value || (!store.activeSession && !store.creating)))
+
+const LOCATION_LABELS: Record<TerminalLocation, string> = {
+  workspace: 'Workspace',
+  repo: 'Repository',
+}
+
+function folderName(folder: string): string {
+  return folder.split(/[\\/]/).filter(Boolean).at(-1) || folder
+}
+
 async function create(): Promise<void> {
+  if (offersChoice.value) {
+    choosing.value = !choosing.value
+    return
+  }
   await store.createSession()
+}
+
+async function createIn(choice: TerminalFolderChoice): Promise<void> {
+  choosing.value = false
+  await store.createSession(choice.location)
 }
 
 function openSession(session: TerminalSessionInfo): void {
@@ -321,6 +347,8 @@ function focusControls(): void {
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
 
+watch(() => store.target, () => { choosing.value = false })
+
 watch(() => store.activeSession?.session_id, (sessionId) => {
   if (!sessionId) {
     releaseScreen()
@@ -342,6 +370,9 @@ watch(() => store.visible, (open) => {
   // The layout owns the slot and needs to know whether the terminal is on
   // screen: a hidden terminal gives the slot back.
   emit('open', open)
+  // A chat switch showed or hid the terminal: the keyboard stays where the
+  // navigation left it, and the old opener is forgotten.
+  if (store.chatSwitch) { opener = null; return }
   if (open) {
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     void nextTick(() => { if (store.visible) focusScreen() })
@@ -352,6 +383,8 @@ watch(() => store.visible, (open) => {
   opener = null
   void nextTick(() => { if (target?.isConnected) target.focus() })
 }, { flush: 'sync', immediate: true })
+
+watch(() => props.chatId, (chatId) => { store.followChat(chatId) }, { immediate: true })
 
 function onViewport(): void {
   isMobile.value = window.innerWidth < 768
@@ -395,7 +428,10 @@ onBeforeUnmount(() => {
           <span class="tp-status-item">{{ platformLabel }}</span>
         </p>
       </div>
-      <button ref="closeButtonEl" type="button" class="btn-icon tp-close" title="Close terminal" aria-label="Close" @click="closePane">×</button>
+      <!-- Close sits top right, where the pinned file tile keeps its own. -->
+      <button ref="closeButtonEl" type="button" class="btn-icon tp-close" title="Close terminal" aria-label="Close" @click="closePane">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      </button>
     </header>
 
     <p class="tp-warning">
@@ -414,12 +450,12 @@ onBeforeUnmount(() => {
               :tabindex="session.session_id === store.activeSession?.session_id ? 0 : -1"
               :title="`${session.folder} · ${sessionState(session)}`"
               @keydown="onTabKeydown($event, store.sessions.indexOf(session))" @click="openSession(session)">
-              <span class="tp-session-folder">{{ session.folder.split('/').filter(Boolean).at(-1) || session.folder }}</span>
+              <span class="tp-session-folder">{{ folderName(session.folder) }}</span>
               <span class="tp-session-state">{{ sessionState(session) }}</span>
             </button>
             <button type="button" class="btn-icon tp-session-end" :aria-label="`End terminal session ${session.folder}`" title="End session" :disabled="store.ending" @click="end(session)">×</button>
           </div>
-          <button type="button" class="btn-icon tp-new" aria-label="New terminal session" :title="store.creating ? 'Starting…' : 'New session'" :disabled="store.creating || store.sessions.length >= 4" @click="create">+</button>
+          <button type="button" class="btn-icon tp-new" aria-label="New terminal session" :title="store.creating ? 'Starting…' : 'New session'" :aria-expanded="offersChoice ? choosing : undefined" :disabled="store.creating || store.sessions.length >= 4" @click="create">+</button>
         </div>
         <div v-if="store.phase === 'takeover'" class="tp-takeover" role="alert">
           <p class="tp-takeover-text">Another connection took over this terminal session.</p>
@@ -435,33 +471,44 @@ onBeforeUnmount(() => {
         <p v-else-if="store.phase === 'ended'" class="tp-phase" role="status">
           This session has ended. Its output stays on the engine until the session is removed.
         </p>
+        <div v-if="showChooser" class="tp-chooser" role="group" aria-label="Where to open the shell">
+          <p class="tp-chooser-title">Open a shell in</p>
+          <div class="tp-chooser-options">
+            <button
+              v-for="choice in store.locations"
+              :key="choice.location"
+              type="button"
+              class="tp-chooser-option"
+              :title="choice.folder"
+              :disabled="store.creating || store.sessions.length >= 4"
+              @click="createIn(choice)"
+            >
+              <span class="tp-chooser-label">{{ LOCATION_LABELS[choice.location] }}</span>
+              <span class="tp-chooser-folder">{{ folderName(choice.folder) }}</span>
+            </button>
+          </div>
+          <button v-if="store.activeSession" type="button" class="btn-small tp-chooser-cancel" @click="choosing = false">Cancel</button>
+        </div>
+        <p v-else-if="!store.activeSession && store.creating" class="tp-phase" role="status">
+          Starting a shell…
+        </p>
         <p v-else-if="!store.activeSession" class="tp-phase" role="status">
           No shell is open for this {{ store.target && 'projectId' in store.target ? 'project' : 'chat' }} yet.
         </p>
       </div>
 
       <!-- The keys a soft keyboard cannot produce. Rendered only with a
-           screen, and shown only under a coarse pointer (see the sheet). -->
-      <div v-if="renderer" class="tp-keys" role="toolbar" aria-label="Terminal keys">
-        <button
-          v-for="key in ON_SCREEN_KEYS"
-          :key="key.name"
-          type="button"
-          class="tp-key"
-          :aria-label="key.name"
-          :title="key.name"
-          :disabled="!keysEnabled"
-          @pointerdown="onKeyPointerDown"
-          @click="pressKey(key.bytes)"
-        >{{ key.label }}</button>
-      </div>
+           screen, and shown only under a coarse pointer (see TerminalKeyRow). -->
+      <TerminalKeyRow v-if="renderer" :disabled="!keysEnabled" @press="pressKey" />
 
       </div>
     </template>
 
     <p class="tp-hint">
       The terminal keeps the keyboard while it has focus: Escape, Tab, the
-      arrows, Ctrl+C and Ctrl+D go to the shell. Press
+      arrows, Ctrl+C and Ctrl+D go to the shell.
+      <span class="tp-hint-touch">On a touch screen, the keys under the terminal send them.</span>
+      Press
       <kbd>Shift</kbd>+<kbd>Tab</kbd> to come back to these controls, or use
       <strong>Close</strong> to leave the terminal — the shell keeps running.
     </p>
@@ -544,6 +591,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
 }
+.tp-hint-touch { display: none; }
 .tp-body {
   flex: 1;
   min-height: 0;
@@ -559,32 +607,6 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: flex;
 }
-/* The on-screen keys exist for a pointer that has no hardware keys. A mouse
-   and a keyboard do not need them, so the row is hidden until the coarse
-   pointer rule below shows it; it sits under the screen, full width, and
-   scrolls sideways rather than wrapping into a second row. */
-.tp-keys {
-  display: none;
-  flex: 0 0 auto;
-  gap: var(--space-1);
-  overflow-x: auto;
-  padding-top: var(--space-2);
-}
-.tp-key {
-  flex: 0 0 auto;
-  min-width: var(--touch);
-  min-height: var(--touch);
-  padding: 0 var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg3);
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-.tp-key:disabled { opacity: 0.5; cursor: default; }
-.tp-key:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tp-surface {
   flex: 1;
   min-width: 0;
@@ -604,6 +626,59 @@ onBeforeUnmount(() => {
   color: var(--fg2);
   font-size: var(--text-xs);
   pointer-events: none;
+}
+.tp-chooser {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  border-radius: var(--radius-sm);
+}
+.tp-chooser-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+.tp-chooser-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.tp-chooser-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 160px;
+  max-width: 240px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tp-chooser-option:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg3); }
+.tp-chooser-option:disabled { opacity: 0.5; cursor: default; }
+.tp-chooser-option:focus-visible,
+.tp-chooser-cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tp-chooser-label { font-size: var(--text-sm); font-weight: 600; }
+.tp-chooser-folder {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tp-sessions {
   flex: 0 0 auto;
@@ -689,14 +764,8 @@ onBeforeUnmount(() => {
   min-height: 0;
   padding-bottom: var(--safe-bottom);
 }
-/* The terminal title and engine details wrap in narrow drawers and tiles. */
-.terminal-pane--drawer .tp-head,
-.terminal-pane--tile .tp-head {
-  flex-direction: column;
-  align-items: stretch;
-}
 @media (pointer: coarse) {
-  .tp-keys { display: flex; }
+  .tp-hint-touch { display: inline; }
   .tp-close,
   .tp-session-end,
   .tp-takeover-button,
@@ -705,6 +774,8 @@ onBeforeUnmount(() => {
     min-width: var(--touch);
   }
   .tp-tab-wrap { min-height: var(--touch); }
+  .tp-chooser-option,
+  .tp-chooser-cancel { min-height: var(--touch); }
   .tp-tab { min-height: var(--touch); }
 }
 </style>

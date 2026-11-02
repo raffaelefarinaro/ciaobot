@@ -780,6 +780,138 @@ async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
     assert reloaded.last_snippet == chat.last_snippet
 
 
+def _drain_chat(pcm: ProjectChatManager, name: str):
+    project = pcm.create_project(name, workspace="personal")
+    chat = pcm.create_chat(project.project_id, title=name)
+    chat.session_id = f"sess-{name}"
+    pcm._save()
+    return project, chat
+
+
+async def test_drain_announces_only_the_follow_up_final_segment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A follow-up execution previews its last text block, not the joined turn.
+
+    OpenCode's wake result joins every part of the execution; the unread card
+    and push must excerpt the block the chat ends on, while the durable
+    handover keeps the whole execution text (#2139).
+    """
+    from ciao.models import AssistantTextDelta, ResultEvent, ToolUseEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-segment")
+    interim = "Interim working narration."
+    final = "Final answer in file.md."
+    whole = f"{interim}\n\n{final}"
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield AssistantTextDelta(type="text", text=interim)
+            yield ToolUseEvent(type="assistant", tool_name="Bash", tool_input="ls")
+            yield AssistantTextDelta(type="text", text=final)
+            yield ResultEvent(
+                type="result",
+                result=whole,
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert len(ready) == 1
+    assert ready[0]["snippet"] == "Final answer in file.md."
+    assert chat.last_snippet == "Final answer in file.md."
+    # The complete execution text still reaches the handover and the schedule
+    # classifier, which judges the finished synthesis rather than a preview.
+    assert chat.last_response == whole
+    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
+
+
+async def test_drain_uses_provider_final_text_without_text_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A wake attached after the text frames still names its final block."""
+    from ciao.models import ResultEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-metadata")
+    whole = "Interim working narration.\n\nFinal answer in file.md."
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield ResultEvent(
+                type="result",
+                result=whole,
+                session_id=chat.session_id,
+                is_error=False,
+                final_text="Final answer in file.md.",
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert [ev["snippet"] for ev in ready] == ["Final answer in file.md."]
+    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
+
+
+async def test_drain_resets_the_final_segment_for_each_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A second wake's answer is its own block, not the previous one plus it."""
+    from ciao.models import AssistantTextDelta, ResultEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-reset")
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield AssistantTextDelta(type="text", text="First answer.")
+            yield ResultEvent(
+                type="result",
+                result="First answer.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+            yield AssistantTextDelta(type="text", text="Second answer.")
+            yield ResultEvent(
+                type="result",
+                result="Second answer.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert [ev["snippet"] for ev in ready] == ["First answer.", "Second answer."]
+
+
 def _monitor_task_records() -> list[dict]:
     return [
         {"type": "user", "message": {"role": "user", "content": "watch the report"}},
@@ -853,7 +985,8 @@ def test_build_cli_task_wake_prompt_names_command_and_tool() -> None:
     assert "Monitor" in prompt
     assert "adoption report 2026-08 DAG progress and failures" in prompt
     assert "command: tail -f /tmp/adoption_2026-08.log" in prompt
-    assert "ciao run start" in prompt
+    assert "run_in_background" in prompt
+    assert "ciao run" not in prompt
     assert "pgrep/ps" in prompt
 
 
@@ -904,7 +1037,8 @@ async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
     assert count == 1
     assert "bl7dzu4ku" in prompt
     assert "Monitor" in prompt
-    assert "ciao run start" in prompt
+    assert "run_in_background" in prompt
+    assert "ciao run" not in prompt
     assert "tail -f /tmp/adoption_2026-08.log" in prompt
     assert origin == "cli_task_wake"
 
@@ -2301,3 +2435,157 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
 
 
+# ── OpenCode background work interrupted by a restart ────────────────────────
+#
+# OpenCode keeps its background set only in the provider object, so shutdown
+# records it and the next boot consumes the record once.
+
+
+def _opencode_chat_with_background_work(
+    pcm: ProjectChatManager, tmp_path: Path, *, outstanding: bool = True
+):
+    project = pcm.create_project("oc-restart", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="oc-restart")
+    chat.provider = "opencode"
+    chat.session_id = "ses_parent_1"
+    pcm._save()
+    provider = OpencodeProvider(tmp_path)
+    provider._background_children = {"ses_child_b", "ses_child_a"}
+    provider._background_shells = {"sh_1"}
+    provider._shell_commands = {"sh_1": "bash gates.sh"}
+    pcm._providers[chat.chat_id] = SimpleNamespace(
+        provider=provider, background_work_outstanding=outstanding
+    )
+    return chat
+
+
+async def test_restart_wakes_opencode_chat_with_interrupted_background_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao import subagent_tracking
+
+    pcm = _make_manager(tmp_path)
+    chat = _opencode_chat_with_background_work(pcm, tmp_path)
+    assert pcm.record_interrupted_background_work() == 1
+    pcm._providers.clear()
+
+    pcm2 = _make_manager(tmp_path)
+    wakes: list[tuple[object, str, int, str]] = []
+    monkeypatch.setattr(
+        pcm2,
+        "_deliver_wake",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count, origin)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert pcm2.sweep_interrupted_background_work() == 1
+
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
+    parent, prompt, count, origin = wakes[0]
+    assert parent.chat_id == chat.chat_id
+    assert origin == "cli_task_wake"
+    assert count == 3
+    assert prompt.startswith(subagent_tracking.CLI_TASK_WAKE_PREFIX + " 3 CLI tasks")
+    assert prompt.index("(task ses_child_a)") < prompt.index("(task ses_child_b)")
+    assert prompt.index("(task ses_child_b)") < prompt.index("(task sh_1)")
+    assert "command: bash gates.sh" in prompt
+    assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+    assert pcm2.sweep_interrupted_background_work() == 0
+
+
+def test_record_interrupted_background_work_skips_idle_and_claude_chats(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    _opencode_chat_with_background_work(pcm, tmp_path, outstanding=False)
+    project = pcm.create_project("claude-restart", workspace="personal")
+    claude_chat = pcm.create_chat(project.project_id, title="claude-restart")
+    claude_chat.session_id = "sess-claude-1"
+    pcm._providers[claude_chat.chat_id] = SimpleNamespace(
+        provider=object(), background_work_outstanding=True
+    )
+
+    assert pcm.record_interrupted_background_work() == 0
+    assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+
+
+async def test_interrupted_work_sweep_skips_archived_moved_and_stale_records(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    archived = pcm.create_chat(pcm.create_project("oc-archived", workspace="personal").project_id, title="archived")
+    archived.provider = "opencode"
+    archived.session_id = "ses_archived"
+    archived.archived = True
+    moved = pcm.create_chat(pcm.create_project("oc-moved", workspace="personal").project_id, title="moved")
+    moved.provider = "opencode"
+    moved.session_id = "ses_moved_now"
+    valid = pcm.create_chat(pcm.create_project("oc-valid", workspace="personal").project_id, title="valid")
+    valid.provider = "opencode"
+    valid.session_id = "ses_valid"
+    pcm._save()
+
+    path = tmp_path / ".runtime" / "interrupted_background_work.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(recorded_at: datetime) -> None:
+        entry = {"session_id": "ses_moved_recorded", "children": ["ses_child_x"], "shells": []}
+        payload = {
+            "recorded_at": recorded_at.isoformat(),
+            "chats": {
+                archived.chat_id: {**entry, "session_id": "ses_archived"},
+                moved.chat_id: entry,
+                valid.chat_id: {**entry, "session_id": "ses_valid"},
+            },
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    wakes: list[str] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count, origin="": wakes.append(parent.chat_id) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    # Fresh record: only the valid chat is woken. Archived and moved are guarded.
+    record(datetime.now(UTC))
+    assert pcm.sweep_interrupted_background_work() == 1
+    await asyncio.sleep(0)
+    pending = [t for t in list(asyncio.all_tasks()) if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    assert wakes == [valid.chat_id]
+    assert not path.exists()
+
+    # Stale record (8 days): nothing is woken, and the file is still consumed.
+    record(datetime.now(UTC) - timedelta(days=8))
+    assert pcm.sweep_interrupted_background_work() == 0
+    assert wakes == [valid.chat_id]
+    assert not path.exists()
+
+
+def test_interrupted_work_sweep_removes_an_unreadable_file(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    path = tmp_path / ".runtime" / "interrupted_background_work.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+
+    assert pcm.sweep_interrupted_background_work() == 0
+    assert not path.exists()

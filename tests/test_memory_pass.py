@@ -283,6 +283,28 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     assert "instead of inventing a type" in prompt
 
 
+def test_repo_section_asks_only_for_what_the_code_cannot_say() -> None:
+    """Repository facts are filed only when reading the code could not answer them.
+
+    On a real install most repository proposals were dismissed: a version, a
+    single file, a single function's trap, or a status snapshot. The section
+    names those exclusions and makes proposing nothing the normal outcome.
+    """
+    rendered = memory_pass.REPO_SECTION_PROMPT.format(
+        repo="/repos/example",
+        doc="It has no AGENTS.md that could be quoted here.",
+        command=memory_pass.REPO_PROPOSAL_COMMAND,
+    )
+    for phrase in (
+        "Proposing nothing is the normal outcome",
+        "code comment",
+        "project doc",
+    ):
+        assert phrase in rendered, phrase
+    assert "where something lives" not in rendered
+    assert "Never queue a status snapshot" in memory_pass.MEMORY_PASS_PROMPT
+
+
 def test_superseded_guidance_is_rewritten_not_annotated() -> None:
     """A later reader must not be left with two current instructions (#1132).
 
@@ -434,6 +456,19 @@ def test_the_lesson_path_names_both_non_owned_destinations() -> None:
     # And the two attended actions are named as attended.
     assert "the draft is where your turn ends" in prompt
     assert "neither may the nightly Workspace care run" in prompt
+
+
+def test_lesson_routing_prompt_says_how_to_recover_from_a_sibling_refusal() -> None:
+    """A refused re-file names the way out: `same_as` or `distinct_from`, read from the listed titles."""
+    prompt = memory_pass.LESSON_ROUTING_PROMPT.substitute(
+        inventory="notes",
+        routing=memory_pass.DRAFT_COMMAND,
+        source="conversation",
+        evidence="transcript",
+    )
+    assert "already has drafts" in prompt
+    assert '"same_as"' in prompt
+    assert '"distinct_from"' in prompt
 
 
 def _rendered_chat_lesson_routing() -> str:
@@ -1225,6 +1260,32 @@ async def test_resume_after_restart(
     ).postprocess["steps"]["memory_pass"]["status"] == "attention"
     assert reloaded_streams.chat_ids == [ids[1]]
     assert reloaded.get_chat(ids[1]).helper["state"] == "running"
+
+
+async def test_resume_archives_a_pass_left_done_by_a_restart(
+    tmp_path: Path, passes_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    pass_id = manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
+    chat = manager.get_chat(pass_id)
+    assert chat is not None
+    # The process died after the pass settled as done but before archiving.
+    manager._memory_pass._set_state(chat, "done")
+
+    reloaded = _make_manager(tmp_path)
+    reloaded_streams = _FakeStreams()
+    reloaded.start_stream = reloaded_streams  # type: ignore[method-assign]
+    archived = _stub_archive(reloaded, monkeypatch)
+    assert reloaded.get_chat(pass_id).archived is False
+
+    await reloaded.resume_memory_passes()
+
+    assert archived == [pass_id]
+    assert reloaded.get_chat(pass_id).archived is True
+    assert reloaded.get_chat(pass_id).helper["state"] == "done"
+    assert reloaded_streams.chat_ids == []
 
 
 # ── The terminal turn a pass settles on ────────────────────────────────────

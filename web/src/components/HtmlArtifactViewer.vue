@@ -212,8 +212,10 @@ defineExpose({ sendHighlights, enableComments, frameEl })
    frame over the dark PWA shell makes unstyled text unreadable. Artifacts that
    honour prefers-color-scheme paint over this anyway. */
 .hav-frame {
-  flex: 1;
-  min-height: 320px;
+  /* Take the leftover height of the host pane instead of forcing a 320px
+     floor: inside FileViewerModal the frame is the only scroller (#2311). */
+  flex: 1 1 0%;
+  min-height: 0;
   width: 100%;
   border: 1px solid var(--border, #2e3258);
   border-radius: var(--radius-sm, 6px);

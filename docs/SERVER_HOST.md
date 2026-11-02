@@ -139,14 +139,18 @@ built by the later service child (#1008 child B), not here.
 | Display name | `Ciaobot Server` |
 | Executable | `Ciaobot Server` |
 | Host protocol | `CiaobotServerHostProtocol` = `2` |
-| Bundle version | host revision (`4`), never the engine release |
+| Bundle version | host revision (`4` ad-hoc, `5` release-signed), never the engine release |
 | Minimum system | `13.0` |
 | `LSUIElement` | `true` (accessory app: no window, no Dock) |
 
 The bundle ID is distinct from the retired app, the PWA and the earlier
 `local.ciaobot.server-host-experiment` spike, so a permission grant can never be
 inherited across identities. `CFBundleVersion`/`CFBundleShortVersionString`
-express the host revision; they are deliberately not the engine version.
+express the host revision; they are deliberately not the engine version. The
+ad-hoc default build keeps revision 4; the explicit Developer ID/notarized build
+(#2328) is revision 5 with the same protocol 2, so a service contract that reads
+the protocol is unaffected and an installer can still tell the two signed byte
+sets apart.
 
 The bundle ships only the executable, its `Info.plist`, the tracked
 `CiaobotServer.icns` and the signature. No Python, configuration or sidecar
@@ -185,6 +189,109 @@ reports no CDHash for a slice. It never installs into `~/Applications`, never
 writes a launch agent, never launches what it builds and never requests a
 permission.
 
+## Release signing: Developer ID, hardened runtime and notarization
+
+The default build above is ad-hoc signed and applies **no** entitlements. A
+release build is a separate, explicitly selected mode (#2328); it never changes
+the default, the publish workflow, the installer or the manifest.
+
+```sh
+python scripts/build-server-host.py --output /tmp/ciaobot-server-host-release \
+    --release \
+    --signing-identity "Developer ID Application: Example (ABCDE12345)" \
+    --team-id ABCDE12345 \
+    --notary-profile ciaobot-notary
+```
+
+Prerequisites, all operator-supplied and all outside the builder:
+
+- a `Developer ID Application` certificate in the login keychain, named by
+  `--signing-identity`. A certificate fingerprint may select the identity, but
+  it never defines the host's logical identity;
+- `--team-id`, the ten-character uppercase Apple team ID the signing
+  certificate must belong to. It is validated before any interpolation and is
+  part of the designated requirement;
+- `--notary-profile`, the name of a `notarytool` keychain profile created once
+  with `xcrun notarytool store-credentials`. The builder passes only the
+  profile name, never an Apple ID, password or API key, and prints none of
+  them;
+- macOS with the Command Line Tools and Python 3.12+.
+
+All three values are required together with `--release`. A partial set, an
+ad-hoc identity (`-`), a malformed team ID or a missing/mismatched entitlements
+file is refused before the output directory is created. Nothing is
+auto-detected and no environment variable selects this mode.
+
+The signed build uses the tracked
+`native/server-host/ServerHost.entitlements.plist`, whose only entitlement is
+`com.apple.security.automation.apple-events` (no sandbox, JIT, unsigned
+executable memory, library-validation disable, debug or broad filesystem
+entitlement). It then:
+
+1. assembles the universal app exactly as the ad-hoc build does, with host
+   revision 5 in the plist;
+2. signs it **once** with the named identity, `--options runtime`,
+   `--timestamp` and that entitlements file, plus the stable designated
+   requirement: bundle identifier `local.ciaobot.server`, the Apple generic
+   anchor, the Developer ID CA extension `1.2.840.113635.100.6.2.6`, the
+   Developer ID Application leaf extension `1.2.840.113635.100.6.1.13`, and
+   `certificate leaf[subject.OU]` equal to the expected team;
+3. strict-verifies the signature, then separately verifies it against the
+   external expected requirement with `codesign --verify --strict
+   --test-requirement "=<requirement>" --all-architectures` so every slice is
+   checked against that requirement. `--requirements` is only the signing
+   (embed) option; it is never used to check the artifact. Both slices are also
+   inspected for the bundle identifier, team, the CodeDirectory
+   hardened-runtime option flag (`0x10000`) **and** its runtime version (the
+   version string alone is not proof), the secure timestamp and the
+   entitlements;
+4. writes a temporary ZIP of the app with `ditto` and submits it with
+   `xcrun notarytool submit --keychain-profile … --wait --timeout 30m
+   --output-format json`; only an exact `Accepted` JSON status continues. A
+   non-zero exit, malformed JSON, `Invalid`, `Rejected` or an unfinished status
+   fails the build;
+5. staples the accepted ticket and validates it, and only then writes the fixed
+   `ciaobot-server-host-macos-universal-v1.tar.gz`. Nothing signs after
+   stapling, so the signature stays valid over the stapled bundle;
+6. re-extracts the final archive into a fresh scratch directory and repeats the
+   signature, expected-requirement, runtime/entitlement, staple and
+   `spctl --assess` Gatekeeper checks on the **extracted** app, then computes
+   the archive/executable digests and the per-arch CDHashes from those final
+   bytes.
+
+The archive policy is unchanged: exactly the app subtree, ordinary files and
+directories only, fixed root `Ciaobot Server.app`, modes preserved, uid/gid and
+user/group names cleared, no absolute paths, no links. Whatever material
+`stapler` wrote into the app is preserved because the archive is written after
+stapling. Every subprocess the release mode adds - including the arch check -
+carries an explicit deadline (300 s, and 30m for the notary wait), and the
+commands are argument vectors, never a shell. A failure at any step removes only
+the directory this invocation created; the temporary ZIP and extraction scratch
+are removed on success, and a caller's pre-existing paths are never touched.
+
+Release failures are sanitized. The signing identity, the notary keychain
+profile, the tool argv, any captured stdout/stderr and the original exception
+chain never appear in an error or in the CLI output; a failed `codesign`,
+`ditto`, `notarytool`, `stapler` or `spctl` step becomes a plain
+`BuildError` naming only the stage (a timeout says it did not finish, a
+rejected submission reports only one of the known notary statuses or "an
+unrecognized status"). The values the native tools report are not echoed
+either: a wrong architecture set, bundle identifier, team or entitlement set is
+described with fixed text naming only the expected contract. A notary status
+that is not a string (a JSON list or object is valid JSON) is reported as an
+unrecognized status instead of raising. The default ad-hoc path is unchanged.
+
+**Real release validation is still unverified.** The tests drive every step with
+an injected runner, so mocked success is not proof that a real certificate,
+notarization service and stapled ticket behave as expected. The first real
+signed/notarized build must be made and installed by the operator with the
+credentials in hand, and `codesign --verify --strict`, `spctl --assess` and
+`xcrun stapler validate` must agree on the installed app. That fixture must also
+confirm the exact signed file set - no unexpected file inside the sealed app
+beyond the executable, `Info.plist`, icon, signature envelope and whatever the
+real staple adds - before any runtime contract or installer adopts a
+release-signed host. No test, this document or the builder claims otherwise.
+
 ## Ad-hoc signing and reapproval
 
 The host is ad-hoc signed, not signed with a paid Developer ID. Its permission
@@ -193,6 +300,29 @@ CDHash and can require the user to reapprove the Accessibility/Automation prompt
 in System Settings. That is why ordinary engine updates must keep these bytes
 unchanged, and why a host upgrade is a separate, explicit, warned action. The
 builder and tests never edit TCC and never remove a grant.
+
+The explicit release mode above is the alternative: a Developer ID signature
+with hardened runtime, a secure timestamp and a notarized, stapled ticket. It
+does not change what production publishing does or what production installs
+today; that adoption is a later, protected rehearsal. A Developer ID host is also
+a different signed byte set, so it still means one new permission decision for
+the user when it replaces an ad-hoc host.
+
+An owned ad-hoc revision-2/3/4 host is migrated to the signed revision-5 one
+automatically, but only when an authenticated manifest explicitly selects it and
+only through the durable transaction (#2330): the previous app and its exact
+ownership record are kept until the new engine has answered with its own version
+on the configured port, and every later failure puts both back exactly.
+`--no-start` never migrates: it keeps the previous host and says the upgrade
+completes on a later normal run. Before anything is replaced the user is told,
+once, that macOS may ask again for Accessibility and Automation and for access to
+Desktop, Documents and Downloads, and that existing grants are not transferred
+automatically - a Developer ID signature is a new identity to TCC, and this
+installer neither moves nor manufactures a grant. The candidate's launchd job, if
+this run already started one, is booted out and its process waited for before the
+old bytes go back: an identity is never reverted under a still-running candidate,
+and such a run reports an incomplete rollback with its preserved before-images
+rather than a rollback it did not perform.
 
 ## Workspaces in Desktop, Documents and Downloads
 
@@ -226,9 +356,13 @@ environment variable or operation changes, so the protocol stays `2`.
 `run-move` shares `ChildController`, so it takes the same pre-check.
 Replacing a revision-2 or revision-3 host (both are accepted as superseded;
 revision 2 is dropped one release after revision 4 ships) changes the signed
-bytes, so it needs the same
-reapproval as any host upgrade; the release walk must still check whether the
-folder grant survives it.
+bytes, so it needs the same reapproval as any host upgrade, and that includes
+the folder grant: on the v1.7.0 release walk (2026-10-26, macOS 27.0.1) a
+revision 3 → 4 replacement over a workspace in `~/Documents` showed the
+"Ciaobot Server would like to access files in your Documents folder" prompt
+again, and the engine started once it was allowed. A host upgrade therefore
+always means one new folder prompt for a workspace in Desktop, Documents or
+Downloads.
 
 Revision 3 adds the three usage strings the prompt was missing
 (#1659): `NSDesktopFolderUsageDescription`,
@@ -237,9 +371,8 @@ Revision 3 adds the three usage strings the prompt was missing
 Server, and says the access is scoped to a workspace the user chose. Adding them
 changed the signed bytes, which is why the host revision moved to 3 and why the
 installer can now replace a revision-2 host instead of refusing it (see
-`docs/SERVER_HOST_CONTRACT.md`). Not yet verified: whether the folder grant
-survives a host revision (a re-signed bundle). Check it in the release walk of
-the next host revision.
+`docs/SERVER_HOST_CONTRACT.md`). The folder grant does not survive a host
+revision (see revision 4 above).
 
 ## Tests
 
@@ -249,7 +382,33 @@ folder usage descriptions the macOS folder prompts need, the icon digest, no
 Python bundled, the exact both-arch compile commands and deployment floor,
 output refusal, non-macOS refusal before writes, injected build ordering,
 archive safety and metadata, the `killpg`-free and `posix_spawn`-only source
-contract). On macOS with Command Line Tools it
+contract, and the release mode through an injected runner: the fake rejects any
+argv it does not expect and uses native-shaped fixtures written independently of
+the builder's constants; an incomplete or ad-hoc signing configuration is
+refused before writes, the minimal entitlements file is the only entitlement
+source, the one signature embeds runtime, timestamp, entitlements and the stable
+designated requirement through `--requirements`, verification uses
+`--test-requirement` with the single requirement plus `--all-architectures` (and
+never `--requirements`), the exact `ditto`/notary/staple/Gatekeeper argv and
+order are pinned, built and extracted artifacts are each rejected for bad or
+missing architectures/identifier/team/CodeDirectory runtime flag/runtime
+version/timestamp/CDHash/entitlements, the same facts faulted only in the
+x86_64 slice prove the second architecture is enforced independently on both
+built and extracted apps (artifact architecture-set faults stay stage-only),
+non-string notary statuses (including JSON lists and objects) fail sanitized
+without a staple and without a `TypeError`, raw native-tool fields cannot echo
+their content, a wrong team or unmet expected
+requirement is refused before submission, only an exact `Accepted` notarization
+continues (non-zero, malformed, `Invalid`, `Rejected` and unfinished all fail),
+extracted-only staple and Gatekeeper failures are refused after the built app's
+checks passed, every release subprocess is bounded with the notary wait longest,
+failures are sanitized and unchained (no identity, profile, argv or captured
+output in a message or in CLI output), failure removes only this invocation's
+output, the staple happens before the final archive and digests, the ticket
+survives the archive, and the extracted app is independently re-verified. The
+mocked runners prove ordering and failures, not a real certificate or
+notarization service.
+On macOS with Command Line Tools it
 compiles the real host and a small offline C child fixture once, then exercises
 the shipped host: fixed supervisor argv, the fixed `run-move` argv and the
 process group it shares with the host, inherited cwd/environment/stdio, the
@@ -272,7 +431,7 @@ If the user answers *Don't Allow* to "Ciaobot Server would like to access files 
 
 The user sees the line in `ciao service status` (text and `--json`, field `workspace_access_denied`), in the installer when its health wait fails, and in the file itself. The message names System Settings, Privacy & Security, Files and Folders, Ciaobot Server.
 
-Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun.
+Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun. The same holds for a signed-host migration (#2330): a denial during its health wait is a failed transaction, so the previous host and its record are restored (after the candidate's job is quiesced) instead of leaving a signed host with no working engine. A grant given to the ad-hoc host does not follow the Developer ID build - the user may have to allow the folder again for the new identity.
 
 To bring the prompt back for testing: `tccutil reset SystemPolicyDocumentsFolder local.ciaobot.server` (Desktop: `SystemPolicyDesktopFolder`, Downloads: `SystemPolicyDownloadsFolder`).
 
