@@ -905,6 +905,9 @@ SHELL_LAST_PHASE: Final[str] = "download"
 COORDINATOR_READINESS_TIMEOUT_SECONDS: Final[float] = 60.0
 #: Pause between readiness proofs that answered with a transient failure.
 COORDINATOR_READINESS_INTERVAL_SECONDS: Final[float] = 1.0
+#: How long, after the wizard exits, its process group may keep running and the
+#: setup port may stay held before the coordinator stops the group itself.
+COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS: Final[float] = 15.0
 #: Readiness answers that may be retried. Every other failure is final.
 _READINESS_RETRYABLE: Final[frozenset[str]] = frozenset(
     {"listener_missing", "startup_status_unavailable", "startup_not_ready"}
@@ -1135,6 +1138,7 @@ class _CoordinatorPolicy:
     poll_interval: float = COORDINATOR_POLL_INTERVAL_SECONDS
     readiness_timeout: float = COORDINATOR_READINESS_TIMEOUT_SECONDS
     readiness_interval: float = COORDINATOR_READINESS_INTERVAL_SECONDS
+    port_release_timeout: float = COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -1146,6 +1150,7 @@ class _CoordinatorPolicy:
             "poll_interval",
             "readiness_timeout",
             "readiness_interval",
+            "port_release_timeout",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float):
@@ -1191,6 +1196,11 @@ class _CoordinatorDeps:
     #: IPv4 and IPv6, so a foreign same-UID listener (``SO_REUSEPORT`` or a more
     #: specific bind) is returned too and fails the owned-listener check.
     wizard_listener: Callable[[int, int], frozenset[int]]
+    #: ``port -> frozenset`` of every pid holding a listening socket on the setup
+    #: port, read after the wizard's group has exited and before activation. It
+    #: must raise, or return ``None``, when the query itself fails: a failed query
+    #: is never read as a free port.
+    port_listeners: Callable[[int], frozenset[int]]
     prove_ready: Callable[
         [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
     ]
@@ -1219,6 +1229,10 @@ class _OwnedChild:
         self._term_grace = term_grace
         self._reap_timeout = reap_timeout
         self._poll_interval = poll_interval
+        # Set the first time the wizard's group is seen empty. A group id may be
+        # reused once its group is empty, so from then on it is never probed or
+        # signalled again.
+        self._group_gone = False
 
     @property
     def pid(self) -> int:
@@ -1258,6 +1272,85 @@ class _OwnedChild:
                 )
             except subprocess.TimeoutExpired:
                 continue
+
+    def reap_exited(self) -> None:
+        """Reap the leader if it has exited. A running leader is left alone."""
+        self._process.poll()
+
+    def group_alive(self) -> bool:
+        """Whether any process is still in the wizard's group.
+
+        ``ProcessLookupError`` proves the group empty, and that observation
+        latches: every later call returns False without probing again. Any other
+        error is not proof of emptiness, so the group reads as still present and
+        the caller's bounded wait continues; macOS can return EPERM for a group
+        that is still tearing down. Only :meth:`stop_group` can give up, and it
+        raises ``_ChildCleanupFailed`` when emptiness cannot be shown. The leader
+        is reaped first (:meth:`reap_exited`): an unreaped zombie leader would
+        still count as a member.
+        """
+        if self._group_gone:
+            return False
+        if _KILLPG is None:
+            raise _ChildCleanupFailed
+        try:
+            _KILLPG(self._process.pid, 0)
+        except ProcessLookupError:
+            self._group_gone = True
+            return False
+        except OSError:
+            return True
+        return True
+
+    def stop_group(self) -> None:
+        """Terminate the wizard's whole group, leader included, and prove it empty.
+
+        Returns only when the group is proven empty; otherwise raises
+        ``_ChildCleanupFailed``. A latched group returns at once, with no signal.
+        The group id is this child's only while the group is non-empty: POSIX
+        does not reuse a process ID while a process group with that ID exists.
+        Once the group is seen empty, its id may be recycled, so the latch
+        (``_group_gone``) stops every later probe and signal. A group is
+        signalled only after :meth:`group_alive` has seen it non-empty.
+        """
+        if self._group_gone:
+            return
+        self.reap_exited()
+        if self._process.returncode is not None and not self.group_alive():
+            return
+        self._signal_group(signal.SIGTERM)
+        if self._group_empty_within(self._term_grace):
+            return
+        if _SIGKILL is None:
+            raise _ChildCleanupFailed
+        self._signal_group(_SIGKILL)
+        if self._group_empty_within(self._reap_timeout):
+            return
+        raise _ChildCleanupFailed
+
+    def _signal_group(self, signum: int) -> None:
+        if self._group_gone:
+            return
+        if _KILLPG is None:
+            raise _ChildCleanupFailed
+        try:
+            _KILLPG(self._process.pid, signum)
+        except ProcessLookupError:
+            self._group_gone = True
+            return
+        except OSError:
+            raise _ChildCleanupFailed from None
+
+    def _group_empty_within(self, seconds: float) -> bool:
+        end = time.monotonic() + seconds
+        while True:
+            self.reap_exited()
+            if not self.group_alive():
+                return True
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, self._poll_interval))
 
     def terminate_and_reap(self) -> None:
         if self._process.poll() is not None:
@@ -2958,6 +3051,7 @@ def _production_deps(
         # decides ownership; the child pid is not needed here.
         return native_readiness.wizard_listener_pids(port)
 
+
     def prove_ready(
         host: FreshHostInstall, handoff: NativeHandoffResult, remaining: float
     ) -> NativeReadinessProof:
@@ -2992,6 +3086,7 @@ def _production_deps(
         read_handoff=read_handoff,
         activate=activate,
         wizard_listener=wizard_listener,
+        port_listeners=_setup_port_listeners,
         prove_ready=prove_ready,
     )
     return _ProductionDeps(deps=deps, private=private)
@@ -3109,6 +3204,95 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(signum, handler)
 
 
+
+
+def _setup_port_listeners(port: int) -> frozenset[int]:
+    """Production listener lookup for the setup port. Raises when not known.
+
+    "Free" needs two proofs: lsof names no listener, and loopback connects to
+    127.0.0.1 and ::1 are both refused. Listeners lsof names are returned, so
+    the caller sees them as busy. Any answer that proves neither raises, and the
+    coordinator refuses it as unknown.
+    """
+    answer = native_readiness.wizard_listener_answer(port)
+    if answer is None:
+        raise OSError("the setup port listener query failed")
+    if answer:
+        return answer
+    probe = native_readiness.loopback_port_refused(
+        port, native_readiness.LOOPBACK_PROBE_TIMEOUT_SECONDS
+    )
+    if probe is not True:
+        raise OSError("the setup port is not proven free")
+    return frozenset()
+
+
+def _port_listeners_answer(deps: _CoordinatorDeps, port: int) -> frozenset[int]:
+    """The setup port's listeners. A query that raises or answers oddly refuses."""
+    try:
+        answer = deps.port_listeners(port)
+    except (_Cancelled, _TimedOut):
+        raise
+    except Exception:
+        raise _Refusal("activation_refused") from None
+    if not isinstance(answer, frozenset):
+        raise _Refusal("activation_refused")
+    return answer
+
+
+def _await_wizard_release(
+    child: _OwnedChild,
+    port: int,
+    deps: _CoordinatorDeps,
+    policy: _CoordinatorPolicy,
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+) -> None:
+    """Return only once the wizard's group is gone and nothing listens on ``port``.
+
+    A listener outside the wizard's own group is refused at once and is never
+    signalled. Otherwise the group may leave on its own for ``port_release_timeout``;
+    after that, or on cancellation or the run deadline, it is stopped by
+    :meth:`_OwnedChild.stop_group`. Every exit other than success stops the
+    group first, so no process from it is left holding the port. Failing to
+    prove that raises ``_ChildCleanupFailed`` for the caller to retain the lock.
+    """
+    release = _Deadline.after(policy.port_release_timeout)
+    try:
+        while True:
+            _check_stage(deadline, cancellation)
+            child.reap_exited()
+            listeners = _port_listeners_answer(deps, port)
+            for pid in listeners:
+                if _GETPGID is None:
+                    raise _Refusal("activation_refused")
+                try:
+                    group = _GETPGID(pid)
+                except ProcessLookupError:
+                    # Left the port after the query. The next poll decides.
+                    continue
+                except OSError:
+                    raise _Refusal("activation_refused") from None
+                if group != child.pid:
+                    raise _Refusal("activation_refused")
+            if not listeners and not child.group_alive():
+                return
+            if release.remaining() <= 0:
+                break
+            _wait_observing(
+                min(policy.poll_interval, release.remaining()),
+                cancellation,
+                policy.poll_interval,
+            )
+        child.stop_group()
+        if _port_listeners_answer(deps, port):
+            raise _Refusal("activation_refused")
+    except _ChildCleanupFailed:
+        # The group could not be stopped; a second bounded stop would not help.
+        raise
+    except Exception:
+        child.stop_group()
+        raise
 
 
 def _run_native_install(
@@ -3332,6 +3516,15 @@ def _run_native_install(
                 if code != 0:
                     raise _Refusal("wizard_failed")
                 _check_stage(deadline, cancellation)
+                # The leader exiting does not end the wizard's group: a grandchild
+                # can still hold the setup port. Activation waits for both.
+                try:
+                    _await_wizard_release(
+                        child, port, deps, policy, deadline, cancellation
+                    )
+                except _ChildCleanupFailed:
+                    lock_retained = True
+                    raise _Refusal("activation_refused") from None
                 try:
                     handoff = deps.read_handoff(request.run_id)
                 except NativeHandoffError:

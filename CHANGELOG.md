@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.1 - 2026-11-02
+
+### Bug fixes
+- The native Mac install mode (`install.sh --native-install`) failed on a real Mac in two places, both found by a hands-on run on a fresh machine ([#2477](https://github.com/raffaelefarinaro/ciaobot/pull/2477)):
+  - Preparing the installer's private environment failed to resolve dependencies, because `http-ece` (needed by `pywebpush`) ships only as source. The environment now stays binary-only except for that one package.
+  - The service could start while the setup wizard was still releasing its port, so the engine refused to bind and the install ended with `service_not_ready`. The installer now waits for the wizard and everything it started to exit and for the setup port to be free before it starts the service. It never touches another program's process, and refuses instead if one holds the port.
+
 ## v1.8.0 - 2026-11-02
 
 **Heads up:**
