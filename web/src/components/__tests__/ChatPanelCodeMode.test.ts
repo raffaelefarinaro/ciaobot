@@ -107,7 +107,7 @@ enableAutoUnmount(afterEach)
  * use is silent — the assertions then read a panel that never saw the
  * change — and it is exactly what made this file fail on a loaded machine.
  */
-async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
+async function mountPanel(opts: { realRepoSection?: boolean; plainHeader?: boolean } = {}): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -127,6 +127,7 @@ async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ w
   })
 
   const wrapper = shallowMount(ChatPanel, {
+    ...(opts.plainHeader ? { props: { plainHeader: true } } : {}),
     global: {
       plugins: [pinia],
       stubs: {
@@ -364,5 +365,54 @@ describe('ChatPanel naming placeholder', () => {
     expect(css).toMatch(/\.chat-title-shimmer\s*\{[^}]*flex:\s*0 1 10rem/)
     // Reduced motion: a still bar, not a pulse.
     expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{[\s\S]*?animation:\s*none/)
+  })
+})
+
+describe('ChatPanel title rail', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
+  })
+
+  afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  function withSecondChat(store: ReturnType<typeof useProjectStore>) {
+    const stamp = '2026-11-01T10:00:00Z'
+    store.chats[0].last_activity_at = stamp
+    store.chats.push({ ...makeChat('chat-2'), last_activity_at: stamp })
+    store.activeWorkspace = 'personal'
+  }
+
+  it('shows the title rail between close and the code badge when the workspace has another chat', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
+    store.chats[0].code_mode = true
+    withSecondChat(store)
+    await flushPromises()
+
+    const row = wrapper.get('.chat-title-row').element
+    const children = Array.from(row.children)
+    expect(children).toHaveLength(3)
+    expect(children[0].className).toBe('btn-icon close-btn')
+    expect(children[1].classList.contains('title-rail')).toBe(true)
+    expect(children[2].className).toBe('chat-code-badge')
+  })
+
+  it('the plain header returns with plainHeader', async () => {
+    const { wrapper, store } = await mountPanel({ plainHeader: true })
+    withSecondChat(store)
+    await flushPromises()
+
+    expect(wrapper.find('.title-rail').exists()).toBe(false)
+    expect(wrapper.find('.chat-title-row .chat-title').exists()).toBe(true)
   })
 })
