@@ -1229,6 +1229,10 @@ class _OwnedChild:
         self._term_grace = term_grace
         self._reap_timeout = reap_timeout
         self._poll_interval = poll_interval
+        # Set the first time the wizard's group is seen empty. A group id may be
+        # reused once its group is empty, so from then on it is never probed or
+        # signalled again.
+        self._group_gone = False
 
     @property
     def pid(self) -> int:
@@ -1276,30 +1280,41 @@ class _OwnedChild:
     def group_alive(self) -> bool:
         """Whether any process is still in the wizard's group.
 
-        Only ``ProcessLookupError`` proves the group empty. Any other failure
-        raises ``_ChildCleanupFailed``, so it is never read as empty. The leader
+        ``ProcessLookupError`` proves the group empty, and that observation
+        latches: every later call returns False without probing again. Any other
+        error is not proof of emptiness, so the group reads as still present and
+        the caller's bounded wait continues; macOS can return EPERM for a group
+        that is still tearing down. Only :meth:`stop_group` can give up, and it
+        raises ``_ChildCleanupFailed`` when emptiness cannot be shown. The leader
         is reaped first (:meth:`reap_exited`): an unreaped zombie leader would
         still count as a member.
         """
+        if self._group_gone:
+            return False
         if _KILLPG is None:
             raise _ChildCleanupFailed
         try:
             _KILLPG(self._process.pid, 0)
         except ProcessLookupError:
+            self._group_gone = True
             return False
         except OSError:
-            raise _ChildCleanupFailed from None
+            return True
         return True
 
     def stop_group(self) -> None:
         """Terminate the wizard's whole group, leader included, and prove it empty.
 
         Returns only when the group is proven empty; otherwise raises
-        ``_ChildCleanupFailed``. The group id is this child's: POSIX does not
-        reuse a process ID while a process group with that ID exists, so the
-        group signalled here is the wizard's. A group is signalled only after
-        :meth:`group_alive` has seen it non-empty, never blindly.
+        ``_ChildCleanupFailed``. A latched group returns at once, with no signal.
+        The group id is this child's only while the group is non-empty: POSIX
+        does not reuse a process ID while a process group with that ID exists.
+        Once the group is seen empty, its id may be recycled, so the latch
+        (``_group_gone``) stops every later probe and signal. A group is
+        signalled only after :meth:`group_alive` has seen it non-empty.
         """
+        if self._group_gone:
+            return
         self.reap_exited()
         if self._process.returncode is not None and not self.group_alive():
             return
@@ -1314,11 +1329,14 @@ class _OwnedChild:
         raise _ChildCleanupFailed
 
     def _signal_group(self, signum: int) -> None:
+        if self._group_gone:
+            return
         if _KILLPG is None:
             raise _ChildCleanupFailed
         try:
             _KILLPG(self._process.pid, signum)
         except ProcessLookupError:
+            self._group_gone = True
             return
         except OSError:
             raise _ChildCleanupFailed from None
@@ -3033,13 +3051,6 @@ def _production_deps(
         # decides ownership; the child pid is not needed here.
         return native_readiness.wizard_listener_pids(port)
 
-    def port_listeners(port: int) -> frozenset[int]:
-        # A failed or unreadable query raises, so the coordinator refuses it as
-        # busy. An empty set is returned only when lsof ran and found nothing.
-        answer = native_readiness.wizard_listener_answer(port)
-        if answer is None:
-            raise OSError("the setup port listener query failed")
-        return answer
 
     def prove_ready(
         host: FreshHostInstall, handoff: NativeHandoffResult, remaining: float
@@ -3075,7 +3086,7 @@ def _production_deps(
         read_handoff=read_handoff,
         activate=activate,
         wizard_listener=wizard_listener,
-        port_listeners=port_listeners,
+        port_listeners=_setup_port_listeners,
         prove_ready=prove_ready,
     )
     return _ProductionDeps(deps=deps, private=private)
@@ -3193,6 +3204,27 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(signum, handler)
 
 
+
+
+def _setup_port_listeners(port: int) -> frozenset[int]:
+    """Production listener lookup for the setup port. Raises when not known.
+
+    "Free" needs two proofs: lsof names no listener, and loopback connects to
+    127.0.0.1 and ::1 are both refused. Listeners lsof names are returned, so
+    the caller sees them as busy. Any answer that proves neither raises, and the
+    coordinator refuses it as unknown.
+    """
+    answer = native_readiness.wizard_listener_answer(port)
+    if answer is None:
+        raise OSError("the setup port listener query failed")
+    if answer:
+        return answer
+    probe = native_readiness.loopback_port_refused(
+        port, native_readiness.LOOPBACK_PROBE_TIMEOUT_SECONDS
+    )
+    if probe is not True:
+        raise OSError("the setup port is not proven free")
+    return frozenset()
 
 
 def _port_listeners_answer(deps: _CoordinatorDeps, port: int) -> frozenset[int]:

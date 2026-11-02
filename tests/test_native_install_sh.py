@@ -1074,11 +1074,15 @@ def test_the_uv_environment_is_cleared_and_pinned(tmp_path: Path) -> None:
     assert "--default-index https://pypi.org/simple" in by_command["run"]
     assert "--no-build" in by_command["run"]
     assert "--default-index https://pypi.org/simple" in by_command["pip"]
-    # The engine's pinned dependencies include sdist-only packages (http-ece,
-    # via pywebpush), so the coordinator venv must be allowed to build them,
-    # exactly as the coordinator's own `uv tool install` and the legacy installer do.
-    assert "--only-binary" not in by_command["pip"]
+    # The pip install is binary-only except http-ece, which only ships an sdist
+    # (pinned by pywebpush). The full v1.8.0 set resolves this way with uv 0.12.17.
+    pip_argv = by_command["pip"].split()
+    assert "--only-binary" in pip_argv and ":all:" in pip_argv
+    assert "--no-binary" in pip_argv and "http-ece" in pip_argv
+    assert "--no-config" in pip_argv and "--managed-python" in pip_argv
+    assert "--default-index" in pip_argv and "https://pypi.org/simple" in pip_argv
     assert "--only-binary" not in by_command["venv"]
+    assert "--no-binary" not in by_command["venv"]
 
 
 def _uv_blocks(h: dict[str, Any]) -> list[dict[str, Any]]:
