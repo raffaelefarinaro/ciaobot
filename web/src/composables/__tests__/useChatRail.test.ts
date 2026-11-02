@@ -126,6 +126,23 @@ describe('useChatRail', () => {
     expect(ids(retry)).toEqual(['a', 'c', 'b'])
   })
 
+  // The store surfaces a refused switch itself; a step must not add an unhandled rejection on top.
+  it('step does not leave an unhandled rejection when the switch throws', async () => {
+    const store = seed()
+    vi.spyOn(store, 'switchChat').mockRejectedValue(new Error('guard refused'))
+    const rail = useChatRail(() => 'b')
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      expect(rail.step(1)).toBe(true)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+  })
+
   it('ignores a second swipe while a switch is still in flight', async () => {
     const store = seed()
     let finish: () => void = () => {}
