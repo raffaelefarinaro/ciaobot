@@ -69,7 +69,8 @@ jobs:
           py="$RUNNER_TEMP/engine-check/bin/python"
           ws="$GITHUB_WORKSPACE"
           host_archive="$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
-          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" --server-host "$host_archive" "$ws"/dist/ciaobot-*.whl)
+          # The three installers are listed by the exact files the Attach step uploads (#2483): install.sh is the copy Prepare release assets made, and the other two are uploaded from scripts/ verbatim.
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" --server-host "$host_archive" --installer "$ws/install.sh" --installer "$ws/scripts/install-engine.sh" --installer "$ws/scripts/install.ps1" "$ws"/dist/ciaobot-*.whl)
           # The manifest is signed by the same minisign key the installer
           # embeds, but the signer must not live under desktop/ any more or
           # #579b would break the release. `signer sign <path>` needs no Tauri
@@ -83,6 +84,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          set -euo pipefail
           # Exactly seven engine assets: the macOS installer under both names,
           # the Windows installer, the wheel, the signed manifest beside it, and
           # the universal server host archive the manifest authenticates (#1022).
@@ -108,6 +110,22 @@ jobs:
           printf '%s\n' "$assets" | grep -qx install-engine.sh
           printf '%s\n' "$assets" | grep -qx install.ps1
           printf '%s\n' "$assets" | grep -qx ciaobot-server-host-macos-universal-v1.tar.gz
+          # A client authenticates install.sh from the signed manifest (#2483),
+          # so the installers now on the release - not the local copies - have
+          # to be the bytes the manifest lists. Re-downloaded and checked here.
+          uploaded="$RUNNER_TEMP/uploaded-assets"
+          mkdir -p "$uploaded"
+          gh release download "$TAG" --dir "$uploaded" \
+            --pattern install.sh \
+            --pattern install-engine.sh \
+            --pattern install.ps1 \
+            --pattern ciaobot-engine-manifest.json \
+            --pattern ciaobot-engine-manifest.json.sig
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest verify \
+            "$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig" \
+            --asset "$uploaded/install.sh" \
+            --asset "$uploaded/install-engine.sh" \
+            --asset "$uploaded/install.ps1")
 
   release-smoke:
     needs: build-engine

@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ciao import release_manifest
 from ciao.release_manifest import (
+    INSTALLER_KIND,
+    INSTALLER_PLATFORMS,
     MANIFEST_NAME,
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_ARCH,
@@ -28,11 +30,13 @@ from ciao.release_manifest import (
     SignatureError,
     artifact_entry,
     build_manifest,
+    installer_artifact_entry,
     main,
     missing_static_assets,
     parse_public_key,
     select_server_host_artifact,
     server_host_artifact_entry,
+    verify_assets,
     verify_manifest,
     verify_signature,
 )
@@ -1037,3 +1041,171 @@ def test_main_build_refuses_a_signing_team_without_the_host(tmp_path: Path) -> N
         ]
     ) == 1
     assert not out.exists()
+
+
+# ── installer scripts as signed artifacts (#2483) ───────────────────────────
+
+
+def test_installer_artifact_entry_names_platform(tmp_path: Path) -> None:
+    # The client authenticates install.sh by its entry, so the kind, platform and
+    # digest of each installer are pinned here, not just that an entry exists.
+    assert INSTALLER_KIND == "installer"
+    assert set(INSTALLER_PLATFORMS) == {"install.sh", "install-engine.sh", "install.ps1"}
+
+    sh_bytes = b"#!/bin/sh\necho sh\n"
+    sh = tmp_path / "install.sh"
+    sh.write_bytes(sh_bytes)
+    engine_sh = tmp_path / "install-engine.sh"
+    engine_sh.write_bytes(sh_bytes)
+    ps1_bytes = b"Write-Host ps1\n"
+    ps1 = tmp_path / "install.ps1"
+    ps1.write_bytes(ps1_bytes)
+
+    assert installer_artifact_entry(sh) == {
+        "filename": "install.sh",
+        "kind": "installer",
+        "platform": "macos",
+        "arch": "any",
+        "sha256": hashlib.sha256(sh_bytes).hexdigest(),
+        "size": len(sh_bytes),
+    }
+    assert installer_artifact_entry(engine_sh) == {
+        "filename": "install-engine.sh",
+        "kind": "installer",
+        "platform": "macos",
+        "arch": "any",
+        "sha256": hashlib.sha256(sh_bytes).hexdigest(),
+        "size": len(sh_bytes),
+    }
+    assert installer_artifact_entry(ps1) == {
+        "filename": "install.ps1",
+        "kind": "installer",
+        "platform": "windows",
+        "arch": "any",
+        "sha256": hashlib.sha256(ps1_bytes).hexdigest(),
+        "size": len(ps1_bytes),
+    }
+
+
+def test_installer_artifact_entry_rejects_other_names(tmp_path: Path) -> None:
+    bash = tmp_path / "install.bash"
+    bash.write_bytes(b"x")
+
+    with pytest.raises(ValueError, match="not a release installer"):
+        installer_artifact_entry(bash)
+
+
+def _write_installers(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """The three installer scripts a release uploads, as bytes on disk."""
+    sh = tmp_path / "install.sh"
+    sh.write_bytes(b"#!/bin/sh\necho sh\n")
+    engine_sh = tmp_path / "install-engine.sh"
+    engine_sh.write_bytes(b"#!/bin/sh\necho sh\n")
+    ps1 = tmp_path / "install.ps1"
+    ps1.write_bytes(b"Write-Host ps1\n")
+    return sh, engine_sh, ps1
+
+
+def test_main_build_with_installers(tmp_path: Path) -> None:
+    priv, public_key, key_id = _keypair()
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(b"host archive bytes")
+    sh, engine_sh, ps1 = _write_installers(tmp_path)
+    out = tmp_path / MANIFEST_NAME
+
+    assert main(
+        [
+            "build", "--version", "1.2.3", "--out", str(out),
+            "--server-host", str(archive),
+            "--installer", str(sh),
+            "--installer", str(engine_sh),
+            "--installer", str(ps1),
+            str(wheel),
+        ]
+    ) == 0
+
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert [a["kind"] for a in written["artifacts"]] == [
+        "wheel", SERVER_HOST_KIND, "installer", "installer", "installer",
+    ]
+    assert [a for a in written["artifacts"] if a["kind"] == "installer"] == [
+        installer_artifact_entry(sh),
+        installer_artifact_entry(engine_sh),
+        installer_artifact_entry(ps1),
+    ]
+    # The host selector still picks the host out of a manifest with installers.
+    raw = out.read_bytes()
+    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+    assert select_server_host_artifact(verified)["filename"] == SERVER_HOST_FILENAME
+
+
+def test_main_build_rejects_bad_installers_without_partial_output(tmp_path: Path) -> None:
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    out = tmp_path / MANIFEST_NAME
+    sh, _, _ = _write_installers(tmp_path)
+
+    wrong_name = tmp_path / "install.bash"
+    wrong_name.write_bytes(b"x")
+    duplicate = sh
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    empty = empty_dir / "install.sh"
+    empty.write_bytes(b"")
+    missing = tmp_path / "missing" / "install.ps1"
+
+    refused = [wrong_name, sh, empty, missing]
+    for bad in refused:
+        argv = ["build", "--version", "1.2.3", "--out", str(out)]
+        if bad is duplicate:
+            argv += ["--installer", str(sh), "--installer", str(sh)]
+        else:
+            argv += ["--installer", str(bad)]
+        argv.append(str(wheel))
+        assert main(argv) == 1, bad
+        assert not out.exists(), f"a refused build wrote a manifest for {bad}"
+
+
+def test_main_verify_checks_assets(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    priv, public_key, key_id = _keypair()
+    sh = tmp_path / "install.sh"
+    sh.write_bytes(b"#!/bin/sh\n")
+    document = build_manifest(
+        "1.2.3", [_entry(), installer_artifact_entry(sh)], created="2026-09-25T10:00:00+00:00"
+    )
+    manifest = tmp_path / MANIFEST_NAME
+    raw = json.dumps(document).encode()
+    manifest.write_bytes(raw)
+    signature = tmp_path / (MANIFEST_NAME + ".sig")
+    signature.write_text(_sign(raw, priv, key_id), encoding="utf-8")
+    base = ["verify", str(manifest), str(signature), "--public-key", public_key]
+
+    assert main([*base, "--asset", str(sh)]) == 0
+    assert "asset matches: install.sh" in capsys.readouterr().out
+
+    sh.write_bytes(b"#!/bin/sh\nevil\n")
+    assert main([*base, "--asset", str(sh)]) == 1
+    assert "does not match the manifest" in capsys.readouterr().err
+
+    other = tmp_path / "other" / "install.ps1"
+    other.parent.mkdir()
+    other.write_bytes(b"x")
+    assert main([*base, "--asset", str(other)]) == 1
+    assert "0 artifacts named 'install.ps1'" in capsys.readouterr().err
+
+    # Without --asset the signature-and-schema verification is unchanged.
+    assert main(base) == 0
+
+
+def test_verify_assets_refuses_a_duplicated_filename(tmp_path: Path) -> None:
+    sh, _, _ = _write_installers(tmp_path)
+    manifest = build_manifest(
+        "1.2.3",
+        [_entry(), installer_artifact_entry(sh), installer_artifact_entry(sh)],
+        created="2026-09-25T10:00:00+00:00",
+    )
+
+    with pytest.raises(ValueError, match="2 artifacts named 'install.sh'"):
+        verify_assets(manifest, [sh])

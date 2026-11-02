@@ -25,7 +25,13 @@ from ciao import install_receipt, windows_service
 from ciao.cli import build_parser
 from ciao.os_support import shell_hints
 from ciao.release_manifest import RELEASE_PUBLIC_KEY
-from tests.test_engine_installer import VERSION, WHEEL_BYTES, WHEEL_NAME, _manifest_bytes
+from tests.test_engine_installer import (
+    VERSION,
+    WHEEL_BYTES,
+    WHEEL_NAME,
+    _installer_manifest_bytes,
+    _manifest_bytes,
+)
 from tests.test_release_manifest import _keypair, _sign
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -1023,3 +1029,20 @@ def test_install_state_is_read_as_the_utf8_it_is_written_in() -> None:
     # mojibake and a repair or uninstall acted on a path that does not exist.
     assert "New-Object System.Text.UTF8Encoding($false)" in SCRIPT_TEXT
     assert "Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8" in SCRIPT_TEXT
+
+
+def test_embedded_verifier_ignores_installer_artifacts(tmp_path: Path) -> None:
+    # #2483: the Windows verifier must read only the wheel out of a manifest
+    # that also lists the signed installer scripts.
+    raw = _installer_manifest_bytes(tmp_path)
+    private_key, public_key, key_id = _keypair()
+    signature = _sign(raw, private_key, key_id)
+
+    result = _run_verifier(tmp_path, raw, signature, VERSION, public_key)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [
+        WHEEL_NAME,
+        hashlib.sha256(WHEEL_BYTES).hexdigest(),
+        str(len(WHEEL_BYTES)),
+    ]

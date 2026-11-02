@@ -1029,3 +1029,65 @@ def test_workflow_expressions_are_valid_for_github() -> None:
             assert "runner." not in stripped, (
                 "a job-level env value may not use the runner context: " + stripped
             )
+
+
+def test_publish_lists_installers_in_the_signed_manifest() -> None:
+    # #2483: a client authenticates install.sh from the signed manifest, so the
+    # three installers are listed in the build, by the exact files that are
+    # uploaded later, and the manifest is built after Prepare release assets has
+    # copied install.sh.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    build = next(
+        line for line in workflow.splitlines() if "-m ciao.release_manifest build" in line
+    )
+    for installer in (
+        '--installer "$ws/install.sh"',
+        '--installer "$ws/scripts/install-engine.sh"',
+        '--installer "$ws/scripts/install.ps1"',
+    ):
+        assert installer in build, f"the manifest build does not list {installer}"
+    assert workflow.index("Prepare release assets") < workflow.index(
+        "Write and sign engine manifest"
+    )
+
+
+def test_publish_rechecks_uploaded_installers_against_the_manifest() -> None:
+    # #2483: the bytes that matter are the ones on the release, so the publish
+    # job re-downloads them after the upload and verifies each against the
+    # signed manifest.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    upload = workflow.index('gh release upload "$TAG"')
+    download = workflow.index('gh release download "$TAG" --dir "$uploaded"')
+    assert download > upload
+    for asset in (
+        '--asset "$uploaded/install.sh"',
+        '--asset "$uploaded/install-engine.sh"',
+        '--asset "$uploaded/install.ps1"',
+    ):
+        assert asset in workflow, f"publish.yml does not verify {asset}"
+    assert '"$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig"' in workflow
+
+
+def test_docs_drop_the_pinned_install_sh_digest() -> None:
+    # #2483: the client verifies install.sh against the signed manifest, so the
+    # docs no longer tell it to pin one release's digest, and the stale
+    # "after 1.7.0" wording is gone from both files.
+    from ciao.release_manifest import RELEASE_PUBLIC_KEY
+
+    root = Path(__file__).parents[1]
+    development = (root / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    architecture = (root / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+
+    assert "next engine release after 1.7.0" not in development
+    assert "next engine release after 1.7.0" not in architecture
+    assert "must pin the sha256" not in development
+    assert "pin the `install.sh` digest" not in development
+    assert RELEASE_PUBLIC_KEY in development
+    assert "version >= 1.8.1" in development
+    assert "Authenticating `install.sh`" in development
