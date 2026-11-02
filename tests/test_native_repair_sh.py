@@ -23,6 +23,7 @@ from tests.test_engine_installer import SCRIPT_TEXT, VERSION, runs_the_sh_instal
 from tests.test_native_installer import RUN_ID
 from tests.test_native_install_sh import (
     LEGACY_USAGE,
+    _default_argv,
     _FAKE_COORDINATOR,
     _VENV_PYTHON,
     _PROBE,
@@ -50,6 +51,36 @@ _WIZARD_LINES = (
     'emit({"type": "wizard_ready", "origin": "http://127.0.0.1:54321"})\n',
     'emit({"type": "setup_saved"})\n',
 )
+
+# A coordinator that refuses at once: it writes one terminal event at the first
+# sequence number it is given, and exits 1.
+_REFUSING_COORDINATOR = '''\
+import argparse
+import json
+import os
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("command")
+parser.add_argument("--run-id", required=True)
+parser.add_argument("--events-fd", type=int, required=True)
+parser.add_argument("--first-seq", type=int, required=True)
+args, _ = parser.parse_known_args(sys.argv[1:])
+line = {"schema": 1, "run_id": args.run_id, "seq": args.first_seq, "type": "failed", "code": "not_installed"}
+os.write(args.events_fd, (json.dumps(line, separators=(",", ":")) + "\\n").encode())
+raise SystemExit(1)
+'''
+
+# The files a successful repair writes under HOME. Only the first is the fake
+# coordinator's own record. The rest are logs of harness fakes the shell calls
+# (the shasum wrapper, and the fake `uv run` that the native run reaches): the
+# harness's snapshot does not exclude them, and this test may not edit it.
+_SUCCESS_WRITES = {
+    "coordinator-argv.json",
+    "shasum-env.log",
+    "uv-run-calls.log",
+    "native-host-wheel",
+}
 
 
 def _repair_harness(tmp_path: Path, *, installed: bool = True) -> dict[str, Any]:
@@ -87,6 +118,15 @@ def _repair_argv(fd: int) -> list[str]:
 
 def _terminal(payload: bytes) -> list[dict[str, Any]]:
     return [e for e in _events(payload) if e["type"] in native.TERMINAL_TYPES]
+
+
+def _plant_lock(h: dict[str, Any]) -> Path:
+    """A native-install lock held by another run, whose owner is not running."""
+    lock = h["home"] / ".local/state/ciaobot/native-install.lock"
+    lock.mkdir(parents=True)
+    record = lock / "run.json"
+    record.write_text('{"schema":1,"run_id":"%s","pid":999999}' % OTHER_RUN_ID, encoding="utf-8")
+    return record
 
 
 # --- the success path ----------------------------------------------------------
@@ -132,7 +172,24 @@ def test_repair_streams_shell_phases_then_hands_over_to_the_repair_coordinator(t
     assert pairs["--run-id"] == RUN_ID
     assert pairs["--version"] == VERSION
     assert "--workspace" not in argv
-    assert any(line.startswith("coordinator ") for line in _read(h["home"], "fd.log").splitlines())
+    fd_log = _read(h["home"], "fd.log")
+    assert any(line.startswith("coordinator ") for line in fd_log.splitlines())
+    # The protocol probe imports the repair coordinator, never the install one.
+    assert "probe " in fd_log
+    assert "from ciao.native_repair import NATIVE_REPAIR_PROTOCOL" in fd_log
+    assert "native_installer" not in fd_log
+
+
+def test_coordinator_refusal_after_handover_is_the_only_terminal(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path)
+    (tmp_path / "fake_coordinator.py").write_text(_REFUSING_COORDINATOR, encoding="utf-8")
+    completed, payload = _run(h, _repair_argv)
+    assert completed.returncode == 1
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "phase", "phase", "failed"]
+    assert [e.get("phase") for e in events[:3]] == ["preflight", "bootstrap", "download"]
+    assert events[-1] == {"schema": 1, "run_id": RUN_ID, "seq": 4, "type": "failed", "code": "not_installed"}
+    assert len(_terminal(payload)) == 1
 
 
 # --- refusals that name the flag or the state ---------------------------------
@@ -158,6 +215,7 @@ def test_nothing_installed_is_not_installed_and_changes_nothing(tmp_path: Path) 
     events = _events(payload)
     assert [e["type"] for e in events] == ["phase", "failed"]
     assert events[1]["code"] == "not_installed"
+    assert b"use --native-install" in completed.stderr
     assert "curl" not in _trace(h)
     assert _snapshot(h["home"]) == before
 
@@ -196,23 +254,102 @@ def test_repair_unknown_state_changes_nothing(tmp_path: Path, case: str) -> None
     assert _snapshot(h["home"]) == before
 
 
+@pytest.mark.parametrize("contents", ["FOO=1\n", "# CIAO_WORKSPACES=x\n", "CIAO_WORKSPACES=\n"])
+def test_an_env_without_a_usable_workspace_line_is_not_evidence(tmp_path: Path, contents: str) -> None:
+    h = _repair_harness(tmp_path, installed=False)
+    _write(h["home"] / "Ciaobot/.env", contents)
+    before = _snapshot(h["home"])
+    completed, payload = _run(h, _repair_argv)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "not_installed"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
+def test_an_unreadable_env_is_unknown_state(tmp_path: Path) -> None:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    h = _repair_harness(tmp_path, installed=False)
+    env_file = h["home"] / "Ciaobot/.env"
+    _write(env_file, "CIAO_WORKSPACES=x\n")
+    before = _snapshot(h["home"])
+    env_file.chmod(0)
+    try:
+        completed, payload = _run(h, _repair_argv)
+    finally:
+        env_file.chmod(0o644)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "unknown_state"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
+def test_a_plist_directory_is_unknown_state(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path, installed=False)
+    (h["home"] / "Library/LaunchAgents/com.ciao.server.plist").mkdir(parents=True)
+    before = _snapshot(h["home"])
+    completed, payload = _run(h, _repair_argv)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "unknown_state"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
+def test_an_indeterminate_launchctl_answer_is_unknown_state(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path, installed=False)
+    _write(h["home"] / "launchctl-print-indeterminate", "")
+    before = _snapshot(h["home"])
+    completed, payload = _run(h, _repair_argv)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "unknown_state"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
 def test_repair_refuses_a_held_lock_and_keeps_it(tmp_path: Path) -> None:
     h = _repair_harness(tmp_path)
-    lock = h["home"] / ".local/state/ciaobot/native-install.lock"
-    lock.mkdir(parents=True)
-    record = lock / "run.json"
-    record.write_text(
-        '{"schema":1,"run_id":"%s","pid":999999}' % OTHER_RUN_ID,
-        encoding="utf-8",
-    )
-    before = record.read_bytes()
+    record = _plant_lock(h)
+    before_record = record.read_bytes()
+    before = _snapshot(h["home"])
     completed, payload = _run(h, _repair_argv)
     events = _events(payload)
     assert [e["type"] for e in events] == ["phase", "failed"]
     assert events[1]["code"] == "install_in_progress"
     assert b"never removed automatically" in completed.stderr
-    assert record.read_bytes() == before
+    assert record.read_bytes() == before_record
     assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
+def test_lock_beats_unknown_state(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path, installed=False)
+    _plant_lock(h)
+    plist = h["home"] / "Library/LaunchAgents/com.ciao.server.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.symlink_to(h["home"] / "nowhere.plist")
+    before = _snapshot(h["home"])
+    completed, payload = _run(h, _repair_argv)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "install_in_progress"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
+
+
+def test_lock_beats_not_installed(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path, installed=False)
+    _plant_lock(h)
+    before = _snapshot(h["home"])
+    completed, payload = _run(h, _repair_argv)
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "install_in_progress"
+    assert "curl" not in _trace(h)
+    assert _snapshot(h["home"]) == before
 
 
 # --- installed evidence proceeds ----------------------------------------------
@@ -234,10 +371,16 @@ def _plant_legacy_env(h: dict[str, Any]) -> None:
 def test_installed_evidence_variants_proceed(tmp_path: Path, plant: Any) -> None:
     h = _repair_harness(tmp_path, installed=False)
     plant(h)
+    before = _snapshot(h["home"])
     completed, payload = _run(h, _repair_argv)
     assert completed.returncode == 0, completed.stderr
     assert _events(payload)[-1]["type"] == "service_ready"
     assert _argv_record(h) is not None
+    # The success path is read-only apart from what the fake coordinator and the
+    # harness's shasum log record; nothing else under HOME changes.
+    after = _snapshot(h["home"])
+    changed = {name for name in set(before) | set(after) if before.get(name) != after.get(name)}
+    assert changed == _SUCCESS_WRITES
 
 
 # --- argument validation ------------------------------------------------------
@@ -254,15 +397,45 @@ def test_both_native_flags_are_invalid_arguments(tmp_path: Path) -> None:
     assert "curl" not in _trace(h)
 
 
-@pytest.mark.parametrize("flag", ["--migrate", "--as-host", "--no-start"])
-def test_repair_refuses_legacy_flags(tmp_path: Path, flag: str) -> None:
+@pytest.mark.parametrize(
+    "tail, flag",
+    [
+        (["--migrate"], "--migrate"),
+        (["--as-host"], "--as-host"),
+        (["--as-client", "https://example.test"], "--as-client"),
+        (["--no-start"], "--no-start"),
+    ],
+)
+def test_repair_refuses_legacy_flags(tmp_path: Path, tail: list[str], flag: str) -> None:
     h = _repair_harness(tmp_path)
-    completed, payload = _run(h, lambda fd: _repair_argv(fd) + [flag])
+    completed, payload = _run(h, lambda fd: _repair_argv(fd) + tail)
     assert completed.returncode != 0
     events = _events(payload)
     assert [e["type"] for e in events][-1] == "failed"
     assert events[-1]["code"] == "invalid_arguments"
     assert f"{flag} cannot be combined with --native-repair".encode() in completed.stderr
+    assert "curl" not in _trace(h)
+
+
+def test_repair_requires_version(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path)
+    completed, payload = _run(h, lambda fd: ["--native-repair", "--events-fd", str(fd), "--run-id", RUN_ID])
+    assert completed.returncode != 0
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["failed"]
+    assert events[0]["code"] == "invalid_arguments"
+    assert b"--native-repair requires --version" in completed.stderr
+    assert "curl" not in _trace(h)
+
+
+def test_repair_refuses_a_non_https_release_base(tmp_path: Path) -> None:
+    h = _repair_harness(tmp_path)
+    completed, payload = _run(h, _repair_argv, env={"CIAO_RELEASE_BASE_URL": "http://example.test/releases"})
+    assert completed.returncode != 0
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["failed"]
+    assert events[0]["code"] == "invalid_arguments"
+    assert b"--native-repair needs a" in completed.stderr
     assert "curl" not in _trace(h)
 
 
@@ -310,3 +483,16 @@ def test_repair_shell_constants_match_the_coordinator() -> None:
     assert repair.NATIVE_REPAIR_PROTOCOL == 1
     assert "not_installed" in native.FAILURE_CODES
     assert "native_code=not_installed" in SCRIPT_TEXT
+
+
+@pytest.mark.parametrize("mode", ["install", "repair"])
+def test_repeated_native_flags_are_not_mutually_exclusive(tmp_path: Path, mode: str) -> None:
+    if mode == "install":
+        h = _native_harness(tmp_path)
+        argv_for = lambda fd: _default_argv(fd) + ["--native-install"]  # noqa: E731
+    else:
+        h = _repair_harness(tmp_path)
+        argv_for = lambda fd: _repair_argv(fd) + ["--native-repair"]  # noqa: E731
+    completed, payload = _run(h, argv_for)
+    assert completed.returncode == 0, completed.stderr
+    assert _events(payload)[-1]["type"] == "service_ready"

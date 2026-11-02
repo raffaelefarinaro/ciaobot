@@ -836,12 +836,12 @@ Refusals change nothing (no file, lock or service):
 
 | Code | Emitted by | Meaning |
 | --- | --- | --- |
-| `not_installed` | shell or coordinator | No LaunchAgent, no loaded job and no completed workspace at `~/Ciaobot`. Also covers a workspace whose install shows no native evidence: none of the install receipt, our LaunchAgent, or the server host ownership record exists (for example a user's own `uv tool install ciaobot`). Offer native install instead. |
+| `not_installed` | shell or coordinator | No LaunchAgent, no loaded job, and no workspace evidence at `~/Ciaobot` (`.runtime/workspaces.json` or a `CIAO_WORKSPACES=` line in `.env`). Also covers a workspace whose install shows no native evidence: none of the install receipt, our LaunchAgent, or the server host ownership record exists (for example a user's own `uv tool install ciaobot`). Offer native install instead. |
 | `install_in_progress` | shell or coordinator | A native install or repair holds `~/.local/state/ciaobot/native-install.lock`, or a killed run left it. See "Recovering a native-install lock". |
 | `unknown_state` | shell or coordinator | A redirect variable or `CIAO_CHAT_ID`; an unsafe state directory, plist, `.env`, receipt or shim; a LaunchAgent with another label, runtime root or program (for example a developer checkout); a loaded job without a LaunchAgent; a disabled launchd override; a migration transaction, host-upgrade journal or legacy menubar agent; a symlink at the host path, or a LaunchAgent whose host lies outside `~/Applications/Ciaobot Server.app`; an invalid `PWA_PORT`; a classification that changed after the lock was taken. |
 | `invalid_arguments` | shell or coordinator | As in install mode, plus both native flags given, `--workspace` given, a release without `ciao.native_repair`, a `--version` that is not `X.Y.Z[-pre]`, or a `--version` older than the installed engine (SemVer precedence; nothing is touched). |
 
-The other codes (`download_failed`, `verification_failed`, `install_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error`) mean what they mean in install mode.
+The other codes (`download_failed`, `verification_failed`, `install_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error`) mean what they mean in install mode. The shell's preflight reports a held lock as `install_in_progress` before any other state.
 
 What repair checks and replaces. Every check runs before the first change, and only a component that fails its check is replaced:
 
@@ -855,7 +855,7 @@ What repair checks and replaces. Every check runs before the first change, and o
 | LaunchAgent `~/Library/LaunchAgents/com.ciao.server.plist` | bytes equal the canonical hosted render for the workspace, its `.runtime`, the configured port and the existing plist's `PATH` | missing or different (atomic replace, `0600`) |
 | Service `com.ciao.server` | — | always: `launchctl bootout` when loaded, wait until launchd reports it absent, then bootstrap through `load_fresh_agent`, then the native readiness proof |
 
-Every check, including the host archive, runs before the service is stopped. A bad host archive ends `failed(verification_failed)` with the service untouched.
+Every check, including the host archive when one would be used, runs before the service is stopped. A bad host archive ends `failed(verification_failed)` with the service untouched.
 
 A healthy install is idempotent: nothing but the persisted uv and the service restart changes, and the run ends with `service_ready` on the same port. Repair never edits a shell profile, opens a browser, prints a sign-in URL, clears a launchd override, removes a lock or rolls back. Because it replaces only what already failed its check, a failure part-way leaves no component worse than it found it, but a failure after the service is stopped leaves it stopped: repair does not roll back, and the client should offer Repair again. The engine the run starts writes its normal runtime state under `.runtime/`, as every start does.
 

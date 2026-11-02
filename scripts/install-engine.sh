@@ -167,7 +167,7 @@ settled_mismatch=
 native_install=0
 # Native repair mode (#2485) reuses every native-mode helper; these pick its preflight and coordinator.
 native_repair=0
-native_modes=0
+native_want_install=0
 native_flag=--native-install
 native_module=ciao.native_installer
 events_fd=
@@ -1122,7 +1122,7 @@ native_validate_arguments() {
     esac
     native_emit_phase preflight || { native_channel_open=0; fail "the --events-fd descriptor is not writable"; }
     # Refused after the preflight phase, so the events are phase preflight then failed.
-    [ "$native_modes" -le 1 ] || fail "--native-install and --native-repair are mutually exclusive"
+    [ "$native_want_install" -eq 0 ] || [ "$native_repair" -eq 0 ] || fail "--native-install and --native-repair are mutually exclusive"
     if [ "$native_repair" -eq 1 ] && [ -n "$workspace" ]; then
         fail "--workspace cannot be combined with --native-repair"
     fi
@@ -1223,8 +1223,8 @@ while [ "$#" -gt 0 ]; do
             as_client=$2
             shift 2
             ;;
-        --native-install) native_install=1; native_modes=$((native_modes + 1)); shift ;;
-        --native-repair) native_install=1; native_repair=1; native_modes=$((native_modes + 1)); native_flag=--native-repair; native_module=ciao.native_repair; shift ;;
+        --native-install) native_install=1; native_want_install=1; shift ;;
+        --native-repair) native_install=1; native_repair=1; native_flag=--native-repair; native_module=ciao.native_repair; shift ;;
         --events-fd)
             [ "$#" -ge 2 ] || fail "--events-fd requires a value"
             events_fd=$2
