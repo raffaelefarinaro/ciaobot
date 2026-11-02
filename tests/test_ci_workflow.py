@@ -1052,26 +1052,58 @@ def test_publish_lists_installers_in_the_signed_manifest() -> None:
     assert workflow.index("Prepare release assets") < workflow.index(
         "Write and sign engine manifest"
     )
+    # The upload block ships the same install.sh the build lists: the bare name
+    # is the workspace copy that "$ws/install.sh" points at.
+    upload = workflow[workflow.index('gh release upload "$TAG"'):]
+    upload = upload[: upload.index("--clobber")]
+    assert any(line.strip() == "install.sh \\" for line in upload.splitlines()), (
+        "gh release upload does not ship the install.sh the manifest lists"
+    )
 
 
 def test_publish_rechecks_uploaded_installers_against_the_manifest() -> None:
     # #2483: the bytes that matter are the ones on the release, so the publish
     # job re-downloads them after the upload and verifies each against the
-    # signed manifest.
+    # signed manifest. The checks read only the slice from the upload to the
+    # next job, so a commented-out or `|| true` verify cannot pass on a
+    # fragment that happens to sit elsewhere in the file.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
 
-    upload = workflow.index('gh release upload "$TAG"')
-    download = workflow.index('gh release download "$TAG" --dir "$uploaded"')
-    assert download > upload
+    attach = workflow.index("- name: Attach release assets")
+    upload = workflow.index('gh release upload "$TAG"', attach)
+    step = workflow[upload : workflow.index("\n  release-smoke:")]
+
+    # The Attach step fails the job on the first error, before anything uploads.
+    assert "set -euo pipefail" in workflow[attach:upload]
+
+    download = step.index('gh release download "$TAG" --dir "$uploaded"')
+    assert download < step.index("ciao.release_manifest verify")
+    for asset in (
+        '"$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig"',
+        '--asset "$uploaded/install.sh"',
+        '--asset "$uploaded/install-engine.sh"',
+        '--asset "$uploaded/install.ps1"',
+    ):
+        assert asset in step, f"publish.yml does not verify {asset}"
+
+    # The verify statement itself: a live call, the three installers in it, and
+    # no `||` on any of its lines, so a failure cannot be swallowed.
+    lines = step.splitlines()
+    start_line = next(i for i, line in enumerate(lines) if "ciao.release_manifest verify" in line)
+    assert not lines[start_line].lstrip().startswith("#"), "the verify call is commented out"
+    end_line = next(i for i in range(start_line, len(lines)) if ")" in lines[i])
+    statement = lines[start_line : end_line + 1]
     for asset in (
         '--asset "$uploaded/install.sh"',
         '--asset "$uploaded/install-engine.sh"',
         '--asset "$uploaded/install.ps1"',
     ):
-        assert asset in workflow, f"publish.yml does not verify {asset}"
-    assert '"$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig"' in workflow
+        assert any(asset in line for line in statement), f"verify does not check {asset}"
+    assert not any("||" in line for line in statement), (
+        "the manifest verify can fail without failing the job"
+    )
 
 
 def test_docs_drop_the_pinned_install_sh_digest() -> None:

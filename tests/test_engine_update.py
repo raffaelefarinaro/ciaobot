@@ -3510,7 +3510,7 @@ def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
     raw = json.dumps(
         build_manifest(
             "1.2.3",
-            [wheel, installer_artifact_entry(installer)],
+            [installer_artifact_entry(installer), wheel],
             created="2026-09-25T10:00:00+00:00",
         )
     ).encode()

@@ -106,10 +106,10 @@ jobs:
           # has to be on the release or a documented install path is dead.
           # Checked here, where the tag is still known.
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
-          printf '%s\n' "$assets" | grep -qx install.sh
-          printf '%s\n' "$assets" | grep -qx install-engine.sh
-          printf '%s\n' "$assets" | grep -qx install.ps1
-          printf '%s\n' "$assets" | grep -qx ciaobot-server-host-macos-universal-v1.tar.gz
+          grep -qx install.sh <<<"$assets"
+          grep -qx install-engine.sh <<<"$assets"
+          grep -qx install.ps1 <<<"$assets"
+          grep -qx ciaobot-server-host-macos-universal-v1.tar.gz <<<"$assets"
           # A client authenticates install.sh from the signed manifest (#2483),
           # so the installers now on the release - not the local copies - have
           # to be the bytes the manifest lists. Re-downloaded and checked here.

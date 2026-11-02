@@ -1055,8 +1055,9 @@ def test_installer_artifact_entry_names_platform(tmp_path: Path) -> None:
     sh_bytes = b"#!/bin/sh\necho sh\n"
     sh = tmp_path / "install.sh"
     sh.write_bytes(sh_bytes)
+    engine_bytes = b"#!/bin/sh\necho engine\n"
     engine_sh = tmp_path / "install-engine.sh"
-    engine_sh.write_bytes(sh_bytes)
+    engine_sh.write_bytes(engine_bytes)
     ps1_bytes = b"Write-Host ps1\n"
     ps1 = tmp_path / "install.ps1"
     ps1.write_bytes(ps1_bytes)
@@ -1074,8 +1075,8 @@ def test_installer_artifact_entry_names_platform(tmp_path: Path) -> None:
         "kind": "installer",
         "platform": "macos",
         "arch": "any",
-        "sha256": hashlib.sha256(sh_bytes).hexdigest(),
-        "size": len(sh_bytes),
+        "sha256": hashlib.sha256(engine_bytes).hexdigest(),
+        "size": len(engine_bytes),
     }
     assert installer_artifact_entry(ps1) == {
         "filename": "install.ps1",
@@ -1100,7 +1101,7 @@ def _write_installers(tmp_path: Path) -> tuple[Path, Path, Path]:
     sh = tmp_path / "install.sh"
     sh.write_bytes(b"#!/bin/sh\necho sh\n")
     engine_sh = tmp_path / "install-engine.sh"
-    engine_sh.write_bytes(b"#!/bin/sh\necho sh\n")
+    engine_sh.write_bytes(b"#!/bin/sh\necho engine\n")
     ps1 = tmp_path / "install.ps1"
     ps1.write_bytes(b"Write-Host ps1\n")
     return sh, engine_sh, ps1
@@ -1185,6 +1186,12 @@ def test_main_verify_checks_assets(tmp_path: Path, capsys: pytest.CaptureFixture
     assert main([*base, "--asset", str(sh)]) == 0
     assert "asset matches: install.sh" in capsys.readouterr().out
 
+    # Same length, one byte changed: only the sha256 comparison can refuse it.
+    sh.write_bytes(b"#!/bin/sx\n")
+    assert len(b"#!/bin/sx\n") == len(b"#!/bin/sh\n")
+    assert main([*base, "--asset", str(sh)]) == 1
+    assert "does not match the manifest" in capsys.readouterr().err
+
     sh.write_bytes(b"#!/bin/sh\nevil\n")
     assert main([*base, "--asset", str(sh)]) == 1
     assert "does not match the manifest" in capsys.readouterr().err
@@ -1209,3 +1216,25 @@ def test_verify_assets_refuses_a_duplicated_filename(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="2 artifacts named 'install.sh'"):
         verify_assets(manifest, [sh])
+
+
+def test_verify_assets_refuses_a_swapped_installer(tmp_path: Path) -> None:
+    # Distinct bytes of the same length: only the sha256 can tell the two apart,
+    # so a digest-blind comparison cannot pass this test on a size mismatch.
+    sh = tmp_path / "install.sh"
+    sh.write_bytes(b"#!/bin/sh\necho aaaa\n")
+    engine_sh = tmp_path / "install-engine.sh"
+    engine_sh.write_bytes(b"#!/bin/sh\necho bbbb\n")
+    assert sh.stat().st_size == engine_sh.stat().st_size
+    manifest = build_manifest(
+        "1.2.3",
+        [_entry(), installer_artifact_entry(sh), installer_artifact_entry(engine_sh)],
+        created="2026-09-25T10:00:00+00:00",
+    )
+    swapped_dir = tmp_path / "swapped"
+    swapped_dir.mkdir()
+    swapped = swapped_dir / "install-engine.sh"
+    swapped.write_bytes(sh.read_bytes())
+
+    with pytest.raises(ValueError, match="does not match the manifest"):
+        verify_assets(manifest, [swapped])
