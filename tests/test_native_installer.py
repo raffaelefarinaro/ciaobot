@@ -2794,6 +2794,7 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
         "activate": lambda run_id, remaining: _handoff(run_id),
         "wizard_listener": lambda port, child_pid: frozenset({child_pid}),
         "port_listeners": lambda port: frozenset(),
+        "port_bindable": lambda port: True,
         "prove_ready": lambda host, handoff, remaining: NativeReadinessProof(
             ready=False,
             failure="startup_status_invalid",
@@ -3535,7 +3536,9 @@ def test_a_second_preflight_refuses_a_service_that_appeared_before_host_install(
     assert events[-1]["code"] == "existing_install"
 
 
-@pytest.mark.parametrize("field", ["run_timeout", "port_release_timeout"])
+@pytest.mark.parametrize(
+    "field", ["run_timeout", "port_release_timeout", "port_bind_timeout"]
+)
 @pytest.mark.parametrize(
     "value",
     [0, -1, float("inf"), float("nan"), native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1],
@@ -3964,6 +3967,91 @@ def test_an_unprovable_group_keeps_the_lock_and_never_activates(
     assert outcome.activation_attempted is False
     assert activated == []
     assert _lock_path(tmp_path / "state").exists()
+
+
+def test_activation_waits_until_the_service_port_is_bindable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    answers = iter([False, False, True])
+    probed: list[int] = []
+    calls_at_activation: list[int] = []
+
+    def port_bindable(port: int) -> bool:
+        probed.append(port)
+        return next(answers)
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        calls_at_activation.append(len(probed))
+        return _handoff(run_id)
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path, port_bindable=port_bindable, activate=activate
+    )
+
+    assert calls_at_activation == [3]
+    assert probed == [_handoff(RUN_ID).port] * 3
+    assert outcome.activation_completed is True
+
+
+def test_a_never_bindable_service_port_refuses_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    activated: list[str] = []
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    policy = native._CoordinatorPolicy(port_bind_timeout=0.3, poll_interval=0.02)
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path,
+        port_bindable=lambda port: False,
+        activate=activate,
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is False
+    assert activated == []
+
+
+def test_a_raising_bind_probe_refuses_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    activated: list[str] = []
+
+    def port_bindable(port: int) -> bool:
+        raise OSError("probe failed")
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path, port_bindable=port_bindable, activate=activate
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is False
+    assert activated == []
+
+
+def test_the_engine_bind_probe_sees_a_held_port_only_until_it_is_closed() -> None:
+    from ciao.port_in_use import port_is_available
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        holder.bind(("0.0.0.0", 0))
+        holder.listen(1)
+        port = holder.getsockname()[1]
+        assert port_is_available(port, native.DEFAULT_PWA_HOST) is False
+    finally:
+        holder.close()
+    assert port_is_available(port, native.DEFAULT_PWA_HOST) is True
 
 
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:

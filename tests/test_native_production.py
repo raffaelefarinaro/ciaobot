@@ -1256,6 +1256,7 @@ def _e2e(
     )
     deps = dataclasses.replace(
         production.deps,
+        port_bindable=lambda port: True,
         prepare_state_dir=lambda: native_lock.prepare_native_state_dir(
             tmp_path / "state", trusted_root=tmp_path
         ),
@@ -1663,6 +1664,7 @@ def test_a_held_lock_reports_pid_liveness_on_stderr_only(
     )
     deps = dataclasses.replace(
         production.deps,
+        port_bindable=lambda port: True,
         prepare_state_dir=lambda: native_lock.prepare_native_state_dir(
             state, trusted_root=tmp_path
         ),

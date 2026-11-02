@@ -695,7 +695,7 @@ holding a listening socket on that port, IPv4 and IPv6. The set must be non-empt
 and every pid must be the wizard child or in the process group the child leads
 (`_OwnedChild.owns_process`), or the run is `wizard_failed` before `wizard_ready`
 is emitted. It then emits `wizard_ready`, validates the run-bound handoff, emits
-`setup_saved`, and calls activation. Before activation, the coordinator waits for the wizard's process group to exit and the setup port to be free, terminating only its own wizard group at the bound, and refuses `activation_refused` if a foreign listener holds the port. After `wizard_ready`, a wizard exit or any
+`setup_saved`, and calls activation. Before activation, the coordinator waits for the wizard's process group to exit and the setup port to be free, terminating only its own wizard group at the bound, and refuses `activation_refused` if a foreign listener holds the port. It then waits until the engine's own bind probe (`port_is_available`) accepts the service port, and refuses `activation_refused` if it never does within ten seconds. That also catches a port held by a listener the coordinator cannot see, such as another user's or a root service bound to a specific interface. After `wizard_ready`, a wizard exit or any
 `failed` event ends trust in that origin, and the client must stop using it.
 `workspace` is only the classifier suggestion; the selected directory is read from
 the handoff and reported, and an optional `expected_workspace` is the only
