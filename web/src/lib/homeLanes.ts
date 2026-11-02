@@ -38,6 +38,14 @@ export function ageBucket(iso: string, now: Date = new Date()): 'fresh' | 'week'
  * reason it was pulled out of `quiet` in the first place: calling a chat
  * with an unread badge "quiet" was simply untrue.
  */
+/** The order Home renders its tiers in (HomeRecentChats tierEntries: needs you, working, unread, earlier = quiet + older). */
+export const HOME_TIER_ORDER: readonly HomeTierKey[] = ['needsYou', 'working', 'unread', 'quiet', 'older']
+
+export interface OrderedHomeChat {
+  chat: ChatInfo
+  tier: HomeTierKey
+}
+
 export function groupHomeTiers(
   chats: ChatInfo[],
   isNeedsYou: (chatId: string) => boolean,
@@ -69,4 +77,9 @@ export function groupHomeTiers(
   }
 
   return tiers
+}
+
+// Same order as HomeRecentChats.vue tierEntries, which renders these tiers. Keep them in step.
+export function orderedHomeChats(tiers: HomeTiers): OrderedHomeChat[] {
+  return HOME_TIER_ORDER.flatMap(tier => tiers[tier].map(chat => ({ chat, tier })))
 }

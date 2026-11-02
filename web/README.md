@@ -102,6 +102,7 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
+    components/ChatTitleRail.vue  the chat header's swipeable title rail (ChatPanel's `plainHeader` prop turns it off)
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
@@ -119,7 +120,7 @@ web/
                            bumps when the project order changes outside the store's own reorder so an open sidebar
                            drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
-                          out of oversized panes (useHoverPinPopover, useChatComposer,
+                          out of oversized panes (useHoverPinPopover, useChatComposer, useChatRail (Home-ordered, workspace-scoped rail items with an order frozen across rail switches),
                           useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
@@ -136,7 +137,8 @@ web/
     lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
-                          (drop-slot geometry, settled order, auto-scroll step, announcement wording)
+                          (drop-slot geometry, settled order, auto-scroll step, announcement wording);
+                          `chatRail.ts` (rail order, neighbours, settle index, labels)
 ```
 
 ## iOS PWA gotchas
@@ -606,6 +608,7 @@ establish:
 | Spec | What only a real browser can decide |
 | --- | --- |
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
+| `chat-title-rail.spec.ts` | That the header's rail snaps and settles to a neighbour in a real layout, switches the chat, keeps the 61px header and the title-line alignment, and that the body never scrolls sideways. |
 | `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `task-board-lanes.spec.ts` | That every board lane is 310px wide at 1440, 1100, 900 and iPhone widths (computed flex included), that a review card's state word and action share one line, and that Done sits collapsed behind a 44px tab that expands, hides, persists across a reload, scrolls the Done lane into view and focuses its Hide button when the tab opens it, and accepts a dropped card (opening the completion sheet). The status filter still lists done tasks at full width. Widths and line boxes only exist in a real layout engine. |
