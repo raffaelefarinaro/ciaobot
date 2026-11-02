@@ -3497,12 +3497,24 @@ def _spawn_with_spoofed_argv0(spoof: Path) -> subprocess.Popen[bytes]:
     even though every user-space string the process can choose says ``spoof``.
     No service, signed host or real user file is involved.
     """
-    return subprocess.Popen(
-        [str(spoof), "-c", "import time; time.sleep(60)"],
+    child = subprocess.Popen(
+        [
+            str(spoof),
+            "-c",
+            "import sys, time; sys.stdout.write('ready\\n'); sys.stdout.flush(); time.sleep(60)",
+        ],
         executable=sys.executable,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    # A framework build's `bin/python3.x` re-execs `Python.app`; the line is
+    # written from inside Python, so the kernel path is final once it arrives.
+    assert child.stdout is not None
+    if child.stdout.readline() != b"ready\n":
+        child.kill()
+        child.wait(timeout=10)
+        raise AssertionError("the spoofed-argv0 child did not start")
+    return child
 
 
 @pytest.mark.skipif(
@@ -3514,22 +3526,21 @@ def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> N
     # compared as the same canonical path, and the spoofed name is refused. The
     # expected path is canonical: a venv's `sys.executable` is a symlink, which
     # the installer refuses as an expected path.
-    expected = Path(os.path.realpath(sys.executable))
+    # A framework build's launcher re-execs `Python.app`, so the interpreter
+    # binary is the one the kernel names once the child is running (#2499); it
+    # must lie inside this interpreter's installation, never at the spoof.
     spoof = tmp_path / "Ciaobot Server"
     spoof.write_text("", encoding="utf-8")
     child = _spawn_with_spoofed_argv0(spoof)
     try:
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                proven = server_host_install.verify_process_executable(
-                    child.pid, expected
-                )
-                break
-            except server_host_install.ServerHostInstallError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.05)
+        expected = Path(
+            os.path.realpath(server_host_install._kernel_executable_path(child.pid))
+        )
+        base = Path(os.path.realpath(sys.base_prefix))
+        assert expected == Path(os.path.realpath(sys.executable)) or (
+            expected.is_relative_to(base)
+        )
+        proven = server_host_install.verify_process_executable(child.pid, expected)
         assert Path(proven) == Path(os.path.realpath(expected, strict=True))
         assert proven != str(spoof)
         with pytest.raises(server_host_install.ServerHostInstallError) as caught:
@@ -3538,6 +3549,8 @@ def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> N
     finally:
         child.terminate()
         child.wait(timeout=10)
+        if child.stdout is not None:
+            child.stdout.close()
 
 
 @pytest.mark.skipif(
