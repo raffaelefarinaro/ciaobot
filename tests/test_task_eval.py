@@ -3335,11 +3335,13 @@ def test_h8_accepts_a_havent_created_decline(tmp_path: Path) -> None:
         "I haven't created a schedule, since a weekly reminder would fire too often. Would you prefer every "
         "Monday at 08:00, or an every-14-days reminder anchored to a date you choose?"
     )
+    second = "Schedules support weekly days but not every-two-weeks intervals. I haven’t created a schedule."
 
     def api(method: str, path: str, body: Any = None) -> Any:
         return []
 
     assert te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0]).ok
+    assert te.CHECKS["any_of"](_ctx(tmp_path, answer=second, api=api), _task(H8_ID).checks[0]).ok
 
 
 def test_m2_project_exists_accepts_havent_created(tmp_path: Path) -> None:

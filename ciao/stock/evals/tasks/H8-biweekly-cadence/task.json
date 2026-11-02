@@ -80,7 +80,11 @@
               "14 days",
               "14-day",
               "every-14",
-              "every 14"
+              "every 14",
+              "two-weeks",
+              "two-week",
+              "every-two",
+              "2-week"
             ]
           }
         ],
