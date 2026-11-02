@@ -1264,6 +1264,9 @@ def _e2e(
         recheck_host=lambda host: None,
         prepare_scratch=lambda: tmp_path / "scratch",
         wizard_listener=lambda port, child_pid: frozenset({child_pid}),
+        # The real setup-port check runs /usr/sbin/lsof and loopback probes;
+        # this end-to-end test fakes the readiness steps, so it fakes this one too.
+        port_listeners=lambda port: frozenset(),
         prove_ready=lambda host, handoff_, remaining: NativeReadinessProof(
             ready=True, failure=None, port=54321, version=artifacts.version
         ),
