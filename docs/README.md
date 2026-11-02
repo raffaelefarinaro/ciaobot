@@ -38,4 +38,5 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [PWA development](../web/README.md) and [design system](../DESIGN.md): frontend structure and interaction principles.
 - [HTTP API](../PWA_API.md) and [agent CLI](AGENT_CLI.md): application operations and security contracts.
 - [Memory design](MEMORY_DESIGN.md): rationale for durable, scoped, reviewable knowledge.
+- [Task evaluations](TASK_EVAL.md) and [results](evals/README.md): real tasks on an isolated engine, with pass rates, tokens and cost per model ([site page](https://www.raffaelefarinaro.com/ciaobot/evals.html)).
 - [Credits](CREDITS.md): the tools Ciaobot builds on.

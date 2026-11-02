@@ -11,6 +11,9 @@ checks, and records tokens, tool calls, ciao-call errors, cost and wall time.
 Implementation: `ciao/task_eval.py`. Catalog: `ciao/stock/evals/tasks/`.
 CLI: `ciao eval tasks`.
 
+
+Recorded results, one file per run or release: [evals/](evals/README.md). The public summary is the site's [How we measure Ciaobot](https://www.raffaelefarinaro.com/ciaobot/evals.html) page.
+
 ## Cost warning
 
 `ciao eval tasks run` makes real model calls, one per task per repeat, and
