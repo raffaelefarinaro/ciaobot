@@ -5663,8 +5663,10 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-/* Rail mode: close and the title block share one vertical centre. */
-.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; align-items: center; }
+/* Rail mode: close and the title block share one vertical centre, and the row is
+   the reading column's width (it starts where the column starts), so the rail can
+   centre its title on the chat rather than on the whole header. */
+.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
 
 .chat-title {
   cursor: pointer;

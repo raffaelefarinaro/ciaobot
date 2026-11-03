@@ -3,6 +3,7 @@
     ref="root"
     class="title-rail"
     :class="{ 'title-rail--settled': !moving }"
+    :style="{ paddingLeft: `${pad.left}px`, paddingRight: `${pad.right}px`, '--pad-l': `${pad.left}px`, '--pad-r': `${pad.right}px` }"
     role="group"
     :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`"
   >
@@ -108,8 +109,27 @@ const root = ref<HTMLElement | null>(null)
 // How far the header's bottom edge sits below the rail. The header is 61px on desktop
 // and taller on a phone (safe area, 44px targets), so it is measured, not assumed.
 const trackDrop = ref<number | null>(null)
+// The title centres on the chat's reading column, not on the header: close sits
+// before the rail and the header actions after it, and Chat details can take the
+// pane's right side. Padding the rail's longer side moves its centre onto the
+// column's; the rail never grows, so the title only gives up room, never overlaps.
+const pad = ref({ left: 0, right: 0 })
+function readingColumn(): HTMLElement | null {
+  return root.value?.closest('.chat-panel')?.querySelector<HTMLElement>('.messages-content') ?? null
+}
 function measureTrack(): void {
   const rail = root.value
+  const column = readingColumn()
+  if (rail && column) {
+    const r = rail.getBoundingClientRect()
+    const c = column.getBoundingClientRect()
+    const centre = c.left + c.width / 2
+    const before = centre - r.left
+    const after = r.right - centre
+    pad.value = before > 0 && after > 0
+      ? { left: Math.max(0, before - after), right: Math.max(0, after - before) }
+      : { left: 0, right: 0 }
+  }
   const header = rail?.closest('.pane-header')
   if (!rail || !header) { trackDrop.value = null; return }
   trackDrop.value = header.getBoundingClientRect().bottom - rail.getBoundingClientRect().bottom
@@ -212,6 +232,9 @@ onMounted(() => {
   if (header && typeof ResizeObserver === 'function') {
     headerObserver = new ResizeObserver(measureTrack)
     headerObserver.observe(header)
+    // The column moves when Chat details opens or closes, without resizing the header.
+    const column = readingColumn()
+    if (column) headerObserver.observe(column)
   }
 })
 
@@ -240,10 +263,14 @@ onBeforeUnmount(() => {
   font: inherit; text-align: center; cursor: default; }
 .title-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-xs); }
 .title-rail-title { flex: none; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-lg); font-weight: 600; line-height: 1.25; }
+/* The shared header shimmer sizes itself with `flex-basis: 10rem` for a row; the rail's
+   items are columns, where that basis is a height. Keep it a 10rem by 12px bar on the
+   title line. */
+.title-rail-item .chat-title-shimmer { flex: none; width: 10rem; max-width: 100%; height: 12px; margin-block: calc((var(--text-lg) * 1.25 - 12px) / 2); }
 .title-rail-project { flex: none; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: var(--text-xs)/1.3 var(--font-mono); color: var(--fg3); }
 /* On the header's bottom edge: the measured drop sets `bottom`; this fallback is the
    61px desktop header with the rail centred in it. */
-.title-rail-track { --gap: 3px; position: absolute; left: 50%; bottom: calc((var(--touch) - 61px) / 2); transform: translateX(-50%);
+.title-rail-track { --gap: 3px; position: absolute; left: calc(var(--pad-l, 0px) + (100% - var(--pad-l, 0px) - var(--pad-r, 0px)) / 2); bottom: calc((var(--touch) - 61px) / 2); transform: translateX(-50%);
   width: min(60%, calc(var(--n) * 31px)); height: 2px; display: flex; gap: var(--gap); pointer-events: none; }
 .title-rail-seg { flex: 1 1 0; min-width: 4px; height: 2px; border-radius: 1px; background: var(--border-strong); }
 .title-rail-seg-current { position: absolute; top: 0; left: 0; height: 2px; border-radius: 1px; background: var(--fg);

@@ -36,7 +36,10 @@ test.describe('chat title rail, desktop', () => {
     const strip = await box('.title-rail-strip')
     const track = await box('.title-rail-track')
     const head = await box('.chat-panel .pane-header')
-    // Centred in the rail, with close on the block's vertical centre.
+    // Centred on the chat's reading column (not the header, which also spans the
+    // actions and Chat details), with close on the block's vertical centre.
+    const column = await box('.messages-content')
+    expect(Math.abs(title.centreX - column.centreX)).toBeLessThanOrEqual(2)
     expect(Math.abs(title.centreX - strip.centreX)).toBeLessThanOrEqual(2)
     expect(Math.abs(close.centreY - block.centreY)).toBeLessThanOrEqual(2)
     // The neighbour is off-screen until a swipe or step brings it in.
@@ -44,7 +47,7 @@ test.describe('chat title rail, desktop', () => {
     expect(next.left).toBeGreaterThanOrEqual(strip.right - 1)
     // The track sits on the header's bottom edge, centred under the title, below the project line.
     expect(Math.abs(track.bottom - head.bottom)).toBeLessThanOrEqual(2)
-    expect(Math.abs(track.centreX - strip.centreX)).toBeLessThanOrEqual(2)
+    expect(Math.abs(track.centreX - column.centreX)).toBeLessThanOrEqual(2)
     const project = await box('.title-rail-item[aria-current="page"] .title-rail-project')
     expect(track.top).toBeGreaterThan(project.bottom)
     await expect(page.locator('.title-rail-track .title-rail-seg')).toHaveCount(2)
@@ -74,6 +77,26 @@ test.describe('chat title rail, desktop', () => {
     )
     expect(track.left).toBeGreaterThanOrEqual(strip.left)
     expect(track.right).toBeLessThanOrEqual(strip.right)
+  })
+
+  test('a chat still being named shows a title-sized shimmer in the rail, and the header stays 61px', async ({ page }) => {
+    // The rail's items are flex columns: the shared shimmer's `flex-basis: 10rem`
+    // once became a 10rem-tall block there.
+    const naming = (c: Record<string, unknown>) => c.chat_id === 'alpha-chat-1' ? { ...c, title: 'New Chat', title_status: 'pending' } : c
+    // The list and the open chat's own record both carry the title.
+    await page.route(/\/api\/chats(\/alpha-chat-1)?(\?.*)?$/, async route => {
+      const response = await route.fetch()
+      const body = await response.json() as Record<string, unknown> | Array<Record<string, unknown>>
+      await route.fulfill({ response, json: Array.isArray(body) ? body.map(naming) : naming(body) })
+    })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    const shimmer = page.locator('.title-rail-item[aria-current="page"] .chat-title-shimmer')
+    await expect(shimmer).toBeVisible()
+    const box = await shimmer.evaluate(el => { const b = el.getBoundingClientRect(); return { w: b.width, h: b.height } })
+    expect(box.h).toBeLessThanOrEqual(14)
+    expect(box.w).toBeGreaterThan(40)
+    expect(await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)).toBe(61)
   })
 
   test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {

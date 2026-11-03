@@ -417,8 +417,14 @@ html.keyboard-open {
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+/* WebKit (Safari, the macOS app's web view) can keep drawing a classic scrollbar
+   when only `display: none` is set; a zero-size, transparent bar is hidden in
+   every engine. */
 *::-webkit-scrollbar {
   display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
 }
 
 html, body {
