@@ -35,6 +35,7 @@
           'chat-body--split': sideSlotOccupied,
           'chat-body--terminal': terminalInTile || besideInTile,
           'chat-body--pane-focused': besideInTile && focusedPane === 'main',
+          'chat-body--window': besideInTile,
         }"
         :style="chatColumnStyle"
         @pointerdown.capture="focusPane('main')"
@@ -1682,6 +1683,20 @@ onBeforeUnmount(() => {
    to, so the two floors are the same number on both sides of the divider. */
 .chat-body--terminal {
   min-width: 360px;
+}
+
+/* Two chats: both panes are the same docked window, so neither reads as the
+   "real" chat. The main column takes the tile's surface, border, radius, shadow
+   and inset; the divider between them is the gap. */
+.chat-body--window {
+  margin: var(--space-4) 0 var(--space-4) var(--space-4);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
+}
+:global(:root.theme-light) .chat-body--window {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 
 /* Two chats: the pane with the keyboard wears the accent ring. A ring, not a tint, so the
