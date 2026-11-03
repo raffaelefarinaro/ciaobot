@@ -183,6 +183,7 @@ from ciao.web.chat_broker import (
     EventsHub,
     edit_pending_list,
     remove_pending_list,
+    take_pending_list,
     reorder_pending_list,
     shared_origin,
 )
@@ -526,6 +527,10 @@ class ProjectOrderError(ValueError):
         self.current = current
 
 
+_MAX_TAKEN_EDITS = 100
+_TAKEN_EDIT_TTL_S = 3600
+
+
 @dataclass(slots=True)
 class ProjectInfo:
     project_id: str
@@ -796,6 +801,7 @@ class ChatInfo:
     # `to_dict` copies the list so a reload can show the chips; callers must
     # not receive the live list.
     pending_queue: list[dict] = field(default_factory=list)
+    taken_edits: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
     # to the source conversation and stable root-relative title numbering.
@@ -856,6 +862,8 @@ class ChatInfo:
     grants_data_root: bool = False
 
     def to_dict(self, *, local: bool | None = None) -> dict:
+        self.taken_edits = [entry for entry in self.taken_edits
+                            if time.monotonic() - entry["taken_at"] < _TAKEN_EDIT_TTL_S][-_MAX_TAKEN_EDITS:]
         d = {
             "chat_id": self.chat_id,
             "project_id": self.project_id,
@@ -882,6 +890,10 @@ class ChatInfo:
                     "images": [str(ref) for ref in (entry.get("images") or [])],
                 }
                 for entry in self.pending_queue
+            ],
+            "pending_takes": [
+                {"entry_id": e["entry_id"], "text": e["text"], "images": list(e["images"])}
+                for e in self.taken_edits
             ],
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
@@ -7261,6 +7273,39 @@ class ProjectChatManager:
         if live is not None:
             live.publish_pending()
         return True
+
+    def take_queue_for_edit(self, chat_id: str, entry_id: str) -> dict | None:
+        """Atomically take a queued entry and retain a receipt until acknowledged."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        stream = self._broker.get(chat_id)
+        live = stream if stream is not None and not stream.background else None
+        if live is not None and live._is_steering(entry_id):
+            return None
+        entry = live.take_pending(entry_id) if live is not None else None
+        if entry is None:
+            entry = take_pending_list(chat.pending_queue, entry_id)
+            if entry is None:
+                return None
+            self._save()
+        payload = {"entry_id": entry_id, "text": str(entry.get("text", "")),
+                   "images": list(entry.get("images") or [])}
+        now = time.monotonic()
+        chat.taken_edits = [e for e in chat.taken_edits if now - e["taken_at"] < _TAKEN_EDIT_TTL_S]
+        chat.taken_edits = [*chat.taken_edits, {**payload, "taken_at": now}][-_MAX_TAKEN_EDITS:]
+        if live is not None:
+            live.publish_pending()
+        elif stream is not None:
+            stream.publish_queue_state(chat.pending_queue)
+        return payload
+
+    def queue_take_ack(self, chat_id: str, entry_id: str) -> None:
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            now = time.monotonic()
+            chat.taken_edits = [e for e in chat.taken_edits
+                                if e["entry_id"] != entry_id and now - e["taken_at"] < _TAKEN_EDIT_TTL_S]
 
     def remove_queue(self, chat_id: str, entry_id: str) -> bool:
         """Remove a queued message (live stream, else parked queue)."""

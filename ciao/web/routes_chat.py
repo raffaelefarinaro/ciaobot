@@ -351,6 +351,25 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if msg_type in ("queue_take", "queue_take_ack"):
+                entry_id = msg.get("entry_id")
+                if not isinstance(entry_id, str) or not 0 < len(entry_id) <= _MAX_QUEUE_ENTRY_ID_LEN:
+                    continue
+                if msg_type == "queue_take_ack":
+                    pcm.queue_take_ack(chat_id, entry_id)
+                    continue
+                request_id = msg.get("request_id")
+                if not isinstance(request_id, str) or not 0 < len(request_id) <= _MAX_QUEUE_ENTRY_ID_LEN:
+                    continue
+                taken = pcm.take_queue_for_edit(chat_id, entry_id)
+                await websocket.send_json({
+                    "type": "queue_take_result", "request_id": request_id,
+                    "entry_id": entry_id, "ok": taken is not None,
+                    "text": taken["text"] if taken else "",
+                    "images": taken["images"] if taken else [],
+                })
+                continue
+
             if msg_type == "queue_remove":
                 pcm.remove_queue(
                     chat_id,
