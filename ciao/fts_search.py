@@ -696,6 +696,24 @@ def forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     return int(removed or 0)
 
 
+def forget_transcript_subtree(conn: sqlite3.Connection, prefix: str) -> int:
+    """Drop every transcript row stored under ``prefix``; return how many went.
+
+    The transcript twin of :func:`forget_subtree`, on ``transcript_fts`` and
+    ``transcript_meta``, with the same two refused prefixes. Used when a
+    workspace's own ``Logs`` leaves the install's live tree.
+    """
+    if not prefix or prefix == NO_MATCH_KEY_PREFIX:
+        return 0
+    pattern = _like_prefix_pattern(prefix)
+    removed = conn.execute(
+        "DELETE FROM transcript_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
+    ).rowcount
+    conn.execute("DELETE FROM transcript_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
+    conn.commit()
+    return int(removed or 0)
+
+
 def index_file(
     conn: sqlite3.Connection,
     vault_root: Path,

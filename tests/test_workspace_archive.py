@@ -21,7 +21,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao import fts_search, vault_index, vault_lint
+from ciao import fts_search, vault_index, vault_lint, workspace_archive
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
@@ -35,10 +35,17 @@ from ciao.web.routes_api import (
 )
 from ciao.workspace_archive import (
     ARCHIVE_DIR_NAME,
+    LAYOUT_SHARED,
+    ArchiveTarget,
     WorkspaceArchiveError,
     archive_root,
+    carry_late_transcripts,
     list_archives,
+    move_to_archive,
     plan_archive,
+    restore_archive,
+    undo_move_to_archive,
+    unregister,
 )
 
 
@@ -1338,3 +1345,124 @@ def test_archive_keeps_remaining_order(tmp_path):
     assert response.status_code == 200, response.json()
     assert list(config.workspaces) == ["personal", "extra"]
     assert [w["name"] for w in response.json()["workspaces"]] == ["personal", "extra"]
+
+
+# ── late transcripts of a per-root workspace ────────────────────────────────
+
+
+def _work_notes(install: Path) -> None:
+    notes = install / "work" / "memory-vault"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "x.md").write_text("# work note\n", encoding="utf-8")
+
+
+def _archive_work(config: CiaoConfig) -> tuple[ArchiveTarget, dict]:
+    target = plan_archive(config, "work")
+    return target, move_to_archive(config, target)
+
+
+def _late_transcript(install: Path) -> Path:
+    """A transcript written after the folder moved, as the archive chat does."""
+    path = install / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# late\n", encoding="utf-8")
+    return path
+
+
+def test_late_transcripts_follow_the_archived_root(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    target, archived = _archive_work(config)
+    _late_transcript(tmp_path)
+    assert (tmp_path / "work").is_dir(), "the late write recreates the agent root"
+
+    moved = carry_late_transcripts(config, target, archived)
+
+    assert moved == 1
+    folder = archive_root(config) / archived["id"]
+    carried = folder / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+    assert carried.read_text(encoding="utf-8") == "# late\n"
+    assert not (tmp_path / "work").exists()
+
+
+def test_rollback_after_late_transcripts_restores_the_folder(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    target, archived = _archive_work(config)
+    _late_transcript(tmp_path)
+
+    undo_move_to_archive(config, target, archived)
+
+    assert (tmp_path / "work" / "memory-vault" / "x.md").is_file()
+    assert (tmp_path / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md").is_file()
+    folder = archive_root(config) / archived["id"]
+    assert not (folder / "work").exists()
+
+
+def test_restore_brings_the_workspaces_transcripts_back(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    target, archived = _archive_work(config)
+    _late_transcript(tmp_path)
+    carry_late_transcripts(config, target, archived)
+    unregister(config, "work")
+
+    restore_archive(config, archived["id"])
+
+    assert (tmp_path / "work" / "memory-vault" / "x.md").is_file()
+    assert (tmp_path / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md").is_file()
+    assert config.workspace("work") is not None
+
+
+def test_forget_search_rows_drops_the_workspaces_transcript_rows(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    for name in ("work", "personal"):
+        (tmp_path / name / "Logs" / "Chats" / "chat-1" / "claude").mkdir(parents=True)
+        (tmp_path / name / "Logs" / "Chats" / "chat-1" / "claude" / "s.md").write_text(
+            f"# {name} chat\n\nquokka {name}\n", encoding="utf-8"
+        )
+    db = fts_search.get_db_path(config.state_path.parent)
+    conn = sqlite3.connect(db)
+    try:
+        fts_search.init_db(conn)
+        for name in ("work", "personal"):
+            fts_search.index_logs(
+                conn,
+                tmp_path / name,
+                logs_root=tmp_path / name / "Logs",
+                path_base=tmp_path,
+            )
+    finally:
+        conn.close()
+
+    removed = workspace_archive.forget_search_rows(
+        config, Path(config.workspace_vault_root("work"))
+    )
+
+    assert removed >= 1
+    conn = sqlite3.connect(db)
+    try:
+        keys = [row[0] for row in conn.execute("SELECT path FROM transcript_meta")]
+    finally:
+        conn.close()
+    assert not any(key.startswith("work/Logs/") for key in keys)
+    assert any(key.startswith("personal/Logs/") for key in keys)
+
+
+def test_carry_is_a_noop_on_the_shared_layout(tmp_path):
+    config = _config(tmp_path, rerooted=False)
+    late = tmp_path / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+    late.parent.mkdir(parents=True)
+    late.write_text("# late\n", encoding="utf-8")
+    target = ArchiveTarget(
+        name="work",
+        layout=LAYOUT_SHARED,
+        source=tmp_path / "work",
+        vault=tmp_path / "work" / "memory-vault",
+    )
+
+    moved = carry_late_transcripts(config, target, {"id": "work-x", "content_dir": "work"})
+
+    assert moved == 0
+    assert late.read_text(encoding="utf-8") == "# late\n"
