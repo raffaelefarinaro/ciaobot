@@ -75,14 +75,6 @@
                 @click.stop
               >{{ chat.title }}</span>
               <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
-              <button
-                v-if="codeModeOn && !chat.archived && !editingTitle"
-                type="button"
-                class="chat-code-badge"
-                aria-label="Code mode is on. Show repository details"
-                title="Code mode is on"
-                @click.stop="showDetails('repo')"
-              ><span class="chat-code-badge-tag" aria-hidden="true">›_</span></button>
             </div>
           </div>
         </div>
@@ -5671,13 +5663,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-/* Rail mode: close, the title block and the code badge share one vertical centre. */
+/* Rail mode: close and the title block share one vertical centre. */
 .header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; align-items: center; }
-.chat-code-badge { display: inline-grid; place-items: center; flex: none; min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
-.chat-code-badge-tag { display: inline-grid; place-items: center; height: 20px; padding: 0 3px; color: var(--accent); font: 700 calc(14px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
-.chat-code-badge:hover { background: var(--bg3); }
-.chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
 
 .chat-title {
   cursor: pointer;
@@ -7982,12 +7969,10 @@ details[open] > .activity-summary::before {
 }
 
 /* Phones (the pane header bell's breakpoint): the title needs the room. Back and
-   the menu already leave the chat, and Chat details' Repository section carries
-   the code mode switch, so neither control is lost. Hidden, not removed, so
-   desktop keeps them. */
+   the menu already leave the chat, so the close control is not lost. Hidden, not
+   removed, so desktop keeps it. */
 @media (max-width: 767px) {
-  .close-btn,
-  .chat-code-badge { display: none; }
+  .close-btn { display: none; }
 }
 
 @media (max-width: 768px) {

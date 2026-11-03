@@ -95,25 +95,43 @@ describe('ChatTitleRail', () => {
     expect(wrapper.find('button[aria-label="Next chat"]').exists()).toBe(false)
   })
 
-  it('puts the dots on the project line, marking each title\'s own position and needs-you chats', () => {
-    seed(['a', 'b', 'c'])
+  it('draws one track segment per chat, marking each chat\'s state by shape', () => {
+    seed(['a', 'b', 'c', 'd'])
     const wrapper = mount(ChatTitleRail, {
-      props: { items: [item('a', { tier: 'needsYou' }), item('b'), item('c')], currentId: 'b' },
+      props: {
+        items: [item('a', { tier: 'needsYou' }), item('b'), item('c', { tier: 'working' }), item('d', { tier: 'unread' })],
+        currentId: 'b',
+      },
     })
 
-    const current = wrapper.get('.title-rail-item[aria-current="page"]')
-    const dots = current.findAll('.title-rail-meta .title-rail-dot')
-    expect(dots).toHaveLength(3)
-    expect(dots[0].classes()).toContain('is-needs')
-    expect(dots[1].classes()).toContain('is-current')
-    expect(current.get('.title-rail-dots').attributes('aria-hidden')).toBe('true')
-    // The next title carries its own position, so the dot moves with the slide.
-    expect(wrapper.findAll('.title-rail-item')[2].findAll('.title-rail-dot')[2].classes()).toContain('is-current')
+    const track = wrapper.get('.title-rail-track')
+    expect(track.attributes('aria-hidden')).toBe('true')
+    const segs = track.findAll('.title-rail-seg')
+    expect(segs).toHaveLength(4)
+    expect(segs[0].classes()).toContain('title-rail-seg--needs')
+    expect(segs[1].classes()).toEqual(['title-rail-seg'])
+    expect(segs[2].classes()).toContain('title-rail-seg--working')
+    expect(segs[3].classes()).toContain('title-rail-seg--unread')
+    // The bright segment sits on the current chat.
+    expect(track.attributes('style')).toContain('--n: 4')
+    expect(track.attributes('style')).toContain('--pos: 1')
+    // Nothing but the title and project sits on the text lines.
+    expect(wrapper.find('.title-rail-dot').exists()).toBe(false)
+  })
 
-    const many = Array.from({ length: 13 }, (_, i) => item(`chat-${i}`))
-    const capped = mount(ChatTitleRail, { props: { items: many, currentId: 'chat-0' } })
-    expect(capped.findAll('.title-rail-dot')).toHaveLength(0)
-    expect(capped.get('.title-rail-item[aria-current="page"] .title-rail-count').text()).toBe('1 / 13')
+  it('moves the bright segment with the strip mid-swipe', () => {
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    strip.scrollLeft = 140
+    strip.dispatchEvent(new Event('scroll'))
+    return wrapper.vm.$nextTick().then(() => {
+      expect(wrapper.get('.title-rail-track').attributes('style')).toContain('--pos: 1.4')
+      wrapper.unmount()
+    })
   })
 
   // The arrow keys step the chat, sliding the neighbour in first like a swipe.

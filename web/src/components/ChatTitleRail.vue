@@ -1,6 +1,8 @@
 <template>
   <div
+    ref="root"
     class="title-rail"
+    :class="{ 'title-rail--settled': !moving }"
     role="group"
     :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`"
   >
@@ -16,7 +18,7 @@
       @touchcancel.passive="onTouchEnd"
     >
       <button
-        v-for="(entry, at) in items"
+        v-for="entry in items"
         :key="entry.chatId"
         type="button"
         class="title-rail-item"
@@ -37,22 +39,24 @@
           :class="{ 'pane-title chat-title': entry.chatId === currentId }"
           :title="entry.title"
         >{{ entry.title }}</span>
-        <!-- Each title carries its own position, so the dots move with the slide. -->
-        <span class="title-rail-meta">
-          <span class="title-rail-project">{{ entry.project }}</span>
-          <span class="title-rail-dots" aria-hidden="true">
-            <template v-if="items.length <= RAIL_MAX_DOTS">
-              <span
-                v-for="(other, i) in items"
-                :key="other.chatId"
-                class="title-rail-dot"
-                :class="{ 'is-current': i === at, 'is-needs': other.tier === 'needsYou' }"
-              />
-            </template>
-            <span v-else class="title-rail-count">{{ at + 1 }} / {{ items.length }}</span>
-          </span>
-        </span>
+        <span class="title-rail-project">{{ entry.project }}</span>
       </button>
+    </div>
+
+    <!-- One segment per chat on the header's bottom edge, under the title. The bright
+         one follows the strip's scroll, so it moves with a finger mid-swipe. -->
+    <div
+      class="title-rail-track"
+      aria-hidden="true"
+      :style="{ '--n': items.length, '--pos': position, ...(trackDrop === null ? {} : { bottom: `${-trackDrop}px` }) }"
+    >
+      <span
+        v-for="entry in items"
+        :key="entry.chatId"
+        class="title-rail-seg"
+        :class="SEG_STATE[entry.tier] && `title-rail-seg--${SEG_STATE[entry.tier]}`"
+      />
+      <span class="title-rail-seg-current" />
     </div>
   </div>
 </template>
@@ -60,7 +64,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  RAIL_MAX_DOTS,
   RAIL_SETTLE_MS,
   RAIL_SLIDE_MS,
   railItemLabel,
@@ -70,6 +73,15 @@ import {
 } from '../lib/chatRail'
 
 const props = defineProps<{ items: ChatRailItem[]; currentId: string }>()
+
+// Each segment shows its chat's state with the app's marks in miniature, told apart
+// by shape and motion (DESIGN.md "Activity glyphs"): needs you is the alert
+// triangle, working the chase, unread the news dot; a quiet chat is a plain segment.
+const SEG_STATE: Partial<Record<ChatRailItem['tier'], 'needs' | 'working' | 'unread'>> = {
+  needsYou: 'needs',
+  working: 'working',
+  unread: 'unread',
+}
 const emit = defineEmits<{ select: [chatId: string]; rename: [] }>()
 
 const neighbours = computed(() => railNeighbours(props.items.map(i => i.chatId), props.currentId))
@@ -92,6 +104,25 @@ function onItemKeydown(e: KeyboardEvent, chatId: string): void {
 // Programmatic centring, focus-induced scrolling and screen-reader scrolling
 // move the strip without a gesture, so they never switch the chat.
 const strip = ref<HTMLElement | null>(null)
+const root = ref<HTMLElement | null>(null)
+// How far the header's bottom edge sits below the rail. The header is 61px on desktop
+// and taller on a phone (safe area, 44px targets), so it is measured, not assumed.
+const trackDrop = ref<number | null>(null)
+function measureTrack(): void {
+  const rail = root.value
+  const header = rail?.closest('.pane-header')
+  if (!rail || !header) { trackDrop.value = null; return }
+  trackDrop.value = header.getBoundingClientRect().bottom - rail.getBoundingClientRect().bottom
+}
+let headerObserver: ResizeObserver | null = null
+// Fractional index the strip shows (1.4 = forty percent of the way to the third chat).
+const position = ref(neighbours.value.index)
+// The track's highlight animates on its own only when the strip is at rest; mid-swipe it follows the scroll.
+const moving = ref(false)
+function trackPosition(): void {
+  const el = strip.value
+  position.value = el && el.clientWidth ? el.scrollLeft / el.clientWidth : neighbours.value.index
+}
 let touchActive = false
 let gestureSeen = false
 let timer: ReturnType<typeof setTimeout> | null = null
@@ -105,6 +136,7 @@ function centre(): void {
   const el = strip.value
   const cur = itemEls()[neighbours.value.index]
   if (el && cur) el.scrollLeft = cur.offsetLeft + cur.offsetWidth / 2 - el.clientWidth / 2
+  position.value = neighbours.value.index
 }
 
 /**
@@ -134,6 +166,7 @@ defineExpose({ slide })
 
 function settle(): void {
   timer = null
+  moving.value = false
   if (sliding || touchActive || !gestureSeen || !strip.value) return
   gestureSeen = false
   const i = settledIndex(
@@ -145,6 +178,8 @@ function settle(): void {
 }
 
 function onScroll(): void {
+  moving.value = true
+  trackPosition()
   if (timer) clearTimeout(timer)
   timer = setTimeout(settle, RAIL_SETTLE_MS)
 }
@@ -170,9 +205,19 @@ watch(
   { flush: 'post' },
 )
 
-onMounted(centre)
+onMounted(() => {
+  centre()
+  measureTrack()
+  const header = root.value?.closest('.pane-header')
+  if (header && typeof ResizeObserver === 'function') {
+    headerObserver = new ResizeObserver(measureTrack)
+    headerObserver.observe(header)
+  }
+})
 
 onBeforeUnmount(() => {
+  headerObserver?.disconnect()
+  headerObserver = null
   if (sliding) clearTimeout(sliding)
   sliding = null
   if (timer) clearTimeout(timer)
@@ -183,23 +228,39 @@ onBeforeUnmount(() => {
 <style scoped src="./titleShimmer.css"></style>
 
 <style scoped>
-/* The title sits where the plain header puts it (left, next to close), and the
-   position dots follow the project name on its line, so the rail is no taller
-   than the title and project it shows. */
-.title-rail { display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
+/* The current title is centred in the space between close and the header actions,
+   with its project under it. The position is a segmented track on the header's
+   bottom edge, so nothing but the title and project sits on the text lines. */
+.title-rail { position: relative; display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
 .title-rail-strip { position: relative; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory;
   overscroll-behavior-x: contain; touch-action: pan-x; scrollbar-width: none; min-width: 0; }
 .title-rail-strip::-webkit-scrollbar { display: none; }
 .title-rail-item { flex: 0 0 100%; scroll-snap-align: start; scroll-snap-stop: always; min-height: var(--touch); min-width: 0;
-  padding: 0; display: flex; flex-direction: column; justify-content: center; border: 0; background: none; color: var(--fg);
-  font: inherit; text-align: left; cursor: default; }
+  padding: 0 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 0; background: none; color: var(--fg);
+  font: inherit; text-align: center; cursor: default; }
 .title-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-xs); }
-.title-rail-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-lg); font-weight: 600; line-height: 1.25; }
-.title-rail-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.title-rail-project { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: var(--text-xs)/1.3 var(--font-mono); color: var(--fg3); }
-.title-rail-dots { flex: none; display: flex; align-items: center; gap: 4px; }
-.title-rail-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--fg3); opacity: .5; }
-.title-rail-dot.is-current { background: var(--fg); opacity: 1; }
-.title-rail-dot.is-needs { background: var(--accent); opacity: 1; }
-.title-rail-count { font: var(--text-xs)/1 var(--font-mono); color: var(--fg3); }
+.title-rail-title { flex: none; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-lg); font-weight: 600; line-height: 1.25; }
+.title-rail-project { flex: none; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: var(--text-xs)/1.3 var(--font-mono); color: var(--fg3); }
+/* On the header's bottom edge: the measured drop sets `bottom`; this fallback is the
+   61px desktop header with the rail centred in it. */
+.title-rail-track { --gap: 3px; position: absolute; left: 50%; bottom: calc((var(--touch) - 61px) / 2); transform: translateX(-50%);
+  width: min(60%, calc(var(--n) * 31px)); height: 2px; display: flex; gap: var(--gap); pointer-events: none; }
+.title-rail-seg { flex: 1 1 0; min-width: 4px; height: 2px; border-radius: 1px; background: var(--border-strong); }
+.title-rail-seg-current { position: absolute; top: 0; left: 0; height: 2px; border-radius: 1px; background: var(--fg);
+  width: calc((100% - (var(--n) - 1) * var(--gap)) / var(--n));
+  transform: translateX(calc(var(--pos) * (100% + var(--gap)))); }
+.title-rail-seg { position: relative; }
+/* Marks sit just above their segment, inside the header's bottom padding, at most 4px tall, clear of the project line. */
+.title-rail-seg--unread::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%; background: var(--fg2); }
+.title-rail-seg--needs::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 0; height: 0; margin-left: -3px;
+  border-left: 3px solid transparent; border-right: 3px solid transparent; border-bottom: 4px solid var(--accent); }
+.title-rail-seg--working { background: linear-gradient(90deg, var(--border-strong) 0 35%, var(--fg2) 45% 55%, var(--border-strong) 65% 100%);
+  background-size: 300% 100%; animation: title-rail-chase 1.4s linear infinite; }
+@keyframes title-rail-chase { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.title-rail--settled .title-rail-seg-current { transition: transform 220ms var(--ease); }
+@media (prefers-reduced-motion: reduce) {
+  .title-rail--settled .title-rail-seg-current { transition: none; }
+  /* Still, but still a different shape: a dashed segment. */
+  .title-rail-seg--working { animation: none; background: repeating-linear-gradient(90deg, var(--fg3) 0 4px, transparent 4px 7px); }
+}
 </style>

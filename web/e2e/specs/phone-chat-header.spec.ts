@@ -19,7 +19,7 @@ test.describe('phone chat header', () => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
     await expect(page.locator('.chat-title-row .close-btn')).toBeHidden()
-    await expect(page.locator('.chat-code-badge')).toBeHidden()
+    await expect(page.locator('.chat-code-badge')).toHaveCount(0)
     await expect(page.locator('.chat-title-row .chat-title')).toBeVisible()
 
     const rail = (await page.locator('.chat-title-row .title-rail').boundingBox())!
