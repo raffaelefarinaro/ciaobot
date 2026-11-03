@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -388,7 +389,16 @@ class TranscriptStore:
     def __init__(self, runtime_root: Path, archive_root: Path) -> None:
         self._runtime_root = runtime_root
         self._archive_root = archive_root
+        self._archive_root_for: Callable[[str], Path] | None = None
         self._v1_migrated = False
+
+    def set_archive_root_resolver(self, resolver: Callable[[str], Path]) -> None:
+        """Route each chat's archive to the root *resolver* names for its key.
+
+        Wired by ``main`` once the project manager exists. Without it every chat
+        archives under the constructor's ``archive_root``.
+        """
+        self._archive_root_for = resolver
 
     def record_turn(
         self,
@@ -765,7 +775,12 @@ class TranscriptStore:
         return self._runtime_root / "transcripts" / ctx.key / f"{_safe_slug(provider)}.json"
 
     def _archive_dir(self, ctx: ChatContext, provider: str = "claude") -> Path:
-        return self._archive_root / ctx.key / _safe_slug(provider)
+        root = (
+            self._archive_root_for(ctx.key)
+            if self._archive_root_for is not None
+            else self._archive_root
+        )
+        return root / ctx.key / _safe_slug(provider)
 
     def _load_current(self, ctx: ChatContext, provider: str = "claude") -> dict[str, Any]:
         path = self._current_path(ctx, provider)

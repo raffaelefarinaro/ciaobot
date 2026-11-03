@@ -8604,7 +8604,8 @@ def _attach_note_edit_detail(
         }
 
 
-# The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
+# The archive tree is `<chats root>/<chat-id>/<provider>/<stem>.md` for every root
+# in `config.chats_roots()`, and a
 # proposal's `source` is that stem. Resolving it means listing that fixed depth,
 # which is why the result is cached: a History page asks for up to 1000 rows and
 # would otherwise re-list the tree for each one.
@@ -8614,24 +8615,26 @@ _SOURCE_INDEX_TTL_S = 60.0
 
 def _source_index(config: Any) -> dict[str, str]:
     """Archive stem → absolute transcript path, cached briefly."""
-    root = Path(config.logs_root) / "Chats"
-    key = str(root)
+    roots = [Path(r) for r in config.chats_roots()]
+    key = "|".join(str(r) for r in roots)
     cached = _SOURCE_INDEX.get(key)
     now = time.monotonic()
     if cached is not None and now - cached[0] < _SOURCE_INDEX_TTL_S:
         return cached[1]
     index: dict[str, str] = {}
-    try:
-        for chat_dir in root.iterdir():
-            if not chat_dir.is_dir():
-                continue
-            for provider_dir in chat_dir.iterdir():
-                if not provider_dir.is_dir():
+    for root in roots:
+        # A missing root must not wipe the others, so each root is walked alone.
+        try:
+            for chat_dir in root.iterdir():
+                if not chat_dir.is_dir():
                     continue
-                for transcript in provider_dir.glob("*.md"):
-                    index.setdefault(transcript.stem, str(transcript))
-    except OSError:
-        index = {}
+                for provider_dir in chat_dir.iterdir():
+                    if not provider_dir.is_dir():
+                        continue
+                    for transcript in provider_dir.glob("*.md"):
+                        index.setdefault(transcript.stem, str(transcript))
+        except OSError:
+            continue
     _SOURCE_INDEX[key] = (now, index)
     return index
 
