@@ -97,6 +97,10 @@ class ArchivePipeline:
         """
         for chats_root in self._host._config.chats_roots():
             chat_dir = chats_root / chat_id
+            # A symlinked folder names another directory, which may be a sibling
+            # chat's archive. Refuse it rather than follow it.
+            if chat_dir.is_symlink():
+                continue
             # Defend the path: `chat_id` reaching a filesystem join must not escape
             # the archive root, whatever it contains.
             try:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -157,7 +158,7 @@ def test_a_new_archive_lands_in_the_chats_workspace(tmp_path: Path) -> None:
 def test_an_unknown_chat_key_archives_to_the_shared_root(tmp_path: Path) -> None:
     pcm = _manager(tmp_path)
 
-    assert pcm.chat_archive_root("chat-nope") == pcm._config.logs_root / "Chats"
+    assert pcm.chat_archive_root("chat-nope") == tmp_path / "Logs" / "Chats"
 
 
 # --- discovery ----------------------------------------------------------------
@@ -219,14 +220,16 @@ def test_discovery_repoints_a_moved_archive_instead_of_pruning(tmp_path: Path) -
     )
     pcm._save()
 
-    pcm.list_projects()
+    # Called directly: list_projects() also saves unconditionally after discovery,
+    # which would hide a dropped save inside _discover_archived_chats.
+    pcm._discover_archived_chats()
 
     moved = pcm.get_chat("chat-m")
     assert moved is not None
     assert moved.archive_path == "work/Logs/Chats/chat-m/claude/s.md"
-    reloaded = _manager(tmp_path).get_chat("chat-m")
-    assert reloaded is not None
-    assert reloaded.archive_path == "work/Logs/Chats/chat-m/claude/s.md"
+    # A fresh manager would repoint again in memory, so read the saved registry.
+    saved = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8"))
+    assert saved["chats"]["chat-m"]["archive_path"] == "work/Logs/Chats/chat-m/claude/s.md"
 
 
 def test_discovery_still_prunes_an_archive_that_is_nowhere(tmp_path: Path) -> None:
@@ -376,3 +379,209 @@ def test_source_index_spans_every_chats_root(tmp_path: Path) -> None:
     assert index["a"] == str(tmp_path / "work" / "Logs" / "Chats" / "c1" / "claude" / "a.md")
     assert index["b"] == str(tmp_path / "Logs" / "Chats" / "c2" / "claude" / "b.md")
     routes_api._SOURCE_INDEX.clear()
+
+
+# --- first root wins (finding 2) ---------------------------------------------
+
+
+def test_source_index_first_root_wins(tmp_path: Path) -> None:
+    from ciao.web import routes_api
+
+    config = _config(tmp_path, rerooted=True)
+    work_root = tmp_path / "work" / "Logs" / "Chats"
+    shared_root = tmp_path / "Logs" / "Chats"
+    for stem in ("dup-a", "dup-b"):
+        for root in (work_root, shared_root):
+            transcript = root / f"c-{stem}" / "claude" / f"{stem}.md"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text("x", encoding="utf-8")
+    routes_api._SOURCE_INDEX.clear()
+
+    index = routes_api._source_index(config)
+
+    assert index["dup-a"] == str(work_root / "c-dup-a" / "claude" / "dup-a.md")
+    assert index["dup-b"] == str(work_root / "c-dup-b" / "claude" / "dup-b.md")
+    routes_api._SOURCE_INDEX.clear()
+
+
+def test_discovery_first_root_wins_for_a_duplicate_chat(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+    pcm.create_project("Work project", workspace="work")
+    for chat_id in ("chat-p", "chat-q"):
+        _write_transcript(tmp_path / "work" / "Logs" / "Chats", chat_id)
+        _write_transcript(tmp_path / "Logs" / "Chats", chat_id)
+
+    pcm.list_projects()
+
+    for chat_id in ("chat-p", "chat-q"):
+        chat = pcm.get_chat(chat_id)
+        assert chat is not None
+        assert chat.archive_path.startswith(f"work/Logs/Chats/{chat_id}/")
+
+
+# --- pre-reroot manager (finding 3) ------------------------------------------
+
+
+def test_pre_reroot_archive_lands_in_the_shared_root(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path, rerooted=False)
+    store = pcm._transcripts
+    store.set_archive_root_resolver(pcm.chat_archive_root)
+    project = pcm.create_project("Work project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Pre-split chat")
+    ctx = _record_one_turn(store, chat.chat_id)
+
+    archived = store.archive_session(
+        ctx=ctx, active_model="sonnet", last_effective_model="sonnet", session_id="sess-w"
+    )
+
+    assert archived is not None
+    assert archived.parent == tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id / "claude"
+
+
+def test_pre_reroot_discovery_imports_from_the_shared_root(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path, rerooted=False)
+    pcm.create_project("Work project", workspace="work")
+    _write_transcript(tmp_path / "memory-vault" / "Logs" / "Chats", "chat-pre")
+
+    pcm.list_projects()
+
+    chat = pcm.get_chat("chat-pre")
+    assert chat is not None
+    assert chat.archive_path == "memory-vault/Logs/Chats/chat-pre/claude/2026-06-10T12-00-00Z-s.md"
+
+
+def test_pre_reroot_prunes_an_archive_that_is_nowhere(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path, rerooted=False)
+    project = pcm.create_project("Work project", workspace="work")
+    (tmp_path / "memory-vault" / "Logs" / "Chats").mkdir(parents=True)
+    pcm._chats["chat-old"] = ChatInfo(
+        chat_id="chat-old",
+        project_id=project.project_id,
+        title="Old",
+        archived=True,
+        archive_path="memory-vault/Logs/Chats/chat-old/claude/s.md",
+    )
+    pcm._save()
+
+    pcm.list_projects()
+
+    assert pcm.get_chat("chat-old") is None
+
+
+# --- delete through a symlinked chat folder (finding 4) ----------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
+def test_deleting_through_a_symlinked_chat_folder_spares_the_sibling(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+    project = pcm.create_project("Disposable", workspace="work")
+    chats_root = tmp_path / "work" / "Logs" / "Chats"
+    sibling = chats_root / "chat-sib"
+    sibling.mkdir(parents=True)
+    (sibling / "s.md").write_text("keep me", encoding="utf-8")
+    (chats_root / "chat-s").symlink_to(sibling, target_is_directory=True)
+    pcm._chats["chat-s"] = ChatInfo(chat_id="chat-s", project_id=project.project_id, title="S")
+    pcm._save()
+
+    pcm.delete_chat("chat-s")
+
+    assert (sibling / "s.md").read_text(encoding="utf-8") == "keep me"
+
+
+# --- locate archive (finding 5) -----------------------------------------------
+
+
+def test_locate_archive_refuses_a_real_file_outside_every_root(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+    outside = tmp_path / "outside" / "s.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("not an archive", encoding="utf-8")
+
+    assert pcm._locate_archive("chat-x", str(outside)) is None
+
+
+def test_locate_archive_refuses_a_path_with_fewer_than_two_parts(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+
+    assert pcm._locate_archive("chat-x", "s.md") is None
+
+
+def test_locate_archive_refuses_a_relative_path_that_does_not_resolve(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+
+    assert pcm._locate_archive("chat-x", "Logs/Chats/chat-x/claude/none.md") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
+def test_locate_archive_refuses_a_symlink_escaping_the_roots(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path)
+    outside = tmp_path / "outside" / "s.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("not an archive", encoding="utf-8")
+    link = tmp_path / "work" / "Logs" / "Chats" / "chat-y" / "claude" / "s.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+
+    assert pcm._locate_archive("chat-y", "Logs/Chats/chat-y/claude/s.md") is None
+
+
+# --- memory-pass grant edges (finding 6) -------------------------------------
+
+
+def test_memory_pass_grant_accepts_an_archive_in_the_shared_root(
+    workspace_scope_manager: ProjectChatManager, tmp_path: Path
+) -> None:
+    manager = workspace_scope_manager
+    archive = tmp_path / "Logs" / "Chats" / "src-s" / "claude" / "x.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("transcript", encoding="utf-8")
+    chat = _memory_pass_chat_for(manager, "src-s", archive)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(archive.resolve()) in request.agent_read_only
+
+
+def test_memory_pass_grant_refuses_a_source_with_no_folder_in_any_root(
+    workspace_scope_manager: ProjectChatManager, tmp_path: Path
+) -> None:
+    manager = workspace_scope_manager
+    archive = tmp_path / "personal" / "Logs" / "Chats" / "src-1" / "claude" / "x.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("transcript", encoding="utf-8")
+    chat = _memory_pass_chat_for(manager, "src-missing", archive)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(archive.resolve()) not in request.agent_read_only
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
+def test_memory_pass_grant_refuses_a_symlinked_source_folder(
+    workspace_scope_manager: ProjectChatManager, tmp_path: Path
+) -> None:
+    manager = workspace_scope_manager
+    chats_root = tmp_path / "personal" / "Logs" / "Chats"
+    archive = chats_root / "src-real" / "claude" / "x.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("transcript", encoding="utf-8")
+    (chats_root / "src-link").symlink_to(chats_root / "src-real", target_is_directory=True)
+    chat = _memory_pass_chat_for(manager, "src-link", archive)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(archive.resolve()) not in request.agent_read_only
+
+
+def test_memory_pass_grant_refuses_a_traversal_source_id(
+    workspace_scope_manager: ProjectChatManager, tmp_path: Path
+) -> None:
+    manager = workspace_scope_manager
+    archive = tmp_path / "personal" / "Logs" / "x" / "claude" / "x.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("transcript", encoding="utf-8")
+    chat = _memory_pass_chat_for(manager, "../x", archive)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(archive.resolve()) not in request.agent_read_only

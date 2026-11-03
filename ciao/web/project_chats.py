@@ -5382,18 +5382,31 @@ class ProjectChatManager:
         The stored path when it is still a file. Otherwise the first chats root
         holding ``<chat_id>/<provider>/<name>``, where ``<provider>/<name>`` is the
         last two components of the stored path. None when no root holds it.
+
+        A file counts only when it resolves under some chats root, so a stored
+        path pointing outside the archives, or a symlink escaping them, is treated
+        as missing.
         """
+        roots = self._config.chats_roots()
+
+        def under_a_root(path: Path) -> bool:
+            try:
+                resolved = path.resolve()
+                return any(resolved.is_relative_to(root.resolve()) for root in roots)
+            except OSError:
+                return False
+
         stored = Path(archive_path)
         if not stored.is_absolute():
             stored = self._config.workspace_root / stored
-        if stored.is_file():
+        if stored.is_file() and under_a_root(stored):
             return stored
         if len(stored.parts) < 2:
             return None
         tail = Path(*stored.parts[-2:])
-        for root in self._config.chats_roots():
+        for root in roots:
             candidate = root / chat_id / tail
-            if candidate.is_file():
+            if candidate.is_file() and under_a_root(candidate):
                 return candidate
         return None
 
