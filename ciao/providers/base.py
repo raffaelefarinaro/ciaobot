@@ -96,6 +96,10 @@ def prepend_stable_context(request: AgentRequest) -> None:
     if not prefix or request.prompt.startswith(prefix):
         return
     request.prompt = prefix + request.prompt
+    # The restored capsule is engine-owned as well, so the trusted boundary in
+    # ``injected_context_prefix`` moves with the prompt instead of being
+    # recomputed from delimiters later.
+    request.injected_context_prefix = prefix + request.injected_context_prefix
 
 
 def build_claude_message_content(request: AgentRequest) -> str | list[dict[str, Any]]:

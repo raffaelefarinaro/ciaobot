@@ -7,9 +7,9 @@ Three SDK features worth knowing when you touch this file:
   rate-limited.
 - ``hooks={"PreToolUse": ...}``: denies detached shell invocations
   (``nohup … &``) the CLI cannot track; native background Bash and ``Monitor``
-  run unchanged. Workspace/project/date/entity context is already supplied by
-  the shared request capsule, so Claude does not receive a duplicate
-  UserPromptSubmit injection.
+  run unchanged. Native slash invocations receive the shared request capsule
+  through UserPromptSubmit instead of a prefix, so the CLI can expand skills
+  marked disable-model-invocation without treating context as command arguments.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
   ``.claude/skills/``, ``.claude/agents/``, and ``.claude/commands/`` (including
   ciao-native commands like ``/remember``).
@@ -28,6 +28,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -59,7 +60,7 @@ from claude_agent_sdk import (
     UserMessage,
     get_session_info,
 )
-from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, PermissionMode, SandboxSettings, SystemPromptPreset
+from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
 
 from ciao.fs_sandbox import (
     CLAUDE_FILE_TOOL_PATH_KEYS,
@@ -98,6 +99,7 @@ from ciao.providers.base import (
     BaseSDKProvider,
     ProviderCapabilities,
     build_claude_message_stream,
+    build_prompt,
     rate_limit_quota_payload,
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
@@ -673,6 +675,11 @@ class ClaudeProvider(BaseSDKProvider):
         # rebound, because ``SDKHandle`` shares the set.
         self._turn_open = False
         self._steers_pending: set[str] = set()
+        # Delivery uuid -> (native prompt, capsule). Matching by prompt keeps
+        # queued steers and unrelated CLI-generated turns from sharing context;
+        # the capsule is the request's recorded ``injected_context_prefix``, so
+        # only engine-built context is ever delivered.
+        self._slash_contexts: dict[str, tuple[str, str]] = {}
         # Replaced per turn and shared with that turn's ``SDKHandle``; a set
         # event closes the steer gate (Stop wins over a steer).
         self._stop_event = asyncio.Event()
@@ -1139,10 +1146,8 @@ class ClaudeProvider(BaseSDKProvider):
             # the model's context entirely, since Ciaobot's own schedules and
             # automations supersede them. See HARNESS_DISABLED_SKILLS.
             settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
-            # The request already carries the provider-neutral context capsule.
-            # Keep hooks for process behavior only; injecting context here as
-            # well would duplicate it and make prompt caching less effective.
             hooks={
+                "UserPromptSubmit": [HookMatcher(hooks=[self._slash_context_hook])],
                 # Native run_in_background Bash and Monitor are tracked and
                 # woken by the CLI, and the provider stays alive while they
                 # run. Only detached launches (nohup … &, setsid, disown) are
@@ -1237,7 +1242,33 @@ class ClaudeProvider(BaseSDKProvider):
             return build_claude_message_stream(
                 replace(request, prompt=COMPACT_COMMAND, images=[]), uuid=prompt_uuid
             )
+        command = request.prompt
+        capsule = request.injected_context_prefix
+        if capsule and request.prompt.startswith(capsule):
+            # Trust comes from request construction, never from capsule-shaped
+            # text in the prompt: only the exact recorded prefix is removed, so
+            # a user-authored second block stays user text and is never routed
+            # into hook context.
+            command = request.prompt[len(capsule):]
+        if command != request.prompt and re.match(r"^/[\w:-]+(?:\s|$)", command):
+            request = replace(request, prompt=command)
+            self._slash_contexts[prompt_uuid] = (build_prompt(request), capsule)
         return build_claude_message_stream(request, uuid=prompt_uuid)
+
+    async def _slash_context_hook(
+        self, input_data: HookInput, tool_use_id: str | None, context: HookContext,
+    ) -> HookJSONOutput:
+        """Deliver a slash request's capsule once, outside the command parser."""
+        if input_data.get("agent_id"):
+            return {}
+        prompt = input_data.get("prompt")
+        for delivery_id, (expected, capsule) in self._slash_contexts.items():
+            if prompt == expected:
+                del self._slash_contexts[delivery_id]
+                return {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit", "additionalContext": capsule,
+                }}
+        return {}
 
     async def steer_turn(self, request: AgentRequest) -> str | None:
         """Inject a user message into the running foreground turn.
@@ -1258,11 +1289,12 @@ class ClaudeProvider(BaseSDKProvider):
         # ``query()`` returns.
         self._steers_pending.add(delivery_id)
         try:
-            await self._client.query(build_claude_message_stream(request, uuid=delivery_id))
+            await self._client.query(self._prompt_payload(request, delivery_id))
         except BaseException as exc:
             # Cancelled or failed sends must not leave a uuid the turn would
             # wait the full grace period for.
             self._steers_pending.discard(delivery_id)
+            self._slash_contexts.pop(delivery_id, None)
             if isinstance(exc, _CLAUDE_OP_ERRORS):
                 return None
             raise
@@ -1296,6 +1328,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._connected = False
         self._turn_open = False
         self._steers_pending.clear()
+        self._slash_contexts.clear()
         self._session_id = None
         self._pending_quota = {}
         self._mcp_token = ""
@@ -1828,6 +1861,7 @@ class ClaudeProvider(BaseSDKProvider):
             finally:
                 self._turn_open = False
                 self._steers_pending.clear()
+                self._slash_contexts.clear()
                 merged.put_nowait(_DONE)
 
         consumer = asyncio.create_task(consume_sdk())

@@ -56,7 +56,7 @@ ciao/                          Python backend (Starlette).
     opencode.py                OpenCode 2.0.16+ provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, V2 OpenAPI fail-closed readiness, flat-message normalization, steer delivery for user steers, queue otherwise).
     oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by routine-model automations.
   context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints, and one bounded task-board recipe line — never a board dump; see the capsule section).
-  observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
+  observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule; ClaudeProvider delivers that capsule through UserPromptSubmit for native slash invocations.
   schedules.py                 Cron-style schedule dispatch.
   schedule_command.py          The optional shell command a schedule runs before its model turn (#1258): run in the workspace with a timeout, no chat when it exits 0 with empty stdout, otherwise the exit code and capped output go ahead of the prompt. Runs in its own process tree (`os_support.processes`), so a timeout kills pipelines and children too and keeps the partial output.
   task_board.py                Portable per-workspace Markdown task records and a revision-safe store (#978, child of #973): the canonical `<vault>/Workspace/Tasks/<id>.md` contract, a strict frontmatter parser, source-preserving patches, revision-checked `delete` and atomic writes. Reached by `/api/tasks*` and `ciao task` through the workspace-scoped service in `control_plane.py`; the board UI is B4. Its two nullable linkage fields (`chat_id`/`attempt_id`) are refused as ordinary patch fields — an agent naming its own chat would be claiming a delegation it never made — and get their own revision-checked door instead: `link()`/`unlink()`, called only by the delegation service, which is the whole of "a task with a turn in flight cannot be completed or reassigned". A task the agent files through the managed create carries an optional `created_by: agent` frontmatter key (absent for user-filed tasks and every task from before the field existed; never patchable), which the decision log records as `task_created_by`.
@@ -855,8 +855,20 @@ The server registers a Claude `PreToolUse` hook in `ciao/observability/hooks.py`
 It rewrites only Claude `Bash` calls with `run_in_background: true` to run in
 the foreground. Runtime, workspace, project, and vault-entity context is built
 once by `ciao/context/capsule.py` and prepended to the request for both supported
-providers; a second Claude `UserPromptSubmit` injection is intentionally not
-installed. Retrieval is driven by the system prompt (`vault_search` tool) rather
+providers. For Claude native slash invocations, `ClaudeProvider._prompt_payload`
+removes the capsule from the wire message and delivers it once through the SDK's
+`UserPromptSubmit.additionalContext` instead: a prefix prevents native command
+expansion, including explicit-only skills such as `/retro`. Ordinary prompts
+keep their capsule inline; no prompt receives both forms. Trust is explicit, not
+inferred: `AgentRequest.injected_context_prefix` records the exact capsule
+`build_agent_request` prepended (empty for compact) and `prepend_stable_context`
+extends it when restoring stable context, so the provider strips that one prefix
+and nothing else. A user-authored `[CIAO_CONTEXT_BEGIN]` block after it stays
+user text, and a missing or mismatched prefix means the message is not treated
+as a native command. Pending capsules are matched to the submitted prompt
+(including queued steers), excluded from subagent prompts and cleared when a
+send fails, a turn ends or the provider disconnects.
+Retrieval is driven by the system prompt (`vault_search` tool) rather
 than a per-turn heuristic hint. The managed SDK CLI owns background shell
 processes and stops them when the turn ends, while their terminal notification
 is delayed until a later turn resumes the session. Keeping these calls in the

@@ -147,6 +147,12 @@ class AgentRequest:
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
+    # The exact context capsule this request builder prepended to ``prompt``,
+    # or "" when there is none (compact turns, requests built elsewhere). It is
+    # engine-owned provenance, recorded where the capsule is built, never
+    # inferred from ``[CIAO_CONTEXT_BEGIN]`` delimiters in user text: a provider
+    # may strip or re-route this prefix, and nothing else.
+    injected_context_prefix: str = ""
     # A manual context compaction (the chat's Compact button). The turn carries
     # no user prompt, context capsule, file references or images: Claude sends
     # the bare ``/compact`` command, and opencode calls its compact endpoint.
