@@ -71,7 +71,9 @@ test.describe('chat title rail, desktop', () => {
     await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
     await page.keyboard.press('Alt+BracketRight')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
-    // Opening a chat focuses its composer, so step back from a blurred page again.
+    // Opening a chat focuses its composer on mount: wait for that focus before
+    // blurring, or the blur can land first and the next press hits the typing gate.
+    await expect(page.locator(COMPOSER)).toBeFocused()
     await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
     await page.keyboard.press('Alt+BracketLeft')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
