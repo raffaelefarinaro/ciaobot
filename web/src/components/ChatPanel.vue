@@ -48,6 +48,7 @@
               />
               <ChatTitleRail
                 v-else-if="titleRailOn"
+                ref="titleRailRef"
                 class="title-rail"
                 :items="titleRail.items.value"
                 :current-id="chat.chat_id"
@@ -1843,7 +1844,12 @@ const chat = computed(() => view.chat!)
 
 const titleRail = useChatRail(() => chat.value.chat_id)
 const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
-function selectAdjacentChat(direction: -1 | 1): boolean { return titleRailOn.value ? titleRail.step(direction) : false }
+const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
+// The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
+function selectAdjacentChat(direction: -1 | 1): boolean {
+  if (!titleRailOn.value) return false
+  return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
+}
 
 /**
  * The command the assistant suggested for this chat, if it holds one.
@@ -5665,13 +5671,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; align-items: flex-start;
-  /* Title line centre below the row top: the rail's items start at the top, so it is half the title line box. */
-  --rail-title-centre: calc(var(--text-lg) * 0.625); }
-/* Close is a 46px .btn-icon box (44px plus its border). The code badge is 24px, and 44px where the coarse-pointer rule sets it. */
-.chat-title-row--rail > .close-btn { margin-top: calc(var(--rail-title-centre) - 23px); }
-.chat-title-row--rail > .chat-code-badge { margin-top: calc(var(--rail-title-centre) - 12px); }
-@media (pointer: coarse), (max-width: 768px) { .chat-title-row--rail > .chat-code-badge { margin-top: calc(var(--rail-title-centre) - 22px); } }
+/* Rail mode: close, the title block and the code badge share one vertical centre. */
+.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; align-items: center; }
 .chat-code-badge { display: inline-grid; place-items: center; flex: none; min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
 .chat-code-badge-tag { display: inline-grid; place-items: center; height: 20px; padding: 0 3px; color: var(--accent); font: 700 calc(14px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
 .chat-code-badge:hover { background: var(--bg3); }

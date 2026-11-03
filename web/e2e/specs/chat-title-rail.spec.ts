@@ -15,30 +15,44 @@ test.describe('chat title rail, desktop', () => {
     await isolate(page, `title-rail-desktop-${testInfo.workerIndex}`)
   })
 
-  test('shows the current chat centred with its neighbour, keeps the 61px header and the title line, and switches with the arrows', async ({ page }) => {
+  test('keeps the title where the plain header has it, hides the neighbours, centres close and the code badge on the title block, and slides to the next chat with the arrow key', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
-    await expect(page.locator('.title-rail [aria-current="page"]')).toContainText('alpha first conversation')
-    await expect(page.getByRole('button', { name: /alpha second conversation/ })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Previous chat' })).toBeDisabled()
+    const current = page.locator('.title-rail-item[aria-current="page"]')
+    await expect(current).toContainText('alpha first conversation')
+    await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Previous chat' })).toHaveCount(0)
 
     const headerHeight = await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)
     expect(headerHeight).toBe(61)
 
-    const centreY = (selector: string) => page.locator(selector).evaluate(el => {
-      const box = el.getBoundingClientRect()
-      return box.top + box.height / 2
+    const box = (selector: string) => page.locator(selector).first().evaluate(el => {
+      const b = el.getBoundingClientRect()
+      return { left: b.left, right: b.right, centreY: b.top + b.height / 2 }
     })
-    const titleY = await centreY('.chat-title-row .chat-title')
-    expect(Math.abs((await centreY('.chat-title-row .close-btn')) - titleY)).toBeLessThanOrEqual(2)
-    expect(Math.abs((await centreY('.chat-title-row .chat-code-badge')) - titleY)).toBeLessThanOrEqual(2)
+    const close = await box('.chat-title-row .close-btn')
+    const title = await box('.title-rail-item[aria-current="page"] .chat-title')
+    const block = await box('.title-rail-item[aria-current="page"]')
+    const strip = await box('.title-rail-strip')
+    // Left-aligned next to close, not centred in the header.
+    expect(title.left - close.right).toBeLessThan(24)
+    // The neighbour is off-screen until a swipe or step brings it in.
+    const next = await box('.title-rail-item:not([aria-current]) .title-rail-title')
+    expect(next.left).toBeGreaterThanOrEqual(strip.right - 1)
+    expect(Math.abs(close.centreY - block.centreY)).toBeLessThanOrEqual(2)
+    expect(Math.abs((await box('.chat-title-row .chat-code-badge')).centreY - block.centreY)).toBeLessThanOrEqual(2)
+    // The dots sit on the project line, inside the title block.
+    const project = await box('.title-rail-item[aria-current="page"] .title-rail-project')
+    const dots = await box('.title-rail-item[aria-current="page"] .title-rail-dots')
+    expect(Math.abs(dots.centreY - project.centreY)).toBeLessThanOrEqual(2)
 
-    await page.getByRole('button', { name: 'Next chat' }).click()
+    await current.focus()
+    await page.keyboard.press('ArrowRight')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
-    await expect(page.locator('.title-rail [aria-current="page"]')).toContainText('alpha second conversation')
+    await expect(page.locator('.title-rail-item[aria-current="page"]')).toContainText('alpha second conversation')
   })
 
-  test('with 13 chats the n / N count sits clear of the project line and the header stays 61px', async ({ page }) => {
+  test('with 13 chats the n / N count sits on the project line and the header stays 61px', async ({ page }) => {
     // Eleven more chats in alpha, copied from alpha-chat-2 so they share its
     // project. The fixture itself stays as it is for the other specs.
     await page.route(/\/api\/chats(\?.*)?$/, async route => {
@@ -50,15 +64,16 @@ test.describe('chat title rail, desktop', () => {
     })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
-    await expect(page.locator('.title-rail-count')).toHaveText('1 / 13')
+    await expect(page.locator('.title-rail-item[aria-current="page"] .title-rail-count')).toHaveText('1 / 13')
     const headerHeight = await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)
     expect(headerHeight).toBe(61)
 
-    const boxes = await page.locator('.title-rail-item[aria-current] .title-rail-project, .title-rail-count').evaluateAll(
-      els => els.map(el => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom } }),
+    const boxes = await page.locator('.title-rail-item[aria-current] .title-rail-project, .title-rail-item[aria-current] .title-rail-count').evaluateAll(
+      els => els.map(el => { const b = el.getBoundingClientRect(); return { left: b.left, right: b.right, centreY: b.top + b.height / 2 } }),
     )
     const [project, count] = boxes
-    expect(count.top, 'count must start below the project line').toBeGreaterThanOrEqual(project.bottom)
+    expect(Math.abs(count.centreY - project.centreY), 'count shares the project line').toBeLessThanOrEqual(2)
+    expect(count.left, 'count follows the project name').toBeGreaterThanOrEqual(project.right)
   })
 
   test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {
@@ -87,10 +102,10 @@ test.describe('chat title rail, phone', () => {
     await isolate(page, `title-rail-phone-${testInfo.workerIndex}`)
   })
 
-  test('hides the arrows, snaps the strip, switches on a finished swipe, and never scrolls the document sideways', async ({ page }) => {
+  test('has no arrow buttons, snaps the strip, switches on a finished swipe, and never scrolls the document sideways', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
-    await expect(page.getByRole('button', { name: 'Next chat' })).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
     const snap = await page.locator('.title-rail-strip').evaluate(el => getComputedStyle(el).scrollSnapType)
     expect(snap).toContain('x mandatory')
 
