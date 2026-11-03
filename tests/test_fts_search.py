@@ -892,3 +892,52 @@ def test_concurrent_hits_rotation_never_drops_a_record(
     assert hits is not None
     assert len(hits) == len(lines)
 
+
+
+def _transcript_roots(tmp_path: Path) -> tuple[Path, list[Path]]:
+    """One install holding a transcript archive per workspace and one shared root,
+    each with a single transcript containing the word `kite`."""
+    install = tmp_path / "install"
+    roots = [install / "work" / "Logs", install / "personal" / "Logs", install / "Logs"]
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / "chat.md").write_text("# chat\nkite talk\n", encoding="utf-8")
+    return install, roots
+
+
+def test_search_logs_with_path_prefixes_matches_any_prefix(
+    db_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    install, roots = _transcript_roots(tmp_path)
+    for root in roots:
+        fts_search.index_logs(db_conn, root, logs_root=root, path_base=install)
+
+    rows = fts_search.search_logs(
+        db_conn, "kite", path_prefixes=("work/Logs/", "Logs/")
+    )
+
+    assert sorted(row["path"] for row in rows) == [
+        "Logs/chat.md",
+        "work/Logs/chat.md",
+    ]
+
+
+def test_search_rejects_both_prefix_forms(db_conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError):
+        fts_search.search_logs(
+            db_conn, "kite", path_prefix="work/Logs/", path_prefixes=("Logs/",)
+        )
+
+
+def test_indexing_one_logs_root_keeps_a_siblings_rows(
+    db_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Indexing one archive must not prune the rows of another archive."""
+    install, roots = _transcript_roots(tmp_path)
+    work, shared = roots[0], roots[2]
+    fts_search.index_logs(db_conn, work, logs_root=work, path_base=install)
+
+    fts_search.index_logs(db_conn, shared, logs_root=shared, path_base=install)
+
+    rows = fts_search.search_logs(db_conn, "kite", limit=10)
+    assert "work/Logs/chat.md" in {row["path"] for row in rows}

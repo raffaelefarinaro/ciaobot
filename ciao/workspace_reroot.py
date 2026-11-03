@@ -2137,20 +2137,27 @@ def rebuild_search_index(
                 )
             except Exception as exc:  # noqa: BLE001
                 result["errors"].append({"workspace": name, "error": str(exc)})
-        # The transcript archive is dropped along with everything else, so
+        # The transcript archives are dropped along with everything else, so
         # rebuilding only the vaults left `transcript_meta` empty and every
-        # transcript search silently answering nothing. It is not per-root: D5
-        # PROMOTES `Logs/` to the install root unsplit, so it indexes once,
-        # keyed against the same base as the vault rows.
-        logs = Path(install_root) / "Logs"
-        if logs.is_dir():
+        # transcript search silently answering nothing. Transcripts live in each
+        # root's Logs/ and in the shared Logs/; index all of them, keyed against
+        # the same base as the vault rows. The reported counts are totals over
+        # every root that was indexed.
+        for logs in [Path(install_root) / name / "Logs" for name in workspaces] + [
+            Path(install_root) / "Logs"
+        ]:
+            if not logs.is_dir():
+                continue
             try:
                 indexed, removed = index_logs(
                     conn, logs.parent, logs_root=logs, path_base=install_root
                 )
-                result["logs"] = {"indexed": indexed, "removed": removed}
             except Exception as exc:  # noqa: BLE001
                 result["errors"].append({"workspace": "", "error": str(exc)})
+                continue
+            totals = result.setdefault("logs", {"indexed": 0, "removed": 0})
+            totals["indexed"] += indexed
+            totals["removed"] += removed
     finally:
         conn.close()
     return result
@@ -3130,21 +3137,28 @@ def index_workspace_prefixes(index: Path, workspaces: list[str]) -> list[str]:
 def unindexed_transcript_archive(
     install_root: Path, *, db_path: Path | None = None
 ) -> int:
-    """Files in the promoted archive when the transcript index holds nothing.
+    """Files in the transcript archives when the transcript index holds nothing.
 
     `stale_search_rows` answers "do the indexed paths still resolve" — which a
     table with no rows at all passes trivially. So a rebuild that dropped the
     database and re-indexed only the vaults left transcript search empty and
     every check downstream called it clean. The count of what should have been
-    indexed is the signal; zero archive files means there is nothing to report.
+    indexed is the signal, summed over the shared `Logs/` and each workspace's
+    `Logs/`; zero archive files means there is nothing to report.
     """
     import sqlite3
 
+    from ciao.config import agent_roots_for
     from ciao.fts_search import get_db_path
 
     install_root = Path(install_root).resolve()
-    logs = install_root / "Logs"
-    if not logs.is_dir():
+    logs_dirs = [install_root / "Logs"] + [
+        root / "Logs"
+        for root, name in agent_roots_for(install_root, install_root / ".runtime")
+        if name
+    ]
+    logs_dirs = [logs for logs in logs_dirs if logs.is_dir()]
+    if not logs_dirs:
         return 0
     db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
     if not db.exists():
@@ -3158,7 +3172,7 @@ def unindexed_transcript_archive(
         conn.close()
     if rows:
         return 0
-    return sum(1 for _ in logs.rglob("*.md"))
+    return sum(1 for logs in logs_dirs for _ in logs.rglob("*.md"))
 
 
 def stale_search_rows(

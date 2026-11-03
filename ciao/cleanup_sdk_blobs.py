@@ -1,7 +1,7 @@
 """Reclaim disk by deleting SDK session JSONL blobs for already-archived chats.
 
-Scans ``memory-vault/Logs/Chats/**/*.md`` for session UUIDs embedded in the
-filename, then removes matching ``~/.claude/projects/-<slug>/<uuid>.jsonl``
+Scans every transcript archive (each workspace's ``Logs/Chats`` and the shared
+``Logs/Chats``) for session UUIDs embedded in the filename, then removes matching ``~/.claude/projects/-<slug>/<uuid>.jsonl``
 blobs. Dry-run by default; pass ``--apply`` to actually delete.
 
 Only blobs whose UUID appears in an archived markdown filename are removed.
@@ -55,21 +55,24 @@ def main(argv: list[str] | None = None) -> int:
 
     workspace = args.workspace.resolve()
     # Not `workspace / "memory-vault" / "Logs"`: the re-rooting promotes the
-    # archive to `<install>/Logs`, and a hardcoded pre-migration path makes this
+    # archive out of the vault, and a hardcoded pre-migration path makes this
     # report every archived chat as missing and every SDK blob as orphaned.
-    from ciao.config import logs_root_for
+    # Every root is read: each workspace keeps its own archive under its Logs/.
+    from ciao.config import logs_roots_for
 
-    vault_chats = logs_root_for(
-        workspace, workspace / "memory-vault", workspace / ".runtime"
-    ) / "Chats"
+    chats_roots = [
+        root / "Chats"
+        for root in logs_roots_for(workspace, workspace / "memory-vault", workspace / ".runtime")
+    ]
     projects_dir = claude_projects_dir(workspace)
 
     print(f"Workspace:       {workspace}")
-    print(f"Vault chats:     {vault_chats}")
+    for chats_root in chats_roots:
+        print(f"Vault chats:     {chats_root}")
     print(f"SDK projects:    {projects_dir}")
     print()
 
-    archived = archived_session_ids(vault_chats)
+    archived = set().union(*(archived_session_ids(root) for root in chats_roots))
     print(f"Archived session IDs found: {len(archived)}")
 
     if not projects_dir.exists():
