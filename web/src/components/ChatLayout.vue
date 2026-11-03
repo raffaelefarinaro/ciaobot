@@ -940,6 +940,8 @@ watch(() => activePinKey.value && activePinKey.value === besideWanted.value, (sa
 watch(() => store.bootstrapped && !!besideWanted.value
   && !store.chats.some(c => c.chat_id === besideWanted.value && !c.archived),
   (stale) => { if (stale) setBeside('') })
+// The keyboard belongs to a pane on screen: when the second chat leaves the tile, the main pane has it.
+watch(besideInTile, (on) => { if (!on) focusedPane.value = 'main' })
 
 /**
  * The terminal occupies the slot: no file or second chat has claimed it, and the pane is

@@ -3318,7 +3318,10 @@ describe('ChatLayout chat route without a catalog entry', () => {
         expose({
           toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
           focusComposer: () => panelCalls.push(`focus:${props.chatId}`),
-          handleSendShortcut: () => true,
+          handleSendShortcut: () => {
+            panelCalls.push(`send:${props.chatId}`)
+            return true
+          },
           archiveActiveChat: vi.fn(),
         })
         return () => h('section', {
@@ -3591,6 +3594,56 @@ describe('ChatLayout chat route without a catalog entry', () => {
       useProjectStore().activeWorkspace = 'work'
       await flushPromises()
       expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it is archived', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      store.chats.find(c => c.chat_id === 'chat-2')!.archived = true
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      expect(store.attachBesideChat).toHaveBeenLastCalledWith(null)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it becomes the main one', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      await wrapper.vm.$router.push('/chat/chat-2')
+      store.activeChatId = 'chat-2'
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a split that collapses hands the keyboard back to the main pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+
+      // The pane narrows: the second chat goes, and so does its keyboard.
+      resizePane(900)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', metaKey: true, bubbles: true }))
+      await flushPromises()
+      expect(panelCalls).toContain('send:chat-1')
+      expect(panelCalls).not.toContain('send:chat-2')
+
+      // The pane widens again: the chat comes back, but the main pane has the keyboard.
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
       wrapper.unmount()
     })
   })
