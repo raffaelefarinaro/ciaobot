@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -796,13 +796,18 @@ def search(
     limit: int = 10,
     *,
     path_prefix: str = "",
+    path_prefixes: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """Search FTS5 table with Porter stemmer query. Returns ranked results with snippets.
 
     ``path_prefix`` restricts results to one subtree of the stored keys. It is
     how a workspace-scoped search stays inside its own agent root now that the
     prune no longer deletes every other root's rows on each pass.
+    ``path_prefixes`` restricts results to any of several subtrees; pass one or
+    the other, not both.
     """
+    if path_prefix and path_prefixes:
+        raise ValueError("pass path_prefix or path_prefixes, not both")
     # Sanitize search term. If query is a simple string, escape double quotes
     # and wrap words. SQLite FTS5 MATCH syntax is powerful.
     # To support basic multi-word queries gracefully, we join words with AND.
@@ -817,6 +822,9 @@ def search(
     if path_prefix:
         scope_sql = " AND path LIKE ? ESCAPE '\\'"
         scope_args = (_like_prefix_pattern(path_prefix),)
+    elif path_prefixes:
+        scope_sql = " AND (" + " OR ".join(["path LIKE ? ESCAPE '\\'"] * len(path_prefixes)) + ")"
+        scope_args = tuple(_like_prefix_pattern(p) for p in path_prefixes)
 
     sql = f"""
         SELECT path, title, snippet({fts_table}, 2, '<<<', '>>>', '...', 32) AS snippet, rank
@@ -876,8 +884,9 @@ def search_logs(
     limit: int = 10,
     *,
     path_prefix: str = "",
+    path_prefixes: Sequence[str] = (),
 ) -> list[dict[str, str]]:
-    """Search transcripts, optionally scoped to one archive's stored keys.
+    """Search transcripts, optionally scoped to one or more archives' stored keys.
 
     ``path_prefix`` has the same meaning it has in :func:`search_vault`, and
     exists for the same reason: one database holds every re-rooted workspace's
@@ -886,13 +895,18 @@ def search_logs(
     workspace's chat titles and snippets — the same disclosure, reached through
     ``--logs`` instead of the notes path.
 
-    Left ``""`` for a single-archive install, and correct there: after the
-    re-rooting ``Logs/`` is PROMOTED to the install root UNSPLIT (D5), so its
-    rows have one prefix that every workspace shares. The filter matters for the
-    layouts where each root keeps its own archive under its own vault, which is
-    what a not-yet-migrated root and every per-root ``index_file`` write produce.
+    Transcripts live under each workspace's ``<root>/Logs`` and the shared
+    ``Logs/``. Scope a workspace's search with ``path_prefixes`` naming both.
+    Left unscoped, a search answers from every archive in the install.
     """
-    return search(conn, "transcript_fts", query, limit, path_prefix=path_prefix)
+    return search(
+        conn,
+        "transcript_fts",
+        query,
+        limit,
+        path_prefix=path_prefix,
+        path_prefixes=path_prefixes,
+    )
 
 
 # ── Scoped evidence drill-down ─────────────────────────────────────────────
