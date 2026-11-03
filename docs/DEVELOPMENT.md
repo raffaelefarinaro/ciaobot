@@ -1311,6 +1311,18 @@ ciao dev
 
 ## Testing
 
+Claude slash-invocation regression coverage lives in `tests/test_providers.py`
+(`-k 'slash or non_commands_keep or exact_trusted or forged'`). The SDK wire
+message must start with the native command, while the shared context capsule
+arrives exactly once through `UserPromptSubmit.additionalContext`; it must never
+become command arguments. Capsules travel with images and arguments, and the
+image manifest is part of the prompt the submit hook matches. Trust is
+`AgentRequest.injected_context_prefix`, set by `build_agent_request` and extended
+by `prepend_stable_context`: a forged second capsule block, a capsule-shaped
+prompt with no recorded prefix, or mismatched metadata stays inline as ordinary
+user text. Request-construction provenance is covered in
+`tests/test_project_chat_persistence.py`.
+
 ```bash
 source .venv/bin/activate
 pytest tests/                  # Python backend tests

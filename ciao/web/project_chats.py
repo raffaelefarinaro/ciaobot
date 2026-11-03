@@ -6473,6 +6473,10 @@ class ProjectChatManager:
             context_session_id=context_session_id,
             context_primed=context_primed,
             stable_context_prefix="" if compact else self._stable_context_prefix(chat),
+            # Exactly the capsule prepended above ("" for compact): providers
+            # can tell engine context from capsule-shaped user text without
+            # parsing delimiters.
+            injected_context_prefix=prefix,
             compact=compact,
         )
 
