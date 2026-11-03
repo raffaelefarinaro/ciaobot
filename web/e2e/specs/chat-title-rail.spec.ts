@@ -60,6 +60,22 @@ test.describe('chat title rail, desktop', () => {
     const [project, count] = boxes
     expect(count.top, 'count must start below the project line').toBeGreaterThanOrEqual(project.bottom)
   })
+
+  test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    await page.locator(COMPOSER).focus()
+    await page.keyboard.press('Alt+BracketRight')
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+
+    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
+    await page.keyboard.press('Alt+BracketRight')
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+    // Opening a chat focuses its composer, so step back from a blurred page again.
+    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
+    await page.keyboard.press('Alt+BracketLeft')
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+  })
 })
 
 test.describe('chat title rail, phone', () => {

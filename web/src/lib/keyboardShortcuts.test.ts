@@ -24,4 +24,22 @@ describe('keyboard shortcuts', () => {
     expect(displayBinding('Alt+KeyN', true)).toBe('⌥N')
     expect(displayBinding('Alt+KeyN', false)).toBe('Alt+N')
   })
+
+  it('defaults previous/next chat to Alt+brackets', () => {
+    expect(DEFAULT_SHORTCUTS.previousChat).toBe('Alt+BracketLeft')
+    expect(DEFAULT_SHORTCUTS.nextChat).toBe('Alt+BracketRight')
+  })
+
+  it('labels brackets', () => {
+    expect(displayBinding('Alt+BracketLeft', true)).toBe('⌥[')
+    expect(displayBinding('Alt+BracketRight', false)).toBe('Alt+]')
+  })
+
+  it('matches the bracket chord', () => {
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketRight', altKey: true }), 'Alt+BracketRight')).toBe(true)
+  })
+
+  it('captures it in Settings', () => {
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'BracketLeft', altKey: true }))).toBe('Alt+BracketLeft')
+  })
 })
