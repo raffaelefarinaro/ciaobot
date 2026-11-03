@@ -67,6 +67,13 @@ because the rule reads as an over-broad name match without it (#734):
   vault's ``Logs`` too, and the transcript subtree is refused there by its
   shape rather than by its name.
 
+A workspace's own transcripts (``<agent root>/Logs``, from #2536) need no rule
+of their own: ``Logs`` is not in :data:`DURABLE_ROOTS`, so under a live agent
+root it is outside the allowlist, and the shared install-root ``Logs`` is
+refused by location as above. An archived per-root copy of the same
+``Logs/Chats`` is refused by shape. These are pinned by tests rather than added
+as denials.
+
 Leaf module by design: it imports nothing from ``ciao`` except the read-only
 git helper and the guide's filename, and reaches ``local_session.sync_root``
 through a deferred import so ``local_session`` can import *this* module for its
@@ -399,6 +406,9 @@ def _scope(config, root: Path) -> _Scope:
 def _archive_rel(config, root: Path) -> str | None:
     """Where this install's transcript archive is, data-root-relative.
 
+    That is the shared ``logs_root`` only. A workspace's own ``<agent root>/Logs``
+    is outside the agent-root allowlist instead, so it needs no entry here.
+
     The same ``config.logs_root`` the writers use, so the refusal follows the
     archive through the re-rooting (``<vault>/Logs`` before it, ``<install>/Logs``
     after) instead of one spelling of it. Three answers, because all three are
@@ -618,6 +628,10 @@ def _is_durable(remainder: str, kind: str) -> bool:
 
 def _holds_archived_transcripts(parts: tuple[str, ...], *, offset: int) -> bool:
     """Whether this is the transcript tree of an archived agent root.
+
+    Covers a per-workspace archive too: a per-root workspace's ``Logs/Chats``
+    moved with its root (``<archive>/<name>/Logs/Chats``), and that copy is
+    refused here by shape exactly like an older promoted copy.
 
     The one place the archive anchor does not reach. :func:`_in_archive` refuses
     the archive at the single location ``config.logs_root`` resolves to, but an

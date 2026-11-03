@@ -789,6 +789,14 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 # primary workspace.
                 logger.exception("Could not archive every chat of workspace %s", name)
                 return _roll_back(f"its chats could not be archived ({exc})")
+        # The chats above are archived after the folder moved, so an archive
+        # chat that wrote a transcript recreated ``<install>/<name>/Logs``.
+        # Those files go into the archive before anything else can fail.
+        try:
+            workspace_archive.carry_late_transcripts(config, target, archived)
+        except OSError:
+            logger.exception("Could not move the late transcripts of %s into its archive", name)
+            return _roll_back("its transcripts could not be moved into the archive")
         # Archiving destroys the workspace's webhook verifiers: a revoked
         # trigger cannot be re-enabled until it is rotated, so a restored
         # workspace name reactivates no old credential. Revoked before the
