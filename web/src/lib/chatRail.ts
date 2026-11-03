@@ -1,7 +1,7 @@
 import type { HomeTierKey } from './homeLanes'
 
-export const RAIL_MAX_DOTS = 12 // above this the dots row becomes a mono "3 / 40" count
 export const RAIL_SETTLE_MS = 120 // debounce after the last scroll event
+export const RAIL_SLIDE_MS = 220 // a keyboard step slides the title this long before switching
 
 export interface ChatRailItem {
   chatId: string
