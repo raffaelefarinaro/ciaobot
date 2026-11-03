@@ -3424,6 +3424,10 @@ describe('ChatLayout chat route without a catalog entry', () => {
         expose({
           toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
           focusComposer: () => panelCalls.push(`focus:${props.chatId}`),
+          selectAdjacentChat: (direction: -1 | 1) => {
+            panelCalls.push(`step:${props.chatId}:${direction}`)
+            return true
+          },
           handleSendShortcut: () => {
             panelCalls.push(`send:${props.chatId}`)
             return true
@@ -3556,6 +3560,20 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(wrapper.find('[data-chat-id="chat-1"]').exists()).toBe(true)
       expect(useProjectStore().attachBesideChat).toHaveBeenLastCalledWith('chat-2')
       wrapper.unmount()
+    })
+
+    // With a second chat beside, the main pane's rail is replaced by a plain
+    // header, so Option+] must not step the main chat behind the user's back.
+    it('leaves Option+] alone while a second chat is beside the open one', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      try {
+        const event = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
+        window.dispatchEvent(event)
+        expect(panelCalls.filter(call => call.startsWith('step:'))).toEqual([])
+        expect(event.defaultPrevented).toBe(false)
+      } finally {
+        wrapper.unmount()
+      }
     })
 
     it('shows no second chat on a pane narrower than 940px, and brings it back when there is room', async () => {

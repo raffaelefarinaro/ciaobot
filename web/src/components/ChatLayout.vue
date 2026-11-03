@@ -1474,11 +1474,11 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Previous / next chat in the header rail's order (Home's order, this workspace).
   // Inert while typing: the gate above already returned for a focused text field,
   // and on macOS Option+[ / Option+] type “ and ‘.
-  // The main pane's ChatPanel owns the rail; while a second chat sits beside it,
-  // the main pane shows a plain header and declines.
+  // The main pane's ChatPanel owns the rail. While a second chat sits beside it
+  // the rail is replaced by a plain header, so the chord does nothing.
   const chatStep = matchesShortcut(e, 'previousChat') ? -1 : matchesShortcut(e, 'nextChat') ? 1 : 0
   if (chatStep) {
-    if (!store.activeChat || subagentRoute.value) return
+    if (!store.activeChat || subagentRoute.value || besideInTile.value) return
     if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) e.preventDefault()
     return
   }
