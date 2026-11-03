@@ -1,8 +1,9 @@
 """Reclaim disk by deleting SDK session JSONL blobs for already-archived chats.
 
 Scans every transcript archive (each workspace's ``Logs/Chats`` and the shared
-``Logs/Chats``) for session UUIDs embedded in the filename, then removes matching ``~/.claude/projects/-<slug>/<uuid>.jsonl``
-blobs. Dry-run by default; pass ``--apply`` to actually delete.
+``Logs/Chats``) for session UUIDs embedded in the filename, then removes
+matching ``~/.claude/projects/-<slug>/<uuid>.jsonl`` blobs. Dry-run by default;
+pass ``--apply`` to actually delete.
 
 Only blobs whose UUID appears in an archived markdown filename are removed.
 Anything else (including the SDK blob for live, non-archived chats) is left

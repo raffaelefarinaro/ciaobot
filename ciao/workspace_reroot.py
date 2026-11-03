@@ -2143,9 +2143,11 @@ def rebuild_search_index(
         # root's Logs/ and in the shared Logs/; index all of them, keyed against
         # the same base as the vault rows. The reported counts are totals over
         # every root that was indexed.
-        for logs in [Path(install_root) / name / "Logs" for name in workspaces] + [
-            Path(install_root) / "Logs"
-        ]:
+        # Each entry carries the workspace whose archive failed; the shared root
+        # has no workspace and reports "".
+        archives = [(name, Path(install_root) / name / "Logs") for name in workspaces]
+        archives.append(("", Path(install_root) / "Logs"))
+        for name, logs in archives:
             if not logs.is_dir():
                 continue
             try:
@@ -2153,7 +2155,7 @@ def rebuild_search_index(
                     conn, logs.parent, logs_root=logs, path_base=install_root
                 )
             except Exception as exc:  # noqa: BLE001
-                result["errors"].append({"workspace": "", "error": str(exc)})
+                result["errors"].append({"workspace": name, "error": str(exc)})
                 continue
             totals = result.setdefault("logs", {"indexed": 0, "removed": 0})
             totals["indexed"] += indexed
