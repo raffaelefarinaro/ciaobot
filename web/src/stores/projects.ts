@@ -334,6 +334,10 @@ export const useProjectStore = defineStore('projects', () => {
   // streaming). Cleared when the server echoes them back as a user_echo at
   // flush time, or on result when the queue ends up empty.
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
+  const pendingQueueTakes = ref<Record<string, Array<{ entry_id: string; text: string; images?: string[] }>>>({})
+  const queueTakeFailures = ref<Record<string, number>>({})
+  const queuedTakeAcks: Record<string, Set<string>> = {}
+  const acknowledgedQueueTakes: Record<string, Set<string>> = {}
   // One-line dock notice per chat after a steer fell back to the queue.
   const steerNotice = ref<Record<string, string>>({})
   // The server answers every steer with steered, steer_fallback or a
@@ -1510,7 +1514,7 @@ export const useProjectStore = defineStore('projects', () => {
   function pushErrorToast(
     title: string,
     errorText: string,
-    opts?: { fixRoute?: string; fixLabel?: string },
+    opts?: { fixRoute?: string; fixLabel?: string; gwsProfile?: string },
   ): InAppToast {
     return pushToast({
       chat_id: '',
@@ -2151,6 +2155,10 @@ export const useProjectStore = defineStore('projects', () => {
    */
   function hydrateParkedQueues(nextChats: ChatInfo[]) {
     for (const chat of nextChats) {
+      if (Array.isArray(chat.pending_takes) && chat.pending_takes.length) {
+        const existing = pendingQueueTakes.value[chat.chat_id] || []
+        pendingQueueTakes.value[chat.chat_id] = [...existing, ...chat.pending_takes.filter(t => !acknowledgedQueueTakes[chat.chat_id]?.has(t.entry_id) && !existing.some(e => e.entry_id === t.entry_id))]
+      }
       const parked = chat.pending_queue
       if (!Array.isArray(parked)) continue
       if (parked.length) {
@@ -4407,6 +4415,10 @@ export const useProjectStore = defineStore('projects', () => {
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
       flushQueuedResponses(chatId)
+      for (const entryId of queuedTakeAcks[chatId] || []) {
+        ws.send(JSON.stringify({ type: 'queue_take_ack', entry_id: entryId }))
+      }
+      delete queuedTakeAcks[chatId]
     }
 
     ws.onmessage = (ev) => {
@@ -5035,6 +5047,7 @@ export const useProjectStore = defineStore('projects', () => {
             && typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
+              project_id: msg.project_id,
               title: msg.title || 'ciaobot',
               body: msg.snippet || 'New message',
             })
@@ -5327,6 +5340,7 @@ export const useProjectStore = defineStore('projects', () => {
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
           fixRoute: '/settings/workspace',
           fixLabel: 'Fix in Settings',
+          gwsProfile: msg.profile,
         })
         break
       }
@@ -5692,6 +5706,21 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function requestQueuedEdit(chatId: string, entryId: string): boolean {
+    const ws = sockets.value[chatId]
+    const index = queuedMessages.value[chatId]?.findIndex(q => q.id === entryId && !q.steering) ?? -1
+    if (index < 0 || ws?.readyState !== WebSocket.OPEN) return false
+    ws.send(JSON.stringify({ type: 'queue_take', entry_id: entryId, request_id: makeQueuedId() }))
+    return true
+  }
+
+  function ackQueuedEdit(chatId: string, entryId: string) {
+    (acknowledgedQueueTakes[chatId] ||= new Set()).add(entryId)
+    const ws = sockets.value[chatId]
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'queue_take_ack', entry_id: entryId }))
+    else (queuedTakeAcks[chatId] ||= new Set()).add(entryId)
+  }
+
   function removeQueuedByIds(chatId: string, entryIds: string[] | undefined) {
     const list = queuedMessages.value[chatId]
     if (!list || !entryIds?.length) return
@@ -5737,20 +5766,6 @@ export const useProjectStore = defineStore('projects', () => {
       const beforeId = list[toIndex + 1]?.id || null
       ws.send(JSON.stringify({ type: 'queue_reorder', entry_id: moved.id, before_id: beforeId }))
     }
-  }
-
-  function editQueued(chatId: string, entryId: string, text: string, images?: string[]) {
-    const list = queuedMessages.value[chatId]
-    if (!list) return false
-    const entry = list.find(q => q.id === entryId)
-    if (!entry) return false
-    entry.text = text
-    entry.images = images
-    const ws = sockets.value[chatId]
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'queue_edit', entry_id: entryId, text, images }))
-    }
-    return true
   }
 
   /**
@@ -6484,6 +6499,19 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'queue_take_result': {
+        if (!event.ok) {
+          queueTakeFailures.value[chatId] = (queueTakeFailures.value[chatId] || 0) + 1
+          break
+        }
+        removeQueuedById(chatId, event.entry_id)
+        const takes = pendingQueueTakes.value[chatId] || []
+        if (!takes.some(t => t.entry_id === event.entry_id)) {
+          pendingQueueTakes.value[chatId] = [...takes, { entry_id: event.entry_id, text: event.text, images: event.images }]
+        }
+        break
+      }
+
       case 'queue_state': {
         // Authoritative queue order from the backend (e.g. after a reorder/edit
         // from another client, or on reconnect). Rebuild local chips to match.
@@ -7195,7 +7223,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     terminalOfferReadStart, dismissTerminalOffer,
-    removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
+    removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs, reconnectNow,

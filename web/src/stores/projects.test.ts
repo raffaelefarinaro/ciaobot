@@ -5439,6 +5439,14 @@ describe('parked pending_queue chips', () => {
     }
   }
 
+  test('hydrates unacknowledged takes without duplicating them on reconcile', () => {
+    const store = useProjectStore()
+    const take = { entry_id: 'a', text: 'draft', images: ['shot.png'] }
+    store.reconcileChatList([chat({ chat_id: 'idle', pending_takes: [take] })])
+    store.reconcileChatList([chat({ chat_id: 'idle', pending_takes: [take] })])
+    expect(store.pendingQueueTakes.idle).toEqual([take])
+  })
+
   test('an idle chat payload with pending_queue becomes chips', () => {
     const store = useProjectStore()
     store.queuedMessages.idle = [{ id: 'old', text: 'stale chip', delivery: 'queue' }]
@@ -7361,6 +7369,7 @@ describe('gws health toast', () => {
     expect(toast).toBeTruthy()
     expect(toast?.fixRoute).toBe('/settings/workspace')
     expect(toast?.fixLabel).toBe('Fix in Settings')
+    expect(toast?.gwsProfile).toBe('personal')
     expect(toast?.chat_id).toBe('')
   })
 })
@@ -9186,6 +9195,22 @@ describe('queue delivery: queue or steer', () => {
     store.streaming[chatId] = true
     return { store, socket: fakeSockets[fakeSockets.length - 1], applyKeyboardSettings }
   }
+
+  it('requests a take without changing the queue and applies only successful results', async () => {
+    const { store, socket } = await setup()
+    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one' }] })
+    expect(store.requestQueuedEdit(chatId, 'a')).toBe(true)
+    const request = frames(socket, 'queue_take')[0]
+    expect(request).toMatchObject({ entry_id: 'a', request_id: expect.any(String) })
+    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    emit(socket, { type: 'queue_take_result', request_id: request.request_id, entry_id: 'a', ok: false, text: '', images: [] })
+    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    emit(socket, { type: 'queue_take_result', request_id: request.request_id, entry_id: 'a', ok: true, text: 'one', images: ['x'] })
+    expect(store.queuedMessages[chatId]).toBeUndefined()
+    expect(store.pendingQueueTakes[chatId]).toEqual([{ entry_id: 'a', text: 'one', images: ['x'] }])
+    store.ackQueuedEdit(chatId, 'a')
+    expect(frames(socket, 'queue_take_ack')[0]).toEqual({ type: 'queue_take_ack', entry_id: 'a' })
+  })
 
   it('sends delivery steer for a mid-turn message when the preference is steer', async () => {
     const { store, socket, applyKeyboardSettings } = await setup()
