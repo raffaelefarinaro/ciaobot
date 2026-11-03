@@ -1426,6 +1426,28 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Side by side: Mod chords that type nothing, so they work from inside a composer, which is
+  // where moving to the other chat starts. The terminal keeps its own keys (it stops them).
+  // AltGr (reported as Ctrl+Alt on Windows) types [ and ] on several layouts, so it is left alone.
+  const altGraph = e.getModifierState('AltGraph')
+  if (!altGraph && matchesShortcut(e, 'splitChat')) {
+    // Only take the key when the chord acts: otherwise it stays with the page.
+    if (besideInTile.value) { e.preventDefault(); closeBeside(); return }
+    const next = store.recentChats.find(c => c.chat_id !== activePinKey.value)
+    if (next && store.activeChat && splitFits.value && !subagentRoute.value) {
+      e.preventDefault()
+      void openBeside(next.chat_id)
+    }
+    return
+  }
+  const focusLeft = matchesShortcut(e, 'focusPaneLeft')
+  if (!altGraph && (focusLeft || matchesShortcut(e, 'focusPaneRight'))) {
+    if (!besideInTile.value) return
+    e.preventDefault()
+    focusPane(focusLeft ? 'main' : 'beside', true)
+    return
+  }
+
   // User shortcuts must never take printable chords away from an editor.
   if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
 
