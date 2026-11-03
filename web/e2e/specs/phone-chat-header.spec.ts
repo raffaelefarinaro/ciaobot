@@ -3,7 +3,7 @@ import { COMPOSER, boot, isolate } from '../support/app'
 
 /**
  * Layout claims about the phone chat header need a real engine: jsdom lays
- * nothing out. At 390px the close X, the code badge and the rail arrows give
+ * nothing out. At 390px the close X and the code badge give
  * their room to the title rail (Back and the menu leave the chat; Chat details
  * carries the code mode switch), and the bell's count hangs off the bell icon
  * at every button size.
@@ -19,12 +19,12 @@ test.describe('phone chat header', () => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
     await expect(page.locator('.chat-title-row .close-btn')).toBeHidden()
-    await expect(page.locator('.chat-code-badge')).toBeHidden()
+    await expect(page.locator('.chat-code-badge')).toHaveCount(0)
     await expect(page.locator('.chat-title-row .chat-title')).toBeVisible()
 
     const rail = (await page.locator('.chat-title-row .title-rail').boundingBox())!
     expect(rail.width).toBeGreaterThan(150)
-    await expect(page.getByRole('button', { name: 'Next chat' })).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
 
     const bell = page.locator('.header-trail .notif-bell')
     await expect(bell).toBeVisible()

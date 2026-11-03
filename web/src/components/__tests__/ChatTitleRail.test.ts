@@ -5,7 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import { RAIL_SETTLE_MS, railItemLabel, type ChatRailItem } from '../../lib/chatRail'
+import { RAIL_SETTLE_MS, RAIL_SLIDE_MS, railItemLabel, type ChatRailItem } from '../../lib/chatRail'
 import ChatTitleRail from '../ChatTitleRail.vue'
 
 function item(chatId: string, overrides: Partial<ChatRailItem> = {}): ChatRailItem {
@@ -75,20 +75,6 @@ describe('ChatTitleRail', () => {
     const label = wrapper.findAll('.title-rail-item')[0].attributes('aria-label')
     expect(label).toBe(railItemLabel(a))
     expect(label).toContain('needs you')
-    expect(wrapper.find('.title-rail-signals').attributes('aria-hidden')).toBe('true')
-  })
-
-  it('emits select when a neighbour is clicked, and nothing for the current item', () => {
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
-      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
-    })
-    const buttons = wrapper.findAll('.title-rail-item')
-
-    void buttons[2].trigger('click')
-    void buttons[1].trigger('click')
-
-    expect(wrapper.emitted('select')).toEqual([['c']])
   })
 
   it('asks to rename when the current title is double-clicked', () => {
@@ -100,46 +86,57 @@ describe('ChatTitleRail', () => {
     expect(wrapper.emitted('rename')).toHaveLength(1)
   })
 
-  it('arrow buttons step and disable at the ends', async () => {
+  // The neighbours are reached by swiping or stepping, never by buttons or by clicking a peeking title.
+  it('has no arrow buttons', () => {
     seed(['a', 'b', 'c'])
-    const items = [item('a'), item('b'), item('c')]
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' } })
 
-    const first = mount(ChatTitleRail, { props: { items, currentId: 'a' } })
-    expect(first.find('button[aria-label="Previous chat"]').attributes('disabled')).toBeDefined()
-    await first.find('button[aria-label="Next chat"]').trigger('click')
-    expect(first.emitted('select')).toEqual([['b']])
-
-    const last = mount(ChatTitleRail, { props: { items, currentId: 'c' } })
-    expect(last.find('button[aria-label="Next chat"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('button[aria-label="Previous chat"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Next chat"]').exists()).toBe(false)
   })
 
-  it('marks needs-you dots in the accent and caps the row', () => {
-    seed(['a', 'b', 'c'])
+  it('draws one track segment per chat, marking each chat\'s state by shape', () => {
+    seed(['a', 'b', 'c', 'd'])
     const wrapper = mount(ChatTitleRail, {
-      props: { items: [item('a', { tier: 'needsYou' }), item('b'), item('c')], currentId: 'b' },
+      props: {
+        items: [item('a', { tier: 'needsYou' }), item('b'), item('c', { tier: 'working' }), item('d', { tier: 'unread' })],
+        currentId: 'b',
+      },
     })
 
-    const dots = wrapper.findAll('.title-rail-dot')
-    expect(dots[0].classes()).toContain('is-needs')
-    expect(dots[1].classes()).toContain('is-current')
-    expect(wrapper.find('.title-rail-dots').attributes('aria-hidden')).toBe('true')
-
-    const many = Array.from({ length: 13 }, (_, i) => item(`chat-${i}`))
-    const capped = mount(ChatTitleRail, { props: { items: many, currentId: 'chat-0' } })
-    expect(capped.findAll('.title-rail-dot')).toHaveLength(0)
-    expect(capped.find('.title-rail-count').text()).toBe('1 / 13')
+    const track = wrapper.get('.title-rail-track')
+    expect(track.attributes('aria-hidden')).toBe('true')
+    const segs = track.findAll('.title-rail-seg')
+    expect(segs).toHaveLength(4)
+    expect(segs[0].classes()).toContain('title-rail-seg--needs')
+    expect(segs[1].classes()).toEqual(['title-rail-seg'])
+    expect(segs[2].classes()).toContain('title-rail-seg--working')
+    expect(segs[3].classes()).toContain('title-rail-seg--unread')
+    // The bright segment sits on the current chat.
+    expect(track.attributes('style')).toContain('--n: 4')
+    expect(track.attributes('style')).toContain('--pos: 1')
+    // Nothing but the title and project sits on the text lines.
+    expect(wrapper.find('.title-rail-dot').exists()).toBe(false)
   })
 
-  it('gives the count room only above the dots cap', () => {
-    seed(['chat-0'])
-    const many = (n: number) => Array.from({ length: n }, (_, i) => item(`chat-${i}`))
-
-    expect(mount(ChatTitleRail, { props: { items: many(12), currentId: 'chat-0' } }).classes()).not.toContain('title-rail--count')
-    expect(mount(ChatTitleRail, { props: { items: many(13), currentId: 'chat-0' } }).classes()).toContain('title-rail--count')
+  it('moves the bright segment with the strip mid-swipe', () => {
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    strip.scrollLeft = 140
+    strip.dispatchEvent(new Event('scroll'))
+    return wrapper.vm.$nextTick().then(() => {
+      expect(wrapper.get('.title-rail-track').attributes('style')).toContain('--pos: 1.4')
+      wrapper.unmount()
+    })
   })
 
-  // Item 7: with no arrow buttons (phones), the arrow keys still step the chat.
-  it('steps to a neighbour with the arrow keys from the current item', async () => {
+  // The arrow keys step the chat, sliding the neighbour in first like a swipe.
+  it('steps to a neighbour with the arrow keys from the current item, after the slide', async () => {
+    vi.useFakeTimers()
     seed(['a', 'b', 'c'])
     const wrapper = mount(ChatTitleRail, {
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
@@ -147,9 +144,52 @@ describe('ChatTitleRail', () => {
     const current = wrapper.get('.title-rail-item[aria-current="page"]')
 
     await current.trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.emitted('select')).toBeUndefined()
+    // A second step while the first slides is ignored.
     await current.trigger('keydown', { key: 'ArrowRight' })
+    vi.advanceTimersByTime(RAIL_SLIDE_MS)
+    expect(wrapper.emitted('select')).toEqual([['a']])
 
+    await current.trigger('keydown', { key: 'ArrowRight' })
+    vi.advanceTimersByTime(RAIL_SLIDE_MS)
     expect(wrapper.emitted('select')).toEqual([['a'], ['c']])
+  })
+
+  it('slides the strip to the neighbour before switching', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    const scrollTo = vi.fn()
+    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
+
+    const exposed = wrapper.vm as unknown as { slide: (d: -1 | 1) => boolean }
+    expect(exposed.slide(1)).toBe(true)
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 200, behavior: 'smooth' })
+    // The slide's own scroll events never count as a swipe.
+    strip.dispatchEvent(new Event('scroll'))
+    vi.advanceTimersByTime(RAIL_SLIDE_MS)
+    expect(wrapper.emitted('select')).toEqual([['c']])
+    wrapper.unmount()
+  })
+
+  it('switches at once under reduced motion, and reports when there is no neighbour', () => {
+    seed(['a', 'b'])
+    const matchMedia = vi.fn(() => ({ matches: true }))
+    vi.stubGlobal('matchMedia', matchMedia)
+    try {
+      const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' } })
+      const exposed = wrapper.vm as unknown as { slide: (d: -1 | 1) => boolean }
+      expect(exposed.slide(-1)).toBe(false)
+      expect(exposed.slide(1)).toBe(true)
+      expect(wrapper.emitted('select')).toEqual([['b']])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   // A browser chord such as Alt+ArrowLeft is Back: the rail must leave it alone.
