@@ -2500,11 +2500,13 @@ async function confirmDeleteChat(chatId: string) {
 
   /* Idle project names may use the slots reserved for hover actions. Keep the
      buttons in the tab order at zero width; focusing or hovering restores the
-     full target before it is activated. */
+     full target before it is activated. Clip the collapsed button's icon and
+     padding, or they spill past the row and the sidebar scrolls sideways. */
   .project-header .project-actions-btn,
   .project-header .add-chat-btn {
     width: 0;
     min-width: 0;
+    overflow: hidden;
   }
 
   .project-header:hover .project-actions-btn,
