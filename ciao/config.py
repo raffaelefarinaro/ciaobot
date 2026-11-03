@@ -252,6 +252,19 @@ def logs_root_for(workspace_root: Path, vault_root: Path, runtime_root: Path) ->
     return Path(vault_root) / "Logs"
 
 
+def logs_roots_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> list[Path]:
+    """Every transcript-archive Logs root, from explicit paths: each agent root's
+    <root>/Logs (registry order from agent_roots_for), then the shared
+    logs_root_for(...). Pre-reroot: [<vault>/Logs]. De-duplicated, order kept."""
+    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
+
+    shared = logs_root_for(workspace_root, vault_root, runtime_root)
+    if read_receipt(Path(runtime_root)) is None:
+        return [shared]
+    roots = [root / "Logs" for root, name in agent_roots_for(workspace_root, runtime_root) if name]
+    return list(dict.fromkeys([*roots, shared]))
+
+
 def _clean_relative_path(raw: str) -> str:
     """Normalize a safe relative path so equivalent spellings resolve alike.
 
@@ -282,6 +295,20 @@ def _clean_relative_path(raw: str) -> str:
     return Path(*parts).as_posix() if parts else ""
 
 
+def _is_agent_root(path: Path) -> bool:
+    """Whether a folder is a workspace's agent root, which now holds its own Logs/."""
+    return (
+        (path / "AGENTS.md").exists()
+        or (path / "CLAUDE.md").exists()
+        or (path / ".claude").is_dir()
+    )
+
+
+def _has_logs(path: Path) -> bool:
+    """A Logs/ folder counts as vault evidence only outside an agent root."""
+    return (path / "Logs").is_dir() and not _is_agent_root(path)
+
+
 def _looks_like_vault(path: Path) -> bool:
     """Whether a directory is plausibly a workspace vault, not a stray folder."""
     try:
@@ -295,7 +322,7 @@ def _looks_like_vault(path: Path) -> bool:
             (path / "INDEX.md").is_file(),
             (path / "Workspace").is_dir(),
             (path / "projects").is_dir(),
-            (path / "Logs").is_dir(),
+            _has_logs(path),
         )
     )
 
@@ -308,7 +335,7 @@ def _vault_evidence_score(path: Path) -> int:
     score += 8 if (path / "MEMORY.md").is_file() else 0
     score += 4 if (path / "INDEX.md").is_file() else 0
     score += 4 if (path / "projects").is_dir() else 0
-    score += 2 if (path / "Logs").is_dir() else 0
+    score += 2 if _has_logs(path) else 0
     score += 1 if (path / "Workspace").is_dir() else 0
     return score
 
@@ -950,25 +977,47 @@ class CiaoConfig:
 
     @property
     def logs_root(self) -> Path:
-        """Where the derived transcript archive lives. See :func:`logs_root_for`.
+        """The shared logs root. See :func:`logs_root_for`.
 
-        D5: ``Logs/`` holds roughly 72% of the vault's notes, is derived output
-        rather than curated content, and its chat ids cannot each be resolved
-        back to one workspace, so the re-rooting PROMOTES it to
-        ``<install>/Logs/`` unmoved rather than splitting it per root. Before the
-        migration it is ``<vault>/Logs``; after, ``<install>/Logs``.
+        Before the re-rooting it is the only archive, ``<vault>/Logs``. After it,
+        ``<install>/Logs`` holds what predates per-workspace archives and could not
+        be attributed to a workspace: loose files, ``CLI/``, ``Telegram/``,
+        ``Meetings/``, and chat ids not in the registry. New chat archives go to
+        :meth:`chats_root` for their workspace. Readers scan :meth:`logs_roots`.
 
         Receipt-gated through the same ``_rerooted`` check as
         :meth:`agent_root`, so the two can never disagree about which layout the
-        install is on. Without this seam the readers keep computing
-        ``vault_root / "Logs"``, which after the migration is a path that does
-        not exist — so chat archiving would recreate it and write new
-        transcripts into a fresh empty tree, silently orphaning them from the
-        promoted archive and making the old ones invisible.
+        install is on.
         """
         return (
             self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
         )
+
+    def chats_root(self, workspace: str) -> Path:
+        """Where a chat of *workspace* archives: ``<agent_root(workspace)>/Logs/Chats``
+        after the re-rooting; ``self.logs_root / "Chats"`` before it, and for
+        workspace ``""`` (a chat with no workspace has no agent root).
+
+        ``agent_root``'s ``ValueError`` propagates for a malformed name. Callers pass
+        registered names only.
+        """
+        if not workspace or not self._rerooted():
+            return self.logs_root / "Chats"
+        return self.agent_root(workspace) / "Logs" / "Chats"
+
+    def logs_roots(self) -> list[Path]:
+        """Every archive Logs root a reader must scan: each agent root's ``Logs``
+        after the re-rooting, then the shared ``logs_root``. Before the re-rooting,
+        ``[logs_root]``. De-duplicated, order kept.
+        """
+        if not self._rerooted():
+            return [self.logs_root]
+        roots = [root / "Logs" for root, _ in self.agent_root_targets()]
+        return list(dict.fromkeys([*roots, self.logs_root]))
+
+    def chats_roots(self) -> list[Path]:
+        """``root / "Chats"`` for every root in :meth:`logs_roots`."""
+        return [root / "Chats" for root in self.logs_roots()]
 
     def agent_root_targets(self) -> list[tuple[Path, str]]:
         """Every agent root in this install, as ``(root, workspace name)``.

@@ -90,29 +90,33 @@ class ArchivePipeline:
         poll brought the chat back with the same ``chat_id`` and
         ``archive_path``.
 
-        Scoped to this chat's own directory under the derived transcript
-        archive: that tree is Ciaobot-generated, one directory per chat, and the
-        user asked for this chat to be deleted. Everything else in the vault is
-        left alone.
+        Scoped to this chat's own directory under each chats root
+        (``config.chats_roots()``): that tree is Ciaobot-generated, one directory
+        per chat, and the user asked for this chat to be deleted. Everything else
+        in the vault is left alone.
         """
-        chats_root = self._host._config.logs_root / "Chats"
-        chat_dir = chats_root / chat_id
-        # Defend the path: `chat_id` reaching a filesystem join must not escape
-        # the archive root, whatever it contains.
-        try:
-            resolved = chat_dir.resolve()
-            if resolved.parent != chats_root.resolve():
-                return
-        except OSError:
-            return
-        if not resolved.is_dir():
-            return
-        try:
-            shutil.rmtree(resolved)
-        except OSError:
-            logger.warning(
-                "Could not delete archived transcript for %s", chat_id, exc_info=True
-            )
+        for chats_root in self._host._config.chats_roots():
+            chat_dir = chats_root / chat_id
+            # A symlinked folder names another directory, which may be a sibling
+            # chat's archive. Refuse it rather than follow it.
+            if chat_dir.is_symlink():
+                continue
+            # Defend the path: `chat_id` reaching a filesystem join must not escape
+            # the archive root, whatever it contains.
+            try:
+                resolved = chat_dir.resolve()
+                if resolved.parent != chats_root.resolve():
+                    continue
+            except OSError:
+                continue
+            if not resolved.is_dir():
+                continue
+            try:
+                shutil.rmtree(resolved)
+            except OSError:
+                logger.warning(
+                    "Could not delete archived transcript for %s", chat_id, exc_info=True
+                )
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         from ciao.insights import resolve_insights_model

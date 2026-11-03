@@ -1017,6 +1017,8 @@ async def _run_server_locked(
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
+    # Each chat archives under its own workspace's agent root (config.chats_root).
+    transcripts.set_archive_root_resolver(pcm.chat_archive_root)
     # Dispatch failures stamp last_status on the stored schedule row so the
     # Automations sidebar flags them for attention instead of leaving an
     # endless string of invisible `stream error` job records (issue #407).

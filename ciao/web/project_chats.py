@@ -1939,7 +1939,7 @@ class ProjectChatManager:
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
                 f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable. {known_state}\n"
-                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
+                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
@@ -1966,7 +1966,7 @@ class ProjectChatManager:
                 f"`{vault_root}`\n\n"
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to bootstrap the current vault structure and core documentation:\n"
-                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
+                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Known state first**: {known_state}\n"
                 f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
@@ -2468,82 +2468,118 @@ class ProjectChatManager:
         return general
 
     def _discover_archived_chats(self) -> None:
-        """Scan the vault's archived transcripts and import missing chats."""
-        chats_root = self._config.logs_root / "Chats"
-        if not chats_root.is_dir():
+        """Scan every chats root's archived transcripts and import missing chats.
+
+        An archived chat whose file moved between roots is repointed, not pruned.
+        It is pruned only when no root holds the file.
+        """
+        chats_roots = [root for root in self._config.chats_roots() if root.is_dir()]
+        if not chats_roots:
             return
 
         new_chats_discovered = False
         pruned_chats = False
+        repointed_chats = False
 
-        # 1. Prune archived chats whose transcript files no longer exist
+        # 1. Repoint the archives that moved, then prune archived chats whose
+        #    transcript files exist nowhere.
+        for chat in self._chats.values():
+            helper = chat.helper
+            if not isinstance(helper, dict) or helper.get("kind") != "memory_pass":
+                continue
+            archive_path = str(helper.get("archive_path") or "")
+            source_chat_id = str(helper.get("source_chat_id") or "")
+            if not archive_path or not source_chat_id:
+                continue
+            stored = Path(archive_path)
+            if not stored.is_absolute():
+                stored = self._config.workspace_root / stored
+            if stored.is_file():
+                continue
+            found = self._locate_archive(source_chat_id, archive_path)
+            if found is not None:
+                helper["archive_path"] = str(found)
+                repointed_chats = True
         for cid, chat in list(self._chats.items()):
             if chat.archived and chat.archive_path:
                 full_path = self._config.workspace_root / chat.archive_path
                 if not full_path.exists():
+                    found = self._locate_archive(cid, chat.archive_path)
+                    if found is not None:
+                        try:
+                            chat.archive_path = found.relative_to(
+                                self._config.workspace_root
+                            ).as_posix()
+                        except ValueError:
+                            chat.archive_path = str(found)
+                        repointed_chats = True
+                        logger.info("Repointed archived chat %s to %s", cid, found)
+                        continue
                     self._chats.pop(cid)
                     pruned_chats = True
                     logger.info("Pruned archived chat %s (transcript file no longer exists)", cid)
 
-        # 2. Discover new archived chats from transcripts
-        for chat_dir in chats_root.iterdir():
-            if not chat_dir.is_dir() or not chat_dir.name.startswith("chat-"):
-                continue
-            chat_id = chat_dir.name
+        # 2. Discover new archived chats from transcripts, in every root. The
+        #    first root holding a chat wins: `chat_id in self._chats` skips the rest.
+        for chats_root in chats_roots:
+            for chat_dir in chats_root.iterdir():
+                if not chat_dir.is_dir() or not chat_dir.name.startswith("chat-"):
+                    continue
+                chat_id = chat_dir.name
 
-            # Skip if already in database
-            if chat_id in self._chats:
-                continue
+                # Skip if already in database
+                if chat_id in self._chats:
+                    continue
 
-            # Find all markdown transcripts in provider subdirectories
-            transcripts: list[Path] = []
-            for sub in chat_dir.iterdir():
-                if sub.is_dir():
-                    transcripts.extend(sub.glob("*.md"))
+                # Find all markdown transcripts in provider subdirectories
+                transcripts: list[Path] = []
+                for sub in chat_dir.iterdir():
+                    if sub.is_dir():
+                        transcripts.extend(sub.glob("*.md"))
 
-            if not transcripts:
-                continue
+                if not transcripts:
+                    continue
 
-            # Use the latest transcript file (sorted by name/timestamp)
-            transcripts.sort()
-            transcript_path = transcripts[-1]
+                # Use the latest transcript file (sorted by name/timestamp)
+                transcripts.sort()
+                transcript_path = transcripts[-1]
 
-            metadata = self._parse_transcript_file(transcript_path)
-            if not metadata:
-                continue
+                metadata = self._parse_transcript_file(transcript_path)
+                if not metadata:
+                    continue
 
-            ws = metadata["workspace"]
-            proj_name = metadata["project_name"]
-            proj_id = self._resolve_project_reference(ws, proj_name)
+                ws = metadata["workspace"]
+                proj_name = metadata["project_name"]
+                proj_id = self._resolve_project_reference(ws, proj_name)
 
-            if not proj_id:
-                # If no project ID could be resolved, skip
-                continue
+                if not proj_id:
+                    # If no project ID could be resolved, skip
+                    continue
 
-            # Reconstruct archive path relative to workspace root
-            try:
-                rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
-            except ValueError:
-                rel_archive_path = str(transcript_path)
+                # Reconstruct archive path relative to workspace root
+                try:
+                    rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
+                except ValueError:
+                    rel_archive_path = str(transcript_path)
 
-            chat_info = ChatInfo(
-                chat_id=chat_id,
-                project_id=proj_id,
-                title=metadata["title"],
-                model=metadata["model"],
-                provider=metadata["provider"],
-                session_id=metadata["session_id"],
-                created_at=metadata["created_at"],
-                archived=True,
-                last_activity_at=metadata["ended_at"],
-                last_read_at=metadata["ended_at"],
-                archive_path=rel_archive_path,
-            )
-            self._chats[chat_id] = chat_info
-            new_chats_discovered = True
-            logger.info("Imported archived chat %s under project %s", chat_id, proj_id)
+                chat_info = ChatInfo(
+                    chat_id=chat_id,
+                    project_id=proj_id,
+                    title=metadata["title"],
+                    model=metadata["model"],
+                    provider=metadata["provider"],
+                    session_id=metadata["session_id"],
+                    created_at=metadata["created_at"],
+                    archived=True,
+                    last_activity_at=metadata["ended_at"],
+                    last_read_at=metadata["ended_at"],
+                    archive_path=rel_archive_path,
+                )
+                self._chats[chat_id] = chat_info
+                new_chats_discovered = True
+                logger.info("Imported archived chat %s under project %s", chat_id, proj_id)
 
-        if new_chats_discovered or pruned_chats:
+        if new_chats_discovered or pruned_chats or repointed_chats:
             self._save(reason="archived_transcript_discovery")
 
     def _claude_session_exists(
@@ -2702,8 +2738,16 @@ class ProjectChatManager:
             ctx = ChatContext.for_web(chat_id)
             if self._transcripts.current_path(ctx, chat.provider).exists():
                 continue  # live transcript -> genuinely active, leave alone
-            archive_dir = self._transcripts.archive_dir(ctx, chat.provider)
-            if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
+            # The chat's own write folder, then every chats root: its archive may
+            # sit in another root after a move.
+            archive_dirs = list(dict.fromkeys([
+                self._transcripts.archive_dir(ctx, chat.provider),
+                *(root / chat_id / chat.provider for root in self._config.chats_roots()),
+            ]))
+            archived_files = [
+                md for folder in archive_dirs if folder.is_dir() for md in folder.glob("*.md")
+            ]
+            if not archived_files:
                 continue  # never archived -> not the corrupt state
             if chat.provider == "claude" and self._claude_session_exists(
                 chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
@@ -2711,9 +2755,7 @@ class ProjectChatManager:
                 continue  # session blob still present -> not archived
             chat.archived = True
             if not chat.archive_path:
-                latest = max(
-                    archive_dir.glob("*.md"), key=lambda p: p.name, default=None
-                )
+                latest = max(archived_files, key=lambda p: p.name, default=None)
                 if latest is not None:
                     try:
                         chat.archive_path = latest.relative_to(
@@ -5336,6 +5378,50 @@ class ProjectChatManager:
                 connections.append(connection)
         return result
 
+    def chat_archive_root(self, chat_key: str) -> Path:
+        """The chats root a chat archives into: its workspace's ``Logs/Chats``.
+
+        A key the registry does not know (not a chat id) archives to the shared
+        root, as before.
+        """
+        if chat_key not in self._chats:
+            return self._config.logs_root / "Chats"
+        return self._config.chats_root(self._workspace_for_chat(chat_key))
+
+    def _locate_archive(self, chat_id: str, archive_path: str) -> Path | None:
+        """The archive file a stored ``archive_path`` names, wherever it now lives.
+
+        The stored path when it is still a file. Otherwise the first chats root
+        holding ``<chat_id>/<provider>/<name>``, where ``<provider>/<name>`` is the
+        last two components of the stored path. None when no root holds it.
+
+        A file counts only when it resolves under some chats root, so a stored
+        path pointing outside the archives, or a symlink escaping them, is treated
+        as missing.
+        """
+        roots = self._config.chats_roots()
+
+        def under_a_root(path: Path) -> bool:
+            try:
+                resolved = path.resolve()
+                return any(resolved.is_relative_to(root.resolve()) for root in roots)
+            except OSError:
+                return False
+
+        stored = Path(archive_path)
+        if not stored.is_absolute():
+            stored = self._config.workspace_root / stored
+        if stored.is_file() and under_a_root(stored):
+            return stored
+        if len(stored.parts) < 2:
+            return None
+        tail = Path(*stored.parts[-2:])
+        for root in roots:
+            candidate = root / chat_id / tail
+            if candidate.is_file() and under_a_root(candidate):
+                return candidate
+        return None
+
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
 
@@ -5463,8 +5549,8 @@ class ProjectChatManager:
         read the chat it distils without a folder of other transcripts. The
         helper lives in the hand-editable registry, so it is validated here and
         every failure grants nothing: the chat is a memory pass with a
-        ``memory_pass`` helper, the source chat id is one folder name under
-        ``Logs/Chats`` (never a symlink), and the archive, resolved, is a regular
+        ``memory_pass`` helper, the source chat id is one folder name under one of
+        the chats roots (never a symlink), and the archive, resolved, is a regular
         file with one link inside that folder. A symlinked leaf is refused before
         it is resolved.
         """
@@ -5478,12 +5564,16 @@ class ProjectChatManager:
             return None
         workspace_root = Path(self._config.workspace_root)
         try:
-            chats_root = (self._config.logs_root / "Chats").resolve()
-            source_link = chats_root / source_chat_id
-            if source_link.is_symlink():
-                return None
-            source_dir = source_link.resolve()
-            if source_dir.parent != chats_root:
+            source_dirs: list[Path] = []
+            for root in self._config.chats_roots():
+                chats_root = root.resolve()
+                source_link = chats_root / source_chat_id
+                if source_link.is_symlink() or not source_link.is_dir():
+                    continue
+                source_dir = source_link.resolve()
+                if source_dir.parent == chats_root:
+                    source_dirs.append(source_dir)
+            if not source_dirs:
                 return None
             candidate = Path(archive_path)
             if not candidate.is_absolute():
@@ -5496,7 +5586,9 @@ class ProjectChatManager:
                 return None
         except (OSError, ValueError, RuntimeError):
             return None
-        if not resolved.is_relative_to(source_dir) or not resolved.is_file():
+        if not resolved.is_file() or not any(
+            resolved.is_relative_to(source_dir) for source_dir in source_dirs
+        ):
             return None
         return resolved
 
@@ -5944,23 +6036,6 @@ class ProjectChatManager:
                 primary,
             )
         return primary
-
-    def chat_workspaces(self) -> dict[str, str]:
-        """Every known chat id mapped to its project's workspace.
-
-        Archives live under one shared ``Logs/Chats/<chat-id>/`` tree — the
-        re-rooting promotes Logs out of the vault but does not split it per
-        workspace — so an archive's path says which CHAT wrote it and nothing
-        about where that chat ran. Anything filtering archives by workspace has
-        to come back through the registry, which is here and not in
-        ``ciao.insights``; the insights backfill that used to live there
-        compared the chat-id path segment to a workspace name directly, which
-        can never match, so a workspace-scoped run silently found nothing.
-        """
-        return {
-            chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""
-            for chat_id, chat in self._chats.items()
-        }
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
