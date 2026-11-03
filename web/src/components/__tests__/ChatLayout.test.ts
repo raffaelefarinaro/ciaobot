@@ -3806,10 +3806,46 @@ describe('ChatLayout chat route without a catalog entry', () => {
 
     it('the split chord is inert on a narrow pane', async () => {
       const wrapper = await mountSplit(900)
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+      const chord = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(chord)
       await flushPromises()
       expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
       expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      // It does nothing, so it does not take the key away from the page either.
+      expect(chord.defaultPrevented).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('the split chord is not taken when there is no other chat to open', async () => {
+      const wrapper = await mountSplit(1200)
+      const store = useProjectStore()
+      store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }] as unknown as typeof store.chats
+      await flushPromises()
+      const chord = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(chord)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(chord.defaultPrevented).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('an AltGr chord is left to the composer, so the layout can type [ and ]', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const composer = document.createElement('textarea')
+      document.body.appendChild(composer)
+      composer.focus()
+      try {
+        const chord = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', ctrlKey: true, altKey: true, bubbles: true, cancelable: true })
+        // Windows reports AltGr as Ctrl+Alt; the browser also says AltGraph is held.
+        Object.defineProperty(chord, 'getModifierState', { value: (key: string) => key === 'AltGraph' })
+        composer.dispatchEvent(chord)
+        await flushPromises()
+        expect(chord.defaultPrevented).toBe(false)
+        expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+        expect(panelCalls).not.toContain('focus:chat-2')
+      } finally {
+        composer.remove()
+      }
       wrapper.unmount()
     })
 
