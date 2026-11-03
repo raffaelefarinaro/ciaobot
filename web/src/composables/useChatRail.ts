@@ -5,11 +5,20 @@ import { railNeighbours, stableRailOrder, type ChatRailItem } from '../lib/chatR
 
 // Module-level so it survives ChatPanel remounts (ChatLayout keys ChatPanel by chat id).
 let snapshot: { workspace: string; chatId: string; ids: string[] } | null = null
+// Which way the last rail switch went (1 = to the next chat), read once by the
+// panel that mounts for it so its transcript can slide in from that side.
+let arrival: -1 | 1 | 0 = 0
+export function takeRailArrival(): -1 | 1 | 0 {
+  const a = arrival
+  arrival = 0
+  return a
+}
 // True while a rail switch is in flight; a second swipe during it is ignored.
 let switching = false
 
 export function resetChatRailSnapshot(): void {
   snapshot = null
+  arrival = 0
 }
 
 export function useChatRail(currentChatId: () => string): {
@@ -60,10 +69,13 @@ export function useChatRail(currentChatId: () => string): {
     if (switching || chatId === currentChatId()) return
     switching = true
     try {
-      snapshot = { workspace: store.activeWorkspace, chatId, ids: items.value.map(i => i.chatId) }
+      const ids = items.value.map(i => i.chatId)
+      snapshot = { workspace: store.activeWorkspace, chatId, ids }
+      arrival = ids.indexOf(chatId) > ids.indexOf(currentChatId()) ? 1 : -1
       await store.switchChat(chatId)
     } catch (err) {
       snapshot = null
+      arrival = 0
       throw err
     } finally {
       switching = false

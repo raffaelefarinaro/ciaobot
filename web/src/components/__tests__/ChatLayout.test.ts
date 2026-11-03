@@ -27,7 +27,7 @@ const selectAdjacentChat = vi.fn(() => true)
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
-  emits: ['close'],
+  emits: ['close', 'pull', 'pull-end'],
   setup(_, { emit, expose }) {
     expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat })
     return () => h('button', {
@@ -1770,6 +1770,40 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     await flushPromises()
     expect(fromHome.store.activeChatId).toBeNull()
     fromHome.wrapper.unmount()
+  })
+
+  // Pull to close: the chat title dragged down far enough (or flicked) closes the
+  // chat once the pane has dropped away; a short pull springs back.
+  it('closes the chat after a long pull on the title, and springs back from a short one', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    const panel = wrapper.findComponent({ name: 'ChatPanel' })
+
+    panel.vm.$emit('pull', 60)
+    await nextTick()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(true)
+    expect((panel.element as HTMLElement).style.transform).toContain('translateY(60px)')
+    panel.vm.$emit('pull-end', 60, 0.1)
+    await new Promise(r => setTimeout(r, 320))
+    await nextTick()
+    expect(closeChat).not.toHaveBeenCalled()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(false)
+
+    panel.vm.$emit('pull', 150)
+    panel.vm.$emit('pull-end', 150, 0.2)
+    expect(closeChat).not.toHaveBeenCalled()
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('treats a short downward flick as a close', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    wrapper.findComponent({ name: 'ChatPanel' }).vm.$emit('pull-end', 50, 1.2)
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 
   it('Home navigation does not delete an empty draft or its staged content', async () => {
