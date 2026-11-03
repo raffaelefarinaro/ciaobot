@@ -76,6 +76,85 @@ def test_stock_skills_use_no_stale_command_or_ui_names() -> None:
         assert "proposals panel" not in text.lower(), path
 
 
+def _capabilities_reference(name: str) -> str:
+    return (STOCK_SKILLS / "ciao-capabilities" / "references" / name).read_text(encoding="utf-8")
+
+
+def _subagent_bullet() -> str:
+    return next(
+        line
+        for line in _capabilities_reference("workspaces-and-chats.md").splitlines()
+        if line.startswith("- **Subagents**")
+    )
+
+
+def test_capabilities_description_and_index_cover_locating_running_agents() -> None:
+    index = (STOCK_SKILLS / "ciao-capabilities" / "SKILL.md").read_text(encoding="utf-8")
+    parts = split_frontmatter(index)
+    assert parts is not None
+    description = yaml.safe_load(parts[0])["description"]
+    for phrase in ("running agents", "transcripts"):
+        assert phrase in description.lower(), f"description is missing {phrase!r}"
+    row = next(line for line in index.splitlines() if "`references/workspaces-and-chats.md`" in line)
+    for phrase in ("running agents", "transcripts"):
+        assert phrase in row.lower(), f"capabilities index row is missing {phrase!r}"
+
+
+def test_subagent_reference_points_at_composer_activity_and_chat_details_running() -> None:
+    bullet = _subagent_bullet()
+    assert "composer" in bullet.lower()
+    assert "**1 agent**" in bullet and "**N agents**" in bullet
+    assert "count alone" in bullet.lower()
+    assert "Chat details → **Running** → **Agents**" in bullet
+    assert "**Processes**" in bullet
+
+
+def test_subagent_reference_distinguishes_read_only_views_from_completed_activity() -> None:
+    bullet = _subagent_bullet()
+    assert "read-only" in bullet.lower()
+    assert "Activity" in bullet
+
+
+def test_subagent_reference_treats_activity_trace_as_insufficient_proof_of_a_stop() -> None:
+    bullet = _subagent_bullet()
+    assert "Activity" in bullet
+    assert "trace alone" in bullet.lower()
+    assert "not proof" in bullet
+    assert "possibly active" in bullet.lower()
+    assert "same worktree" in bullet.lower()
+
+
+def test_subagent_reference_does_not_treat_displayed_state_as_definitive() -> None:
+    bullet = _subagent_bullet()
+    assert "display, not proof" in bullet.lower()
+    assert "earlier execution" in bullet.lower()
+    assert "authoritative completion result" in bullet.lower()
+    assert "current execution" in bullet.lower()
+    assert "verified lifecycle" in bullet.lower()
+
+
+def test_subagent_reference_marks_sidebar_status_as_conditional() -> None:
+    bullet = _subagent_bullet()
+    assert "tooltip" in bullet.lower()
+    assert "**Working**" in bullet
+    assert "rather than a count" in bullet.lower()
+    assert "higher-priority" in bullet.lower()
+    assert "replaces" in bullet.lower()
+
+
+def test_subagent_reference_keeps_visibility_limits_and_drops_the_sidebar_row_claim() -> None:
+    bullet = _subagent_bullet()
+    assert "row under its chat in the sidebar" not in bullet.lower()
+    assert "sidebar" in bullet.lower()
+    assert "chat-level status" in bullet.lower()
+    assert "Transcript not on this machine" in bullet
+    assert "not every dispatch" in bullet.lower()
+    assert "absent row" in bullet.lower()
+    assert "is not proof" in bullet
+    assert "clean worktree" in bullet.lower()
+    assert "same worktree" in bullet.lower()
+
+
 def test_capabilities_index_is_small_and_every_named_reference_ships() -> None:
     root = STOCK_SKILLS / "ciao-capabilities"
     index = (root / "SKILL.md").read_text(encoding="utf-8")
