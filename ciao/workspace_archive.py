@@ -304,6 +304,54 @@ def move_to_archive(
     return {**metadata, "id": folder.name, "path": _display(config, folder)}
 
 
+def carry_late_transcripts(
+    config: Any, target: ArchiveTarget, archived: dict[str, Any]
+) -> int:
+    """Move transcripts written to ``<agent root>/Logs`` into the archive.
+
+    The route archives a workspace's chats only after :func:`move_to_archive`
+    has moved its folder, so an archive chat that writes then recreates
+    ``<install>/<name>/Logs`` and, with it, a folder the rollback cannot put
+    back. This moves every file under that ``Logs`` into the archived root's own
+    ``Logs`` (never overwriting, and skipping symlinks), then removes the
+    emptied tree and the agent root when nothing else is left in them. Returns
+    how many files moved. The shared layout has no per-workspace ``Logs``.
+    """
+    if target.layout != LAYOUT_PER_ROOT:
+        return 0
+    late = target.source / "Logs"
+    if late.is_symlink() or not late.is_dir():
+        return 0
+    dest = archive_root(config) / str(archived["id"]) / target.source.name / "Logs"
+    moved = 0
+    for file in sorted(p for p in late.rglob("*") if p.is_file() and not p.is_symlink()):
+        out = dest / file.relative_to(late)
+        if out.exists():
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(file, out)
+        moved += 1
+    emptied = sorted(
+        (p for p in late.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+    for leftover in (*emptied, late, target.source):
+        try:
+            leftover.rmdir()
+        except OSError:
+            pass
+    if late.is_symlink() or late.exists():
+        # A collision or a skipped symlink stayed behind. The caller must not
+        # treat the workspace as archived or as moved back.
+        raise OSError(
+            f"{late} still holds files that were not moved into {dest} "
+            "(a file of the same name is already archived, or a symlink was "
+            "skipped); they were left in place"
+        )
+    return moved
+
+
 def _remove_empty_archive_folder(folder: Path) -> None:
     """Undo a fresh archive folder that holds nothing but its own metadata."""
     for leftover in (folder / METADATA_FILE, (folder / METADATA_FILE).with_suffix(".json.tmp")):
@@ -350,6 +398,14 @@ def undo_move_to_archive(
     :class:`WorkspaceArchiveError` when the folder cannot be moved back; the
     archive is then left untouched.
     """
+    try:
+        carry_late_transcripts(config, target, archived)
+    except OSError:
+        logger.warning(
+            "Could not move the late transcripts of %s into its archive",
+            target.name,
+            exc_info=True,
+        )
     folder = archive_root(config) / str(archived["id"])
     content_dir = str(archived.get("content_dir") or "")
     if content_dir:
@@ -408,25 +464,50 @@ def refresh_shared_index(config: Any) -> bool:
     return True
 
 
+def _workspace_logs_root(config: Any, vault: Path) -> Path | None:
+    """The ``Logs`` of the agent root holding *vault*, per-root installs only.
+
+    A per-root workspace's vault sits under its own agent root
+    (``<install>/<name>/...``), and that root's ``Logs`` is where its transcripts
+    were written. The shared layout keeps every transcript in the one shared
+    root, so there is nothing per-workspace to drop.
+    """
+    install = Path(config.workspace_root)
+    if not _rerooted(config) or not vault.is_relative_to(install):
+        return None
+    parts = vault.relative_to(install).parts
+    if not parts:
+        return None
+    return install / parts[0] / "Logs"
+
+
 def forget_search_rows(config: Any, vault: Path) -> int:
-    """Drop the archived vault's rows from the install's search database."""
+    """Drop the archived vault's rows, and its transcripts', from search."""
     from ciao.async_reads import keyed_lock  # noqa: PLC0415
     from ciao.fts_search import (  # noqa: PLC0415
         forget_subtree,
+        forget_transcript_subtree,
         get_db_path,
         init_db,
+        logs_key_prefix,
         vault_key_prefix,
     )
 
     db_path = get_db_path(Path(config.state_path).parent)
     if not db_path.exists():
         return 0
-    prefix = vault_key_prefix(vault, Path(config.workspace_root))
+    install = Path(config.workspace_root)
+    prefix = vault_key_prefix(vault, install)
+    logs_root = _workspace_logs_root(config, vault)
+    logs_prefix = None if logs_root is None else logs_key_prefix(logs_root, install)
     conn = sqlite3.connect(db_path)
     try:
         with keyed_lock(f"fts-index:{db_path}"):
             init_db(conn)
-            return forget_subtree(conn, prefix)
+            removed = forget_subtree(conn, prefix)
+            if logs_prefix is not None:
+                removed += forget_transcript_subtree(conn, logs_prefix)
+            return removed
     finally:
         conn.close()
 

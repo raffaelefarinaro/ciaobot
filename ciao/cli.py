@@ -2110,7 +2110,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     vault_root = _resolve_vault_root(args.vault_root)
     # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
     # be derived from the vault root on a migrated install.
-    from ciao.config import logs_root_for
+    from ciao.config import logs_root_for, logs_roots_for
 
     # The install root defines BOTH the stored-key base and the database: an
     # explicit --runtime-root / CIAO_RUNTIME_ROOT names `<install>/.runtime`, so
@@ -2131,7 +2131,15 @@ def _vault_search_command(args: argparse.Namespace) -> int:
             os.environ.get("CIAO_WORKSPACE", "").strip() or vault_root.parent
         ).expanduser().resolve()
         runtime_root = (key_base / ".runtime").resolve()
-    logs_root = logs_root_for(key_base, vault_root, runtime_root)
+    # Every archive root gets indexed, so transcripts written under a workspace's
+    # own Logs/ are searchable as well as the shared Logs/. `--logs` answers from
+    # this vault's workspace archive plus the shared one, never a sibling's.
+    all_logs_roots = logs_roots_for(key_base, vault_root, runtime_root)
+    shared_logs = logs_root_for(key_base, vault_root, runtime_root)
+    own_logs = vault_root.parent / "Logs"
+    search_logs_roots = [
+        root for root in all_logs_roots if root in (own_logs, shared_logs)
+    ] or [shared_logs]
     # Install-owned, exactly like the MCP tools and startup indexing: with the
     # legacy global `~/.ciao/vault-fts.db`, a `ciao vault-search` run from a dev
     # checkout cleared the production install's index (and vice versa) because
@@ -2150,7 +2158,11 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         fts_search.init_db(conn)
         if not args.query:
             vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
-            logs_indexed, logs_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
+            logs_indexed = logs_removed = 0
+            for logs_root in all_logs_roots:
+                indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
+                logs_indexed += indexed
+                logs_removed += removed
             if vault_indexed or vault_removed or logs_indexed or logs_removed:
                 print(
                     "FTS Index updated: "
@@ -2162,7 +2174,11 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
         try:
             if args.logs:
-                indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
+                indexed = removed = 0
+                for logs_root in all_logs_roots:
+                    part_indexed, part_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
+                    indexed += part_indexed
+                    removed += part_removed
                 if indexed or removed:
                     print(
                         f"Transcripts index: {indexed} indexed, {removed} removed.",
@@ -2192,7 +2208,9 @@ def _vault_search_command(args: argparse.Namespace) -> int:
                 # Same reason the vault query is scoped: the FTS database
                 # deliberately holds rows from every re-rooted root, so an
                 # unscoped search returns another workspace's transcripts.
-                path_prefix=fts_search.logs_key_prefix(logs_root, key_base),
+                path_prefixes=tuple(
+                    fts_search.logs_key_prefix(root, key_base) for root in search_logs_roots
+                ),
             )
             if args.logs
             else fts_search.search_vault(
