@@ -896,16 +896,7 @@
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
-          <template v-if="editingQueueId === q.id">
-            <textarea
-              v-model="editingQueueText"
-              class="queued-edit-input"
-              rows="2"
-              @keydown.enter.prevent="saveEditQueue(chat.chat_id, q.id)"
-              @keydown.esc="cancelEditQueue"
-            />
-          </template>
-          <span v-else class="queued-text">{{ q.text }}</span>
+          <span class="queued-text">{{ q.text }}</span>
         </div>
         <div v-if="!q.steering" class="queued-controls">
           <div
@@ -953,16 +944,11 @@
               @click="store.reorderQueued(chat.chat_id, i, i + 1)"
             ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
             <button
-              v-if="editingQueueId !== q.id"
               class="queued-action"
               title="Edit"
               aria-label="Edit queued message"
               @click="startEditQueue(q)"
             ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
-            <template v-else>
-              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
-              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-            </template>
             <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           </div>
         </div>
@@ -972,6 +958,7 @@
          appears already in the Steering state is announced by this text
          changing, not by a new element. -->
     <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
+    <p v-if="queueEditNotice" class="queue-edit-notice steer-notice" role="status">{{ queueEditNotice }}</p>
     <!-- Outside the queue block: the fallback reply usually empties it, and a
          collapsed dock hides it, but the notice must still be read. -->
     <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
@@ -1949,12 +1936,7 @@ watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
 
-// Inline editing state for queued messages. Keyed by queue entry id.
-const editingQueueId = ref<string | null>(null)
-const editingQueueText = ref('')
-// The edit UI only edits text, so hold the entry's images and re-send them on
-// save — otherwise the backend clears attachments it resolves from an empty list.
-const editingQueueImages = ref<string[] | undefined>(undefined)
+const queueEditNotice = ref('')
 
 // Entries that "Steer all" combines: queue-mode ones not already handed over,
 // in list order.
@@ -2009,23 +1991,49 @@ function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
 }
 
 function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
-  editingQueueId.value = entry.id
-  editingQueueText.value = entry.text
-  editingQueueImages.value = entry.images ? [...entry.images] : undefined
+  if (inputText.value || view.pendingImages.length || view.pendingComments.length || view.pendingChatComments.length) {
+    queueEditNotice.value = 'Please delete the current draft and remove its attachments before editing a queued message.'
+    return
+  }
+  if (!store.requestQueuedEdit(chat.value.chat_id, entry.id)) {
+    queueEditNotice.value = 'Could not move the queued message. Check the connection and try again.'
+    return
+  }
+  queueEditNotice.value = ''
 }
 
-function cancelEditQueue() {
-  editingQueueId.value = null
-  editingQueueText.value = ''
-  editingQueueImages.value = undefined
-}
-
-function saveEditQueue(chatId: string, entryId: string) {
-  const text = editingQueueText.value.trim()
-  if (!text) return
-  store.editQueued(chatId, entryId, text, editingQueueImages.value)
-  cancelEditQueue()
-}
+watch(() => store.queueTakeFailures[chat.value.chat_id], () => {
+  queueEditNotice.value = 'Could not move the queued message. It may already have been sent.'
+})
+// The engine has already taken the entry out of the queue when it answers, so
+// its text lives only in the take receipt until this applies it. A draft that
+// appeared while the take was in flight is never overwritten: the receipt is
+// kept unacknowledged and the message lands as soon as the composer is empty
+// again, which is what the notice asks for.
+watch(
+  () => [chat.value.chat_id, store.pendingQueueTakes[chat.value.chat_id]?.length,
+    inputText.value, view.pendingImages.length, view.pendingComments.length,
+    view.pendingChatComments.length] as const,
+  () => {
+    const chatId = chat.value.chat_id
+    const entry = store.pendingQueueTakes[chatId]?.[0]
+    if (!entry) return
+    if (inputText.value || view.pendingImages.length || view.pendingComments.length || view.pendingChatComments.length) {
+      queueEditNotice.value = `“${queuedExcerpt(entry.text)}” was taken out of the queue. Delete the current draft and its attachments to edit it.`
+      return
+    }
+    inputText.value = entry.text
+    if (entry.images?.length) store.addPendingImageRefs(chatId, entry.images)
+    store.ackQueuedEdit(chatId, entry.entry_id)
+    store.pendingQueueTakes[chatId] = store.pendingQueueTakes[chatId].slice(1)
+    queueEditNotice.value = ''
+    void nextTick(() => {
+      composer.autoResize()
+      inputEl.value?.focus({ preventScroll: true })
+    })
+  },
+  { immediate: true },
+)
 
 const taskStore = useTaskStore()
 // Automations linked to this chat: either the chat carries a schedule_id
@@ -7410,18 +7418,6 @@ details[open] > .activity-summary::before {
   font-size: 12px;
   color: var(--fg2);
 }
-.queued-edit-input {
-  width: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 8px;
-  font-family: var(--font);
-  font-size: 13px;
-  resize: vertical;
-}
-
 /* AskUserQuestion picker. Same docking pattern as the permission card so
    the model's structured question doesn't get lost in the trace. */
 .question-card {

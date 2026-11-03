@@ -23,6 +23,49 @@ beforeEach(() => {
   routerPush.mockReset()
 })
 
+describe('workspace scope', () => {
+  it('shows chat popups only in their workspace and keeps global notices visible', async () => {
+    const { wrapper, store } = mountToast()
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      { project_id: 'p1', workspace: 'personal' },
+      { project_id: 'p2', workspace: 'work' },
+    ] as typeof store.projects
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1' },
+      { chat_id: 'c2', project_id: 'p2' },
+    ] as typeof store.chats
+    store.pushToast({ chat_id: 'c1', title: 'Personal result', body: 'personal' })
+    store.pushToast({ chat_id: 'c2', title: 'Work result', body: 'work' })
+    store.pushToast({ chat_id: 'unknown', title: 'Unknown result', body: 'unknown' })
+    store.pushToast({ chat_id: 'new', project_id: 'p1', title: 'New chat result', body: 'new' })
+    store.pushToast({ chat_id: '', title: 'Global notice', body: 'global' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.toast-title').map(el => el.text())).toEqual(['Personal result', 'New chat result', 'Global notice'])
+
+    store.activeWorkspace = 'work'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.toast-title').map(el => el.text())).toEqual(['Work result', 'Global notice'])
+    wrapper.unmount()
+  })
+
+  it('scopes Google account alerts to workspaces using that account', async () => {
+    const { wrapper, store } = mountToast()
+    store.workspaces = [
+      { name: 'personal', gws_profile: 'personal-account' },
+      { name: 'work', gws_profile: 'work-account' },
+    ] as typeof store.workspaces
+    store.activeWorkspace = 'personal'
+    store.pushToast({ chat_id: '', title: 'Work account', body: 'expired', gwsProfile: 'work-account' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.toast').exists()).toBe(false)
+    store.activeWorkspace = 'work'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.toast-title').text()).toBe('Work account')
+    wrapper.unmount()
+  })
+})
+
 describe('info toast action', () => {
   it('runs and dismisses an info toast action', async () => {
     const { wrapper, store } = mountToast()

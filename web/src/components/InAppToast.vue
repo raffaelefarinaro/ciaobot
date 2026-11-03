@@ -1,7 +1,7 @@
 <template>
-  <div class="toast-stack" :class="{ 'toast-stack--under-modal': modalOpen }" v-if="store.toasts.length">
+  <div class="toast-stack" :class="{ 'toast-stack--under-modal': modalOpen }" v-if="visibleToasts.length">
     <div
-      v-for="t in store.toasts"
+      v-for="t in visibleToasts"
       :key="t.id"
       class="toast"
       :class="{ 'toast-error': t.variant === 'error', 'toast-swiping': swipeId === t.id }"
@@ -54,6 +54,17 @@ import type { InAppToast } from '../lib/types'
 const store = useProjectStore()
 const router = useRouter()
 const modalOpen = useModalOpen()
+const visibleToasts = computed(() => store.toasts.filter((toast) => {
+  if (toast.gwsProfile) {
+    return store.workspaces.some(w => w.name === store.activeWorkspace && w.gws_profile === toast.gwsProfile)
+  }
+  if (toast.restoreDraft?.workspace && toast.restoreDraft.workspace !== store.activeWorkspace) return false
+  if (!toast.chat_id) return true
+  const project = toast.project_id
+    ? store.projects.find(p => p.project_id === toast.project_id)
+    : store.projectFor(toast.chat_id)
+  return !!project && project.workspace === store.activeWorkspace
+}))
 
 // ── Swipe-to-dismiss ────────────────────────────────────────────────────────
 // Horizontal drag past a threshold dismisses the toast. Tracked per-toast so
@@ -115,7 +126,7 @@ async function onClick(toast: InAppToast) {
   // Global error toasts aren't tied to a chat — clicking the body is a no-op
   // (use the Fix / dismiss buttons instead).
   if (!toast.chat_id) return
-  // Switch workspace if needed (the toast may be for a chat in the other one)
+  // A workspace switch may have started between rendering and the click.
   const project = store.projectFor(toast.chat_id)
   if (project && project.workspace !== store.activeWorkspace) {
     if ((await store.switchWorkspace(project.workspace)) === false) return
