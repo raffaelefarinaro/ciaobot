@@ -83,6 +83,14 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
     return False
 
 
+def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
+    """Remove and return a pending entry by id."""
+    for i, item in enumerate(items):
+        if item.get("id") == entry_id:
+            return items.pop(i)
+    return None
+
+
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
 #: An engine-injected turn's source, or ``retry`` for a user-requested retry.
 #: Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
@@ -878,6 +886,12 @@ class ChatStream:
         if self._is_steering(entry_id):
             return False
         return remove_pending_list(self._pending, entry_id)
+
+    def take_pending(self, entry_id: str) -> dict | None:
+        """Take an entry only if it has not been handed to a provider."""
+        if self._is_steering(entry_id):
+            return None
+        return take_pending_list(self._pending, entry_id)
 
     def _is_steering(self, entry_id: str) -> bool:
         return any(p.get("id") == entry_id and p.get("steer_id") for p in self._pending)

@@ -280,6 +280,7 @@ export interface ChatInfo {
   // they leave only through Send now, edit, remove or reorder, so the list
   // is the chat's waiting chips.
   pending_queue?: Array<{ id: string; text: string; images?: string[] }>
+  pending_takes?: Array<{ entry_id: string; text: string; images?: string[] }>
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
   forked_from_turn_index?: number | null
@@ -610,6 +611,7 @@ export type WsEvent =
   | { type: 'question_resolved'; request_id: string; session_id?: string }
   | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean; send_id?: string }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
+  | { type: 'queue_take_result'; request_id: string; entry_id: string; ok: boolean; text: string; images: string[] }
   // A steer reached the running turn: the entries leave the queue and the
   // message becomes its own user turn.
   | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string; origin?: TurnOrigin }
@@ -678,6 +680,10 @@ export interface InAppToast {
   id: number
   // Chat this toast points at; '' for global error toasts not tied to a chat.
   chat_id: string
+  // Result events can arrive before the chat list has been reconciled.
+  project_id?: string
+  // Account alerts belong only to workspaces linked to this profile.
+  gwsProfile?: string
   title: string
   body: string
   // 'error' toasts persist until dismissed and show a "Fix" action.
