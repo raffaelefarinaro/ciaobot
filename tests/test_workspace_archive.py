@@ -506,6 +506,35 @@ def test_forget_subtree_refuses_prefixes_that_are_not_one_subtree(tmp_path):
         conn.close()
 
 
+def test_forget_transcript_subtree_refuses_prefixes_that_are_not_one_subtree(tmp_path):
+    conn = sqlite3.connect(tmp_path / "fts.db")
+    try:
+        fts_search.init_db(conn)
+        for path in ("a/x.md", "ab/y.md", "work/Logs/c/s.md", "work2/Logs/c/s.md"):
+            conn.execute(
+                "INSERT INTO transcript_fts (path, title, body) VALUES (?, 'x', 'y')",
+                (path,),
+            )
+        conn.commit()
+
+        def rows() -> set[str]:
+            return {row[0] for row in conn.execute("SELECT path FROM transcript_fts")}
+
+        assert fts_search.forget_transcript_subtree(conn, "") == 0
+        assert fts_search.forget_transcript_subtree(conn, fts_search.NO_MATCH_KEY_PREFIX) == 0
+        assert len(rows()) == 4, "refused prefixes must not delete anything"
+        assert fts_search.forget_transcript_subtree(conn, "a_/") == 0, (
+            "LIKE wildcards must be escaped"
+        )
+        assert "ab/y.md" in rows()
+        assert fts_search.forget_transcript_subtree(conn, "a/") == 1
+        assert "ab/y.md" in rows(), "a/ must not take the sibling ab/"
+        assert fts_search.forget_transcript_subtree(conn, "work/Logs/") == 1
+        assert "work2/Logs/c/s.md" in rows(), "work/Logs/ must not take work2/Logs/"
+    finally:
+        conn.close()
+
+
 # ── restore ──────────────────────────────────────────────────────────────────
 
 
@@ -1466,3 +1495,119 @@ def test_carry_is_a_noop_on_the_shared_layout(tmp_path):
 
     assert moved == 0
     assert late.read_text(encoding="utf-8") == "# late\n"
+
+
+def _late_transcript_path(install: Path) -> Path:
+    return install / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+
+
+def test_route_carries_a_transcript_written_during_the_chat_archive(tmp_path, monkeypatch):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+
+    def _archive_chats_and_write(workspace):
+        # An archive chat that writes its transcript while the folder is gone.
+        late = _late_transcript_path(tmp_path)
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("# late\n", encoding="utf-8")
+        return {"projects": 0}
+
+    monkeypatch.setattr(pcm, "archive_workspace_projects", _archive_chats_and_write)
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200, response.json()
+    assert not (tmp_path / "work").exists(), "a late write must not recreate the root"
+    archived = response.json()["archived"]
+    carried = archive_root(config) / archived["id"] / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+    assert carried.read_text(encoding="utf-8") == "# late\n"
+    assert config.workspace("work") is None
+
+
+def test_route_rolls_back_when_the_carry_fails(tmp_path, monkeypatch):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    before = _tree(tmp_path / "work")
+
+    def _carry_fails(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(workspace_archive, "carry_late_transcripts", _carry_fails)
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "transcripts could not be moved" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+
+
+def test_route_rollback_retries_the_carry_and_brings_the_late_transcript_back(
+    tmp_path, monkeypatch
+):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    real_carry = workspace_archive.carry_late_transcripts
+    calls = {"n": 0}
+
+    def _first_carry_fails(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(28, "No space left on device")
+        return real_carry(*args, **kwargs)
+
+    def _archive_chats_and_write(workspace):
+        late = _late_transcript_path(tmp_path)
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("# late\n", encoding="utf-8")
+        return {"projects": 0}
+
+    monkeypatch.setattr(workspace_archive, "carry_late_transcripts", _first_carry_fails)
+    monkeypatch.setattr(pcm, "archive_workspace_projects", _archive_chats_and_write)
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert calls["n"] == 2, "the rollback must retry the carry"
+    assert config.workspace("work") is not None
+    assert _late_transcript_path(tmp_path).read_text(encoding="utf-8") == "# late\n"
+    assert (tmp_path / "work" / "memory-vault" / "People" / "work-friend.md").is_file()
+
+
+def test_carry_never_overwrites_and_reports_what_it_left(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    target, archived = _archive_work(config)
+    late = _late_transcript_path(tmp_path)
+    late.parent.mkdir(parents=True, exist_ok=True)
+    late.write_text("# late\n", encoding="utf-8")
+    folder = archive_root(config) / archived["id"]
+    existing = folder / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "s.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text("# old\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="not moved"):
+        carry_late_transcripts(config, target, archived)
+
+    assert existing.read_text(encoding="utf-8") == "# old\n"
+    assert late.read_text(encoding="utf-8") == "# late\n"
+
+
+def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    _work_notes(tmp_path)
+    target, archived = _archive_work(config)
+    outside = tmp_path / "outside.md"
+    outside.write_text("# outside\n", encoding="utf-8")
+    late_dir = tmp_path / "work" / "Logs" / "Chats" / "chat-1" / "claude"
+    late_dir.mkdir(parents=True)
+    (late_dir / "real.md").write_text("# real\n", encoding="utf-8")
+    link = late_dir / "link.md"
+    link.symlink_to(outside)
+
+    with pytest.raises(OSError, match="not moved"):
+        carry_late_transcripts(config, target, archived)
+
+    folder = archive_root(config) / archived["id"]
+    assert (folder / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "real.md").is_file()
+    assert not (folder / "work" / "Logs" / "Chats" / "chat-1" / "claude" / "link.md").exists()
+    assert link.is_symlink(), "the symlink stays where it was"
+    assert outside.read_text(encoding="utf-8") == "# outside\n", "the target is not touched"
+

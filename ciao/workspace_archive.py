@@ -341,6 +341,14 @@ def carry_late_transcripts(
             leftover.rmdir()
         except OSError:
             pass
+    if late.is_symlink() or late.exists():
+        # A collision or a skipped symlink stayed behind. The caller must not
+        # treat the workspace as archived or as moved back.
+        raise OSError(
+            f"{late} still holds files that were not moved into {dest} "
+            "(a file of the same name is already archived, or a symlink was "
+            "skipped); they were left in place"
+        )
     return moved
 
 
