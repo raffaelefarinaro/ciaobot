@@ -22,12 +22,13 @@ import { terminalPanelWanted } from '../../lib/terminalPanel'
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
 const archiveActiveChat = vi.fn()
+const selectAdjacentChat = vi.fn(() => true)
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat })
+    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -72,6 +73,8 @@ describe('ChatLayout', () => {
     handleSendShortcut.mockReset()
     handleSendShortcut.mockReturnValue(true)
     archiveActiveChat.mockReset()
+    selectAdjacentChat.mockReset()
+    selectAdjacentChat.mockReturnValue(true)
     vi.restoreAllMocks()
   })
 
@@ -1008,6 +1011,108 @@ describe('ChatLayout', () => {
     expect(event.defaultPrevented).toBe(false)
     textarea.remove()
     wrapper.unmount()
+  })
+
+  // Option+[ / Option+] step through the header rail's chats. Only the main
+  // pane's ChatPanel is asked: a second chat beside it has no rail of its own.
+  async function mountOpenChat() {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('steps to the next and previous chat with Option+] and Option+[', async () => {
+    const wrapper = await mountOpenChat()
+    try {
+      const next = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
+      window.dispatchEvent(next)
+      expect(selectAdjacentChat).toHaveBeenLastCalledWith(1)
+      expect(next.defaultPrevented).toBe(true)
+
+      const previous = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, cancelable: true })
+      window.dispatchEvent(previous)
+      expect(selectAdjacentChat).toHaveBeenLastCalledWith(-1)
+      expect(previous.defaultPrevented).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  // At either end of the rail, or while a second chat sits beside the main
+  // one (the main pane then has no rail), the panel declines and the chord
+  // is left alone.
+  it('leaves Option+] alone when the panel declines (rail end, or a chat beside)', async () => {
+    selectAdjacentChat.mockReturnValue(false)
+    const wrapper = await mountOpenChat()
+    try {
+      const event = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      expect(event.defaultPrevented).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('leaves Option+[ to a focused text field', async () => {
+    const wrapper = await mountOpenChat()
+    // Focus sits in a text field, as it would mid-compose.
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    try {
+      textarea.focus()
+      const event = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, cancelable: true })
+      textarea.dispatchEvent(event)
+
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    } finally {
+      textarea.remove()
+      wrapper.unmount()
+    }
   })
 
   // No open chat: nothing to archive, so the chord keeps its default meaning

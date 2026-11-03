@@ -32,13 +32,13 @@ async function shortcutLabels(platform: string): Promise<string[]> {
 
 it('shows the Option glyph for browser shortcuts on Apple platforms', async () => {
   const labels = await shortcutLabels('MacIntel')
-  expect(labels).toEqual(expect.arrayContaining(['⌥N', '⌥⌫', '⌥S', '⌥M', '⌥=', '⌥-']))
+  expect(labels).toEqual(expect.arrayContaining(['⌥N', '⌥⌫', '⌥S', '⌥M', '⌥=', '⌥-', '⌥[', '⌥]']))
   expect(labels.some(l => l.startsWith('Alt+'))).toBe(false)
 })
 
 it.each(['Win32', 'Linux x86_64'])('shows Alt labels for browser shortcuts on %s', async (platform) => {
   const labels = await shortcutLabels(platform)
-  expect(labels).toEqual(expect.arrayContaining(['Alt+N', 'Alt+Backspace', 'Alt+S', 'Alt+M', 'Alt+=', 'Alt+-']))
+  expect(labels).toEqual(expect.arrayContaining(['Alt+N', 'Alt+Backspace', 'Alt+S', 'Alt+M', 'Alt+=', 'Alt+-', 'Alt+[', 'Alt+]']))
   expect(labels.some(l => l.includes('⌥'))).toBe(false)
 })
 
@@ -53,7 +53,7 @@ it('shows the common shortcuts and discloses the rest', async () => {
   const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
   try {
     await flushPromises()
-    expect(wrapper.findAll('.shortcut-setting-row')).toHaveLength(16)
+    expect(wrapper.findAll('.shortcut-setting-row')).toHaveLength(18)
     expect(wrapper.get('.shortcut-send-setting').text()).toContain('Send a message with')
     expect(wrapper.get('.settings-disclosure').text()).toBe('Restore all defaults')
   } finally {

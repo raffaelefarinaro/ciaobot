@@ -1454,6 +1454,18 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Previous / next chat in the header rail's order (Home's order, this workspace).
+  // Inert while typing: the gate above already returned for a focused text field,
+  // and on macOS Option+[ / Option+] type “ and ‘.
+  // The main pane's ChatPanel owns the rail; while a second chat sits beside it,
+  // the main pane shows a plain header and declines.
+  const chatStep = matchesShortcut(e, 'previousChat') ? -1 : matchesShortcut(e, 'nextChat') ? 1 : 0
+  if (chatStep) {
+    if (!store.activeChat || subagentRoute.value) return
+    if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) e.preventDefault()
+    return
+  }
+
   // Sidebar: Option+S, because Cmd+S is the browser's Save Page. Skipped while
   // typing for the same reason as archive: in a text field Option+S is how you
   // type ß, and stealing it would break text entry for the sake of a view
