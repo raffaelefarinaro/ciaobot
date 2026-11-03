@@ -42,4 +42,16 @@ describe('keyboard shortcuts', () => {
   it('captures it in Settings', () => {
     expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'BracketLeft', altKey: true }))).toBe('Alt+BracketLeft')
   })
+
+  it('labels the side-by-side chords for each keyboard', () => {
+    expect(displayBinding('Mod+Backslash', true)).toBe('⌘\\')
+    expect(displayBinding('Mod+Alt+BracketRight', true)).toBe('⌘⌥]')
+    expect(displayBinding('Mod+Alt+BracketLeft', false)).toBe('Ctrl+Alt+[')
+  })
+
+  it('captures and matches the side-by-side chords', () => {
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'Backslash', metaKey: true }))).toBe('Mod+Backslash')
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketLeft', ctrlKey: true, altKey: true }), DEFAULT_SHORTCUTS.focusPaneLeft)).toBe(true)
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketLeft', ctrlKey: true }), DEFAULT_SHORTCUTS.focusPaneLeft)).toBe(false)
+  })
 })

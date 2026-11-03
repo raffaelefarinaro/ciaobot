@@ -16,6 +16,7 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useFontScale } from '../../composables/useFontScale'
+import { applyKeyboardSettings } from '../../composables/useKeyboardSettings'
 import { homeNewChatProjectId, pendingNewChat } from '../../lib/newChat'
 import { terminalPanelWanted } from '../../lib/terminalPanel'
 
@@ -3750,6 +3751,61 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
       expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
       wrapper.unmount()
+    })
+
+    it('the split chord opens the most recent other chat beside, even from a composer, and closes it again', async () => {
+      const wrapper = await mountSplit(1200)
+      const composer = document.createElement('textarea')
+      document.body.appendChild(composer)
+      composer.focus()
+      try {
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      } finally {
+        composer.remove()
+      }
+      wrapper.unmount()
+    })
+
+    it('the focus chords move the keyboard between panes', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', ctrlKey: true, altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      expect(panelCalls).toContain('focus:chat-2')
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', ctrlKey: true, altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      expect(panelCalls).toContain('focus:chat-1')
+      wrapper.unmount()
+    })
+
+    it('the split chord is inert on a narrow pane', async () => {
+      const wrapper = await mountSplit(900)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a turned-off split chord does nothing', async () => {
+      applyKeyboardSettings({ keyboard_shortcuts: { splitChat: 'disabled' } })
+      try {
+        const wrapper = await mountSplit(1200)
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+        wrapper.unmount()
+      } finally {
+        applyKeyboardSettings({ keyboard_shortcuts: {} })
+      }
     })
   })
 
