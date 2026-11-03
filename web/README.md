@@ -329,6 +329,29 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   the card is the contextual one, and it is shown only for the chat on
   screen.
 
+### Side-by-side chats
+
+A second chat can sit in the same right-hand tile the terminal and a pinned
+file use. The tile has one occupant; the newest takes it.
+
+- **Persistence:** `lib/chatSplit.ts` keeps one chat per workspace in
+  `localStorage` under `ciao:beside-chat`. It is per browser on purpose: a
+  phone cannot show the split, and the pinned file stays server-owned.
+- **Precedence:** in `ChatLayout.vue`, `besideInTile` (a remembered chat, shown
+  beside a chat route, on a pane at least 940px wide) gives the tile to the
+  second chat; `fileInTile` is the pinned file unless that holds; the terminal
+  takes the tile only when neither does.
+- **Sockets:** `store.attachBesideChat` keeps the second chat live while it is
+  on screen. `isViewedChat` treats both panes as viewed, so unread marks, read
+  receipts and notifications are suppressed for both.
+- **Panes:** `ChatPanel` takes `chatId`, `beside`, `inactive` and `split` props.
+  The second pane's element ids carry a `beside-` prefix so the two never clash.
+- **Keyboard:** `focusedPanel` routes the chat chords (question and permission
+  digits, Enter, ⌘Enter, archive, the model picker) to the pane with the focus.
+  Esc in the second pane closes only that pane.
+- **File viewer:** `stores/fileViewer.ts` docks a file only into the chat that
+  owns the tile. A file opened from the second pane opens the viewer.
+
 ### Layout traps
 
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.

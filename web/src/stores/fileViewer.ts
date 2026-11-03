@@ -64,9 +64,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   /**
    * Pin the file beside the chat instead of opening the viewer, so it lands in
-   * the tile without the modal flashing up first. Only an open that carries a
-   * chat id (a link or file card inside the chat on screen) docks, replacing
-   * that chat's pin. Every other open (a project page, the sidebar, an
+   * the tile without the modal flashing up first. Only an open that carries the
+   * chat id of the dock target (a link or file card inside the chat that owns
+   * the tile on screen) docks, replacing that chat's pin. A file opened from the
+   * chat beside it opens the viewer: docking would pin it onto the other chat.
+   * Every other open (a project page, the sidebar, an
    * archived transcript) uses the viewer. Returns false (and the caller opens
    * the viewer as usual) when there is no dock, no chat, or the pin write
    * fails. An open that targets a line (a `path:N` link, a comment chip) keeps
@@ -75,7 +77,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   async function dockInstead(filePath: string, chat: string): Promise<boolean> {
     const seq = ++dockSeq
     const key = dockTarget.value
-    if (!key || !chat || isOpen.value) return false
+    // Only the chat the tile belongs to docks: a file opened from the chat beside it opens the
+    // viewer, or it would be pinned onto the other chat.
+    if (!key || !chat || chat !== key || isOpen.value) return false
     let target = filePath
     try {
       const resolved = await api.get<{ path: string }>(

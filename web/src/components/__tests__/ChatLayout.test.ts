@@ -3300,6 +3300,354 @@ describe('ChatLayout chat route without a catalog entry', () => {
     })
   })
 
+  describe('side-by-side chats', () => {
+    const originalObserver = globalThis.ResizeObserver
+
+    const PinnedFilePanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      setup: () => () => h('div', { 'data-testid': 'pinned-file-panel' }),
+    })
+
+    /** Calls the pane stubs received through their exposed methods, in order. */
+    const panelCalls: string[] = []
+    const SplitChatPanelStub = defineComponent({
+      name: 'ChatPanel',
+      props: { chatId: String, beside: Boolean, inactive: Boolean, split: Boolean, filePinned: Boolean },
+      emits: ['close'],
+      setup(props, { emit, expose }) {
+        expose({
+          toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
+          focusComposer: () => panelCalls.push(`focus:${props.chatId}`),
+          handleSendShortcut: () => {
+            panelCalls.push(`send:${props.chatId}`)
+            return true
+          },
+          archiveActiveChat: vi.fn(),
+        })
+        return () => h('section', {
+          'data-testid': 'chat-panel',
+          'data-chat-id': props.chatId,
+          'data-beside': String(props.beside),
+          'data-inactive': String(props.inactive),
+        }, [h('button', { 'data-testid': `close-${props.chatId}`, onClick: () => emit('close') }, 'x')])
+      },
+    })
+    const SidebarStub = defineComponent({
+      name: 'ProjectSidebar',
+      props: { canOpenBeside: Boolean },
+      emits: ['open-beside'],
+      setup(props, { emit }) {
+        return () => h('button', {
+          'data-testid': 'open-beside',
+          'data-can': String(props.canOpenBeside),
+          onClick: () => emit('open-beside', 'chat-2'),
+        })
+      },
+    })
+
+    let observers: Array<(width: number) => void> = []
+    let reportedWidth = 0
+
+    afterEach(() => {
+      globalThis.ResizeObserver = originalObserver
+      terminalPanelWanted.value = false
+      observers = []
+      panelCalls.length = 0
+    })
+
+    async function mountSplit(
+      paneWidth: number,
+      options: { beside?: string; pinned?: boolean; terminal?: boolean; terminalVisible?: boolean } = {},
+    ) {
+      observers = []
+      reportedWidth = paneWidth
+      globalThis.ResizeObserver = class {
+        constructor(private readonly cb: ResizeObserverCallback) {}
+        observe() {
+          const report = (width: number) => this.cb(
+            [{ contentRect: { width } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          )
+          observers.push(report)
+          report(reportedWidth)
+        }
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/chat/:chatId?', component: EmptyStub }],
+      })
+      await router.push('/chat/chat-1')
+      await router.isReady()
+
+      const store = useProjectStore()
+      store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+      store.chats = [
+        { chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' },
+        { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two', last_activity_at: '2026-11-01T10:00:00Z' },
+      ] as unknown as typeof store.chats
+      store.activeChatId = 'chat-1'
+      store.bootstrapped = true
+      store.workspaces = [{ name: 'personal' }] as unknown as typeof store.workspaces
+      store.activeWorkspace = 'personal'
+      if (options.pinned) {
+        store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'test' })
+      }
+      if (options.beside) {
+        localStorage.setItem('ciao:beside-chat', JSON.stringify({ personal: options.beside }))
+      }
+      vi.spyOn(store, 'fetchAll').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+      vi.spyOn(store, 'attachBesideChat').mockResolvedValue()
+
+      if (options.terminal) {
+        terminalPanelWanted.value = true
+        const terminal = useTerminalStore()
+        terminal.visible = options.terminalVisible ?? true
+        if (terminal.visible) terminal.target = { chatId: 'chat-1' }
+      }
+
+      const { default: ChatLayout } = await import('../ChatLayout.vue')
+      const wrapper = mount(ChatLayout, {
+        global: {
+          plugins: [router],
+          stubs: {
+            ChatPanel: SplitChatPanelStub, ProjectSidebar: SidebarStub, ProjectView: EmptyStub,
+            SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+            PinnedFilePanel: PinnedFilePanelStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+          },
+        },
+      })
+      await flushPromises()
+      if (options.terminal) {
+        await vi.waitFor(() => {
+          expect(wrapper.find('.terminal-pane').exists()).toBe(true)
+        })
+      }
+      await flushPromises()
+      return wrapper
+    }
+
+    /** A resize: the layout's observers report the new width. */
+    function resizePane(width: number) {
+      reportedWidth = width
+      for (const notify of observers) notify(width)
+    }
+
+    const storedBeside = () => JSON.parse(localStorage.getItem('ciao:beside-chat') || 'null')
+
+    it('shows the remembered chat beside the open one, behind the same divider', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const tile = wrapper.find('.chat-split-side--chat')
+      expect(tile.find('[data-chat-id="chat-2"][data-beside="true"]').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-resizer[role="separator"]').exists()).toBe(true)
+      // The open chat stays in the main column, not in the tile.
+      expect(tile.find('[data-chat-id="chat-1"]').exists()).toBe(false)
+      expect(wrapper.find('[data-chat-id="chat-1"]').exists()).toBe(true)
+      expect(useProjectStore().attachBesideChat).toHaveBeenLastCalledWith('chat-2')
+      wrapper.unmount()
+    })
+
+    it('shows no second chat on a pane narrower than 940px, and brings it back when there is room', async () => {
+      const wrapper = await mountSplit(900, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(useProjectStore().attachBesideChat).toHaveBeenLastCalledWith(null)
+
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('offers Open beside only when a split can be shown', async () => {
+      const wide = await mountSplit(1200)
+      expect(wide.get('[data-testid="open-beside"]').attributes('data-can')).toBe('true')
+      wide.unmount()
+
+      const narrow = await mountSplit(900)
+      expect(narrow.get('[data-testid="open-beside"]').attributes('data-can')).toBe('false')
+      narrow.unmount()
+    })
+
+    it('opens a chat beside and remembers it for the workspace', async () => {
+      const wrapper = await mountSplit(1200)
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      expect(storedBeside()).toEqual({ personal: 'chat-2' })
+      expect(wrapper.get('.chat-split-side--chat [data-chat-id="chat-2"]').attributes('data-inactive')).toBe('false')
+      expect(wrapper.get('.chat-body [data-chat-id="chat-1"]').attributes('data-inactive')).toBe('true')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('opening a chat beside hides the pinned file but keeps the pin', async () => {
+      const wrapper = await mountSplit(1200, { pinned: true })
+      const store = useProjectStore()
+      const unpin = vi.spyOn(store, 'unpinFile')
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(false)
+      expect(unpin).not.toHaveBeenCalled()
+      expect(store.pinnedFileFor('chat-1')).toBe('src/pinned-file.ts')
+
+      await wrapper.get('[data-testid="close-chat-2"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a new pin on the open chat takes the tile back', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useProjectStore().applyChatPinState('chat-1', { path: 'docs/new.md', dismissed_paths: [], revision: 2 }, { source: 'test' })
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('opening a chat beside hides an open terminal', async () => {
+      const wrapper = await mountSplit(1200, { terminal: true })
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+      expect(useTerminalStore().visible).toBe(false)
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('opening the terminal takes the tile from the second chat', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2', terminal: true, terminalVisible: false })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useTerminalStore().visible = true
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('clicking a pane gives it the keyboard', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(false)
+
+      await wrapper.get('.chat-body').trigger('pointerdown')
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('routes the model picker chord to the focused pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(panelCalls).toContain('model:chat-2')
+      expect(panelCalls).not.toContain('model:chat-1')
+      wrapper.unmount()
+    })
+
+    it('Esc in the second pane closes only that pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const closeChat = vi.spyOn(useProjectStore(), 'closeChat').mockResolvedValue()
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(panelCalls).toContain('focus:chat-1')
+      wrapper.unmount()
+    })
+
+    it('closing the main chat moves the second chat into the main pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      vi.spyOn(store, 'closeChat').mockResolvedValue()
+      const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue()
+
+      await wrapper.get('[data-testid="close-chat-1"]').trigger('click')
+      await flushPromises()
+      expect(switchChat).toHaveBeenCalledWith('chat-2')
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a switch to another workspace shows that workspace\'s own choice', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useProjectStore().activeWorkspace = 'work'
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it is archived', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      store.chats.find(c => c.chat_id === 'chat-2')!.archived = true
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      expect(store.attachBesideChat).toHaveBeenLastCalledWith(null)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it becomes the main one', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      await wrapper.vm.$router.push('/chat/chat-2')
+      store.activeChatId = 'chat-2'
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a split that collapses hands the keyboard back to the main pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+
+      // The pane narrows: the second chat goes, and so does its keyboard.
+      resizePane(900)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', metaKey: true, bubbles: true }))
+      await flushPromises()
+      expect(panelCalls).toContain('send:chat-1')
+      expect(panelCalls).not.toContain('send:chat-2')
+
+      // The pane widens again: the chat comes back, but the main pane has the keyboard.
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      wrapper.unmount()
+    })
+  })
+
   describe('notification inbox lifecycle', () => {
     const stubs = {
       ChatPanel: ChatPanelStub,

@@ -446,6 +446,18 @@ describe('docking beside the chat', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  test('a file opened from the chat beside opens the viewer instead of pinning onto the main chat', async () => {
+    vi.mocked(api.get).mockResolvedValue({ path: '/work/notes/today.md' })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.open('notes/today.md', null, 'chat-2')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+  })
+
   test('an open that targets a line keeps the viewer, which scrolls to it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
     const projects = useProjectStore()
