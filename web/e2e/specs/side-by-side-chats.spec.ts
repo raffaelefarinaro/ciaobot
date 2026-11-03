@@ -102,3 +102,23 @@ test('the panes keep their floors when the divider is dragged', async ({ page })
   expect((await tile.boundingBox())!.width).toBeGreaterThanOrEqual(360)
   expect((await chatColumn.boundingBox())!.width).toBeGreaterThanOrEqual(360)
 })
+
+test('the keyboard opens a chat beside and moves between the panes', async ({ page }) => {
+  await boot(page, CHAT_PATH, COMPOSER)
+  await page.locator(COMPOSER).first().click()
+
+  await page.keyboard.press('Control+Backslash')
+  const tile = page.locator('.chat-split-side--chat')
+  await expect(tile).toBeVisible()
+
+  await page.keyboard.press('Control+Alt+BracketLeft')
+  // The tile sits inside .chat-body too; the main composer is the first in DOM order.
+  await expect(page.locator('.chat-body textarea.chat-input').first()).toBeFocused()
+  await expect(page.locator('.chat-body--pane-focused')).toBeVisible()
+
+  await page.keyboard.press('Control+Alt+BracketRight')
+  await expect(tile.locator('textarea.chat-input')).toBeFocused()
+
+  await page.keyboard.press('Control+Backslash')
+  await expect(page.locator('.chat-split-side--chat')).toHaveCount(0)
+})
