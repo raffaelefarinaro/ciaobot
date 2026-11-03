@@ -134,6 +134,59 @@ describe('ChatTitleRail', () => {
     })
   })
 
+  function pointer(type: string, x: number, y: number, pointerType = 'touch'): Event {
+    const e = new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'pointerId', { value: 1 })
+    Object.defineProperty(e, 'pointerType', { value: pointerType })
+    return e
+  }
+
+  it('reports a downward drag on the title as a pull, and its end with distance and speed', () => {
+    seed(['a', 'b'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const root = wrapper.get('.title-rail').element as HTMLElement
+    root.setPointerCapture = () => {}
+    root.dispatchEvent(pointer('pointerdown', 100, 10))
+    root.dispatchEvent(pointer('pointermove', 102, 40))
+    root.dispatchEvent(pointer('pointermove', 103, 140))
+    root.dispatchEvent(pointer('pointerup', 103, 140))
+
+    expect(wrapper.emitted('pull')).toEqual([[30], [130]])
+    const [[dy, velocity]] = wrapper.emitted('pullEnd') as [number, number][]
+    expect(dy).toBe(130)
+    expect(velocity).toBeGreaterThan(0)
+    expect(wrapper.emitted('select')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('ignores an upward drag and a sideways touch drag (the strip scrolls natively)', () => {
+    seed(['a', 'b'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const root = wrapper.get('.title-rail').element as HTMLElement
+    root.setPointerCapture = () => {}
+    root.dispatchEvent(pointer('pointerdown', 100, 100))
+    root.dispatchEvent(pointer('pointermove', 100, 40))
+    root.dispatchEvent(pointer('pointerup', 100, 40))
+    root.dispatchEvent(pointer('pointerdown', 100, 100))
+    root.dispatchEvent(pointer('pointermove', 20, 102))
+    root.dispatchEvent(pointer('pointerup', 20, 102))
+
+    expect(wrapper.emitted('pull')).toBeUndefined()
+    expect(wrapper.emitted('pullEnd')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('reports how far the strip leans from the current chat mid-swipe', () => {
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const strip = geometry(wrapper)
+    strip.scrollLeft = 130
+    strip.dispatchEvent(new Event('scroll'))
+    const leans = wrapper.emitted('lean') as [number][]
+    expect(leans.at(-1)![0]).toBeCloseTo(0.3)
+    wrapper.unmount()
+  })
+
   // The arrow keys step the chat, sliding the neighbour in first like a swipe.
   it('steps to a neighbour with the arrow keys from the current item, after the slide', async () => {
     vi.useFakeTimers()

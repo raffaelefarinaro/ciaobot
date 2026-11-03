@@ -6,6 +6,10 @@
     :style="{ paddingLeft: `${pad.left}px`, paddingRight: `${pad.right}px`, '--pad-l': `${pad.left}px`, '--pad-r': `${pad.right}px` }"
     role="group"
     :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerUp"
   >
     <!-- One chat fills the strip; the neighbours sit off-screen and only slide in
          while a swipe or a step is under way, so the title keeps its place. -->
@@ -83,7 +87,17 @@ const SEG_STATE: Partial<Record<ChatRailItem['tier'], 'needs' | 'working' | 'unr
   working: 'working',
   unread: 'unread',
 }
-const emit = defineEmits<{ select: [chatId: string]; rename: [] }>()
+const emit = defineEmits<{
+  select: [chatId: string]
+  rename: []
+  // A downward drag on the title: how far, in px, so the chat can follow the finger.
+  pull: [dy: number]
+  // The drag ended: the distance and speed (px per ms) decide close or spring back.
+  pullEnd: [dy: number, velocity: number]
+  // How far the strip sits from the current chat (-1 to 1) mid-swipe, so the
+  // transcript can lean the same way.
+  lean: [fraction: number]
+}>()
 
 const neighbours = computed(() => railNeighbours(props.items.map(i => i.chatId), props.currentId))
 
@@ -123,7 +137,13 @@ function measureTrack(): void {
   if (rail && column) {
     const r = rail.getBoundingClientRect()
     const c = column.getBoundingClientRect()
-    const centre = c.left + c.width / 2
+    // The column may be mid-lean or mid-arrival (a translateX on .chat-column);
+    // measure where it rests, not where the animation has it right now.
+    const moving = column.closest<HTMLElement>('.chat-column')
+    const shift = moving && typeof DOMMatrixReadOnly === 'function'
+      ? new DOMMatrixReadOnly(getComputedStyle(moving).transform === 'none' ? undefined : getComputedStyle(moving).transform).m41
+      : 0
+    const centre = c.left - shift + c.width / 2
     const before = centre - r.left
     const after = r.right - centre
     pad.value = before > 0 && after > 0
@@ -142,6 +162,7 @@ const moving = ref(false)
 function trackPosition(): void {
   const el = strip.value
   position.value = el && el.clientWidth ? el.scrollLeft / el.clientWidth : neighbours.value.index
+  emit('lean', Math.max(-1, Math.min(1, position.value - neighbours.value.index)))
 }
 let touchActive = false
 let gestureSeen = false
@@ -225,6 +246,56 @@ watch(
   { flush: 'post' },
 )
 
+/**
+ * Pointer gestures on the title. After 8px the drag locks to an axis:
+ * - down: the chat follows the finger (`pull`), and on release it closes or springs back (`pullEnd`);
+ * - sideways with a mouse: the strip follows the pointer like a finger (touch already
+ *   scrolls the strip natively), then settles on the neighbour or back.
+ * An upward drag does nothing, so the page keeps its own scrolling.
+ */
+const PULL_LOCK_PX = 8
+let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'none' | null; mouse: boolean } | null = null
+function onPointerDown(e: PointerEvent): void {
+  if (e.button !== 0 || sliding) return
+  drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), left0: strip.value?.scrollLeft ?? 0, axis: null, mouse: e.pointerType === 'mouse' }
+}
+function onPointerMove(e: PointerEvent): void {
+  if (!drag || e.pointerId !== drag.id) return
+  const dx = e.clientX - drag.x0
+  const dy = e.clientY - drag.y0
+  if (!drag.axis) {
+    if (Math.hypot(dx, dy) < PULL_LOCK_PX) return
+    drag.axis = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'y' : 'none') : (drag.mouse ? 'x' : 'none')
+    if (drag.axis !== 'none') root.value?.setPointerCapture(drag.id)
+    if (drag.axis === 'x' && strip.value) strip.value.style.scrollSnapType = 'none'
+  }
+  if (drag.axis === 'y') {
+    emit('pull', Math.max(0, dy))
+  } else if (drag.axis === 'x' && strip.value) {
+    strip.value.scrollLeft = drag.left0 - dx
+    onScroll()
+  }
+}
+function onPointerUp(e: PointerEvent): void {
+  if (!drag || e.pointerId !== drag.id) return
+  const d = drag
+  drag = null
+  const dx = e.clientX - d.x0
+  const dy = e.clientY - d.y0
+  const velocity = (d.axis === 'y' ? dy : Math.abs(dx)) / Math.max(1, performance.now() - d.t0)
+  if (d.axis === 'y') emit('pullEnd', Math.max(0, dy), velocity)
+  if (d.axis === 'x' && strip.value) {
+    strip.value.style.scrollSnapType = ''
+    const width = strip.value.clientWidth || 1
+    const passed = Math.abs(dx) > width * 0.25 || (velocity > 0.45 && Math.abs(dx) > 30)
+    const direction = dx < 0 ? 1 : -1
+    if (!passed || !slide(direction)) {
+      const cur = itemEls()[neighbours.value.index]
+      strip.value.scrollTo({ left: cur ? cur.offsetLeft : 0, behavior: 'smooth' })
+    }
+  }
+}
+
 onMounted(() => {
   centre()
   measureTrack()
@@ -254,7 +325,7 @@ onBeforeUnmount(() => {
 /* The current title is centred in the space between close and the header actions,
    with its project under it. The position is a segmented track on the header's
    bottom edge, so nothing but the title and project sits on the text lines. */
-.title-rail { position: relative; display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
+.title-rail { touch-action: pan-x; position: relative; display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
 .title-rail-strip { position: relative; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory;
   overscroll-behavior-x: contain; touch-action: pan-x; scrollbar-width: none; min-width: 0; }
 .title-rail-strip::-webkit-scrollbar { display: none; }

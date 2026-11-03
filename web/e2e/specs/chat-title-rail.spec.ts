@@ -99,6 +99,43 @@ test.describe('chat title rail, desktop', () => {
     expect(await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)).toBe(61)
   })
 
+  test('pulling the title down closes the chat to Home; a short pull springs back; a mouse drag sideways switches', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    const title = page.locator('.title-rail-item[aria-current="page"] .title-rail-title')
+    const grab = async () => { const b = (await title.boundingBox())!; return { x: b.x + b.width / 2, y: b.y + 5 } }
+
+    // A short pull: the Home hint shows, then the chat springs back.
+    let at = await grab()
+    await page.mouse.move(at.x, at.y)
+    await page.mouse.down()
+    await page.mouse.move(at.x, at.y + 60, { steps: 6 })
+    await expect(page.locator('.chat-pull-home')).toBeVisible()
+    await page.waitForTimeout(400)
+    await page.mouse.up()
+    await expect(page.locator('.chat-pull-home')).toHaveCount(0)
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    // Let the spring-back finish before the next grab: mid-transition the title is
+    // still moving under the pointer.
+    await expect.poll(() => page.locator('.chat-panel').evaluate(el => (el as HTMLElement).style.transform)).toBe('')
+
+    // A mouse drag sideways switches to the next chat.
+    at = await grab()
+    await page.mouse.move(at.x, at.y)
+    await page.mouse.down()
+    await page.mouse.move(at.x - 260, at.y + 2, { steps: 10 })
+    await page.mouse.up()
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+
+    // A long pull closes the chat and lands on Home.
+    at = await grab()
+    await page.mouse.move(at.x, at.y)
+    await page.mouse.down()
+    await page.mouse.move(at.x, at.y + 180, { steps: 8 })
+    await expect(page.locator('.chat-pull-home')).toContainText('Release for Home')
+    await page.mouse.up()
+    await expect(page).toHaveURL(/\/$/)
+  })
+
   test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
