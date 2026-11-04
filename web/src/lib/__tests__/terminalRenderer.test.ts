@@ -20,7 +20,12 @@ const stubs = vi.hoisted(() => {
   interface FakeOptions {
     scrollback?: number
     disableStdin?: boolean
-    linkHandler?: { activate: (event: MouseEvent, text: string) => void }
+    linkHandler?: {
+      activate: (event: MouseEvent, text: string) => void
+      hover?: (event: MouseEvent, text: string) => void
+      leave?: (event: MouseEvent, text: string) => void
+      allowNonHttpProtocols?: boolean
+    }
     fontFamily?: string
     fontSize?: number
     theme?: Record<string, string>
@@ -131,11 +136,34 @@ const stubs = vi.hoisted(() => {
     }
   }
 
-  return { FakeTerminal, FakeFitAddon, FakeResizeObserver }
+  class FakeWebLinksAddon {
+    static instances: FakeWebLinksAddon[] = []
+
+    constructor(
+      public handler?: (event: MouseEvent, uri: string) => void,
+      public options?: {
+        hover?: (event: MouseEvent, text: string) => void
+        leave?: (event: MouseEvent, text: string) => void
+      },
+    ) {
+      FakeWebLinksAddon.instances.push(this)
+    }
+
+    activate(): void {
+      /* the link provider is the addon's own business */
+    }
+
+    dispose(): void {
+      /* nothing to release */
+    }
+  }
+
+  return { FakeTerminal, FakeFitAddon, FakeResizeObserver, FakeWebLinksAddon }
 })
 
 vi.mock('@xterm/xterm', () => ({ Terminal: stubs.FakeTerminal }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: stubs.FakeFitAddon }))
+vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: stubs.FakeWebLinksAddon }))
 
 /** The screen the renderer built, once it exists. */
 async function waitForTerminal(): Promise<InstanceType<typeof stubs.FakeTerminal>> {
@@ -174,6 +202,7 @@ function host(): HTMLElement {
 beforeEach(() => {
   stubs.FakeTerminal.instances = []
   stubs.FakeFitAddon.instances = []
+  stubs.FakeWebLinksAddon.instances = []
   stubs.FakeResizeObserver.instances = []
   Object.defineProperty(globalThis, 'ResizeObserver', {
     configurable: true,
@@ -442,23 +471,108 @@ describe('the theme', () => {
 })
 
 describe('the screen itself', () => {
-  it('keeps a thousand lines of scrollback and never follows a link', async () => {
-    const terminal = await (async () => {
-      const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
-      const created = await waitForTerminal()
-      renderer.dispose()
-      return created
-    })()
+  it('keeps a thousand lines of scrollback', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+    renderer.dispose()
 
     expect(terminal.options.scrollback).toBe(1000)
-    const opened = vi.spyOn(window, 'open').mockImplementation(() => null)
-    terminal.options.linkHandler?.activate(new MouseEvent('click'), 'https://example.com')
-    expect(opened).not.toHaveBeenCalled()
   })
 
   it('reaches xterm only through a dynamic import', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../terminalRenderer.ts'), 'utf8')
     expect(source).not.toMatch(/from\s+'@xterm/)
+    expect(source).toMatch(/import\('@xterm\/addon-web-links'\)/)
+  })
+})
+
+describe('links in the output', () => {
+  it('opens an http(s) hyperlink in a new tab without an opener', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    terminal.options.linkHandler!.activate(new MouseEvent('click'), 'https://example.com/a?b=1')
+
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(opened).toHaveBeenCalledWith('https://example.com/a?b=1', '_blank', 'noopener,noreferrer')
+    expect(terminal.options.linkHandler!.allowNonHttpProtocols).toBe(false)
+    renderer.dispose()
+  })
+
+  it('refuses every other scheme', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    for (const text of [
+      'javascript:alert(1)',
+      'file:///etc/passwd',
+      'data:text/html,<b>x</b>',
+      'ftp://example.com/x',
+      'vscode://file/x',
+      'not a url',
+      '',
+    ]) {
+      terminal.options.linkHandler!.activate(new MouseEvent('click'), text)
+    }
+
+    expect(opened).not.toHaveBeenCalled()
+    renderer.dispose()
+  })
+
+  it('opens a plain-text URL through the web links addon', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    expect(stubs.FakeWebLinksAddon.instances).toHaveLength(1)
+    const addon = stubs.FakeWebLinksAddon.instances[0]
+    expect(terminal.addons).toContain(addon)
+
+    addon.handler!(new MouseEvent('click'), 'http://localhost:5173/app')
+    expect(opened).toHaveBeenCalledWith('http://localhost:5173/app', '_blank', 'noopener,noreferrer')
+
+    opened.mockClear()
+    addon.handler!(new MouseEvent('click'), 'javascript:alert(1)')
+    expect(opened).not.toHaveBeenCalled()
+    renderer.dispose()
+  })
+
+  it('names the host while a link is hovered', async () => {
+    const element = host()
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element })
+    const terminal = await waitForTerminal()
+    const linkHandler = terminal.options.linkHandler!
+    const event = new MouseEvent('mouseover')
+
+    linkHandler.hover!(event, 'https://docs.example.com/path')
+    expect(element.getAttribute('title')).toBe('Open docs.example.com')
+
+    linkHandler.leave!(event, 'https://docs.example.com/path')
+    expect(element.hasAttribute('title')).toBe(false)
+
+    linkHandler.hover!(event, 'javascript:alert(1)')
+    expect(element.hasAttribute('title')).toBe(false)
+
+    const addon = stubs.FakeWebLinksAddon.instances[0]
+    addon.options!.hover!(event, 'https://a.example.org:8443/x')
+    expect(element.getAttribute('title')).toBe('Open a.example.org:8443')
+    addon.options!.leave!(event, 'https://a.example.org:8443/x')
+    expect(element.hasAttribute('title')).toBe(false)
+    renderer.dispose()
+  })
+
+  it('leaves no hint behind once the screen is disposed', async () => {
+    const element = host()
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element })
+    const terminal = await waitForTerminal()
+
+    terminal.options.linkHandler!.hover!(new MouseEvent('mouseover'), 'https://docs.example.com')
+    expect(element.getAttribute('title')).toBe('Open docs.example.com')
+
+    renderer.dispose()
+    expect(element.hasAttribute('title')).toBe(false)
   })
 })
 
