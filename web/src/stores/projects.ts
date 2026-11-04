@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
+import { postFormWithProgress, type UploadProgressHandler } from '../lib/chatAttachments'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
@@ -229,6 +230,9 @@ export const useProjectStore = defineStore('projects', () => {
     pendingComments,
     pendingChatComments,
     pendingImagesFor,
+    pendingFilesFor,
+    addPendingFiles,
+    removePendingFile,
     pendingCommentsFor,
     pendingChatCommentsFor,
     fileComments,
@@ -6149,24 +6153,18 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Images ──────────────────────────────────────────────────────────
 
-  async function uploadImages(chatId: string, files: File[]): Promise<string[]> {
-    const refs = await uploadImageRefs(chatId, files)
+  async function uploadImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]> {
+    const refs = await uploadImageRefs(chatId, files, onProgress)
     addPendingImageRefs(chatId, refs)
     return refs
   }
 
-  async function uploadImageRefs(chatId: string, files: File[]): Promise<string[]> {
+  async function uploadImageRefs(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]> {
     const form = new FormData()
-    for (const f of files) {
-      form.append(f.name, f)
-    }
-    const res = await fetch(`/api/chats/${chatId}/images`, {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-    })
-    if (!res.ok) throw new Error('Image upload failed')
-    const results: { ref?: string; error?: string }[] = await res.json()
+    for (const f of files) form.append(f.name, f)
+    const { status, body } = await postFormWithProgress(`/api/chats/${chatId}/images`, form, onProgress)
+    if (status < 200 || status >= 300) throw new Error('Image upload failed')
+    const results = Array.isArray(body) ? (body as { ref?: string }[]) : []
     return results.filter(r => r.ref).map(r => r.ref!)
   }
 
@@ -7195,7 +7193,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isViewedChat, viewedChatIds, chatById, messagesFor, isMessageHistoryLoading, subagentsFor, isChatWakeStreaming,
     streamingTextFor, streamingThinkingFor, queuedFor, backgroundAgentsFor, backgroundableCallsFor, timelineFor,
-    deniedToolUseIdsFor, streamStartedAtFor, pendingImagesFor, pendingCommentsFor, pendingChatCommentsFor,
+    deniedToolUseIdsFor, streamStartedAtFor, pendingImagesFor, pendingFilesFor, pendingCommentsFor, pendingChatCommentsFor,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
@@ -7215,7 +7213,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,
