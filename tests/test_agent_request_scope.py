@@ -981,3 +981,98 @@ def test_a_hardlink_in_the_source_folder_is_not_granted(archive_install, tmp_pat
 
     assert str(alias.resolve()) not in request.agent_read_only
     assert str(secret.resolve()) not in request.agent_read_only
+
+
+def test_a_workspace_chat_reads_but_never_writes_its_own_logs(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    own_logs = (config.agent_root("personal") / "Logs").resolve()
+    assert own_logs in {Path(p).resolve() for p in request.agent_read_only}
+    agent_root = Path(request.agent_roots[0]).resolve()
+    assert own_logs.is_relative_to(agent_root)
+
+
+def test_a_shared_layout_chat_gets_no_logs_grant(tmp_path: Path) -> None:
+    from ciao.config import reset_reroot_cache  # noqa: PLC0415
+
+    reset_reroot_cache()
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    shared_logs = config.logs_root.resolve()
+    granted = [Path(p).resolve() for p in request.agent_read_only]
+    assert shared_logs not in granted
+    assert not any(p.name == "Logs" for p in granted)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS sandbox-exec")
+def test_darwin_seatbelt_keeps_a_workspace_logs_folder_read_only():
+    # Same real-home base as the memory-pass seatbelt test: conftest points
+    # Path.home() at an isolated folder, and the profile's system subpaths read
+    # /private, so only the real home gives a probe the grant actually decides.
+    import pwd  # POSIX only; a module-level import breaks collection on Windows
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    from ciao.fs_sandbox import SANDBOX_EXEC_PATH, opencode_sandbox_prefix  # noqa: PLC0415
+
+    if not Path(SANDBOX_EXEC_PATH).is_file():
+        pytest.skip("needs macOS sandbox-exec")
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not os.access(real_home, os.W_OK):
+        pytest.skip("home folder is not writable")
+    base = Path(tempfile.mkdtemp(dir=real_home, prefix="ciao-seatbelt-")).resolve()
+    try:
+        agent_root = base / "personal"
+        agent_root.mkdir()
+        logs = agent_root / "Logs"
+        transcript = logs / "Chats" / "src-1" / "claude" / "s.md"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("transcript", encoding="utf-8")
+
+        prefix = opencode_sandbox_prefix(roots=[agent_root], read_only=[logs])
+        read = subprocess.run(
+            [*prefix, "/bin/cat", str(transcript)], capture_output=True, timeout=30
+        )
+        assert read.returncode == 0
+        assert read.stdout == b"transcript"
+
+        overwrite = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo x > '{transcript}'"], capture_output=True, timeout=30
+        )
+        assert overwrite.returncode != 0
+        assert transcript.read_text(encoding="utf-8") == "transcript"
+
+        new_file = logs / "Chats" / "src-1" / "claude" / "new.md"
+        create = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo x > '{new_file}'"], capture_output=True, timeout=30
+        )
+        assert create.returncode != 0
+        assert not new_file.exists()
+
+        for cmd in (f"rm -rf '{logs}'", f"mv '{logs}' '{agent_root / 'moved'}'"):
+            gone = subprocess.run([*prefix, "/bin/sh", "-c", cmd], capture_output=True, timeout=30)
+            assert gone.returncode != 0
+            assert transcript.read_text(encoding="utf-8") == "transcript"
+
+        ok = agent_root / "ok.txt"
+        control = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+        )
+        assert control.returncode == 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

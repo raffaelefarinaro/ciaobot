@@ -9,7 +9,7 @@
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
-    @pointercancel="onPointerUp"
+    @pointercancel="onPointerCancel"
   >
     <!-- One chat fills the strip; the neighbours sit off-screen and only slide in
          while a swipe or a step is under way, so the title keeps its place. -->
@@ -20,7 +20,7 @@
       @wheel.passive="onWheel"
       @touchstart.passive="onTouchStart"
       @touchend.passive="onTouchEnd"
-      @touchcancel.passive="onTouchEnd"
+      @touchcancel.passive="onTouchCancel"
     >
       <button
         v-for="entry in items"
@@ -166,6 +166,8 @@ function trackPosition(): void {
 }
 let touchActive = false
 let gestureSeen = false
+let nativeTouchPan = false
+let touchCanceled = false
 let timer: ReturnType<typeof setTimeout> | null = null
 
 function itemEls(): HTMLElement[] {
@@ -231,13 +233,29 @@ function onWheel(e: WheelEvent): void {
 }
 
 function onTouchStart(): void {
+  if (!touchActive) touchCanceled = false
   touchActive = true
-  gestureSeen = true
+  if (!touchCanceled) gestureSeen = true
 }
 
-function onTouchEnd(): void {
+function onTouchEnd(e: TouchEvent): void {
+  if (e.touches?.length) return
   touchActive = false
+  nativeTouchPan = false
+  if (touchCanceled) { touchCanceled = false; return }
   onScroll()
+}
+
+function onTouchCancel(e: TouchEvent): void {
+  touchCanceled = true
+  touchActive = !!e.touches?.length
+  nativeTouchPan = touchActive
+  gestureSeen = false
+  if (timer) { clearTimeout(timer); timer = null }
+  moving.value = false
+  if (drag?.axis === 'y') emit('pullEnd', 0, 0)
+  drag = null
+  restoreCurrentTitle()
 }
 
 watch(
@@ -254,9 +272,9 @@ watch(
  * An upward drag does nothing, so the page keeps its own scrolling.
  */
 const PULL_LOCK_PX = 8
-let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'none' | null; mouse: boolean } | null = null
+let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'native-x' | 'none' | null; mouse: boolean } | null = null
 function onPointerDown(e: PointerEvent): void {
-  if (e.button !== 0 || sliding) return
+  if (e.button !== 0 || sliding || drag || nativeTouchPan) return
   drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), left0: strip.value?.scrollLeft ?? 0, axis: null, mouse: e.pointerType === 'mouse' }
 }
 function onPointerMove(e: PointerEvent): void {
@@ -265,8 +283,8 @@ function onPointerMove(e: PointerEvent): void {
   const dy = e.clientY - drag.y0
   if (!drag.axis) {
     if (Math.hypot(dx, dy) < PULL_LOCK_PX) return
-    drag.axis = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'y' : 'none') : (drag.mouse ? 'x' : 'none')
-    if (drag.axis !== 'none') root.value?.setPointerCapture(drag.id)
+    drag.axis = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'y' : 'none') : (drag.mouse ? 'x' : 'native-x')
+    if (drag.axis === 'x' || drag.axis === 'y') root.value?.setPointerCapture(drag.id)
     if (drag.axis === 'x' && strip.value) strip.value.style.scrollSnapType = 'none'
   }
   if (drag.axis === 'y') {
@@ -294,6 +312,32 @@ function onPointerUp(e: PointerEvent): void {
       strip.value.scrollTo({ left: cur ? cur.offsetLeft : 0, behavior: 'smooth' })
     }
   }
+}
+
+function onPointerCancel(e: PointerEvent): void {
+  if (!drag || e.pointerId !== drag.id) return
+  const d = drag
+  drag = null
+  // On touch, the browser cancels pointer events when it takes over the
+  // strip's native horizontal pan. Let touchend and scroll settling finish it.
+  if (!d.mouse && (d.axis === 'native-x' || (d.axis === null && touchActive))) {
+    nativeTouchPan = true
+    return
+  }
+  touchActive = false
+  gestureSeen = false
+  if (timer) { clearTimeout(timer); timer = null }
+  moving.value = false
+  if (d.axis === 'y') emit('pullEnd', 0, 0)
+  if (d.axis !== 'y') restoreCurrentTitle()
+}
+
+function restoreCurrentTitle(): void {
+  if (!strip.value) return
+  strip.value.style.scrollSnapType = ''
+  const cur = itemEls()[neighbours.value.index]
+  strip.value.scrollTo({ left: cur ? cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2 : 0, behavior: 'smooth' })
+  emit('lean', 0)
 }
 
 onMounted(() => {

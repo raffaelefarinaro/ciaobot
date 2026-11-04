@@ -1,5 +1,12 @@
 import { ref, toValue, watch, nextTick, type MaybeRefOrGetter, type Ref } from 'vue'
-import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
+import {
+  importDesktopDrop,
+  postFormWithProgress,
+  uploadChatAttachments,
+  type AttachedFile,
+  type FormPoster,
+  type UploadProgressHandler,
+} from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
 
 /**
@@ -15,11 +22,16 @@ import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/cha
 /** The slice of the project store the composer needs. The Pinia store
  *  satisfies this structurally; a test can pass a plain object of spies. */
 export interface ComposerAttachmentStore {
-  uploadImages(chatId: string, files: File[]): Promise<string[]>
+  uploadImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]>
   addPendingImageRefs(chatId: string, refs: string[]): void
   removePendingImage(chatId: string, index: number): void
+  addPendingFiles(chatId: string, files: AttachedFile[]): void
+  removePendingFile(chatId: string, index: number): void
   pushErrorToast(title: string, errorText: string): unknown
 }
+
+/** One upload in flight; `ComposerUploadProgress.vue` renders the list. */
+export interface ComposerUpload { id: number; label: string; loaded: number; total: number }
 
 export interface ChatComposerOptions {
   /** Draft key. `ChatLayout` keys the panel by chat id, so one panel
@@ -38,6 +50,8 @@ export interface ChatComposerOptions {
   store: ComposerAttachmentStore
   /** Injected for tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch
+  /** Injected for tests; defaults to XHR `postFormWithProgress` (fetch cannot report upload progress). */
+  postForm?: FormPoster
 }
 
 export type NativeFileDropDetail = {
@@ -59,10 +73,14 @@ export interface ChatComposer {
   handlePromptHistoryKey(e: KeyboardEvent): boolean
   insertTextAtCursor(token: string): void
   insertImageRef(n: number): void
+  /** Attach picked files: images stage as thumbnails, others as file chips. */
   handleFileSelect(e: Event): Promise<void>
   handlePaste(e: ClipboardEvent): Promise<void>
   handleDrop(e: DragEvent): Promise<void>
   removePendingImage(index: number): void
+  removePendingFile(index: number): void
+  /** Uploads in flight. Send is disabled while this is non-empty. */
+  uploads: Ref<ComposerUpload[]>
   handleNativeFileDragEnter(): void
   handleNativeFileDragLeave(): void
   handleNativeFileDrop(event: Event): void
@@ -76,6 +94,9 @@ export interface ChatComposer {
 export function useChatComposer(options: ChatComposerOptions): ChatComposer {
   const { draftChatId, store } = options
   const doFetch: typeof fetch = options.fetchImpl ?? ((...args) => fetch(...args))
+  const postForm: FormPoster = options.postForm ?? postFormWithProgress
+  const uploads = ref<ComposerUpload[]>([])
+  let uploadSeq = 0
 
   const draft = ref(readChatDraft(draftChatId))
   const input = ref<HTMLTextAreaElement>()
@@ -201,22 +222,86 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     insertTextAtCursor(`[Image ${n}]`)
   }
 
+  function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  function uploadLabel(names: string[]): string {
+    return names.length === 1 ? (names[0] || 'file') : `${names.length} files`
+  }
+
+  /** Show a bar for one upload until it settles, whether it succeeds or fails. */
+  async function trackUpload<T>(
+    label: string,
+    total: number,
+    run: (onProgress: UploadProgressHandler) => Promise<T>,
+  ): Promise<T> {
+    const id = ++uploadSeq
+    uploads.value = [...uploads.value, { id, label, loaded: 0, total }]
+    const onProgress: UploadProgressHandler = (loaded, nextTotal) => {
+      uploads.value = uploads.value.map(u => (u.id === id ? { ...u, loaded, total: nextTotal } : u))
+    }
+    try {
+      return await run(onProgress)
+    } finally {
+      uploads.value = uploads.value.filter(u => u.id !== id)
+    }
+  }
+
+  const totalBytes = (files: File[]) => files.reduce((sum, f) => sum + (f.size || 0), 0)
+
+  async function attachImages(id: string, images: File[]): Promise<void> {
+    try {
+      await trackUpload(uploadLabel(images.map(f => f.name)), totalBytes(images),
+        onProgress => store.uploadImages(id, images, onProgress))
+    } catch (error) {
+      store.pushErrorToast('Could not attach images', errorText(error))
+    }
+  }
+
+  async function attachDocuments(id: string, documents: File[]): Promise<void> {
+    try {
+      if (!toValue(options.vaultFolder)) throw new Error('This project has no folder for uploaded files.')
+      const result = await trackUpload(uploadLabel(documents.map(f => f.name)), totalBytes(documents),
+        onProgress => uploadChatAttachments(id, documents, onProgress, postForm))
+      for (const failure of result.failures) store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
+      store.addPendingFiles(id, result.files)
+    } catch (error) {
+      store.pushErrorToast('Could not attach file', errorText(error))
+    }
+  }
+
+  async function attachFiles(files: File[]): Promise<void> {
+    const id = chatId()
+    const images = files.filter(f => f.type.startsWith('image/'))
+    const documents = files.filter(f => !f.type.startsWith('image/'))
+    await Promise.all([
+      documents.length ? attachDocuments(id, documents) : Promise.resolve(),
+      images.length ? attachImages(id, images) : Promise.resolve(),
+    ])
+  }
+
   async function handleFileSelect(e: Event): Promise<void> {
     const el = e.target as HTMLInputElement
     if (!el.files?.length) return
-    await store.uploadImages(chatId(), Array.from(el.files))
+    const files = Array.from(el.files)
     el.value = ''
+    await attachFiles(files)
   }
 
   async function handlePaste(e: ClipboardEvent): Promise<void> {
     const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/'))
     if (!items.length) return
     e.preventDefault()
-    await store.uploadImages(chatId(), items.map(i => i.getAsFile()).filter(Boolean) as File[])
+    await attachImages(chatId(), items.map(i => i.getAsFile()).filter(Boolean) as File[])
   }
 
   function removePendingImage(index: number): void {
     store.removePendingImage(chatId(), index)
+  }
+
+  function removePendingFile(index: number): void {
+    store.removePendingFile(chatId(), index)
   }
 
   async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void> {
@@ -228,24 +313,18 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       )
       return
     }
+    const id = chatId()
     try {
-      const result = await importDesktopDrop(
-        detail.grantId,
-        { chatId: chatId(), projectId: toValue(options.projectId) || '' },
-        doFetch,
-      )
+      // Total 0: no bytes leave the browser, so the bar reads "Processing" at once.
+      const result = await trackUpload(uploadLabel(detail.names?.length ? detail.names : ['files']), 0,
+        () => importDesktopDrop(detail.grantId as string, { chatId: id, projectId: toValue(options.projectId) || '' }, doFetch))
       for (const failure of result.failures) {
         store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
       }
-      if (result.fileRefs.length) {
-        insertTextAtCursor(result.fileRefs.join(' '))
-      }
-      store.addPendingImageRefs(chatId(), result.imageRefs)
+      store.addPendingFiles(id, result.files)
+      store.addPendingImageRefs(id, result.imageRefs)
     } catch (error) {
-      store.pushErrorToast(
-        'Could not attach file',
-        error instanceof Error ? error.message : String(error),
-      )
+      store.pushErrorToast('Could not attach file', errorText(error))
     }
   }
 
@@ -260,17 +339,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
   function handleNativeFileDrop(event: Event): void {
     const detail = (event as CustomEvent<NativeFileDropDetail>).detail || {}
     void importNativeFileDrop(detail)
-  }
-
-  async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
-    if (!toValue(options.vaultFolder)) {
-      throw new Error('This project has no folder for uploaded files.')
-    }
-    const result = await uploadChatAttachments(chatId(), files, doFetch)
-    for (const failure of result.failures) {
-      store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
-    }
-    return result.fileRefs
   }
 
   async function handleDrop(e: DragEvent): Promise<void> {
@@ -299,10 +367,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       files.push(...Array.from(dt.files || []))
     }
 
-    const imageFiles = files.filter(file => file.type.startsWith('image/'))
-    const regularFiles = files.filter(file => !file.type.startsWith('image/'))
-    const refs: string[] = []
-
     if (folders.length) {
       store.pushErrorToast(
         'Could not attach folder',
@@ -310,21 +374,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       )
     }
 
-    if (regularFiles.length) {
-      try {
-        refs.push(...await uploadDroppedProjectFiles(regularFiles))
-      } catch (error) {
-        store.pushErrorToast(
-          'Could not attach file',
-          error instanceof Error ? error.message : String(error),
-        )
-      }
-    }
-
-    if (refs.length) {
-      insertTextAtCursor(refs.join(' '))
-    }
-    if (imageFiles.length) await store.uploadImages(chatId(), imageFiles)
+    await attachFiles(files)
   }
 
   return {
@@ -339,6 +389,8 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     handlePaste,
     handleDrop,
     removePendingImage,
+    removePendingFile,
+    uploads,
     handleNativeFileDragEnter,
     handleNativeFileDragLeave,
     handleNativeFileDrop,

@@ -17,7 +17,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutId, string> = {
   fontIncrease: 'Alt+Equal',
   fontDecrease: 'Alt+Minus',
   closeChat: 'Escape',
-  previousChat: 'Alt+BracketLeft', nextChat: 'Alt+BracketRight',
+  previousChat: 'Alt+ArrowLeft', nextChat: 'Alt+ArrowRight',
   splitChat: 'Mod+Backslash', focusPaneLeft: 'Mod+Alt+BracketLeft', focusPaneRight: 'Mod+Alt+BracketRight',
   workspace1: 'Digit1', workspace2: 'Digit2', workspace3: 'Digit3',
   workspace4: 'Digit4', workspace5: 'Digit5', workspace6: 'Digit6',
@@ -77,7 +77,7 @@ export function bindingFromEvent(event: KeyboardEvent, allowBareDigit = false): 
   ]
   const browserOwned = new Set(['Mod+KeyT', 'Mod+KeyW', 'Mod+KeyR', 'Mod+KeyL', 'Mod+KeyS', 'Mod+BracketLeft', 'Mod+BracketRight', 'Mod+Equal', 'Mod+NumpadAdd'])
   const canonical = [...modifiers, code].join('+')
-  if (browserOwned.has(canonical) || (event.altKey && ['ArrowLeft', 'ArrowRight'].includes(code))) return null
+  if (browserOwned.has(canonical)) return null
   if (!modifiers.length) return allowBareDigit && /^Digit[1-9]$/.test(code) ? code : null
   return canonical
 }
@@ -85,8 +85,8 @@ export function bindingFromEvent(event: KeyboardEvent, allowBareDigit = false): 
 export function displayBinding(binding: string, apple: boolean): string {
   if (binding === 'disabled') return 'Off'
   const symbols: Record<string, string> = apple
-    ? { Mod: '⌘', Alt: '⌥', Shift: '⇧', Backspace: '⌫', Equal: '=', Minus: '-', Backslash: '\\', BracketLeft: '[', BracketRight: ']' }
-    : { Mod: 'Ctrl+', Alt: 'Alt+', Shift: 'Shift+', Backspace: 'Backspace', Equal: '=', Minus: '-', Backslash: '\\', BracketLeft: '[', BracketRight: ']' }
+    ? { Mod: '⌘', Alt: '⌥', Shift: '⇧', Backspace: '⌫', Equal: '=', Minus: '-', Backslash: '\\', BracketLeft: '[', BracketRight: ']', ArrowLeft: '←', ArrowRight: '→' }
+    : { Mod: 'Ctrl+', Alt: 'Alt+', Shift: 'Shift+', Backspace: 'Backspace', Equal: '=', Minus: '-', Backslash: '\\', BracketLeft: '[', BracketRight: ']', ArrowLeft: '←', ArrowRight: '→' }
   if (binding === 'Escape') return 'Esc'
   if (/^Digit[1-9]$/.test(binding)) return binding.slice(-1)
   return binding.split('+').map(part => symbols[part] ?? part.replace(/^Key/, '')).join(apple ? '' : '')

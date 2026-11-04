@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
 import { createChatAnnotations, type ChatPinMutator, ChatPinConflict } from './chatAnnotations'
 import type { ChatPinState } from '../lib/types'
+import { composeAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
+
+const FILE_REF = `drop_${'a'.repeat(32)}`
+const STAGED: AttachedFile[] = [{ ref: FILE_REF, name: 'brief.pdf' }]
 
 let stored: Record<string, string> = {}
 
@@ -83,6 +87,20 @@ describe('pending images', () => {
     a.removePendingImage('', 0)
     a.clearPendingImages()
     expect(stored['ciao-pending-images']).toBeUndefined()
+  })
+})
+
+describe('pending files', () => {
+  test('adds, persists and removes by index', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    a.addPendingFiles('c1', [{ ref: `drop_${'b'.repeat(32)}`, name: 'notes.md' }])
+    expect(JSON.parse(stored['ciao-pending-files'])).toEqual({
+      c1: [STAGED[0], { ref: `drop_${'b'.repeat(32)}`, name: 'notes.md' }],
+    })
+    a.removePendingFile('c1', 0)
+    expect(a.pendingFilesFor('c1')).toHaveLength(1)
+    expect(a.pendingFilesFor('c1')[0].name).toBe('notes.md')
   })
 })
 
@@ -310,6 +328,13 @@ describe('restoreFromStorage', () => {
     expect(a.pendingChatComments.value).toHaveLength(1)
   })
 
+  test('restores ciao-pending-files', () => {
+    stored['ciao-pending-files'] = JSON.stringify({ c1: STAGED })
+    const { a } = make()
+    a.restoreFromStorage()
+    expect(a.pendingFilesFor('c1')).toEqual(STAGED)
+  })
+
   test('a legacy chat-wide dismissal map is dropped rather than translated', () => {
     stored['ciao-dismissed-auto-pins'] = JSON.stringify({ c1: true, c2: ['x.md'] })
     const { a } = make()
@@ -342,6 +367,19 @@ describe('prepare and consume', () => {
     expect(prepared.composed.indexOf('quoted')).toBeLessThan(prepared.composed.indexOf('do it'))
     expect(prepared.fileComments).toHaveLength(1)
     expect(prepared.chatComments).toHaveLength(1)
+  })
+
+  test('staged files follow the typed prompt as an attachment block', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    expect(a.prepareMessage('c1', 'go').composed).toBe('go\n\n' + composeAttachmentBlock(STAGED))
+  })
+
+  test('consuming clears staged files', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    a.consumePreparedAttachments('c1', a.prepareMessage('c1', 'go'))
+    expect(a.pendingFilesFor('c1')).toEqual([])
   })
 
   test('with nothing staged the composed text is just the prompt', () => {
@@ -398,6 +436,12 @@ describe('hasStagedAttachments', () => {
     expect(a.hasStagedAttachments('c1')).toBe(true)
     a.clearPendingChatComments()
     expect(a.hasStagedAttachments('c1')).toBe(false)
+  })
+
+  test('true for staged files', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    expect(a.hasStagedAttachments('c1')).toBe(true)
   })
 
   test("another chat's staged material does not count", () => {

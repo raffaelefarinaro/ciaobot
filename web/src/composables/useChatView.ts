@@ -26,6 +26,7 @@ export function useChatView(chatId: () => string) {
       timeline.value.flatMap(e => (e.kind === 'tool' ? e.content.split('\n') : [])),
     ),
     pendingImages: computed(() => store.pendingImagesFor(chatId())),
+    pendingFiles: computed(() => store.pendingFilesFor(chatId())),
     pendingComments: computed(() => store.pendingCommentsFor(chatId())),
     pendingChatComments: computed(() => store.pendingChatCommentsFor(chatId())),
   })

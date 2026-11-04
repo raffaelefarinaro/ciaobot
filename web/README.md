@@ -42,6 +42,8 @@ Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 existing response path. Conditional and ranged asset requests retain their
 identity representation.
 
+The chat rail uses Option/Alt+Left and Right to move through the current workspace's chats, including from the composer. Matching chords are consumed at the ends; the title's unmodified arrow-key navigation remains available. Configured Option shortcuts work in editable fields, including keys reported as dead keys; unbound dead keys, IME composition, AltGr, unmodified workspace digits and controls that claim their keys retain precedence. Explicit custom and disabled bindings are preserved.
+
 ## Dev workflow
 
 ```bash
@@ -403,11 +405,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `composables/useChatComposer.ts` owns the composer — the draft and its
   synchronous persistence, prompt-history recall, textarea auto-sizing, caret
   insertion, and every attachment path (paste, drop, the native desktop drop
-  grant, the image picker). It deliberately imports no store and registers no
+  grant, the file picker). It deliberately imports no store and registers no
   lifecycle hook: ids arrive as getters, the store arrives as the
   `ComposerAttachmentStore` interface, and `fetch` is injectable, so
   `composables/useChatComposer.test.ts` exercises all of it without mounting
-  anything. `ChatTurnActivity.vue` owns the rendering of one completed turn's
+  anything. Uploads go through `lib/chatAttachments.ts::postFormWithProgress` (XHR, for upload progress), injectable as `postForm`; `uploads` is the in-flight list `ComposerUploadProgress.vue` renders, and Send is disabled while it is non-empty. `ChatTurnActivity.vue` owns the rendering of one completed turn's
   `Activity` disclosure and owns no state — open/closed, the thinking
   preference and the markdown renderer are props, and every action is an emit.
   `ChatPanel` keeps the send path, the slash-command and @-mention pickers,
@@ -441,10 +443,10 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `stores/chatAnnotations.ts` owns everything the user stages against the *next*
   message plus the notes and pins anchored to a file: the per-chat pending-image,
   pending-file-comment and pending-chat-comment buckets, the durable per-file
-  comment store, and the six `localStorage`
-  keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
+  comment store, and the seven `localStorage`
+  keys behind them (`ciao-pending-images`, `ciao-pending-files`, `ciao-pending-comments`,
   `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
-  `ciao-dismissed-auto-pins`). **Chat pins are server-owned** (#1119): a chat's
+  `ciao-dismissed-auto-pins`). Staged files go out as a trailing `Attached files:` block (`composeAttachmentBlock`); user bubbles split it back into chips with `splitAttachmentBlock`, which reads both the `ciao-drop:` token form and the engine-expanded path form. **Chat pins are server-owned** (#1119): a chat's
   pinned file lives on the engine (`ChatInfo.pinned_file_path` /
   `dismissed_pin_paths` / `pin_revision`), is hydrated from chat payloads, the
   `chat_pin_changed` event and the `/ws/events` snapshot's `chat_pins`, and is
