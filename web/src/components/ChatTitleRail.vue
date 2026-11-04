@@ -303,7 +303,10 @@ function onPointerUp(e: PointerEvent): void {
   const velocity = (d.axis === 'y' ? dy : Math.abs(dx)) / Math.max(1, performance.now() - d.t0)
   if (d.axis === 'y') emit('pullEnd', Math.max(0, dy), velocity)
   if (d.axis === 'x' && strip.value) {
-    strip.value.style.scrollSnapType = ''
+    // Snapping stays off until the slide (or the spring back) has finished: turned
+    // back on here it would snap the strip to the old title for a frame first, and
+    // the transcript would lean back with it.
+    restoreSnapAfterSlide()
     const width = strip.value.clientWidth || 1
     const passed = Math.abs(dx) > width * 0.25 || (velocity > 0.45 && Math.abs(dx) > 30)
     const direction = dx < 0 ? 1 : -1
@@ -332,9 +335,18 @@ function onPointerCancel(e: PointerEvent): void {
   if (d.axis !== 'y') restoreCurrentTitle()
 }
 
+let snapTimer: ReturnType<typeof setTimeout> | null = null
+function restoreSnapAfterSlide(): void {
+  if (snapTimer) clearTimeout(snapTimer)
+  snapTimer = setTimeout(() => {
+    snapTimer = null
+    if (strip.value) strip.value.style.scrollSnapType = ''
+  }, RAIL_SLIDE_MS + 120)
+}
+
 function restoreCurrentTitle(): void {
   if (!strip.value) return
-  strip.value.style.scrollSnapType = ''
+  restoreSnapAfterSlide()
   const cur = itemEls()[neighbours.value.index]
   strip.value.scrollTo({ left: cur ? cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2 : 0, behavior: 'smooth' })
   emit('lean', 0)
@@ -354,6 +366,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (snapTimer) clearTimeout(snapTimer)
+  snapTimer = null
   headerObserver?.disconnect()
   headerObserver = null
   if (sliding) clearTimeout(sliding)

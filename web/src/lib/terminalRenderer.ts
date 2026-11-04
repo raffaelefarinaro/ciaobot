@@ -34,9 +34,9 @@
  * on dispose. The font decides the cell size, so a font change re-reads the
  * tokens and fits once.
  *
- * xterm and its fit addon are imported dynamically, so neither enters the
- * bundle of a page that does not show a terminal: Home's payload is
- * unchanged by this module existing.
+ * xterm, its fit addon and its web-links addon are imported dynamically, so
+ * none of them enters the bundle of a page that does not show a terminal:
+ * Home's payload is unchanged by this module existing.
  */
 
 import {
@@ -55,6 +55,7 @@ type XtermTheme = import('@xterm/xterm').ITheme
 type FitAddon = import('@xterm/addon-fit').FitAddon
 type XtermTerminalConstructor = typeof import('@xterm/xterm').Terminal
 type FitAddonConstructor = typeof import('@xterm/addon-fit').FitAddon
+type WebLinksAddonConstructor = typeof import('@xterm/addon-web-links').WebLinksAddon
 
 /**
  * The xterm modules, loaded once.
@@ -65,20 +66,27 @@ type FitAddonConstructor = typeof import('@xterm/addon-fit').FitAddon
 let xtermModules: Promise<{
   Terminal: XtermTerminalConstructor
   FitAddon: FitAddonConstructor
+  WebLinksAddon: WebLinksAddonConstructor
 }> | null = null
 
 /** Load the terminal's modules, once. */
 function loadXtermModules(): Promise<{
   Terminal: XtermTerminalConstructor
   FitAddon: FitAddonConstructor
+  WebLinksAddon: WebLinksAddonConstructor
 }> {
   if (!xtermModules) {
     xtermModules = (async () => {
-      const [xterm, fit] = await Promise.all([
+      const [xterm, fit, webLinks] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
+        import('@xterm/addon-web-links'),
       ])
-      return { Terminal: xterm.Terminal, FitAddon: fit.FitAddon }
+      return {
+        Terminal: xterm.Terminal,
+        FitAddon: fit.FitAddon,
+        WebLinksAddon: webLinks.WebLinksAddon,
+      }
     })()
   }
   return xtermModules
@@ -100,16 +108,39 @@ const DEFAULT_FONT_SIZE = 13
 const ENCODER = new TextEncoder()
 
 /**
- * A link handler that does nothing.
- *
- * The screen shows a shell's output; a URL in it is output, not a
- * destination. xterm only follows a link when a handler says so, and this
- * one says nothing: no navigation, no new tab, no history entry.
+ * The address a link in the output names, when it is one a browser tab may
+ * open: http or https with a host. Anything else is refused.
  */
-const INERT_LINK_HANDLER = {
-  activate(): void {
-    /* a link in the output is output */
-  },
+export function terminalLinkUrl(text: string): URL | null {
+  let url: URL
+  try {
+    url = new URL(text.trim())
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (!url.host) return null
+  return url
+}
+
+/**
+ * Open a link from the output in a new tab, with no opener and no referrer.
+ *
+ * Links in the output open in a new tab, for http(s) only. The link opens in
+ * the browser the user is on, not on the engine's machine, so a localhost
+ * address opens the user's own localhost; nothing is rewritten.
+ */
+export function openTerminalLink(text: string): boolean {
+  const url = terminalLinkUrl(text)
+  if (!url) return false
+  window.open(url.href, '_blank', 'noopener,noreferrer')
+  return true
+}
+
+/** The hint shown while the pointer is on a link: `Open <host>`, or '' for a refused one. */
+export function terminalLinkHint(text: string): string {
+  const url = terminalLinkUrl(text)
+  return url ? `Open ${url.host}` : ''
 }
 
 /**
@@ -370,6 +401,7 @@ export class TerminalRenderer {
     this.#disposed = true
     this.#observer?.disconnect()
     this.#observer = null
+    this.#element.removeAttribute('title')
     const pending = this.#queue.splice(0, this.#queue.length)
     for (const write of this.#inFlight) pending.push(write)
     this.#inFlight.clear()
@@ -381,16 +413,35 @@ export class TerminalRenderer {
     this.#fitAddon = null
   }
 
+  /** Name the host a hovered link opens, on the host element's tooltip. */
+  #showLinkHint(text: string): void {
+    if (this.#disposed) return
+    const hint = text ? terminalLinkHint(text) : ''
+    if (hint) this.#element.title = hint
+    else this.#element.removeAttribute('title')
+  }
+
   /** Start the terminal, once the modules are loaded. */
   async #create(): Promise<void> {
     try {
-      const { Terminal, FitAddon: Fit } = await loadXtermModules()
+      const { Terminal, FitAddon: Fit, WebLinksAddon: WebLinks } = await loadXtermModules()
       if (this.#disposed) return
       const font = readFont(this.#element)
       const terminal = new Terminal({
         scrollback: TERMINAL_SCROLLBACK,
         disableStdin: true,
-        linkHandler: INERT_LINK_HANDLER,
+        linkHandler: {
+          activate: (_event, text) => {
+            openTerminalLink(text)
+          },
+          hover: (_event, text) => {
+            this.#showLinkHint(text)
+          },
+          leave: () => {
+            this.#showLinkHint('')
+          },
+          allowNonHttpProtocols: false,
+        },
         fontFamily: font.fontFamily,
         fontSize: font.fontSize,
         minimumContrastRatio: 4.5,
@@ -398,6 +449,21 @@ export class TerminalRenderer {
       })
       const fitAddon = new Fit()
       terminal.loadAddon(fitAddon)
+      terminal.loadAddon(
+        new WebLinks(
+          (_event, uri) => {
+            openTerminalLink(uri)
+          },
+          {
+            hover: (_event, text) => {
+              this.#showLinkHint(text)
+            },
+            leave: () => {
+              this.#showLinkHint('')
+            },
+          },
+        ),
+      )
       this.#terminal = terminal
       this.#fitAddon = fitAddon
       terminal.open(this.#element)

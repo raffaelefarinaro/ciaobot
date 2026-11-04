@@ -178,6 +178,24 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.text()).not.toContain('nothing needs you here')
   })
 
+  it('lists unread replies before chats still working, and has no visible section heading', async () => {
+    const wrapper = await mountHome()
+    // In the shown (personal) lane: one chat with a new reply, one still working.
+    const store = useProjectStore()
+    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
+    quiet.last_activity_at = timestamp(60)
+    quiet.last_read_at = timestamp(3600)
+    store.chats.push({ ...quiet, chat_id: 'busy', title: 'Still working', last_read_at: timestamp(60) } as typeof quiet)
+    store.backgroundAgents = { ...store.backgroundAgents, busy: 1 }
+    await nextTick()
+    const order = wrapper.findAll('.home-tier').map(n => n.classes().find(c => c.startsWith('home-tier--'))!)
+    expect(order).toContain('home-tier--unread')
+    expect(order).toContain('home-tier--working')
+    expect(order.indexOf('home-tier--unread')).toBeLessThan(order.indexOf('home-tier--working'))
+    expect(wrapper.text()).not.toContain('Continue where you left off')
+    expect(wrapper.find('h2.sr-only').text()).toBe('Your chats')
+  })
+
   it('keeps tier labels lowercase', async () => {
     const wrapper = await mountHome()
     const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
