@@ -401,8 +401,8 @@ web/                           Vue 3 PWA frontend.
                                rejected rather than resolved, the theme is resolved from the app's
                                tokens to `rgb()`/`rgba()` values xterm can parse (`color-mix()` is
                                refused), and one owned ResizeObserver measures the screen. xterm and
-                               its fit addon are imported dynamically, so no page that shows no
-                               terminal carries them.
+                               its fit and web-links addons are imported dynamically, so no page that shows no
+                               terminal carries them. Links in the output open in a new tab, for http(s) only.
                                The pane around that screen is `TerminalPane.vue`, mounted the
                                first time a terminal is asked for (`terminalPanel.ts` carries
                                the one-bit signal) and kept after that, so the screen survives
