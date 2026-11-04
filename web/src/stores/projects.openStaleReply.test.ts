@@ -146,6 +146,8 @@ for (const [label, engineRow] of engineTurns) {
     expect(store.isChatStreaming('B')).toBe(true)
     // ... and the reply to PROMPT, which the server holds, is gone.
     expect(hasReply(store)).toBe(true)
+    // The engine turn's own progress stays out of history: the live trace owns it.
+    expect((store.messages.B || []).some(m => m.tool_name === '_activity' && m.content.includes('html-artifact'))).toBe(false)
   })
 }
 
