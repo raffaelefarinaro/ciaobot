@@ -115,6 +115,9 @@
         </button>
       </template>
     </PaneHeader>
+    <!-- Narrow panes put the shared-pin opener here, under the header, so a pinned
+         file never moves the header (it used to sit above it, under the status bar). -->
+    <slot name="below-header" />
 
     <!-- Body: one page grid. The left column holds everything that belongs to
          the conversation (context bar, transcript, dock, composer) so they all
