@@ -63,7 +63,7 @@ onMounted(() => window.addEventListener('keydown', onCaptureKeydown, true))
 onBeforeUnmount(() => window.removeEventListener('keydown', onCaptureKeydown, true))
 
 function onCaptureKeydown(event: KeyboardEvent): void {
-  if (!captureId.value) return
+  if (!captureId.value || event.isComposing || event.keyCode === 229 || event.getModifierState('AltGraph')) return
   event.preventDefault()
   event.stopImmediatePropagation()
   if (event.key === 'Escape' && !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)) {

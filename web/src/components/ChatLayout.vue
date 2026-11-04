@@ -1168,6 +1168,15 @@ function onChatSelected() {
 const PULL_CLOSE_PX = 120
 const pullY = ref(0)
 const pullSettling = ref(false)
+let pullContext = 0
+function invalidatePull() {
+  pullContext++
+  pullY.value = 0
+  pullSettling.value = false
+}
+// A delayed pull belongs to the chat and view where it started, not whichever
+// chat happens to be selected when its animation finishes.
+watch(() => [store.activeChatId, store.activeWorkspace, route.path, besideInTile.value, fileInTile.value], invalidatePull, { flush: 'sync' })
 const pullStyle = computed(() => {
   if (pullY.value <= 0 && !pullSettling.value) return undefined
   const p = Math.min(1, pullY.value / 400)
@@ -1184,21 +1193,28 @@ const pullStyle = computed(() => {
 })
 function onChatPull(dy: number) {
   if (besideInTile.value) return
+  if (pullSettling.value) pullContext++
   pullSettling.value = false
   pullY.value = dy
 }
 function onChatPullEnd(dy: number, velocity: number) {
   if (besideInTile.value) return
+  const context = pullContext
   const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const close = dy >= PULL_CLOSE_PX || (velocity > 0.6 && dy > 40)
   if (close && reduce) { pullY.value = 0; closeChat(); return }
   pullSettling.value = true
   if (close) {
     pullY.value = Math.max(window.innerHeight, dy + 1)
-    setTimeout(() => { pullSettling.value = false; pullY.value = 0; closeChat() }, 280)
+    setTimeout(() => {
+      if (context !== pullContext) return
+      pullSettling.value = false
+      pullY.value = 0
+      closeChat()
+    }, 280)
   } else {
     pullY.value = 0
-    setTimeout(() => { pullSettling.value = false }, 280)
+    setTimeout(() => { if (context === pullContext) pullSettling.value = false }, 280)
   }
 }
 
@@ -1243,40 +1259,13 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // project created the chat from an unexpectedly changed route. The picker
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
-  if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → tasks → memory → settings)
-  // with Option+Arrow, because the browser has already spent Cmd+Left/Right on
-  // back/forward. Never Tab: that stays the native focus traversal.
-  const mod = e.metaKey || e.ctrlKey
-  const alt = e.altKey
-  const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
-  if (isSectionArrow) {
-    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
-    // Order matches the sidebar's own destination order (Chats, Automations,
-    // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
-    // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
-    // through to, so without one Alt+Right from the board jumped to Home.
-    const sections = ['/', '/schedules', '/tasks', '/memory', '/settings']
-    const current = viewMode.value === 'chat' || viewMode.value === 'project'
-      ? 0
-      : viewMode.value === 'schedules'
-        ? 1
-        : viewMode.value === 'tasks'
-          ? 2
-          : viewMode.value === 'memory' || viewMode.value === 'proposals'
-            ? 3
-            : 4
-    const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
-    e.preventDefault()
-    void router.push(sections[next])
-    return
-  }
+  if (pendingNewChat.value || e.isComposing || e.keyCode === 229 || e.getModifierState('AltGraph')) return
 
   const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
 
   // Workspace navigation is also useful from the automations view, where the
   // chat-only shortcuts are disabled. Match the visible workspace order and
-  // keep the shortcut out of text fields so numbers remain typeable.
+  // keep unmodified and non-Alt shortcuts out of text fields so numbers remain typeable.
   //
   // An open AskUserQuestion card gets first refusal on the same digits. Two
   // features want 1-9, and the card wins *while it is up*: the model is blocked
@@ -1291,9 +1280,11 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // swallows the digit and the composer still types it.
   const workspaceSlot = Array.from({ length: 9 }, (_, i) => i + 1)
     .find(i => matchesShortcut(e, `workspace${i}` as ShortcutId))
-  if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
+  const editing = isTypingTarget(e.target) || isTypingTarget(document.activeElement)
+  if (viewShortcutsActive.value && (!editing || e.altKey) && !e.defaultPrevented
+    && !document.querySelector('[data-dismissable-layer]')
     && workspaceSlot) {
-    if (focusedPanel.value?.handleQuestionShortcut?.(e)) {
+    if (bare && !editing && focusedPanel.value?.handleQuestionShortcut?.(e)) {
       e.preventDefault()
       return
     }
@@ -1301,7 +1292,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // switcher while it is up, mirroring the question card's first-refusal:
     // the model is blocked on the approval and the digits are printed on the
     // buttons. Only the first card is keyed (1 deny / 2 approve).
-    if (focusedPanel.value?.handlePermissionShortcut?.(e)) {
+    if (bare && !editing && focusedPanel.value?.handlePermissionShortcut?.(e)) {
       e.preventDefault()
       return
     }
@@ -1409,7 +1400,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // schedule lists and the overview pane. This lives outside the chat-only
   // gate because shortcutsActive deliberately excludes schedules — the
   // lists still want keyboard roaming.
-  if (viewMode.value === 'schedules' && e.key.startsWith('Arrow')) {
+  if (viewMode.value === 'schedules' && bare && e.key.startsWith('Arrow')) {
     if (isTypingTarget(e.target) || e.defaultPrevented) return
     if (projectSidebarRef.value?.onArrow?.(e.key)) {
       e.preventDefault()
@@ -1424,7 +1415,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 
   if (!shortcutsActive.value) return
 
-  if (e.key.startsWith('Arrow')) {
+  if (bare && e.key.startsWith('Arrow')) {
     // Arrows keep deferring to text fields, or they would break caret movement.
     if (store.activeChat || isTypingTarget(e.target)) return
     // ...and to any open menu that already consumed the key. The Escape branch
@@ -1441,14 +1432,19 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 function onShortcutKeydown(e: KeyboardEvent) {
   if (!shortcutsActive.value) return
   // See onUnreservedKeydown: the new-chat dialog owns the keyboard while open.
-  if (pendingNewChat.value) return
+  if (pendingNewChat.value || e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.getModifierState('AltGraph') || document.querySelector('[data-dismissable-layer]')) return
   // Holding the chord repeats the keydown at OS speed. None of these actions
   // are meant to fire more than once per press: New Chat created a fresh
   // "New Chat" on every repeat (each POST racing the server's empty-chat
   // sweep against the one before it, so the panel kept snapping to a newer
   // chat instead of opening directly), and sidebar/model-picker
   // would otherwise toggle back and forth for as long as the key was held.
-  if (e.repeat) return
+  if (e.repeat) {
+    if ((e.altKey || (!isTypingTarget(e.target) && !isTypingTarget(document.activeElement)))
+      && store.activeChat && !subagentRoute.value && !besideInTile.value
+      && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) e.preventDefault()
+    return
+  }
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is always
   // bound. Handling them here too ran them twice.
@@ -1497,23 +1493,20 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // User shortcuts must never take printable chords away from an editor.
-  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
+  // Only explicitly configured Alt chords may act inside an editor. Bare
+  // digits and non-Alt custom bindings remain available for ordinary typing.
+  if (!alt && (isTypingTarget(e.target) || isTypingTarget(document.activeElement))) return
 
   // New Chat: Option+N. Opens a small picker to choose the workspace the new
   // chat should live in; Enter creates it in the active workspace's General
   // project. Cmd+T is left alone: it is the browser's new tab.
   if (matchesShortcut(e, 'newChat')) {
-    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
-  // Archive is deliberately inert in editable controls so Option+Backspace
-  // keeps its native “delete previous word” meaning on macOS.
   if (matchesShortcut(e, 'archiveChat')) {
-    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     if (!store.activeChat) return
     e.preventDefault()
     // The ref is on `<ChatPanel>`, but while the chunk is in flight the
@@ -1526,23 +1519,18 @@ function onShortcutKeydown(e: KeyboardEvent) {
   }
 
   // Previous / next chat in the header rail's order (Home's order, this workspace).
-  // Inert while typing: the gate above already returned for a focused text field,
-  // and on macOS Option+[ / Option+] type “ and ‘.
   // The main pane's ChatPanel owns the rail. While a second chat sits beside it
   // the rail is replaced by a plain header, so the chord does nothing.
   const chatStep = matchesShortcut(e, 'previousChat') ? -1 : matchesShortcut(e, 'nextChat') ? 1 : 0
   if (chatStep) {
     if (!store.activeChat || subagentRoute.value || besideInTile.value) return
-    if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) e.preventDefault()
+    e.preventDefault()
+    if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) invalidatePull()
     return
   }
 
-  // Sidebar: Option+S, because Cmd+S is the browser's Save Page. Skipped while
-  // typing for the same reason as archive: in a text field Option+S is how you
-  // type ß, and stealing it would break text entry for the sake of a view
-  // toggle.
+  // Sidebar: Option+S, because Cmd+S is the browser's Save Page.
   if (matchesShortcut(e, 'toggleSidebar')) {
-    if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
     return
@@ -1566,10 +1554,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // ignores preventDefault -- the page would zoom *and* the font would grow,
   // two steps at once.
   //
-  // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
   // Step, bounds and persistence come from useFontScale, shared with the
   // Settings +/- buttons.
-  if (!isTypingTarget(e.target) && !isTypingTarget(document.activeElement)) {
+  {
     const zoomIn = matchesShortcut(e, 'fontIncrease')
     const zoomOut = matchesShortcut(e, 'fontDecrease')
     if (zoomIn) {
@@ -1668,6 +1655,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  pullContext++
   chatPaneObserver?.disconnect()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()

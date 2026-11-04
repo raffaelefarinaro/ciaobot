@@ -768,7 +768,7 @@ watch([() => board.remoteChangeEpoch, () => taskSignals.tasks], () => {
 /**
  * The keyboard's drag: Shift+←/→ on a focused card moves it one column over.
  *
- * Not Alt: Option+Arrow is the app-wide section switch. Only on the columns,
+ * Not Alt: the card reserves Shift+Arrow for moving between lanes. Only on the columns,
  * where left and right mean something on screen. Focus
  * follows the card into its new lane once the move has landed.
  */

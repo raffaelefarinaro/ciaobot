@@ -568,7 +568,7 @@ describe('TaskBoardView', () => {
     const wrapper = await mountBoard()
     apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'in_progress' }), revision: NEXT_REVISION, body: '' } })
     const title = card(wrapper, 'Ship the board').get('.task-open')
-    // Option+Arrow is the app's section switch; the card leaves it alone.
+    // The card leaves Option+Arrow alone.
     await title.trigger('keydown', { key: 'ArrowRight', altKey: true })
     expect(apiPatch).not.toHaveBeenCalled()
     // Leftmost already: nothing to the left.
