@@ -3593,9 +3593,9 @@ def test_cli_vault_search_logs_reads_own_workspace_and_shared_root(
     )
     reset_reroot_cache()
     transcripts = {
-        "c1": install / "work" / "Logs" / "Chats" / "c1" / "claude" / "a.md",
-        "c2": install / "personal" / "Logs" / "Chats" / "c2" / "claude" / "b.md",
-        "c3": install / "Logs" / "Chats" / "c3" / "claude" / "c.md",
+        "ownchat": install / "work" / "Logs" / "Chats" / "ownchat" / "claude" / "a.md",
+        "siblingchat": install / "personal" / "Logs" / "Chats" / "siblingchat" / "claude" / "b.md",
+        "rootchat": install / "Logs" / "Chats" / "rootchat" / "claude" / "c.md",
     }
     for path in transcripts.values():
         path.parent.mkdir(parents=True)
@@ -3614,9 +3614,9 @@ def test_cli_vault_search_logs_reads_own_workspace_and_shared_root(
     )
 
     out = capsys.readouterr().out
-    assert "c1" in out
-    assert "c3" in out
-    assert "c2" not in out
+    assert "ownchat" in out
+    assert "rootchat" in out
+    assert "siblingchat" not in out
 
 
 def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
