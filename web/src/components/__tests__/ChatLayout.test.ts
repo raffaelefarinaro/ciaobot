@@ -30,12 +30,15 @@ const handlePermissionShortcut = vi.fn(() => false)
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close', 'pull', 'pull-end'],
-  setup(_, { emit, expose }) {
+  setup(_, { emit, expose, slots }) {
     expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat, handleQuestionShortcut, handlePermissionShortcut })
-    return () => h('button', {
-      'data-testid': 'close-chat',
-      onClick: () => emit('close'),
-    }, 'Close chat')
+    return () => h('div', [
+      h('button', {
+        'data-testid': 'close-chat',
+        onClick: () => emit('close'),
+      }, 'Close chat'),
+      slots['below-header']?.(),
+    ])
   },
 })
 
