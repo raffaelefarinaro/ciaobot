@@ -1474,6 +1474,7 @@ import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import ChatTitleRail from './ChatTitleRail.vue'
 import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
@@ -2335,8 +2336,9 @@ const isWidePane = ref(false)
 // the right then, and two docked windows would leave the chat a sliver. It
 // comes back when the file is unpinned, because ChatLayout mounts a separate
 // ChatPanel for each layout, so the prop never changes on a live instance.
-// The info tab still opens it on demand.
-const railOpen = ref(!props.filePinned)
+// The info tab still opens it on demand. A user's close carries to the next chat
+// (each chat mounts its own panel): it stays closed until opened again.
+const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
@@ -2385,6 +2387,7 @@ function showDetails(target: DetailsTarget = 'close') {
     return
   }
   railOpen.value = true
+  rememberChatDetails(true)
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
@@ -2393,7 +2396,7 @@ function showDetails(target: DetailsTarget = 'close') {
   })
 }
 function closeDetails() {
-  if (isWidePane.value) railOpen.value = false
+  if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   void nextTick(() => inspectorTrigger.value?.focus())
 }

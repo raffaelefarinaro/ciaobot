@@ -23,3 +23,32 @@ test('closing the drawer slides it out with its rows still in it, then collapses
   await expect(page.locator('.sidebar.sidebar--closing')).toHaveCount(1)
   await expect(page.locator('.sidebar.sidebar--closing .project-list')).toBeVisible()
   await page.waitForTimeout(300); await expect(page.locator('.sidebar.collapsed')).toHaveCount(1); await expect(page.locator('.sidebar-backdrop')).toHaveCount(0) }) })
+
+test('closing Chat details keeps it closed in the next chat', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 }); await isolate(page, 'motion-details'); await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  await expect(page.locator('.chat-panel--rail')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Hide chat details' }).click()
+  await expect(page.locator('.chat-panel--rail')).toHaveCount(0)
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  await expect(page).toHaveURL(/alpha-chat-2$/)
+  await expect(page.locator('.chat-panel')).toHaveCount(1)
+  await expect(page.locator('.chat-panel--rail')).toHaveCount(0)
+})
+
+test('switching to a chat with a pinned file slides the chat first, then the file', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 }); await isolate(page, 'motion-tile')
+  await page.route(/\/api\/chats(\/alpha-chat-2)?(\?.*)?$/, async route => {
+    const response = await route.fetch()
+    const body = await response.json() as Record<string, unknown> | Array<Record<string, unknown>>
+    const pin = (c: Record<string, unknown>) => c.chat_id === 'alpha-chat-2' ? { ...c, pinned_file_path: 'notes/plan.md' } : c
+    await route.fulfill({ response, json: Array.isArray(body) ? body.map(pin) : pin(body) })
+  })
+  await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  const tile = page.locator('.chat-split-side--arriving')
+  await expect(tile).toHaveCount(1)
+  // Still hidden while the chat slides in.
+  expect(Number(await tile.evaluate(el => getComputedStyle(el).opacity))).toBeLessThan(0.5)
+  await expect(page.locator('.chat-split-side--arriving')).toHaveCount(0)
+  await expect(page.locator('.chat-split-side')).toBeVisible()
+})

@@ -285,6 +285,7 @@
           'chat-split-side--chat': besideInTile,
           'chat-split-side--focused': besideInTile && focusedPane === 'beside',
           'chat-split-side--closed': !sideSlotOccupied,
+          'chat-split-side--arriving': tileArriving && fileInTile,
         }"
         @pointerdown.capture="focusPane('beside')"
         @focusin="focusPane('beside')"
@@ -1195,6 +1196,22 @@ function onChatSelected() {
  * rail, archive-to-next) does not, since those slide sideways.
  */
 const chatRising = ref(false)
+/**
+ * Switching to a chat that has a pinned file: the chat slides in first, then its
+ * file follows from the right (the tile stays hidden for the chat's slide).
+ */
+const tileArriving = ref(false)
+let tileTimer: ReturnType<typeof setTimeout> | null = null
+watch(() => store.activeChat?.chat_id, (id, was) => {
+  if (!id || !was || id === was) return
+  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  tileArriving.value = false
+  if (tileTimer) clearTimeout(tileTimer)
+  void nextTick(() => {
+    tileArriving.value = true
+    tileTimer = setTimeout(() => { tileArriving.value = false; tileTimer = null }, 560)
+  })
+})
 let riseTimer: ReturnType<typeof setTimeout> | null = null
 let bootSettledAt = 0
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
@@ -2180,6 +2197,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
   animation: chat-tile-in 180ms var(--ease);
 }
+/* After a chat switch the file waits out the chat's slide, then slides in from the right. */
+.chat-split-side--arriving { animation: chat-tile-follow 300ms var(--ease) 220ms both; }
+@keyframes chat-tile-follow {
+  from { opacity: 0; transform: translateX(40%); }
+}
+
 /* The terminal keeps its own floor in the slot: a shell narrower than that
    is not worth looking at. */
 .chat-split-side--terminal {
