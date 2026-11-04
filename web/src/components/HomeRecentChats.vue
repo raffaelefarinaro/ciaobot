@@ -10,9 +10,9 @@
     </div>
   </div>
   <div v-else-if="hasHomeActivity" class="home-recent">
-    <div class="home-recent-heading">
-      <h2 class="home-recent-label">Continue where you left off</h2>
-    </div>
+    <!-- No visible heading: the composer above and the tier labels say what the
+         list is. The heading stays for screen readers' page outline. -->
+    <h2 class="sr-only">Your chats</h2>
     <div ref="lanesEl" class="home-lanes">
       <section
         v-for="lane in lanes"
@@ -467,8 +467,8 @@ function projectsFor(workspace: string | null): ProjectInfo[] {
 function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; chats: ChatInfo[] }> {
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
-    { key: 'working', label: 'working', chats: lane.tiers.working },
     { key: 'unread', label: 'unread', chats: lane.tiers.unread },
+    { key: 'working', label: 'working', chats: lane.tiers.working },
     { key: 'quiet', label: 'earlier', chats: [...lane.tiers.quiet, ...lane.tiers.older] },
   ]
 }
@@ -678,24 +678,6 @@ defineExpose({ onArrow })
      stacked far too late: at a 1750px window the lanes still had only ~450px
      each and ellipsed almost every title. */
   container-type: inline-size;
-}
-
-/* Prototype A's section heading. Visible again: the lane and tier labels
-   below say how the list is sorted, this says what the list is for. */
-.home-recent-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.home-recent-label {
-  margin: 0;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  font-weight: 650;
-  letter-spacing: -0.02em;
 }
 
 .home-lanes {

@@ -90,7 +90,7 @@ describe('groupHomeTiers', () => {
 
     const ordered = orderedHomeChats(tiers)
 
-    expect(ordered.map(e => e.chat.chat_id)).toEqual(['needs', 'working', 'unread', 'quiet', 'older'])
+    expect(ordered.map(e => e.chat.chat_id)).toEqual(['needs', 'unread', 'working', 'quiet', 'older'])
     expect(ordered.map(e => e.tier)).toEqual(HOME_TIER_ORDER)
   })
 
