@@ -1064,6 +1064,11 @@ def test_darwin_seatbelt_keeps_a_workspace_logs_folder_read_only():
         assert create.returncode != 0
         assert not new_file.exists()
 
+        for cmd in (f"rm -rf '{logs}'", f"mv '{logs}' '{agent_root / 'moved'}'"):
+            gone = subprocess.run([*prefix, "/bin/sh", "-c", cmd], capture_output=True, timeout=30)
+            assert gone.returncode != 0
+            assert transcript.read_text(encoding="utf-8") == "transcript"
+
         ok = agent_root / "ok.txt"
         control = subprocess.run(
             [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
