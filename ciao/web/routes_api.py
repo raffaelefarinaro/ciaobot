@@ -131,6 +131,7 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
+from ciao.web.memory_pass import is_memory_pass_chat
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
@@ -6298,6 +6299,10 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         project = pcm.get_project(chat.project_id)
         if project is None:
+            continue
+        if is_memory_pass_chat(chat, project):
+            # The menu bar is a notification surface: a memory pass is app
+            # housekeeping and must not reach its count or rows, blocked or not.
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""

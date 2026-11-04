@@ -1383,9 +1383,18 @@ touch it, check the overlap case (an archive request still in flight while its
 pass is already running must stay ONE row), the fallback (no pass yet, so the row opens
 the archived transcript), the dead entry (no file and no pass, so the row is
 disabled), the counter rules (`chatIsAttentionItem` is what the Home nav badge
-and the lane status sentence both ask), and that the pass never reappears in
-`activeChatsAll`, `projectChats`, `totalUnread`, the sidebar or a schedule
-target. A pass's own archive is not a second row: `memoryInsights` skips any chat
+and the lane status sentence both ask, and it is false for every pass, blocked
+or not; the row's own blocking phase carries that signal), and that a declared
+pass never reappears in `activeChatsAll`, `projectChats`, `totalUnread`, the
+sidebar or a schedule target. A pass is silent on every notification surface
+too — toasts, the notification inbox, the bell and OS badge, and the menu bar —
+even when blocked; `isMemoryPassChat` takes the project as its fallback so a
+malformed helper in a Memory project cannot start notifying again. That
+malformed-helper pass is the exception in the display filters: because it has
+no memory-insight row, it must stay in `activeChatsAll` and `projectChats` so its
+pending question remains reachable, while `projectNeedsInput`, unread and every
+notification predicate still exclude it by project kind. A pass's own archive is
+not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
 For **After this update** changes (Home's update-task group, or the Settings
 history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders

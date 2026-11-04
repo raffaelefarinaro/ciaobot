@@ -38,7 +38,6 @@ import {
 } from '../lib/notificationInbox'
 import type {
   ChatCandidate,
-  MemoryInsightCandidate,
   NotificationSourceKey,
   OperatorCandidate,
   ScheduleCandidate,
@@ -123,7 +122,10 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
         chatId: id,
         title: chat.title,
         archived: !!chat.archived,
-        quietHelper: isMemoryPassChat(chat),
+        quietHelper: isMemoryPassChat(
+          chat,
+          projects.projects.find(p => p.project_id === chat.project_id) || null,
+        ),
         needsYou,
         needsInput,
         failed,
@@ -171,24 +173,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   const reviewTaskCandidates = computed<TaskReviewCandidate[]>(() =>
     taskSignals.inReview(projects.activeWorkspace).map((t) => ({ taskId: t.id, title: t.title })),
   )
-
-  const memoryInsightCandidates = computed<MemoryInsightCandidate[]>(() => {
-    const workspace = projects.activeWorkspace
-    const out: MemoryInsightCandidate[] = []
-    for (const r of projects.memoryInsightRows) {
-      if (!r.blocking || !r.passChatId) continue
-      if (projects.projectFor(r.passChatId)?.workspace !== workspace) continue
-      out.push({
-        sourceChatId: r.sourceChatId,
-        passChatId: r.passChatId,
-        title: r.title,
-        phase: r.phase as MemoryInsightCandidate['phase'],
-        question: r.question,
-        timestamp: r.timestamp,
-      })
-    }
-    return out
-  })
 
   // Another workspace's rows never leak: they count only for the workspace they were loaded for.
   const updateTaskCandidates = computed<UpdateTaskCandidate[]>(() => {
@@ -283,7 +267,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       operators: operatorCandidates.value,
       schedules: scheduleCandidates.value,
       reviewTasks: reviewTaskCandidates.value,
-      memoryInsights: memoryInsightCandidates.value,
       updateTasks: updateTaskCandidates.value,
       sources: snapshots.value,
     }),
@@ -399,7 +382,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     operatorCandidates,
     scheduleCandidates,
     reviewTaskCandidates,
-    memoryInsightCandidates,
     updateTaskCandidates,
     snapshots,
     inbox,

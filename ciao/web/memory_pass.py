@@ -4,7 +4,8 @@ The #594 experiment measured a full chat session against the one-shot insights
 extraction on 50 real conversations, and the chat won, so the pass is now an
 attended ``bypass`` chat in a per-workspace system project called ``Memory``:
 one running pass per workspace, FIFO, auto-archived when it ends cleanly, left
-open for the owner when it does not, and silent on a normal result.
+open for the owner when it does not, and silent on every notification surface,
+including when it is blocked.
 
 Everything here was inert until ``MEMORY_PASS_CHATS`` was flipped, and is live
 now. The archive pipeline reads that module attribute — never a

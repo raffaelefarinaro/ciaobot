@@ -1536,6 +1536,81 @@ async def test_result_push_suppressed_for_memory_pass_chat(
     task.cancel()
 
 
+async def test_result_push_suppressed_by_memory_project_fallback(
+    tmp_path: Path, passes_enabled: None
+) -> None:
+    """A hand-edited or older pass helper still stays silent in a Memory project.
+
+    The helper kind is the fast path; the project kind is the recursion guard's
+    fallback and must also gate notifications, or an existing pass whose helper
+    failed closed would resume notifying the owner.
+    """
+    manager = _make_manager(tmp_path)
+    sent: list[tuple[str, str, str]] = []
+    manager.notify_result_cb = lambda *args: sent.append(args)
+    memory_project = manager._memory_pass.ensure_project("work")
+    malformed = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper={"kind": "legacy-memory-pass"},
+    )
+
+    manager._schedule_push(malformed.chat_id, "t", "s")
+
+    assert sent == []
+    assert malformed.chat_id not in manager._pending_push
+
+
+async def test_result_announce_keeps_lifecycle_event_for_memory_pass(
+    tmp_path: Path, passes_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence is at the push boundary, not the lifecycle event.
+
+    The PWA and the pass settle still need `chat_result_ready`; only the
+    external notification and its delayed task must disappear.
+    """
+    manager = _make_manager(tmp_path)
+    memory_project = manager._memory_pass.ensure_project("work")
+    memory = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
+    )
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+
+    manager._announce_result_ready(memory.chat_id, memory.project_id, "t", "s")
+
+    assert [event["type"] for event in published] == ["chat_result_ready"]
+    assert published[0]["chat_id"] == memory.chat_id
+    assert memory.chat_id not in manager._pending_push
+
+
+async def test_result_push_still_fires_for_ordinary_chat_named_memory(
+    tmp_path: Path, passes_enabled: None
+) -> None:
+    """A user project may be named Memory; only the kind makes a pass."""
+    manager = _make_manager(tmp_path)
+    sent: list[tuple[str, str, str]] = []
+    manager.notify_result_cb = lambda *args: sent.append(args)
+    project = manager.create_project("Memory", workspace="work")
+    chat = manager.create_chat(
+        project.project_id,
+        title="Memory pass · my own notes",
+        helper={},
+    )
+
+    manager._schedule_push(chat.chat_id, "Pricing rework", "done")
+
+    assert list(manager._pending_push) == [chat.chat_id]
+    task = manager._pending_push[chat.chat_id]
+    task.cancel()
+
+
 def test_start_stream_is_attended(
     tmp_path: Path, passes_enabled: None, streams: _FakeStreams
 ) -> None:

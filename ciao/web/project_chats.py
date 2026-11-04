@@ -8455,6 +8455,10 @@ class ProjectChatManager:
 
     # ── Delayed push scheduler ───────────────────────────────────────────
 
+    def _is_memory_pass(self, chat: ChatInfo) -> bool:
+        """True for this app-owned pass, including the project-kind fallback."""
+        return is_memory_pass_chat(chat, self.get_project(chat.project_id))
+
     def _cancel_pending_push(self, chat_id: str) -> None:
         task = self._pending_push.pop(chat_id, None)
         if task is not None and not task.done():
@@ -8479,15 +8483,11 @@ class ProjectChatManager:
         single push fired after the last reply settles.
         """
         chat = self._chats.get(chat_id)
-        if (
-            chat is not None
-            and chat_service._normalize_chat_helper(chat.helper).get("kind")
-            == "memory_pass"
-        ):
+        if chat is not None and self._is_memory_pass(chat):
             # The pass is the app updating its own memory, not a conversation
-            # the owner started: a normal result there is not worth waking them
-            # for. Permission and question pushes travel their own paths and are
-            # still delivered — that is exactly when a pass needs the owner.
+            # the owner started. No result, question or permission push may
+            # reach them; the pass and its pending input stay inspectable from
+            # its memory-insight row and the chat itself.
             return
         if (
             chat is not None
@@ -8510,6 +8510,11 @@ class ProjectChatManager:
             chat = self._chats.get(chat_id)
             # Chat deleted during the window, or already read on some device.
             if chat is None:
+                return
+            if self._is_memory_pass(chat):
+                # The classification is re-checked at fire time: a pass queued
+                # before this guard existed, or one whose helper/project the
+                # registry has since rewritten, must still never wake the owner.
                 return
             if chat.archived:
                 # The chat was archived during the delay window — e.g. an
@@ -8883,6 +8888,11 @@ class ProjectChatManager:
             if chat.pending_permission != payload:
                 chat.pending_permission = payload
                 self._save()
+        if chat is not None and self._is_memory_pass(chat):
+            # Keep the persisted card and the turn's lifecycle state; only the
+            # external notification is silent. The owner reaches the pass from
+            # its memory-insight row, where a blocked pass says "needs you".
+            return
         cb = self.notify_permission_cb
         if cb is None:
             return
@@ -8978,8 +8988,12 @@ class ProjectChatManager:
 
         Called when the model uses AskUserQuestion. The headless CLI
         auto-cancels with empty answers, so the user may not notice the
-        question unless we nudge them.
+        question unless we nudge them. A memory pass never nudges: its question
+        stays on the chat and on its memory-insight row.
         """
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._is_memory_pass(chat):
+            return
         cb = self.notify_question_cb
         if cb is None:
             return
