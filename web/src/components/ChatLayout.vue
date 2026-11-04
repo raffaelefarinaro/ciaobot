@@ -2,7 +2,8 @@
   <div class="chat-layout" :class="{ 'sidebar-open': !sidebarCollapsed }">
     <ProjectSidebar
       ref="projectSidebarRef"
-      :collapsed="sidebarCollapsed"
+      :collapsed="sidebarCollapsed && !sidebarClosing"
+      :class="{ 'sidebar--closing': sidebarClosing }"
       :mode="viewMode"
       :style="sidebarStyle"
       @toggle="sidebarCollapsed = !sidebarCollapsed"
@@ -18,8 +19,9 @@
       @mousedown="startSidebarDrag"
     />
     <div
-      v-if="isMobile && !sidebarCollapsed"
+      v-if="isMobile && (!sidebarCollapsed || sidebarClosing)"
       class="sidebar-backdrop"
+      :class="{ 'sidebar-backdrop--closing': sidebarClosing }"
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
@@ -55,7 +57,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -185,7 +187,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
             </div>
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
           </template>
           <!-- The route names a chat the catalog has not delivered yet: the pane
                is on its way, so it shows the skeleton rather than nothing
@@ -724,6 +726,25 @@ const shortcutsActive = computed(() =>
   viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
+// On a phone the drawer slides out on close the way it slides in on open: for the
+// slide it stays expanded (its rows are still there) while ProjectSidebar moves it
+// off-screen, then it collapses.
+const SIDEBAR_SLIDE_MS = 220
+const sidebarClosing = ref(false)
+let sidebarClosingTimer: ReturnType<typeof setTimeout> | null = null
+// Only a drawer someone opened slides out: the layout also collapses it on its own
+// (at boot the drawer starts expanded and collapses on mount), which must stay instant.
+let drawerOpened = false
+watch(sidebarCollapsed, (collapsed, was) => {
+  if (sidebarClosingTimer) { clearTimeout(sidebarClosingTimer); sidebarClosingTimer = null }
+  if (!collapsed) { drawerOpened = isMobile.value; sidebarClosing.value = false; return }
+  const opened = drawerOpened
+  drawerOpened = false
+  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (was || !opened || !isMobile.value || reduce) { sidebarClosing.value = false; return }
+  sidebarClosing.value = true
+  sidebarClosingTimer = setTimeout(() => { sidebarClosing.value = false; sidebarClosingTimer = null }, SIDEBAR_SLIDE_MS)
+})
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 
@@ -1165,6 +1186,23 @@ function onChatSelected() {
  * Past PULL_CLOSE_PX (or a downward flick) the pane drops away and the chat closes;
  * otherwise it springs back.
  */
+/**
+ * Opening a chat from Home (or any page that is not a chat) raises it from below:
+ * the reverse of pulling it down to close. Switching between chats (the title
+ * rail, archive-to-next) does not, since those slide sideways.
+ */
+const chatRising = ref(false)
+let riseTimer: ReturnType<typeof setTimeout> | null = null
+let bootSettledAt = 0
+watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
+watch(() => store.activeChat?.chat_id, (id, was) => {
+  if (!id || was || !bootSettledAt || Date.now() - bootSettledAt < 800) return
+  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  chatRising.value = true
+  if (riseTimer) clearTimeout(riseTimer)
+  riseTimer = setTimeout(() => { chatRising.value = false; riseTimer = null }, 340)
+})
+
 const PULL_CLOSE_PX = 120
 const pullY = ref(0)
 const pullSettling = ref(false)
@@ -1734,6 +1772,12 @@ onBeforeUnmount(() => {
   min-width: 360px;
 }
 
+/* A chat opened from Home rises into place: the reverse of pulling it down. */
+.chat-rise { animation: chat-rise 320ms var(--ease) both; transform-origin: 50% 0; }
+@keyframes chat-rise {
+  from { transform: translateY(30%) scale(0.92); border-radius: 28px; opacity: 0.4; }
+}
+
 /* The Home hint behind a chat pulled down by its title. */
 .chat-pull-home {
   position: absolute;
@@ -2078,6 +2122,7 @@ onBeforeUnmount(() => {
 }
 
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+.sidebar-backdrop--closing { opacity: 0; transition: opacity 220ms var(--ease); pointer-events: none; }
 
 /* Narrow shared-pin opener: a compact in-chat bar naming the chat's pinned
    file, so a phone gets the same server-owned pin state without a split pane

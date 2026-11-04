@@ -8,6 +8,10 @@ let snapshot: { workspace: string; chatId: string; ids: string[] } | null = null
 // Which way the last rail switch went (1 = to the next chat), read once by the
 // panel that mounts for it so its transcript can slide in from that side.
 let arrival: -1 | 1 | 0 = 0
+// For a switch the rail did not start (archive-to-next): the side the next chat comes from.
+export function markRailArrival(direction: -1 | 1 | 0): void {
+  arrival = direction
+}
 export function takeRailArrival(): -1 | 1 | 0 {
   const a = arrival
   arrival = 0
