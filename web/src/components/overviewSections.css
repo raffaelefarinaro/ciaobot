@@ -1,7 +1,7 @@
 /*
  * The Automations overview's section language: a plain heading over hairline
  * rows — title and one muted sub-line on the left, a time or state on the right.
- * It is the same row language as Home's "Continue where you left off", which is
+ * It is the same row language as Home's chat list, which is
  * why these classes are shared rather than one pane's private styling.
  *
  * `SchedulePanel.vue` and `WebhookTriggers.vue` both render `.ov-section`
