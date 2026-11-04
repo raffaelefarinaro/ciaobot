@@ -454,7 +454,9 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
 
     expect(wrapper.find('.question-card').exists()).toBe(false)
-    const event = pressKey('2')
+    expect(document.activeElement?.tagName).toBe('TEXTAREA')
+    ;(document.activeElement as HTMLElement).blur()
+    const event = pressKey('2', document.body)
     await flushPromises()
 
     expect(event.defaultPrevented).toBe(true)
@@ -467,7 +469,8 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     const { wrapper, store } = await mountLayout({ questions: [makeQuestion()] })
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
 
-    pressKey('2')
+    ;(document.activeElement as HTMLElement).blur()
+    pressKey('2', document.body)
     await nextTick()
     expect(switchWorkspace).not.toHaveBeenCalled()
 
@@ -475,7 +478,8 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     await nextTick()
     expect(wrapper.find('.question-card').exists()).toBe(false)
 
-    pressKey('2')
+    ;(document.activeElement as HTMLElement).blur()
+    pressKey('2', document.body)
     await flushPromises()
     expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
 

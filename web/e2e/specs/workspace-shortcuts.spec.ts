@@ -30,6 +30,9 @@ test.describe('workspace shortcuts', () => {
     await expect(options.nth(1)).toContainText('Beta')
     await expect(options.nth(2)).toContainText('Gamma')
 
+    // The open menu owns the keyboard; workspace shortcuts resume on dismissal.
+    await page.keyboard.press('Escape')
+    await expect(menu).toHaveCount(0)
     await page.keyboard.press('3')
     await expect(activeWorkspaceButton(page)).toContainText('Gamma')
 

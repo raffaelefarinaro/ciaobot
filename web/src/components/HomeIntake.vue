@@ -384,9 +384,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('ciao:native-file-drop', onNativeDrop)
 })
 
-/** Upload staged items into the new chat; returns prompt tokens for files. */
-async function attachStaged(chatId: string, projectId: string, items: StagedItem[]): Promise<string[]> {
-  const refs: string[] = []
+/** Upload staged items into the new chat's pending attachments. */
+async function attachStaged(chatId: string, projectId: string, items: StagedItem[]): Promise<void> {
   const images = items.filter(item => item.file && item.image).map(item => item.file as File)
   const files = items.filter(item => item.file && !item.image).map(item => item.file as File)
   const grants = items.filter(item => item.grantId)
@@ -404,7 +403,7 @@ async function attachStaged(chatId: string, projectId: string, items: StagedItem
     try {
       const result = await uploadChatAttachments(chatId, files)
       report(result.failures)
-      refs.push(...result.fileRefs)
+      store.addPendingFiles(chatId, result.files)
     } catch (error) {
       store.pushErrorToast('Could not attach files', error instanceof Error ? error.message : String(error))
     }
@@ -413,13 +412,12 @@ async function attachStaged(chatId: string, projectId: string, items: StagedItem
     try {
       const result = await importDesktopDrop(grant.grantId as string, { chatId, projectId })
       report(result.failures)
-      refs.push(...result.fileRefs)
+      store.addPendingFiles(chatId, result.files)
       store.addPendingImageRefs(chatId, result.imageRefs)
     } catch (error) {
       store.pushErrorToast(`Could not attach ${grant.name}`, `${error instanceof Error ? error.message : String(error)} Drop the files again if this was more than five minutes ago.`)
     }
   }
-  return refs
 }
 
 function onSubmit(): void {
@@ -476,11 +474,10 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
         : await store.newChatInProject(projectId)
       if (!chat) return
       // Attachments belong to a chat, so they upload now that it exists and
-      // go out with the first message: images staged on the chat, files as
-      // `ciao-drop:` references appended to the text.
-      const refs = items.length ? await attachStaged(chat.chat_id, projectId, items) : []
-      const text = [message, refs.join(' ')].filter(Boolean).join('\n\n')
-      await store.sendMessage(chat.chat_id, text)
+      // go out with the first message: images and files are staged on the chat
+      // and go out with the first message.
+      if (items.length) await attachStaged(chat.chat_id, projectId, items)
+      await store.sendMessage(chat.chat_id, message)
       staged.value = staged.value.filter(item => !items.includes(item))
     } else if (selectedModel.value) {
       await store.newChatInProject(projectId, undefined, selectedModel.value)

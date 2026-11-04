@@ -136,22 +136,16 @@ test.describe('chat title rail, desktop', () => {
     await expect(page).toHaveURL(/\/$/)
   })
 
-  test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {
+  test('Option+arrows step the rail from the composer and preserve its draft', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
-    await page.locator(COMPOSER).focus()
-    await page.keyboard.press('Alt+BracketRight')
-    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
-
-    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
-    await page.keyboard.press('Alt+BracketRight')
+    await page.locator(COMPOSER).fill('A draft to keep')
+    await page.keyboard.press('Alt+ArrowRight')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
-    // Opening a chat focuses its composer on mount: wait for that focus before
-    // blurring, or the blur can land first and the next press hits the typing gate.
     await expect(page.locator(COMPOSER)).toBeFocused()
-    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
-    await page.keyboard.press('Alt+BracketLeft')
+    await page.keyboard.press('Alt+ArrowLeft')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect(page.locator(COMPOSER)).toHaveValue('A draft to keep')
   })
 })
 
@@ -178,5 +172,27 @@ test.describe('chat title rail, phone', () => {
 
     const overflow = await page.evaluate(() => document.scrollingElement!.scrollWidth <= window.innerWidth)
     expect(overflow).toBe(true)
+  })
+
+  test('a native touch pan switches chats after browser pointer cancellation', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    const strip = page.locator('.title-rail-strip')
+    const box = (await strip.boundingBox())!
+    await page.locator('.title-rail').evaluate(el => {
+      el.addEventListener('pointercancel', () => el.setAttribute('data-test-pointer-canceled', 'yes'))
+    })
+    const cdp = await page.context().newCDPSession(page)
+    const y = box.y + box.height / 2
+    const startX = box.x + box.width * 0.85
+    const point = (x: number) => ({ x, y, id: 1 })
+    try {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point(startX)] })
+      for (let i = 1; i <= 8; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point(startX - box.width * 0.7 * i / 8)] })
+      }
+      await expect(page.locator('.title-rail')).toHaveAttribute('data-test-pointer-canceled', 'yes')
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+    } finally { await cdp.detach() }
   })
 })

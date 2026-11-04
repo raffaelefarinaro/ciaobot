@@ -115,6 +115,9 @@
         </button>
       </template>
     </PaneHeader>
+    <!-- Narrow panes put the shared-pin opener here, under the header, so a pinned
+         file never moves the header (it used to sit above it, under the status bar). -->
+    <slot name="below-header" />
 
     <!-- Body: one page grid. The left column holds everything that belongs to
          the conversation (context bar, transcript, dock, composer) so they all
@@ -286,7 +289,13 @@
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
                   </a>
                 </div>
-                <div v-html="renderUserMessage(item.msg.content)"></div>
+                <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
+                  <li v-for="(f, fi) in userAttachments(item.msg.content)" :key="fi" class="message-file" :title="f.path || f.name">
+                    <AppIcon class="message-file-icon" name="doc" :size="14" />
+                    <span class="message-file-name">{{ f.name }}</span>
+                  </li>
+                </ul>
+                <div v-html="renderUserMessage(userText(item.msg.content))"></div>
               </div>
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
@@ -904,7 +913,7 @@
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
-          <span class="queued-text">{{ q.text }}</span>
+          <span class="queued-text">{{ queuedDisplayText(q.text) }}</span>
         </div>
         <div v-if="!q.steering" class="queued-controls">
           <div
@@ -1071,14 +1080,20 @@
                lifecycle (staged here, sent with the next message, cleared on send),
                so they share one row above the input. A chip is a summary; clicking a
                chat-comment chip opens an edit popover anchored to it. -->
+          <ComposerUploadProgress :uploads="uploads" />
           <div
-            v-if="view.pendingImages.length || view.pendingChatComments.length || view.pendingComments.length"
+            v-if="view.pendingImages.length || view.pendingFiles.length || view.pendingChatComments.length || view.pendingComments.length"
             class="pending-attachments"
           >
             <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="image-preview">
               <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
               <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
               <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
+            </span>
+            <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip">
+              <AppIcon class="comment-chip-icon" name="doc" :size="14" />
+              <span class="file-chip-name" :title="f.name">{{ f.name }}</span>
+              <button type="button" class="comment-chip-remove" :aria-label="`Remove ${f.name}`" title="Remove" @click="removePendingFile(i)">&times;</button>
             </span>
             <span
               v-for="c in view.pendingChatComments"
@@ -1203,8 +1218,8 @@
                 </template>
               </ModelSelector>
             </div>
-            <label class="image-btn" title="Upload images" aria-label="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
+            <label class="image-btn" title="Attach files" aria-label="Attach files">
+              <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
             <!-- Background work the turn left running: agents and shells, right
@@ -1448,6 +1463,7 @@ import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
+import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
@@ -1484,6 +1500,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
+import ComposerUploadProgress from './ComposerUploadProgress.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
   activityLines,
@@ -1637,6 +1654,7 @@ const composer = useChatComposer({
 const inputText = composer.draft
 const inputEl = composer.input
 const dragOver = composer.dragOver
+const uploads = composer.uploads
 const starterPrompts = [
   'Review the latest project notes and flag what needs a decision',
   'Turn the current research into a concise briefing',
@@ -1660,6 +1678,7 @@ const {
   handlePromptHistoryKey,
   insertImageRef,
   removePendingImage,
+  removePendingFile,
 } = composer
 const isContinuing = ref(false)
 
@@ -1669,15 +1688,20 @@ const isContinuing = ref(false)
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 
-const canSend = computed(() =>
+const hasComposerContent = computed(() =>
   !!(inputText.value.trim()
     || view.pendingImages.length
+    || view.pendingFiles.length
     || view.pendingComments.length
     || view.pendingChatComments.length),
 )
+// Send waits for every upload in flight to settle, so a file is never sent
+// before the server has it.
+const uploadsInFlight = computed(() => uploads.value.length > 0)
+const canSend = computed(() => hasComposerContent.value && !uploadsInFlight.value)
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => view.isStreaming && !canSend.value)
+const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value && !uploadsInFlight.value)
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
@@ -1715,11 +1739,13 @@ async function moveToBackground() {
 }
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
+  if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
+  if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
   return 'Send message'
 })
@@ -1984,6 +2010,13 @@ watch(
   { flush: 'pre' },
 )
 
+function queuedDisplayText(text: string): string {
+  const { text: body, attachments } = splitAttachmentBlock(text)
+  if (!attachments.length) return text
+  const files = attachments.length === 1 ? attachments[0].name : `${attachments.length} files`
+  return body ? `${body} · ${files}` : files
+}
+
 function queuedExcerpt(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > 40 ? `${flat.slice(0, 40)}…` : flat
@@ -2010,7 +2043,7 @@ function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
 }
 
 function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
-  if (inputText.value || view.pendingImages.length || view.pendingComments.length || view.pendingChatComments.length) {
+  if (inputText.value || view.pendingImages.length || view.pendingFiles.length || view.pendingComments.length || view.pendingChatComments.length) {
     queueEditNotice.value = 'Please delete the current draft and remove its attachments before editing a queued message.'
     return
   }
@@ -2031,17 +2064,25 @@ watch(() => store.queueTakeFailures[chat.value.chat_id], () => {
 // again, which is what the notice asks for.
 watch(
   () => [chat.value.chat_id, store.pendingQueueTakes[chat.value.chat_id]?.length,
-    inputText.value, view.pendingImages.length, view.pendingComments.length,
+    inputText.value, view.pendingImages.length, view.pendingFiles.length, view.pendingComments.length,
     view.pendingChatComments.length] as const,
   () => {
     const chatId = chat.value.chat_id
     const entry = store.pendingQueueTakes[chatId]?.[0]
     if (!entry) return
-    if (inputText.value || view.pendingImages.length || view.pendingComments.length || view.pendingChatComments.length) {
+    if (inputText.value || view.pendingImages.length || view.pendingFiles.length || view.pendingComments.length || view.pendingChatComments.length) {
       queueEditNotice.value = `“${queuedExcerpt(entry.text)}” was taken out of the queue. Delete the current draft and its attachments to edit it.`
       return
     }
-    inputText.value = entry.text
+    // A queued message that carried staged files gets its chips back, not its raw block.
+    const restored = splitAttachmentBlock(entry.text)
+    const files: AttachedFile[] = restored.attachments.flatMap(a => (a.ref ? [{ ref: a.ref, name: a.name }] : []))
+    if (files.length && files.length === restored.attachments.length) {
+      inputText.value = restored.text
+      store.addPendingFiles(chatId, files)
+    } else {
+      inputText.value = entry.text
+    }
     if (entry.images?.length) store.addPendingImageRefs(chatId, entry.images)
     store.ackQueuedEdit(chatId, entry.entry_id)
     store.pendingQueueTakes[chatId] = store.pendingQueueTakes[chatId].slice(1)
@@ -4069,6 +4110,9 @@ function renderMarkdown(text: string): string {
   return rendered
 }
 
+function userAttachments(content: string) { return splitAttachmentBlock(content || '').attachments }
+function userText(content: string) { return splitAttachmentBlock(content || '').text }
+
 function renderUserMessage(text: string): string {
   if (!text) return ''
   const cached = userMdCache.get(text)
@@ -4750,8 +4794,10 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
+  if (uploadsInFlight.value) return
   const text = inputText.value.trim()
-  const hasAttachments = view.pendingImages.length > 0 || view.pendingComments.length > 0 || view.pendingChatComments.length > 0
+  const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
+    || view.pendingComments.length > 0 || view.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
   if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
@@ -6681,6 +6727,10 @@ details[open] > .activity-summary::before {
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .message-image-link { display: inline-block; line-height: 0; text-decoration: none; }
+.message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
+.message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
+.message-file-icon { flex: none; color: var(--accent2); }
+.message-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .message-image {
   max-height: 160px;
   max-width: 240px;
@@ -6821,6 +6871,7 @@ details[open] > .activity-summary::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.file-chip-name { flex: 0 1 auto; min-width: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .comment-chip-remove {
   position: relative;
   flex-shrink: 0;

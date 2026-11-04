@@ -5503,6 +5503,7 @@ class ProjectChatManager:
         and ``credentials.json`` pinned here so they stay write-denied: an
         agent cannot plant a client secret with a hostile ``token_uri``.
         A memory pass also gets its one source archive (``_memory_pass_archive_grant``).
+        The workspace's own `Logs/` (derived transcripts) is readable but never writable.
         """
         if fs_scope != "workspace":
             return ()
@@ -5513,6 +5514,9 @@ class ProjectChatManager:
         runtime = self._config.state_path.parent
         gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
         granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        own_logs = self._config.chats_root(self._workspace_for_chat(chat.chat_id)).parent
+        if own_logs != self._config.logs_root:
+            granted.append(str(own_logs))
         gws_dir = self._granted_gws_dir(chat)
         if gws_dir is not None:
             for name in ("client_secret.json", "credentials.json"):

@@ -25,9 +25,12 @@ describe('keyboard shortcuts', () => {
     expect(displayBinding('Alt+KeyN', false)).toBe('Alt+N')
   })
 
-  it('defaults previous/next chat to Alt+brackets', () => {
-    expect(DEFAULT_SHORTCUTS.previousChat).toBe('Alt+BracketLeft')
-    expect(DEFAULT_SHORTCUTS.nextChat).toBe('Alt+BracketRight')
+  it('defaults previous/next chat to Alt+arrows, which can be captured and displayed', () => {
+    expect(DEFAULT_SHORTCUTS.previousChat).toBe('Alt+ArrowLeft')
+    expect(DEFAULT_SHORTCUTS.nextChat).toBe('Alt+ArrowRight')
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'ArrowLeft', altKey: true }))).toBe('Alt+ArrowLeft')
+    expect(displayBinding('Alt+ArrowLeft', true)).toBe('⌥←')
+    expect(displayBinding('Alt+ArrowRight', false)).toBe('Alt+→')
   })
 
   it('labels brackets', () => {

@@ -40,4 +40,25 @@ test.describe('phone chat header', () => {
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
     await expect(page.locator('#chat-work-rail .chat-repo-section').getByText('Code mode', { exact: true })).toBeVisible()
   })
+
+  test('a pinned file never moves the header: its opener sits under the header, not above it', async ({ page }) => {
+    // alpha-chat-2 gets a pinned file; alpha-chat-1 has none. The opener used to sit
+    // above the header, under the status bar, and pushed the header down.
+    await page.route(/\/api\/chats(\/alpha-chat-2)?(\?.*)?$/, async route => {
+      const response = await route.fetch()
+      const body = await response.json() as Record<string, unknown> | Array<Record<string, unknown>>
+      const pin = (c: Record<string, unknown>) => c.chat_id === 'alpha-chat-2' ? { ...c, pinned_file_path: 'notes/plan.md' } : c
+      await route.fulfill({ response, json: Array.isArray(body) ? body.map(pin) : pin(body) })
+    })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    const header = page.locator('.chat-panel .pane-header')
+    const plainTop = await header.evaluate(el => el.getBoundingClientRect().top)
+
+    await page.goto('/chat/alpha-chat-2')
+    const opener = page.locator('.narrow-pin-opener')
+    await expect(opener).toBeVisible()
+    expect(await header.evaluate(el => el.getBoundingClientRect().top)).toBe(plainTop)
+    const headerBottom = await header.evaluate(el => el.getBoundingClientRect().bottom)
+    expect(await opener.evaluate(el => el.getBoundingClientRect().top)).toBeGreaterThanOrEqual(headerBottom - 1)
+  })
 })
