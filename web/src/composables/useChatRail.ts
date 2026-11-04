@@ -33,15 +33,24 @@ export function useChatRail(currentChatId: () => string): {
 } {
   const store = useProjectStore()
 
+  // The sidebar's order, top to bottom: the pinned projects (General and the other
+  // auto-managed ones) as the server orders them, then the user's projects in their
+  // drag order, each with its chats newest first. Home's tiers only supply each
+  // chat's state for the track's marks.
   const fresh = computed(() => {
     const ws = store.activeWorkspace
     const chats = store.activeChatsAll.filter(c => store.projectFor(c.chat_id)?.workspace === ws)
-    return orderedHomeChats(groupHomeTiers(
+    const tierOf = new Map(orderedHomeChats(groupHomeTiers(
       chats,
       id => store.chatNeedsYou(id),
       id => store.chatIsWorking(id),
       id => store.chatUnread(id) > 0,
-    ))
+    )).map(e => [e.chat.chat_id, e.tier]))
+    const projects = store.workspaceProjects
+    const sidebarProjects = [...projects.filter(p => p.is_auto), ...projects.filter(p => !p.is_auto)]
+    return sidebarProjects.flatMap(p => store.projectChats(p.project_id)
+      .filter(c => tierOf.has(c.chat_id))
+      .map(chat => ({ chat, tier: tierOf.get(chat.chat_id)! })))
   })
 
   // Frozen at setup: ChatPanel remounts per chat, so "setup" = "arrived at this chat".

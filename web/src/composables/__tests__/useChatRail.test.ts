@@ -5,8 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useProjectStore } from '../../stores/projects'
 import { resetChatRailSnapshot, useChatRail } from '../useChatRail'
 
-// Recency: a is oldest, c is newest. All three are quiet and fresh, so the
-// fresh order is newest first: c, b, a.
+// Recency: a is oldest, c is newest, all in one project, so the sidebar's
+// order (and the rail's) is newest first: c, b, a.
 const now = Date.now()
 function at(secondsAgo: number): string {
   return new Date(now - secondsAgo * 1000).toISOString()
@@ -26,8 +26,14 @@ function seed() {
   return store
 }
 
-// Makes chat `id` a needs-you chat, which moves it to the top of the live order.
+// New activity in chat `id`, which moves it to the top of its project in the
+// sidebar, and so of the live order.
 function makeNeedsYou(store: ReturnType<typeof useProjectStore>, id: string) {
+  const chat = store.chats.find(c => c.chat_id === id)!
+  chat.last_activity_at = at(1)
+}
+
+function makeNeedsYouByQuestion(store: ReturnType<typeof useProjectStore>, id: string) {
   const chat = store.chats.find(c => c.chat_id === id)!
   chat.pending_question = JSON.stringify({ questions: [{ question: 'Which option?' }] })
 }
@@ -47,7 +53,31 @@ describe('useChatRail', () => {
     resetChatRailSnapshot()
   })
 
-  it('keeps the order fixed after a chat changes tier', () => {
+  it('follows the sidebar top to bottom: pinned projects, then the user\'s order, chats newest first', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-late', name: 'Late', workspace: 'personal', order: 2, is_auto: false },
+      { project_id: 'p-early', name: 'Early', workspace: 'personal', order: 1, is_auto: false },
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 9, is_auto: true },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      { chat_id: 'late-1', project_id: 'p-late', title: 'l', archived: false, local: true, last_activity_at: at(10), created_at: at(10) },
+      { chat_id: 'early-old', project_id: 'p-early', title: 'eo', archived: false, local: true, last_activity_at: at(500), created_at: at(500) },
+      { chat_id: 'early-new', project_id: 'p-early', title: 'en', archived: false, local: true, last_activity_at: at(50), created_at: at(50) },
+      { chat_id: 'gen-1', project_id: 'general', title: 'g', archived: false, local: true, last_activity_at: at(900), created_at: at(900) },
+    ] as unknown as typeof store.chats
+    store.projectStreaming = {}
+    store.backgroundAgents = {}
+    store.activeWorkspace = 'personal'
+    // A chat that needs you keeps its sidebar place; only its mark changes.
+    makeNeedsYouByQuestion(store, 'late-1')
+
+    const rail = useChatRail(() => 'gen-1')
+    expect(ids(rail)).toEqual(['gen-1', 'early-new', 'early-old', 'late-1'])
+    expect(rail.items.value.find(i => i.chatId === 'late-1')!.tier).toBe('needsYou')
+  })
+
+  it('keeps the order fixed after a chat moves in the sidebar', () => {
     const store = seed()
     const rail = useChatRail(() => 'b')
     const before = ids(rail)
