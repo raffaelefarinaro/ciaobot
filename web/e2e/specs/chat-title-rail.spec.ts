@@ -99,22 +99,16 @@ test.describe('chat title rail, desktop', () => {
     expect(await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)).toBe(61)
   })
 
-  test('the chat shortcut is inert while typing, and steps the rail with Option+brackets otherwise', async ({ page }) => {
+  test('Option+arrows step the rail from the composer and preserve its draft', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
-    await page.locator(COMPOSER).focus()
-    await page.keyboard.press('Alt+BracketRight')
-    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
-
-    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
-    await page.keyboard.press('Alt+BracketRight')
+    await page.locator(COMPOSER).fill('A draft to keep')
+    await page.keyboard.press('Alt+ArrowRight')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
-    // Opening a chat focuses its composer on mount: wait for that focus before
-    // blurring, or the blur can land first and the next press hits the typing gate.
     await expect(page.locator(COMPOSER)).toBeFocused()
-    await page.locator(COMPOSER).evaluate(el => (el as HTMLElement).blur())
-    await page.keyboard.press('Alt+BracketLeft')
+    await page.keyboard.press('Alt+ArrowLeft')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect(page.locator(COMPOSER)).toHaveValue('A draft to keep')
   })
 })
 

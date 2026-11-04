@@ -24,12 +24,14 @@ const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
 const archiveActiveChat = vi.fn()
 const selectAdjacentChat = vi.fn(() => true)
+const handleQuestionShortcut = vi.fn(() => false)
+const handlePermissionShortcut = vi.fn(() => false)
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat })
+    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat, handleQuestionShortcut, handlePermissionShortcut })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -76,6 +78,8 @@ describe('ChatLayout', () => {
     archiveActiveChat.mockReset()
     selectAdjacentChat.mockReset()
     selectAdjacentChat.mockReturnValue(true)
+    handleQuestionShortcut.mockReset().mockReturnValue(false)
+    handlePermissionShortcut.mockReset().mockReturnValue(false)
     vi.restoreAllMocks()
   })
 
@@ -947,8 +951,7 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // Option+Backspace is the macOS delete-previous-word command while editing.
-  it('leaves Option+Backspace to the focused text field', async () => {
+  it('archives with Option+Backspace from a focused text field', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1004,17 +1007,18 @@ describe('ChatLayout', () => {
       key: 'Backspace',
       code: 'Backspace',
       altKey: true,
+      bubbles: true,
       cancelable: true,
     })
     textarea.dispatchEvent(event)
 
-    expect(archiveActiveChat).not.toHaveBeenCalled()
-    expect(event.defaultPrevented).toBe(false)
+    expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
     textarea.remove()
     wrapper.unmount()
   })
 
-  // Option+[ / Option+] step through the header rail's chats. Only the main
+  // Option+arrows step through the header rail's chats. Only the main
   // pane's ChatPanel is asked: a second chat beside it has no rail of its own.
   async function mountOpenChat() {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
@@ -1065,37 +1069,275 @@ describe('ChatLayout', () => {
     return wrapper
   }
 
-  it('steps to the next and previous chat with Option+] and Option+[', async () => {
+  it.each([['ArrowLeft', -1], ['ArrowRight', 1]] as const)(
+    'Option+%s navigates chats from a focused composer and consumes the chord',
+    async (key, direction) => {
+      const wrapper = await mountOpenChat()
+      const textarea = document.createElement('textarea')
+      textarea.value = 'draft text'
+      document.body.appendChild(textarea)
+      try {
+        textarea.focus()
+        const event = new KeyboardEvent('keydown', { key, code: key, altKey: true, bubbles: true, cancelable: true })
+        textarea.dispatchEvent(event)
+        expect(selectAdjacentChat).toHaveBeenCalledWith(direction)
+        expect(event.defaultPrevented).toBe(true)
+        expect(textarea.value).toBe('draft text')
+      } finally {
+        textarea.remove()
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('consumes Option+Right at the end of the chat rail', async () => {
+    selectAdjacentChat.mockReturnValue(false)
     const wrapper = await mountOpenChat()
     try {
-      const next = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
-      window.dispatchEvent(next)
-      expect(selectAdjacentChat).toHaveBeenLastCalledWith(1)
-      expect(next.defaultPrevented).toBe(true)
-
-      const previous = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, cancelable: true })
-      window.dispatchEvent(previous)
-      expect(selectAdjacentChat).toHaveBeenLastCalledWith(-1)
-      expect(previous.defaultPrevented).toBe(true)
+      const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      expect(event.defaultPrevented).toBe(true)
     } finally {
       wrapper.unmount()
     }
   })
 
-  // At either end of the rail, or while a second chat sits beside the main
-  // one (the main pane then has no rail), the panel declines and the chord
-  // is left alone.
-  it('leaves Option+] alone when the panel declines (rail end, or a chat beside)', async () => {
-    selectAdjacentChat.mockReturnValue(false)
+  it('honors custom and disabled chat bindings in an editor', async () => {
     const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
     try {
-      const event = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
-      window.dispatchEvent(event)
-      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
-      expect(event.defaultPrevented).toBe(false)
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { previousChat: 'Alt+BracketLeft', nextChat: 'disabled' } })
+      const previous = new KeyboardEvent('keydown', { key: '“', code: 'BracketLeft', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(previous)
+      expect(selectAdjacentChat).toHaveBeenCalledOnce()
+      expect(selectAdjacentChat).toHaveBeenCalledWith(-1)
+      expect(previous.defaultPrevented).toBe(true)
+      const disabled = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(disabled)
+      expect(selectAdjacentChat).toHaveBeenCalledOnce()
+      expect(disabled.defaultPrevented).toBe(false)
     } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
       wrapper.unmount()
     }
+  })
+
+  it('does not apply a non-Alt custom binding or bare workspace digit in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { nextChat: 'Mod+KeyK' } })
+      const custom = new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true, cancelable: true })
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      input.dispatchEvent(custom)
+      input.dispatchEvent(digit)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(custom.defaultPrevented).toBe(false)
+      expect(digit.defaultPrevented).toBe(false)
+    } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('allows a custom Alt workspace binding in an editor but not bare or non-Alt bindings', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+KeyW' } })
+      const custom = new KeyboardEvent('keydown', { key: '∑', code: 'KeyW', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(custom)
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+      expect(custom.defaultPrevented).toBe(true)
+      switchWorkspace.mockClear()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Mod+KeyW' } })
+      const nonAlt = new KeyboardEvent('keydown', { key: 'w', code: 'KeyW', ctrlKey: true, bubbles: true, cancelable: true })
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      input.dispatchEvent(nonAlt)
+      input.dispatchEvent(digit)
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(nonAlt.defaultPrevented).toBe(false)
+      expect(digit.defaultPrevented).toBe(false)
+    } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('does not offer a modified workspace digit to question or permission cards', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    handleQuestionShortcut.mockReturnValue(false)
+    handlePermissionShortcut.mockReturnValue(true)
+    try {
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+Digit2' } })
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(handleQuestionShortcut).not.toHaveBeenCalled()
+      expect(handlePermissionShortcut).not.toHaveBeenCalled()
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+      expect(event.defaultPrevented).toBe(true)
+    } finally { applyKeyboardSettings({ keyboard_shortcuts: {} }); wrapper.unmount() }
+  })
+
+  it('does not dispatch a workspace shortcut behind a dismissable layer', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const layer = document.createElement('div')
+    layer.setAttribute('data-dismissable-layer', '')
+    document.body.appendChild(layer)
+    try {
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      layer.dispatchEvent(event)
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(handleQuestionShortcut).not.toHaveBeenCalled()
+      expect(handlePermissionShortcut).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    } finally { layer.remove(); wrapper.unmount() }
+  })
+
+  it.each(['question', 'permission'])('gives a bare digit to a pending %s card before switching workspaces', async (owner) => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    if (owner === 'question') handleQuestionShortcut.mockReturnValue(true)
+    else handlePermissionShortcut.mockReturnValue(true)
+    try {
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(owner === 'question' ? handleQuestionShortcut : handlePermissionShortcut).toHaveBeenCalledOnce()
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it('invokes a configured Option shortcut for a dead key in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyN', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(pendingNewChat.value).not.toBeNull()
+    } finally { pendingNewChat.value?.resolve(null); input.remove(); wrapper.unmount() }
+  })
+
+  it('leaves an unbound dead key to native text entry', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyE', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(pendingNewChat.value).toBeNull()
+    } finally { input.remove(); wrapper.unmount() }
+  })
+
+  it('invokes a custom Option workspace binding for a dead key in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+KeyE' } })
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyE', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+    } finally { applyKeyboardSettings({ keyboard_shortcuts: {} }); input.remove(); wrapper.unmount() }
+  })
+
+  it('leaves legacy IME keyCode 229 events alone in both shortcut handlers', async () => {
+    const wrapper = await mountOpenChat()
+    try {
+      const store = useProjectStore()
+      store.workspaces = [
+        { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+        { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      ]
+      const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', keyCode: 229, bubbles: true, cancelable: true })
+      const model = new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', keyCode: 229, altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(digit)
+      window.dispatchEvent(model)
+      expect(digit.defaultPrevented).toBe(false)
+      expect(model.defaultPrevented).toBe(false)
+      expect(toggleModelPicker).not.toHaveBeenCalled()
+      expect(switchWorkspace).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it('leaves IME, AltGr, and already-consumed chords to their owner', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const composing = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, isComposing: true, bubbles: true, cancelable: true })
+      const altGr = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, ctrlKey: true, bubbles: true, cancelable: true })
+      vi.spyOn(altGr, 'getModifierState').mockImplementation(key => key === 'AltGraph')
+      const claimed = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      claimed.preventDefault()
+      input.dispatchEvent(composing)
+      input.dispatchEvent(altGr)
+      input.dispatchEvent(claimed)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(composing.defaultPrevented).toBe(false)
+      expect(altGr.defaultPrevented).toBe(false)
+    } finally {
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('consumes repeats without stepping twice', async () => {
+    const wrapper = await mountOpenChat()
+    try {
+      const repeat = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, repeat: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(repeat)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(repeat.defaultPrevented).toBe(true)
+    } finally { wrapper.unmount() }
   })
 
   it('leaves Option+[ to a focused text field', async () => {
@@ -1105,7 +1347,7 @@ describe('ChatLayout', () => {
     document.body.appendChild(textarea)
     try {
       textarea.focus()
-      const event = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, cancelable: true })
+      const event = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, bubbles: true, cancelable: true })
       textarea.dispatchEvent(event)
 
       expect(selectAdjacentChat).not.toHaveBeenCalled()
@@ -2381,58 +2623,13 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('switches sections with Option+Arrow', async () => {
-    const wrapper = await mountHome()
-    expect(router.currentRoute.value.path).toBe('/')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+  it.each(['/', '/memory', '/tasks', '/schedules'])('does not switch sections or roam the home grid with Option+Arrow from %s', async (path) => {
+    const wrapper = await mountHome(path)
+    const before = document.activeElement
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true }))
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-    wrapper.unmount()
-  })
-
-  it('option_arrow_sections_skip_notifications', async () => {
-    const wrapper = await mountHome('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/settings')
-    wrapper.unmount()
-  })
-
-  // `/tasks` has no `viewMode` arm of its own in the index arithmetic, so it fell
-  // through to Settings: Option+Right off the board jumped to Home and
-  // Option+Left jumped to Memory, neither of them the neighbouring section.
-  it('walks to and from the task board rather than over it', async () => {
-    const wrapper = await mountHome('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
+    expect(router.currentRoute.value.path).toBe(path)
+    expect(document.activeElement).toBe(before)
     wrapper.unmount()
   })
 
@@ -2688,6 +2885,21 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
+  it('opens the model picker with Option+M in a focused editable', async () => {
+    const wrapper = await mountWebLayout()
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = press({ key: 'µ', code: 'KeyM' }, input)
+      expect(toggleModelPicker).toHaveBeenCalledOnce()
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
   it.each(platforms)('%s+N opens the new-chat picker', async (_label, keys) => {
     const wrapper = await mountWebLayout()
     const event = press({ key: keys.n, code: 'KeyN' })
@@ -2727,9 +2939,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  // In a text field Option+S types ß and Option+= types ≠ on a Mac; matching
-  // by physical key must not start stealing them.
-  it.each(platforms)('%s+S and %s+= stay inert while a text field is focused', async (_label, keys) => {
+  it.each(platforms)('%s+S and +equals work while a text field is focused', async (_label, keys) => {
     useFontScale().set(1.2)
     const wrapper = await mountWebLayout()
     const input = document.createElement('input')
@@ -2740,36 +2950,12 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     const zoom = press({ key: keys.eq, code: 'Equal' }, input)
     await nextTick()
 
-    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
-    expect(sidebar.defaultPrevented).toBe(false)
-    expect(zoom.defaultPrevented).toBe(false)
-    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+    expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
+    expect(sidebar.defaultPrevented).toBe(true)
+    expect(zoom.defaultPrevented).toBe(true)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.25')
 
     input.remove()
-    wrapper.unmount()
-  })
-
-  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ), so
-  // inside a text field a Mac Option press must reach the field
-  // untouched. The same events outside a text field are shortcuts.
-  it.each([
-    ['⌥N', { key: 'Dead', code: 'KeyN' }],
-    ['⌥M', { key: 'µ', code: 'KeyM' }],
-  ] as const)('Mac %s in a focused textarea types the character instead of firing', async (_label, init) => {
-    const wrapper = await mountWebLayout()
-    const textarea = document.createElement('textarea')
-    document.body.appendChild(textarea)
-    textarea.focus()
-    homeNewChatProjectId.value = ''
-
-    const event = press(init, textarea)
-    await flushPromises()
-
-    expect(event.defaultPrevented).toBe(false)
-    expect(toggleModelPicker).not.toHaveBeenCalled()
-    expect(pendingNewChat.value).toBeNull()
-
-    textarea.remove()
     wrapper.unmount()
   })
 
@@ -2786,7 +2972,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  it('leaves Alt+N alone while a textarea is focused', async () => {
+  it('opens the new chat picker with Alt+N while a textarea is focused', async () => {
     const wrapper = await mountWebLayout()
     const textarea = document.createElement('textarea')
     document.body.appendChild(textarea)
@@ -2795,8 +2981,8 @@ describe('ChatLayout PWA Option/Alt chords', () => {
 
     const event = press({ key: 'n', code: 'KeyN' }, textarea)
 
-    expect(event.defaultPrevented).toBe(false)
-    expect(pendingNewChat.value).toBeNull()
+    expect(event.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
     expect(archiveActiveChat).not.toHaveBeenCalled()
 
     textarea.remove()
@@ -3563,11 +3749,11 @@ describe('ChatLayout chat route without a catalog entry', () => {
     })
 
     // With a second chat beside, the main pane's rail is replaced by a plain
-    // header, so Option+] must not step the main chat behind the user's back.
-    it('leaves Option+] alone while a second chat is beside the open one', async () => {
+    // header, so Option+Right must not step the main chat behind the user's back.
+    it('leaves Option+Right alone while a second chat is beside the open one', async () => {
       const wrapper = await mountSplit(1200, { beside: 'chat-2' })
       try {
-        const event = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', altKey: true, cancelable: true })
+        const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, cancelable: true })
         window.dispatchEvent(event)
         expect(panelCalls.filter(call => call.startsWith('step:'))).toEqual([])
         expect(event.defaultPrevented).toBe(false)

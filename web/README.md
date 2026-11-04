@@ -42,6 +42,8 @@ Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 existing response path. Conditional and ranged asset requests retain their
 identity representation.
 
+The chat rail uses Option/Alt+Left and Right to move through the current workspace's chats, including from the composer. Matching chords are consumed at the ends; the title's unmodified arrow-key navigation remains available. Configured Option shortcuts work in editable fields, including keys reported as dead keys; unbound dead keys, IME composition, AltGr, unmodified workspace digits and controls that claim their keys retain precedence. Explicit custom and disabled bindings are preserved.
+
 ## Dev workflow
 
 ```bash
