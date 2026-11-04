@@ -136,6 +136,35 @@ test.describe('chat title rail, desktop', () => {
     await expect(page).toHaveURL(/\/$/)
   })
 
+  test('a mouse swipe carries straight on to the next chat, never flashing back to the old title first', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    // A slow engine stretches the gap between the release and the switch.
+    await page.route(/\/api\//, async route => { await new Promise(r => setTimeout(r, 300)); await route.continue() })
+    await page.evaluate(() => {
+      const w = window as unknown as { __railPath: number[] }
+      w.__railPath = []
+      const t0 = performance.now()
+      const tick = () => {
+        const strip = document.querySelector('.title-rail-strip') as HTMLElement | null
+        if (strip && location.pathname.endsWith('alpha-chat-1')) w.__railPath.push(strip.scrollLeft)
+        if (performance.now() - t0 < 1500) requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    const b = (await page.locator('.title-rail-item[aria-current="page"] .title-rail-title').boundingBox())!
+    await page.mouse.move(b.x + b.width / 2, b.y + 5)
+    await page.mouse.down()
+    await page.mouse.move(b.x + b.width / 2 - 300, b.y + 6, { steps: 10 })
+    await page.mouse.up()
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+    const path = await page.evaluate(() => (window as unknown as { __railPath: number[] }).__railPath)
+    // From the end of the drag on, the strip only moves forward until the switch.
+    const from = path.findIndex(x => x >= 290)
+    const after = path.slice(from)
+    expect(from).toBeGreaterThanOrEqual(0)
+    expect(after.every((x, i) => i === 0 || x >= after[i - 1] - 1), `strip path ${after.join(',')}`).toBe(true)
+  })
+
   test('Option+arrows step the rail from the composer and preserve its draft', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
