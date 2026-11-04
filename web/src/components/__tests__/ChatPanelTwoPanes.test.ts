@@ -10,6 +10,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
 import ChatRepoSection from '../ChatRepoSection.vue'
+import ComposerUploadProgress from '../ComposerUploadProgress.vue'
 import TaskOriginNote from '../TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { ProjectRepo, Task } from '../../lib/types'
@@ -103,6 +104,54 @@ describe('two ChatPanels on screen', () => {
 
     expect(b.findAll('.image-preview')).toHaveLength(1)
     expect(a.findAll('.image-preview')).toHaveLength(0)
+  })
+
+  it('each pane shows its own staged files', async () => {
+    const { a, b, store } = mountTwoPanes()
+    store.addPendingFiles('chat-2', [{ ref: `drop_${'a'.repeat(32)}`, name: 'brief.pdf' }])
+    await flushPromises()
+
+    expect(b.findAll('.file-chip')).toHaveLength(1)
+    expect(b.find('.file-chip').text()).toContain('brief.pdf')
+    expect(a.findAll('.file-chip')).toHaveLength(0)
+  })
+
+  it('a sent message lists its files as chips, not tokens or paths', async () => {
+    const { a, store } = mountTwoPanes()
+    store.messages['chat-1'] = [{
+      role: 'user',
+      content: 'Summarise\n\nAttached files:\n- brief.pdf: `/v/brief.pdf`',
+      timestamp: '2026-11-04T10:00:00Z',
+    }] as never
+    await flushPromises()
+
+    expect(a.find('.message-file-name').text()).toBe('brief.pdf')
+    const bubble = a.find('.message.user').text()
+    expect(bubble).toContain('Summarise')
+    expect(bubble).not.toContain('Attached files:')
+    expect(bubble).not.toContain('/v/brief.pdf')
+  })
+
+  it('Send stays disabled while an upload is in flight', async () => {
+    const { a, store } = mountTwoPanes()
+    let finish: (refs: string[]) => void = () => {}
+    const upload = vi.spyOn(store, 'uploadImages').mockReturnValue(new Promise<string[]>((resolve) => { finish = resolve }))
+    await flushPromises()
+
+    const png = new File([new Uint8Array([1])], 'shot.png', { type: 'image/png' })
+    const input = a.find('.image-btn input').element as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [png], configurable: true })
+    await a.find('.image-btn input').trigger('change')
+    await a.find('textarea.chat-input').setValue('hi')
+
+    expect(upload).toHaveBeenCalled()
+    expect(a.findComponent(ComposerUploadProgress).props('uploads')).toHaveLength(1)
+    expect(a.find('.send-btn').attributes('disabled')).toBeDefined()
+    expect(a.find('.send-btn').attributes('title')).toBe('Wait for the upload to finish')
+
+    finish([])
+    await flushPromises()
+    expect(a.find('.send-btn').attributes('disabled')).toBeUndefined()
   })
 
   it('each pane shows its own history load', async () => {
