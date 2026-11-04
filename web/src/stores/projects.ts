@@ -7,6 +7,7 @@ import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
+import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
@@ -5851,6 +5852,16 @@ export const useProjectStore = defineStore('projects', () => {
   // and streaming state take over.
   const compactRequests = ref<Record<string, boolean>>({})
 
+  // Live compaction per chat, from the stream's status events, so an automatic
+  // compaction also shows on the Compact button. `tokens` are the
+  // compact_boundary pre/post counts once the compaction has finished.
+  const compactState = ref<Record<string, { running: boolean; tokens: CompactTokens | null }>>({})
+  // A turn that ends mid-compaction (stop, error) must not leave the button stuck.
+  function settleCompactState(chatId: string) {
+    const cs = compactState.value[chatId]
+    if (cs?.running) compactState.value[chatId] = { ...cs, running: false }
+  }
+
   // Compact a chat's provider session to shrink its context window. The server
   // runs it as a stream, so progress arrives on the chat socket like a turn.
   async function compactChat(chatId: string) {
@@ -6839,6 +6850,12 @@ export const useProjectStore = defineStore('projects', () => {
         // the live Thinking/Working trace (one line, updated in place)
         // instead of dropping them or stacking a chat bubble per tick.
         const isCompacting = /compact/i.test(message)
+        const compacted = parseCompactedStatus(message)
+        if (compacted) {
+          compactState.value[chatId] = { running: false, tokens: compacted.tokens }
+        } else if (isCompacting) {
+          compactState.value[chatId] = { running: true, tokens: null }
+        }
         if (isCompacting) {
           _pushStatusLine(chatId, message)
         } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
@@ -6872,6 +6889,7 @@ export const useProjectStore = defineStore('projects', () => {
 
       case 'result': {
         delete backgroundableCalls.value[chatId]
+        settleCompactState(chatId)
         clearSteerLockTimer(chatId)
         // The broker replays its whole event buffer to every new subscriber,
         // so a reconnect receives the terminal `result` of a turn the history
@@ -7044,6 +7062,7 @@ export const useProjectStore = defineStore('projects', () => {
 
       case 'error': {
         delete backgroundableCalls.value[chatId]
+        settleCompactState(chatId)
         if (isRestartDrainMessage(event.message)) {
           undoOptimisticSend(chatId)
           beginServerRestart(event.message)
@@ -7218,7 +7237,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
+    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, compactState, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

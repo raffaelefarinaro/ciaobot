@@ -1332,6 +1332,7 @@
           :project="project"
           :code-mode="codeModeOn"
           :context-pct="contextPct"
+          :compacted="contextUsage.compacted"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
           :reveal-key="contextRevealKey"
@@ -1459,6 +1460,7 @@ import { useTerminalStore } from '../stores/terminal'
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
 import AgentContextSection from './AgentContextSection.vue'
+import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
@@ -2277,19 +2279,17 @@ const shownTools = computed(() => railShowAll.value.tools ? railTools.value : ra
 // the transcript's only statement of occupancy: the Chat details rail shows it
 // as a meter, because a percentage means nothing without the window's size
 // beside it. Providers report it as text ("13.2%"), so parseFloat, not
-// Number. Null when it reported none.
-const contextPct = computed<number | null>(() => {
-  const items = renderItems.value
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i]
-    if (item.kind !== 'assistant' || !item.meta?.usage) continue
-    const usage = item.meta.usage as Record<string, unknown>
-    const pct = Number.parseFloat(String(usage.context_pct ?? usage.contextPct ?? ''))
-    return Number.isFinite(pct) && pct > 0 ? pct : null
-  }
-  return null
-})
-const compacting = computed(() => Boolean(chat.value && store.compactRequests[chat.value.chat_id]))
+// Number. Null when it reported none. A compaction newer than the last usage
+// rescales it by the compaction's post/pre tokens, or hides the meter when
+// those are unknown.
+const contextUsage = computed(() => latestContextUsage(
+  renderItems.value,
+  chat.value ? store.compactState[chat.value.chat_id]?.tokens ?? null : null,
+))
+const contextPct = computed<number | null>(() => contextUsage.value.pct)
+const compacting = computed(() => Boolean(
+  chat.value && (store.compactRequests[chat.value.chat_id] || store.compactState[chat.value.chat_id]?.running),
+))
 const compactDisabled = computed(() => view.isStreaming || compacting.value || Boolean(chat.value?.archived))
 function compactContext() {
   if (!chat.value || compactDisabled.value) return

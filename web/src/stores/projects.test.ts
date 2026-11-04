@@ -2484,6 +2484,42 @@ describe('ephemeral status events', () => {
     expect(statusEntries.length).toBe(1)
     expect(statusEntries[0].content).toBe('compacting')
   })
+
+  test('tracks live compaction per chat from the status stream, settling on the compacted status', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compact-state'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ role: 'user', content: 'hi', timestamp: '' }]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    expect(store.compactState[chatId]).toEqual({ running: true, tokens: null })
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Compacted context: 100,000 → 20,000 tokens' }),
+    })
+    expect(store.compactState[chatId]).toEqual({ running: false, tokens: { pre: 100000, post: 20000 } })
+  })
+
+  test('settles a compaction still marked running when the turn result arrives', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compact-result'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ role: 'user', content: 'hi', timestamp: '' }]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'result', text: '', is_error: false, stopped: false, usage: {}, session_id: 's1' }),
+    })
+    expect(store.compactState[chatId]?.running).toBe(false)
+  })
 })
 
 describe('subagent thinking deltas', () => {
