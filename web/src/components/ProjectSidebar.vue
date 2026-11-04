@@ -3255,7 +3255,8 @@ async function confirmDeleteChat(chatId: string) {
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
     transform: translateX(0);
   }
-  .sidebar.collapsed {
+  .sidebar.collapsed,
+  .sidebar.sidebar--closing {
     transform: translateX(-100%);
     box-shadow: none;
     pointer-events: none;

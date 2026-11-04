@@ -3144,7 +3144,10 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
   }
 
-  async function archiveChat(chatId: string) {
+  // `next`: open this chat in the archived one's place (the title rail's neighbour)
+  // instead of going Home. If the archive then fails, the toast says so and the
+  // archived chat reappears in the lists; the open chat stays where it is.
+  async function archiveChat(chatId: string, options: { next?: string } = {}) {
     // Guard against double-clicks: the button is already disabled while the
     // optimistic state is live, but event handlers can still double-fire.
     if (archivingChats.value[chatId]) return
@@ -3166,7 +3169,9 @@ export const useProjectStore = defineStore('projects', () => {
     archivingChats.value[chatId] = true
     pendingArchived.value.add(chatId)
     if (chatBefore) chatBefore.archived = true
-    if (wasActive) {
+    if (wasActive && options.next && options.next !== chatId) {
+      void switchChat(options.next)
+    } else if (wasActive) {
       activeChatId.value = null
       persistState()
       // Keep the URL in sync with the optimistically closed pane. Fire-and-

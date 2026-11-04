@@ -15,7 +15,8 @@ export function useArchiveChat() {
   const taskSignals = useTaskSignalsStore()
 
   /** Resolves true when the chat was archived (or the server will archive it), false when cancelled. Rejections from `archiveChat` propagate. */
-  async function archiveChatWithTaskCheck(chat: ChatInfo): Promise<boolean> {
+  // `next`: the chat to open in its place (the title rail's neighbour) rather than Home.
+  async function archiveChatWithTaskCheck(chat: ChatInfo, options: { next?: string } = {}): Promise<boolean> {
     const task = taskSignals.taskForChat(chat)
     const workspace = taskSignals.loadedWorkspace
     if (task && workspace && task.status !== 'done' && taskSignals.chatHoldsTask(chat, task)) {
@@ -23,11 +24,15 @@ export function useArchiveChat() {
       if (choice === 'cancel') return false
       // An approval archives the chat on the server (ControlPlane._learn_from_approved),
       // with the approved-task memory pass; archiving here too would race it.
-      if (choice === 'approved') return true
+      if (choice === 'approved') {
+        if (options.next) await store.switchChat(options.next)
+        return true
+      }
     } else if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, { title: 'Archive chat', confirmLabel: 'Archive' })) {
       return false
     }
-    await store.archiveChat(chat.chat_id)
+    if (options.next) await store.archiveChat(chat.chat_id, { next: options.next })
+    else await store.archiveChat(chat.chat_id)
     return true
   }
 

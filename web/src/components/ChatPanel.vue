@@ -1471,7 +1471,7 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import ChatTitleRail from './ChatTitleRail.vue'
-import { takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
@@ -5249,15 +5249,19 @@ async function archiveAfterTaskDone() {
 
 const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
+  // With the title rail on, archiving moves to the next chat in its order (the
+  // previous one at the end), sliding in like a swipe, rather than going Home.
+  const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
+  if (next) markRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
-    if (!await archiveChatWithTaskCheck(chat.value)) return
+    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markRailArrival(0); return }
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.
     return
   }
-  // Notify ChatLayout so it closes the chat pane.
-  emit('close')
+  // Notify ChatLayout so it closes the chat pane, unless the next chat took its place.
+  if (!next) emit('close')
 }
 
 const taskSignals = useTaskSignalsStore()

@@ -66,6 +66,21 @@ describe('useArchiveChat', () => {
     expect(archiveChat).toHaveBeenCalledWith('other')
   })
 
+  it('hands the next chat to the store, so archiving opens it rather than Home', async () => {
+    askConfirm.mockResolvedValue(true)
+    await expect(useArchiveChat().archiveChatWithTaskCheck({ chat_id: 'other' } as ChatInfo, { next: 'chat-2' })).resolves.toBe(true)
+    expect(archiveChat).toHaveBeenCalledWith('other', { next: 'chat-2' })
+  })
+
+  it('an approval opens the next chat itself, since the server archives the chat', async () => {
+    askArchiveTask.mockResolvedValue('approved')
+    const switchChat = vi.fn().mockResolvedValue(undefined)
+    useProjectStore().switchChat = switchChat as never
+    await expect(useArchiveChat().archiveChatWithTaskCheck(HOLDER, { next: 'chat-2' })).resolves.toBe(true)
+    expect(archiveChat).not.toHaveBeenCalled()
+    expect(switchChat).toHaveBeenCalledWith('chat-2')
+  })
+
   it('a cancelled plain confirm archives nothing', async () => {
     askConfirm.mockResolvedValue(false)
     await expect(useArchiveChat().archiveChatWithTaskCheck({ chat_id: 'other' } as ChatInfo)).resolves.toBe(false)
