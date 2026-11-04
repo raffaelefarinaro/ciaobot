@@ -3546,7 +3546,16 @@ export const useProjectStore = defineStore('projects', () => {
                 }
                 if (noticeIdx >= 0) windowRows = windowRows.slice(0, noticeIdx + 1)
               } else if (serverLastUserIdx >= 0) {
-                windowRows = windowRows.slice(0, serverLastUserIdx + 1)
+                // The matched local bubble can be an older turn when the engine
+                // started a new one while this chat was not open (a background
+                // task wake, a drained queued follow-up). Cut after the newest
+                // server user row instead: the in-flight turn is that row, so
+                // its progress is still cut, and earlier settled replies stay.
+                let newestUserIdx = serverLastUserIdx
+                for (let i = windowRows.length - 1; i > serverLastUserIdx; i--) {
+                  if (windowRows[i].role === 'user') { newestUserIdx = i; break }
+                }
+                windowRows = windowRows.slice(0, newestUserIdx + 1)
               }
             }
           }
@@ -3801,7 +3810,15 @@ export const useProjectStore = defineStore('projects', () => {
               }
             }
             if (serverLastUserIdx >= 0) {
-              normalizedServer = normalizedServer.slice(0, serverLastUserIdx + 1)
+              // Cut after the newest server user row, not the matched local
+              // one: an engine-started turn (a background task wake, a drained
+              // queued follow-up) is not in the local cache yet, so the matched
+              // bubble can be an older turn whose finished reply must stay.
+              let newestUserIdx = serverLastUserIdx
+              for (let i = normalizedServer.length - 1; i > serverLastUserIdx; i--) {
+                if (normalizedServer[i].role === 'user') { newestUserIdx = i; break }
+              }
+              normalizedServer = normalizedServer.slice(0, newestUserIdx + 1)
             }
           }
         }
@@ -4911,7 +4928,10 @@ export const useProjectStore = defineStore('projects', () => {
           })
         }
         if (msg.appearance) applyAppearanceSettings(msg.appearance)
-        // Reset broker-streaming state to match server truth.
+        // Reset broker-streaming state to match server truth. Keep the viewed
+        // chats that were streaming before the reset, so a stream that ended
+        // while the events socket was down still reconciles below.
+        const wasStreaming = new Set(viewedChatIds().filter(id => projectStreaming.value[id]))
         projectStreaming.value = {}
         wakeStreaming.value = {}
         for (const entry of msg.active_streams) {
@@ -4933,14 +4953,14 @@ export const useProjectStore = defineStore('projects', () => {
         if (msg.restarting) {
           beginServerRestart()
         }
-        // Recovery: if we locally think the active chat is streaming but
-        // the snapshot shows no stream is running for it, the turn ended
-        // server-side while our events socket was disconnected (and the
+        // Recovery: if a viewed chat was streaming (locally, or before this
+        // snapshot) but the snapshot shows no stream running for it, the turn
+        // ended server-side while our events socket was disconnected (and the
         // per-chat WS likely also missed the result). Refetch /messages
         // so the UI doesn't stay stuck on the prior turn / "Working..."
         // until a manual reload.
         for (const viewed of viewedChatIds()) {
-          if (streaming.value[viewed] && !projectStreaming.value[viewed]) void reconcileAfterResult(viewed)
+          if ((streaming.value[viewed] || wasStreaming.has(viewed)) && !projectStreaming.value[viewed]) void reconcileAfterResult(viewed)
         }
         // A `tasks_changed` published while the socket was down is gone (the
         // hub keeps no replay), so every (re)connect re-reads the board.
