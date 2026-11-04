@@ -41,6 +41,11 @@
         @pointerdown.capture="focusPane('main')"
         @focusin="focusPane('main')"
       >
+        <!-- Behind a chat being pulled down by its title: where letting go leads. -->
+        <div v-if="pullY > 0" class="chat-pull-home" :style="{ opacity: String(Math.min(1, pullY / 120)) }" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9H4z" /></svg>
+          <span>{{ pullY >= PULL_CLOSE_PX ? 'Release for Home' : 'Home' }}</span>
+        </div>
         <!-- Split view when a file is pinned and holds the slot -->
         <template v-if="fileInTile">
           <SubagentChatView
@@ -50,7 +55,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -180,7 +185,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
             </div>
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
           </template>
           <!-- The route names a chat the catalog has not delivered yet: the pane
                is on its way, so it shows the skeleton rather than nothing
@@ -1154,6 +1159,65 @@ function onChatSelected() {
   }
 }
 
+/**
+ * Pull to close: dragging the chat title down moves the whole pane with the finger,
+ * shrinking it and rounding its corners over a Home hint, like dismissing a story.
+ * Past PULL_CLOSE_PX (or a downward flick) the pane drops away and the chat closes;
+ * otherwise it springs back.
+ */
+const PULL_CLOSE_PX = 120
+const pullY = ref(0)
+const pullSettling = ref(false)
+let pullContext = 0
+function invalidatePull() {
+  pullContext++
+  pullY.value = 0
+  pullSettling.value = false
+}
+// A delayed pull belongs to the chat and view where it started, not whichever
+// chat happens to be selected when its animation finishes.
+watch(() => [store.activeChatId, store.activeWorkspace, route.path, besideInTile.value, fileInTile.value], invalidatePull, { flush: 'sync' })
+const pullStyle = computed(() => {
+  if (pullY.value <= 0 && !pullSettling.value) return undefined
+  const p = Math.min(1, pullY.value / 400)
+  return {
+    transform: `translateY(${pullY.value}px) scale(${1 - p * 0.12})`,
+    transformOrigin: '50% 0',
+    borderRadius: `${Math.min(28, pullY.value / 4)}px`,
+    overflow: 'hidden',
+    boxShadow: pullY.value > 0 ? '0 -10px 40px -10px rgb(0 0 0 / 45%)' : undefined,
+    transition: pullSettling.value ? 'transform 280ms var(--ease), border-radius 280ms var(--ease)' : 'none',
+    position: 'relative' as const,
+    zIndex: 1,
+  }
+})
+function onChatPull(dy: number) {
+  if (besideInTile.value) return
+  if (pullSettling.value) pullContext++
+  pullSettling.value = false
+  pullY.value = dy
+}
+function onChatPullEnd(dy: number, velocity: number) {
+  if (besideInTile.value) return
+  const context = pullContext
+  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const close = dy >= PULL_CLOSE_PX || (velocity > 0.6 && dy > 40)
+  if (close && reduce) { pullY.value = 0; closeChat(); return }
+  pullSettling.value = true
+  if (close) {
+    pullY.value = Math.max(window.innerHeight, dy + 1)
+    setTimeout(() => {
+      if (context !== pullContext) return
+      pullSettling.value = false
+      pullY.value = 0
+      closeChat()
+    }, 280)
+  } else {
+    pullY.value = 0
+    setTimeout(() => { if (context === pullContext) pullSettling.value = false }, 280)
+  }
+}
+
 function closeChat() {
   // With a second chat beside, closing the main one promotes that chat into the main pane.
   const promote = besideInTile.value && besideChat.value ? besideChat.value.chat_id : ''
@@ -1461,7 +1525,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   if (chatStep) {
     if (!store.activeChat || subagentRoute.value || besideInTile.value) return
     e.preventDefault()
-    chatPanelRef.value?.selectAdjacentChat?.(chatStep)
+    if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) invalidatePull()
     return
   }
 
@@ -1591,6 +1655,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  pullContext++
   chatPaneObserver?.disconnect()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()
@@ -1634,6 +1699,7 @@ onBeforeUnmount(() => {
    the slot beside it, not only to the browser viewport width, so this is the
    element the `chat-pane` container is declared on. */
 .chat-body {
+  position: relative;
   flex: 1 1 0%;
   display: flex;
   flex-direction: column;
@@ -1654,6 +1720,22 @@ onBeforeUnmount(() => {
    to, so the two floors are the same number on both sides of the divider. */
 .chat-body--terminal {
   min-width: 360px;
+}
+
+/* The Home hint behind a chat pulled down by its title. */
+.chat-pull-home {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 48px;
+  gap: 6px;
+  color: var(--fg2);
+  font-weight: 600;
+  font-size: 13px;
+  pointer-events: none;
 }
 
 /* Two chats: both panes are the same docked window, so neither reads as the

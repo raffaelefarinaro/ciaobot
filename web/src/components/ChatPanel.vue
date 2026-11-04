@@ -54,6 +54,9 @@
                 :current-id="chat.chat_id"
                 @select="titleRail.select"
                 @rename="startEditTitle"
+                @lean="railLean = $event"
+                @pull="emit('pull', $event)"
+                @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
               />
               <!-- While the engine names a brand new chat there is no title to
                    show yet, and the placeholder the engine hands over ("New
@@ -133,7 +136,12 @@
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
-    <div class="chat-column">
+    <div
+      class="chat-column"
+      :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
+      :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
+      @animationend="railArrival = 0"
+    >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
          as a conversation that began mid-thought; this names the conversation
@@ -1447,7 +1455,7 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import ChatTitleRail from './ChatTitleRail.vue'
-import { useChatRail } from '../composables/useChatRail'
+import { takeRailArrival, useChatRail } from '../composables/useChatRail'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
@@ -1598,7 +1606,14 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `inactive`: the other pane has the keyboard.
 // `split`: two chats are on screen.
 const props = defineProps<{ chatId: string; filePinned?: boolean; plainHeader?: boolean; beside?: boolean; inactive?: boolean; split?: boolean }>()
-const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
+const emit = defineEmits<{
+  close: []
+  'open-sidebar': []
+  // The title is being pulled down (px), and the pull ended (px, px per ms):
+  // the layout moves the pane and decides whether to close.
+  pull: [dy: number]
+  'pull-end': [dy: number, velocity: number]
+}>()
 
 const store = useProjectStore()
 const view = useChatView(() => props.chatId)
@@ -1823,6 +1838,10 @@ const chat = computed(() => view.chat!)
 
 const titleRail = useChatRail(() => chat.value.chat_id)
 const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
+// Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
+// travel, fading); a panel opened from the rail slides its transcript in from that side.
+const railLean = ref(0)
+const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeRailArrival())
 const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
@@ -5674,6 +5693,15 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Rail mode: close and the title block share one vertical centre, and the row is
    the reading column's width (it starts where the column starts), so the rail can
    centre its title on the chat rather than on the whole header. */
+.chat-column--leaning { will-change: transform, opacity; }
+.chat-column:not(.chat-column--leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
+.chat-column--arrive-next { animation: chat-arrive 260ms var(--ease) both; --arrive-from: 12%; }
+.chat-column--arrive-prev { animation: chat-arrive 260ms var(--ease) both; --arrive-from: -12%; }
+@keyframes chat-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .chat-column:not(.chat-column--leaning) { transition: none; }
+  .chat-column--arrive-next, .chat-column--arrive-prev { animation: none; }
+}
 .header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
 
 .chat-title {

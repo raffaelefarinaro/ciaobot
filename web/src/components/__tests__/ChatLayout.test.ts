@@ -29,7 +29,7 @@ const handlePermissionShortcut = vi.fn(() => false)
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
-  emits: ['close'],
+  emits: ['close', 'pull', 'pull-end'],
   setup(_, { emit, expose }) {
     expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat, handleQuestionShortcut, handlePermissionShortcut })
     return () => h('button', {
@@ -2014,6 +2014,137 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     fromHome.wrapper.unmount()
   })
 
+  // Pull to close: the chat title dragged down far enough (or flicked) closes the
+  // chat once the pane has dropped away; a short pull springs back.
+  it('closes the chat after a long pull on the title, and springs back from a short one', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    const panel = wrapper.findComponent({ name: 'ChatPanel' })
+
+    panel.vm.$emit('pull', 60)
+    await nextTick()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(true)
+    expect((panel.element as HTMLElement).style.transform).toContain('translateY(60px)')
+    panel.vm.$emit('pull-end', 60, 0.1)
+    await new Promise(r => setTimeout(r, 320))
+    await nextTick()
+    expect(closeChat).not.toHaveBeenCalled()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(false)
+
+    panel.vm.$emit('pull', 150)
+    panel.vm.$emit('pull-end', 150, 0.2)
+    expect(closeChat).not.toHaveBeenCalled()
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('treats a short downward flick as a close', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    wrapper.findComponent({ name: 'ChatPanel' }).vm.$emit('pull-end', 50, 1.2)
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('does not close a newly selected chat when a shortcut completes during the pull-away animation', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockImplementation(() => {
+      setTimeout(() => { store.activeChatId = 'chat-2' }, 220)
+      return true
+    })
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      await vi.advanceTimersByTimeAsync(220)
+      expect(store.activeChatId).toBe('chat-2')
+      await vi.advanceTimersByTimeAsync(60)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(store.activeChatId).toBe('chat-2')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('cancels a pending pull-close as soon as a late rail shortcut starts', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockImplementation(() => {
+      setTimeout(() => { store.activeChatId = 'chat-2' }, 220)
+      return true
+    })
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(store.activeChatId).toBe('chat-1')
+      await vi.advanceTimersByTimeAsync(40)
+      expect(store.activeChatId).toBe('chat-2')
+      expect(closeChat).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('keeps the pending pull-close when the rail declines a boundary shortcut', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockReturnValue(false)
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowLeft', code: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).toHaveBeenCalledOnce()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('cancels an earlier close timer when a new pull starts', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      panel.vm.$emit('pull', 40)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).not.toHaveBeenCalled()
+      await nextTick()
+      expect((panel.element as HTMLElement).style.transform).toContain('translateY(40px)')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
   it('Home navigation does not delete an empty draft or its staged content', async () => {
     const { wrapper, router, store } = await mountWithSelection()
     const draftId = 'chat-draft'
@@ -3605,7 +3736,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
     const SplitChatPanelStub = defineComponent({
       name: 'ChatPanel',
       props: { chatId: String, beside: Boolean, inactive: Boolean, split: Boolean, filePinned: Boolean },
-      emits: ['close'],
+      emits: ['close', 'pull', 'pull-end'],
       setup(props, { emit, expose }) {
         expose({
           toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
@@ -3794,6 +3925,23 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(wrapper.get('.chat-body [data-chat-id="chat-1"]').attributes('data-inactive')).toBe('true')
       expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
       wrapper.unmount()
+    })
+
+    it('invalidates a pending pull-to-close when the split view opens', async () => {
+      const wrapper = await mountSplit(1200)
+      const store = useProjectStore()
+      const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+      vi.useFakeTimers()
+      try {
+        const panel = wrapper.findComponent({ name: 'ChatPanel' })
+        panel.vm.$emit('pull', 150)
+        panel.vm.$emit('pull-end', 150, 0.2)
+        await wrapper.get('[data-testid="open-beside"]').trigger('click')
+        await nextTick()
+        expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+        await vi.advanceTimersByTimeAsync(280)
+        expect(closeChat).not.toHaveBeenCalled()
+      } finally { wrapper.unmount(); vi.useRealTimers() }
     })
 
     it('opening a chat beside hides the pinned file but keeps the pin', async () => {
