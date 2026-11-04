@@ -150,6 +150,11 @@ describe('composeAttachmentBlock / splitAttachmentBlock', () => {
     expect(splitAttachmentBlock(malformed)).toEqual({ text: malformed, attachments: [] })
   })
 
+  it('returns quickly for a long message without a block', () => {
+    const input = 'a' + ' '.repeat(50000) + 'b'
+    expect(splitAttachmentBlock(input)).toEqual({ text: input, attachments: [] })
+  })
+
   it('sanitises a name with a backtick or newline', () => {
     expect(composeAttachmentBlock([{ ref: REF, name: 'a`b\nc.md' }]))
       .toContain('- a b c.md: `')

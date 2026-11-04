@@ -83,7 +83,8 @@ export function composeAttachmentBlock(files: AttachedFile[]): string {
 
 /** Split a user message into its text and the trailing attachment block (token or expanded-path form). */
 export function splitAttachmentBlock(content: string): { text: string; attachments: MessageAttachment[] } {
-  const trimmed = content.replace(/\s+$/, '')
+  if (!content.includes(ATTACHED_HEADER)) return { text: content, attachments: [] }
+  const trimmed = content.trimEnd()
   const match = BLOCK_RE.exec(trimmed)
   if (!match) return { text: content, attachments: [] }
   const attachments: MessageAttachment[] = []
