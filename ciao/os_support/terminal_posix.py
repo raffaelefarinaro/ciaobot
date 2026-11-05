@@ -56,7 +56,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -442,17 +442,30 @@ if sys.platform != "win32":
                 if master is not None:
                     _close_quietly(master)
 
-    def spawn_terminal(*, cwd: Path, cols: int = 80, rows: int = 24) -> PosixTerminalProcess:
+    def spawn_terminal(
+        *, cwd: Path, cols: int = 80, rows: int = 24, argv: Sequence[str] | None = None
+    ) -> PosixTerminalProcess:
         """Start the user's shell on a fresh pty, in ``cwd``.
 
         The shell becomes the leader of its own session, owns the pty as its
         controlling terminal, and can start jobs of its own. Every job group
         that stays in the session is ended by
-        :meth:`PosixTerminalProcess.close`.
+        :meth:`PosixTerminalProcess.close`. ``argv`` runs that program
+        instead of the shell.
         """
         _check_size(cols, rows)
         folder = _check_folder(cwd)
-        shell_argv = default_shell()
+        if argv is None:
+            shell_argv = default_shell()
+        else:
+            shell_argv = [str(part) for part in argv]
+            if (
+                not shell_argv
+                or not os.path.isabs(shell_argv[0])
+                or not os.path.isfile(shell_argv[0])
+                or not os.access(shell_argv[0], os.X_OK)
+            ):
+                raise OSError("the program is not an executable file")
         if not PS_PATH.is_file() or not os.access(PS_PATH, os.X_OK):
             raise OSError(f"{PS_PATH} is missing")
         env = terminal_environment()

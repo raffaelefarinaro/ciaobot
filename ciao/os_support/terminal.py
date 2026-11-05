@@ -38,6 +38,7 @@ keep the behaviour, and this module only names it.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -84,12 +85,15 @@ class TerminalProcess(Protocol):
         ...
 
 
-def spawn_terminal(*, cwd: Path, cols: int = 80, rows: int = 24) -> TerminalProcess:
+def spawn_terminal(
+    *, cwd: Path, cols: int = 80, rows: int = 24, argv: Sequence[str] | None = None
+) -> TerminalProcess:
     """Start the platform's real terminal in ``cwd``, and return it running.
 
     The size is in characters, and the defaults are the ones both adapters
     use. The terminal is the platform's own: a pty on POSIX, a pseudoconsole
-    on Windows.
+    on Windows. ``argv`` runs that program instead of the shell; only engine
+    code passes it.
 
     Nothing is validated here and nothing is caught: the adapter's refusals
     (``FileNotFoundError`` for a folder that is not there, ``ValueError`` for
@@ -100,4 +104,4 @@ def spawn_terminal(*, cwd: Path, cols: int = 80, rows: int = 24) -> TerminalProc
         from ciao.os_support.terminal_windows import spawn_terminal as _spawn
     else:
         from ciao.os_support.terminal_posix import spawn_terminal as _spawn
-    return _spawn(cwd=cwd, cols=cols, rows=rows)
+    return _spawn(cwd=cwd, cols=cols, rows=rows, argv=argv)
