@@ -5,6 +5,7 @@
  * composes all card copy here from kind and params; the engine sends no
  * display prose except `error` and `note`.
  */
+import { isBridgeMode, PERMISSION_MODE_COPY } from './permissionModes'
 import type { ChatAction, ChatActionKind, ChatActionState } from './types'
 
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
@@ -100,6 +101,31 @@ function commandCopy(action: ChatAction): ActionCopy {
   }
 }
 
+const PERMISSION_MODE_META = 'Permission mode'
+
+function permissionModeCopy(action: ChatAction): ActionCopy {
+  const mode = action.params.mode
+  if (!isBridgeMode(mode)) {
+    // A mode the PWA does not know is shown, never offered: no Start.
+    return { title: 'Permission change requested', why: '', primaryLabel: '', meta: PERMISSION_MODE_META }
+  }
+  const { name, allows } = PERMISSION_MODE_COPY[mode]
+  if (action.state === 'done') {
+    return {
+      title: `Switched to ${name}. It applies from the next turn.`,
+      why: 'Continue starts that turn.',
+      primaryLabel: 'Continue the chat',
+      meta: PERMISSION_MODE_META,
+    }
+  }
+  return {
+    title: `Switch this chat to ${name}?`,
+    why: action.state === 'failed' && action.error ? action.error : `${name}: ${allows}.`,
+    primaryLabel: `Switch to ${name}`,
+    meta: PERMISSION_MODE_META,
+  }
+}
+
 /** The card copy for an action, or null for a kind with no copy yet. */
 export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
@@ -107,6 +133,8 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
       return mcpAuthCopy(action)
     case 'command':
       return commandCopy(action)
+    case 'permission_mode':
+      return permissionModeCopy(action)
     default:
       return null
   }

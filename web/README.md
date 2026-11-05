@@ -136,7 +136,7 @@ web/
                           replay its neighbours in either lane; it persists nothing and calls `onCommit`;
                           useMenuFocusReturn keeps a menu action's trigger focus without stealing it back after
                           the user has focused or pressed elsewhere)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, chatActions, notificationInbox, sourceHealth,
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, chatActions, permissionModes, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
                           (drop-slot geometry, settled order, auto-scroll step, announcement wording);

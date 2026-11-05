@@ -113,6 +113,45 @@ describe('actionCopy', () => {
   it('is null for a kind with no copy yet', () => {
     expect(actionCopy(action({ kind: 'restart' }))).toBeNull()
   })
+
+  it('gives the permission_mode copy for an open request', () => {
+    const copy = actionCopy(action({ kind: 'permission_mode', params: { mode: 'normal' } }))
+    expect(copy).toEqual({
+      title: 'Switch this chat to Manual?',
+      why: 'Manual: ask for every action.',
+      primaryLabel: 'Switch to Manual',
+      meta: 'Permission mode',
+    })
+  })
+
+  it('keeps the bypass card copy to the mode name and what it allows', () => {
+    const copy = actionCopy(action({ kind: 'permission_mode', params: { mode: 'bypass' } }))
+    expect(copy?.why).toBe('Bypass: allow everything.')
+    expect(copy?.why).not.toContain('without asking')
+    expect(copy?.primaryLabel).toBe('Switch to Bypass')
+  })
+
+  it('says the mode applies from the next turn once it is done', () => {
+    const copy = actionCopy(action({ kind: 'permission_mode', state: 'done', params: { mode: 'auto' } }))
+    expect(copy).toEqual({
+      title: 'Switched to Auto. It applies from the next turn.',
+      why: 'Continue starts that turn.',
+      primaryLabel: 'Continue the chat',
+      meta: 'Permission mode',
+    })
+  })
+
+  it('shows the engine error for a failed change', () => {
+    const copy = actionCopy(action({ kind: 'permission_mode', state: 'failed', error: 'The mode could not be changed.', params: { mode: 'plan' } }))
+    expect(copy?.why).toBe('The mode could not be changed.')
+    expect(copy?.primaryLabel).toBe('Switch to Plan')
+  })
+
+  it('gives no Start for a mode the PWA does not know', () => {
+    const copy = actionCopy(action({ kind: 'permission_mode', params: { mode: 'manual' } }))
+    expect(copy?.title).toBe('Permission change requested')
+    expect(copy?.primaryLabel).toBe('')
+  })
 })
 
 describe('safeExternalUrl', () => {

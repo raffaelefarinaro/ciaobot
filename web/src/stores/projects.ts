@@ -2441,6 +2441,12 @@ export const useProjectStore = defineStore('projects', () => {
       const started = res?.action
       if (!isChatAction(started)) return null
       upsertChatAction(chatId, started, readStartedAt)
+      if (started.kind === 'permission_mode' && started.state === 'done') {
+        // There is no chat_mode_changed event. This card is the only PWA
+        // surface that shows a chat's mode, so the cached chat is updated here.
+        const cached = chats.value.find(c => c.chat_id === chatId)
+        if (cached) cached.mode = started.params.mode
+      }
       return started
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
