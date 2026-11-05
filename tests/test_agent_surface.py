@@ -2623,9 +2623,26 @@ def test_a_command_file_whose_handle_is_not_ordinary_is_refused(
     having and worth pinning.
     """
     path = _command_file(tmp_path, "ls -la")
-    monkeypatch.setattr(
-        os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFCHR | 0o600)
-    )
+    real_fstat = os.fstat
+
+    def _character_device(fd: int) -> os.stat_result:
+        # Only the mode is overridden: pytest's capture teardown fstats its own
+        # temp file, and a bare SimpleNamespace(st_mode=...) makes that raise.
+        real = real_fstat(fd)
+        return os.stat_result((
+            stat.S_IFCHR | 0o600,
+            real.st_ino,
+            real.st_dev,
+            real.st_nlink,
+            real.st_uid,
+            real.st_gid,
+            real.st_size,
+            real.st_atime,
+            real.st_mtime,
+            real.st_ctime,
+        ))
+
+    monkeypatch.setattr(os, "fstat", _character_device)
     with pytest.raises(agent_cli.UsageError) as excinfo:
         agent_cli._command_file_text(str(path))
     _assert_static_refusal(
