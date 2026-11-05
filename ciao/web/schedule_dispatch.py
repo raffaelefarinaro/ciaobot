@@ -491,16 +491,12 @@ class ScheduleDispatcher:
             if is_memory_pass_project(project):
                 # The Memory project is app-owned: it holds the engine's own
                 # memory passes, and a routine run there would put an ordinary
-                # chat in a project where every chat is silenced. The run is
-                # skipped here rather than refused from here: this runs inside
-                # the scheduler's tick, and an exception would take the other
-                # due schedules down with it.
-                logger.warning(
-                    "Schedule %s targets the Memory project, which holds the "
-                    "engine's own passes; skipping the run",
-                    sched_id,
+                # chat in a project where every chat is silenced. Refused
+                # rather than skipped: the caller has to record the refusal
+                # (a run that never happened is not a run).
+                raise MemoryProjectRefused(
+                    "the Memory project holds the engine's own memory passes"
                 )
-                return None
             # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
@@ -513,17 +509,13 @@ class ScheduleDispatcher:
                     title_base = title_base[:37] + "..."
             date_str = datetime.now(UTC).strftime("%b %d")
             title = f"{title_base} - {date_str}"
-            try:
-                chat = self._host.create_chat(
-                    project.project_id,
-                    title=title,
-                    model=model,
-                    mode=mode,
-                    provider=provider or None,
-                )
-            except MemoryProjectRefused as exc:
-                logger.warning("Schedule %s cannot run in its target: %s", sched_id, exc)
-                return None
+            chat = self._host.create_chat(
+                project.project_id,
+                title=title,
+                model=model,
+                mode=mode,
+                provider=provider or None,
+            )
             _stamp(chat)
             self._supersede_earlier_runs(chat)
             self._host._save()
@@ -535,10 +527,7 @@ class ScheduleDispatcher:
             ):
                 # A pass is the app's own turn: a routine posted into it would
                 # run under the pass's restrictions and never reach the owner.
-                logger.warning(
-                    "Schedule %s targets a memory pass; skipping the run", sched_id
-                )
-                return None
+                raise MemoryProjectRefused("a memory pass is not a target for a schedule")
             if target_chat is None or target_chat.archived:
                 replacement = self._host._rehome_interval_chat(entry, prompt)
                 if replacement is None:
@@ -596,6 +585,54 @@ class ScheduleDispatcher:
         logger.warning("Schedule has no web target, skipping")
         return None
 
+    def _target_refusal(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is the app's memory machinery, or ''.
+
+        The Memory project is app-owned: it holds the engine's own memory
+        passes, and a routine run there would put an ordinary chat in a
+        project where every chat is silenced. A pass is the app's own turn: a
+        routine posted into it runs under the pass's restrictions and never
+        reaches the owner.
+        """
+        project_id = getattr(entry, "web_project_id", "") or ""
+        if project_id:
+            project = self._host._projects.get(project_id)
+            if project is None:
+                # A stale id: the recorded name is what survives it. Looked up
+                # here without repairing the entry — a quiet command must not
+                # resolve or repair a target.
+                project = self._project_named(entry)
+            if project is not None and is_memory_pass_project(project):
+                return "the Memory project holds the engine's own memory passes"
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if chat_id:
+            chat = self._host._chats.get(chat_id)
+            if chat is not None and is_memory_pass_chat(
+                chat, self._host._projects.get(chat.project_id)
+            ):
+                return "a memory pass is not a target for a schedule"
+        return ""
+
+    def _project_named(self, entry: ScheduleEntry) -> ProjectInfo | None:
+        """The project the entry's recorded name points at, or None.
+
+        The user's project wins when the name is shared: the app-owned Memory
+        project is called "Memory", and a user project may be too.
+        """
+        name = (getattr(entry, "web_project_name", "") or "").strip()
+        workspace = getattr(entry, "workspace", "") or ""
+        if not name:
+            return None
+        matches = [
+            project
+            for project in self._host._projects.values()
+            if project.name == name and project.workspace == workspace
+        ]
+        for project in matches:
+            if not is_memory_pass_project(project):
+                return project
+        return matches[0] if matches else None
+
     def _supersede_earlier_runs(self, chat: ChatInfo) -> None:
         """Retire the earlier runs' retries and errors when a routine runs again.
 
@@ -649,6 +686,16 @@ class ScheduleDispatcher:
         command_workspace = ""
         command_extra: dict[str, object] = {}
         command_printed = False
+        # The target is checked before the command runs: a routine the app will
+        # not dispatch into must not run its command either, and a quiet command
+        # would otherwise report success for work that never happened.
+        refusal = self._target_refusal(entry)
+        if refusal:
+            logger.warning(
+                "Schedule %s cannot run in its target: %s", _sched_schedule_id, refusal
+            )
+            self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, "error")
+            return {"status": "error"}
         if command_requested:
             command_cwd, command_env = self._host.schedule_command_env(entry)
             command_workspace = command_env.get("CIAO_ACTIVE_WORKSPACE", "")

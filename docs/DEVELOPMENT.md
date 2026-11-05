@@ -1402,11 +1402,18 @@ instead, the create route refuses a client-supplied `memory_pass` helper, and
 the agent surface reports the refusal as `invalid_project`. Without that, a
 client could silence any chat it created by moving it into the Memory project
 or by labelling it a pass. A routine is a target like any other, so the same
-rule reaches the scheduler: `prepare_schedule_chat` skips a run whose target is
-the Memory project or a pass (it returns `None` rather than raising, because
-it runs inside the scheduler's tick and an exception there would take the
-other due schedules down with it), and the schedule routes refuse such a target
-with a 400 that names the reason. A pass's own archive is
+rule reaches the scheduler: `prepare_schedule_chat` refuses a target the app
+will not run in, and the refusal is raised rather than swallowed — the caller
+has to record it, because a run that never happened is not a run and a
+one-shot entry that never ran must not be consumed. The scheduler's tick
+catches it, records the entry as failed and carries on with the other due
+schedules (one entry that cannot run must not take the rest of the tick down
+with it); the interval path disables the entry with the reason. The dispatch
+checks the target before a routine's command runs, and the schedule routes
+refuse such a target with a 400 that names the reason — while still letting
+an existing invalid routine be paused or retargeted. A user project called
+"Memory" is not the app's own: only the kind is the discriminator, and a
+schedule whose project id decayed recovers to the user's project. A pass's own archive is
 not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
 For **After this update** changes (Home's update-task group, or the Settings

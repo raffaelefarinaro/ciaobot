@@ -6,13 +6,16 @@ chat in a project where every chat is silenced, or post its prompt into a pass
 that never reaches the owner — so the app refuses the target, at the route
 that configures it and at the dispatch that runs it.
 
-The dispatch-side refusal is the guarantee, and it must not raise: the
-scheduler's tick prepares every due entry in one loop, so an exception there
-would take the other due schedules down with it.
+The refusal is raised, not swallowed: the caller has to record it. A run that
+never happened is not a run, and a one-shot entry that never ran must not be
+consumed. It also must not abort the scheduler's tick, which prepares every
+due entry in one loop.
 """
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,7 @@ from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.memory_pass import MemoryProjectRefused
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import create_schedule, run_schedule_now, schedule_detail
 
@@ -79,16 +83,14 @@ def _memory_project(manager: ProjectChatManager):
 
 
 def test_a_routine_never_runs_in_the_memory_project(tmp_path: Path) -> None:
-    """The Memory project is app-owned: the run is skipped, not dispatched."""
+    """The Memory project is app-owned: the run is refused, not dispatched."""
     manager = _make_manager(tmp_path)
     memory_project = _memory_project(manager)
     entry = _entry(web_project_id=memory_project.project_id)
 
-    chat_id = manager.prepare_schedule_chat(
-        entry, entry.prompt, "opus", "auto", "claude"
-    )
+    with pytest.raises(MemoryProjectRefused):
+        manager.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
 
-    assert chat_id is None
     # No ordinary chat was opened in that project either.
     assert manager.list_chats() == []
 
@@ -104,11 +106,9 @@ def test_a_routine_never_runs_inside_a_pass(tmp_path: Path) -> None:
     )
     entry = _entry(web_chat_id=pass_chat.chat_id)
 
-    chat_id = manager.prepare_schedule_chat(
-        entry, entry.prompt, "opus", "auto", "claude"
-    )
+    with pytest.raises(MemoryProjectRefused):
+        manager.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
 
-    assert chat_id is None
     assert entry.web_chat_id == pass_chat.chat_id
 
 
@@ -126,28 +126,130 @@ def test_a_routine_still_runs_in_an_ordinary_project(tmp_path: Path) -> None:
     assert manager.get_chat(chat_id).project_id == project.project_id
 
 
-def test_a_refused_target_does_not_stop_the_next_entry(tmp_path: Path) -> None:
+def test_a_user_project_named_memory_is_not_the_apps_own(tmp_path: Path) -> None:
+    """A user project may be called "Memory"; only the kind is the app's."""
+    manager = _make_manager(tmp_path)
+    user_project = manager.create_project("Memory", workspace="personal")
+    _memory_project(manager)
+
+    found = manager.find_project("Memory", "personal")
+
+    assert found is not None
+    assert found.project_id == user_project.project_id
+
+
+def test_a_stale_id_resolves_to_the_user_project_not_the_apps(tmp_path: Path) -> None:
+    """A routine whose project id decayed recovers by name — to its own."""
+    manager = _make_manager(tmp_path)
+    user_project = manager.create_project("Memory", workspace="personal")
+    _memory_project(manager)
+
+    resolved = manager._resolve_schedule_project(
+        "proj-decayed", _entry(web_project_name="Memory")
+    )
+
+    assert resolved is not None
+    assert resolved.project_id == user_project.project_id
+
+
+async def test_a_refused_entry_does_not_stop_the_tick(tmp_path: Path) -> None:
     """The scheduler prepares every due entry in one loop.
 
-    A refusal that raised would abort that loop, and every later due schedule
-    would be skipped for as long as the invalid entry stayed due.
+    An entry that cannot run must not take the other due schedules down with
+    it, and it must not consume a one-shot that never ran.
     """
+    store = ScheduleStore(tmp_path)
+    dispatched: list[str] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(entry.schedule_id)
+
+    def prepare(entry, prompt, model, mode, provider):
+        raise MemoryProjectRefused(
+            "the Memory project holds the engine's own memory passes"
+        )
+
+    mgr = ScheduleManager(store=store, dispatch_to_web=dispatch, prepare_chat=prepare)
+    refused = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="once",
+        run_at_date="2026-06-15",
+        timezone_name="UTC",
+        workspace="personal",
+    )
+    ok = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="once",
+        run_at_date="2026-06-15",
+        timezone_name="UTC",
+        workspace="personal",
+    )
+    # The tick skips an entry created after it, so both need a floor.
+    for entry in (refused, ok):
+        entry.created_at = "2026-01-01T00:00:00Z"
+        store.replace(entry)
+    # The second entry prepares fine; the first refuses.
+    calls: list[str] = []
+
+    def prepare_by_id(entry, prompt, model, mode, provider):
+        calls.append(entry.schedule_id)
+        if entry.schedule_id == refused.schedule_id:
+            raise MemoryProjectRefused(
+                "the Memory project holds the engine's own memory passes"
+            )
+        return "chat-ok"
+
+    mgr = ScheduleManager(
+        store=store, dispatch_to_web=dispatch, prepare_chat=prepare_by_id
+    )
+
+    await mgr.tick(now=datetime(2026, 6, 15, 8, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+
+    # Both entries were attempted, and the other one ran.
+    assert len(calls) == 2
+    assert ok.schedule_id in dispatched
+    # The refused one-shot was not consumed, and says why it did not run.
+    stored = store.get(refused.schedule_id)
+    assert stored is not None
+    assert stored.last_status == "error"
+
+
+async def test_a_refused_command_routine_does_not_run_its_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command runs before any chat exists — but not before the target is
+    checked: a routine the app will not dispatch into must not run its command
+    either, and a quiet command would otherwise report success."""
     manager = _make_manager(tmp_path)
     memory_project = _memory_project(manager)
-    refused = _entry(
-        schedule_id="sched-refused", web_project_id=memory_project.project_id
-    )
-    project = manager.create_project("Holder", workspace="personal")
-    due = _entry(schedule_id="sched-due", web_project_id=project.project_id)
+    ran: list[str] = []
 
-    assert manager.prepare_schedule_chat(
-        refused, refused.prompt, "opus", "auto", "claude"
-    ) is None
-    chat_id = manager.prepare_schedule_chat(
-        due, due.prompt, "opus", "auto", "claude"
+    async def fake_run_command(command, cwd, env):
+        ran.append(command)
+        raise AssertionError("the command must not run")
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", fake_run_command
+    )
+    entry = _entry(
+        web_project_id=memory_project.project_id, command="echo hello"
     )
 
-    assert chat_id is not None
+    result = await manager.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert ran == []
+    assert result["status"] == "error"
 
 
 def _client(manager: ProjectChatManager, tmp_path: Path) -> TestClient:
@@ -217,45 +319,59 @@ def test_the_update_route_refuses_a_pass_target(tmp_path: Path) -> None:
     assert "memory pass" in response.json()["error"]
 
 
+def test_an_invalid_routine_can_still_be_disabled(tmp_path: Path) -> None:
+    """A routine the app will not run in must still be pausable and fixable."""
+    manager = _make_manager(tmp_path)
+    memory_project = _memory_project(manager)
+    client = _client(manager, tmp_path)
+    schedule_manager = client.app.state.schedule_manager
+    entry = schedule_manager.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_project_id=memory_project.project_id,
+        workspace="personal",
+    )
+
+    paused = client.patch(f"/api/schedules/{entry.schedule_id}", json={"enabled": False})
+    assert paused.status_code == 200
+    stored = schedule_manager._store.get(entry.schedule_id)
+    assert stored is not None
+    assert stored.enabled is False
+
+    # Retargeting it to a project of the user's own is the repair.
+    project = manager.create_project("Holder", workspace="personal")
+    repaired = client.patch(
+        f"/api/schedules/{entry.schedule_id}",
+        json={"web_project_id": project.project_id},
+    )
+    assert repaired.status_code == 200
+    stored = schedule_manager._store.get(entry.schedule_id)
+    assert stored is not None
+    assert stored.web_project_id == project.project_id
+
+
 def test_running_a_refused_routine_says_why(tmp_path: Path) -> None:
     """A click that does nothing is not an answer: the route says why."""
     manager = _make_manager(tmp_path)
     memory_project = _memory_project(manager)
     client = _client(manager, tmp_path)
-    created = client.post(
-        "/api/schedules",
-        json={
-            "prompt": "brief",
-            "frequency": "daily",
-            "time": "08:00",
-            "web_project_id": memory_project.project_id,
-        },
+    schedule_manager = client.app.state.schedule_manager
+    entry = schedule_manager.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_project_id=memory_project.project_id,
+        workspace="personal",
     )
-    assert created.status_code == 400
-    # The route refuses the configuration, so there is no entry to run.
-    assert client.app.state.schedule_manager.list_entries() == []
 
-
-@pytest.mark.parametrize("target", ["project", "chat"])
-def test_the_route_refusal_names_the_reason(
-    tmp_path: Path, target: str
-) -> None:
-    """Both refusals say what is wrong, in the PWA's own words."""
-    manager = _make_manager(tmp_path)
-    memory_project = _memory_project(manager)
-    client = _client(manager, tmp_path)
-    body = {"prompt": "brief", "frequency": "daily", "time": "08:00"}
-    if target == "project":
-        body["web_project_id"] = memory_project.project_id
-    else:
-        pass_chat = manager.create_chat(
-            memory_project.project_id,
-            title="Memory pass · Pricing rework",
-            helper=_pass_helper(),
-        )
-        body["web_chat_id"] = pass_chat.chat_id
-
-    response = client.post("/api/schedules", json=body)
+    response = client.post(f"/api/schedule-run/{entry.schedule_id}")
 
     assert response.status_code == 400
-    assert response.json()["error"]
+    assert "Memory" in response.json()["error"]

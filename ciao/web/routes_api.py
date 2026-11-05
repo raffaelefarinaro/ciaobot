@@ -5733,6 +5733,10 @@ async def run_schedule_now(request: Request) -> JSONResponse:
             return JSONResponse({"error": refusal}, status_code=400)
     try:
         result = await sm.dispatch_now(schedule_id)
+    except MemoryProjectRefused as exc:
+        # The target resolved to the app's own memory machinery, which the
+        # app will not run a routine in. The schedule exists: say why.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except ValueError:
         return JSONResponse({"error": "not found"}, status_code=404)
     except RuntimeError as exc:
@@ -5793,14 +5797,17 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
     # The target this update asks for, checked before anything is written: the
     # app will not run a routine in the Memory project or inside a pass, and a
-    # half-applied update would leave the entry pointing somewhere else.
-    refusal = _schedule_target_refusal(
-        request.app.state.project_chat_manager,
-        body.get("web_project_id") if "web_project_id" in body else entry.web_project_id,
-        body.get("web_chat_id") if "web_chat_id" in body else entry.web_chat_id,
-    )
-    if refusal:
-        return JSONResponse({"error": refusal}, status_code=400)
+    # half-applied update would leave the entry pointing somewhere else. An
+    # update that does not touch the target is always allowed, so an existing
+    # invalid routine can still be paused, renamed or disabled.
+    if "web_project_id" in body or "web_chat_id" in body:
+        refusal = _schedule_target_refusal(
+            request.app.state.project_chat_manager,
+            body.get("web_project_id") if "web_project_id" in body else entry.web_project_id,
+            body.get("web_chat_id") if "web_chat_id" in body else entry.web_chat_id,
+        )
+        if refusal:
+            return JSONResponse({"error": refusal}, status_code=400)
     timing_fields: set[str] = set()
     if entry.scope == "system":
         try:

@@ -2145,7 +2145,14 @@ class ScheduleManager:
         # Sampling it in there instead read the already-re-pointed value, so
         # the carry-over below could never fire.
         bound_before = entry.web_chat_id
-        chat_id = self._prepare_run_chat(entry, model, mode, provider)
+        try:
+            chat_id = self._prepare_run_chat(entry, model, mode, provider)
+        except ValueError as exc:
+            # The target could not be prepared — the app refuses to run in its
+            # own memory machinery, the project is gone, the model is unknown.
+            # The entry is disabled rather than left to fail every tick.
+            self._disable_interval(entry, str(exc))
+            return None
         if chat_id is None and not entry.command:
             self._disable_interval(entry, "no chat left to dispatch into")
             return None
@@ -2400,7 +2407,21 @@ class ScheduleManager:
             # last_run_chat_id is durable in the same write as
             # last_dispatched_at, instead of depending on the fire-and-forget
             # dispatch task surviving long enough to write it back later.
-            chat_id = self._prepare_run_chat(entry, model, mode, provider)
+            try:
+                chat_id = self._prepare_run_chat(entry, model, mode, provider)
+            except ValueError as exc:
+                # The target could not be prepared — the app refuses to run in
+                # its own memory machinery, the project is gone, the model is
+                # unknown. One entry that cannot run must not take the other
+                # due schedules down with it, and it must not consume a
+                # one-shot that never ran.
+                logger.warning(
+                    "Schedule %s could not be prepared: %s", entry.schedule_id, exc
+                )
+                if entry.last_status != "error":
+                    entry.last_status = "error"
+                    self._store.replace(entry)
+                continue
             # The slot being served is the one this tick matched, whatever the
             # clock says by the time the run ends: a 23:55 daily dispatched at
             # 23:55:07 is credited to that day even if the turn streams past

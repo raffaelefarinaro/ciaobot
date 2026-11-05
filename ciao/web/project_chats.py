@@ -10005,18 +10005,23 @@ class ProjectChatManager:
 
         Names are unique per workspace, which is what lets a schedule survive
         the per-instance id regeneration that strands ``web_project_id``.
+
+        The app-owned Memory project shares its name with any user project
+        called "Memory", and a routine means the user's project: the app's own
+        is only returned when it is the only one with that name.
         """
         wanted = (name or "").strip()
         if not wanted:
             return None
-        return next(
-            (
-                project
-                for project in self._projects.values()
-                if project.workspace == workspace and project.name == wanted
-            ),
-            None,
-        )
+        matches = [
+            project
+            for project in self._projects.values()
+            if project.workspace == workspace and project.name == wanted
+        ]
+        for project in matches:
+            if project.kind != MEMORY_PROJECT_KIND:
+                return project
+        return matches[0] if matches else None
 
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
