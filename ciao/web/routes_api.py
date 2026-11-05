@@ -7,6 +7,7 @@ import contextlib
 import errno
 import functools
 import hashlib
+import html
 import json
 import logging
 import math
@@ -3883,6 +3884,48 @@ _EMBEDDED_PREVIEW_CSP = "; ".join(
     ]
 )
 
+# Error responses from workspace_html are rendered inside the same Preview
+# iframe as the artifact, so they must be frameable, and must carry no script.
+# This is a separate constant from _ARTIFACT_CSP on purpose.
+_ARTIFACT_ERROR_CSP = "; ".join(
+    [
+        "default-src 'none'",
+        "style-src 'unsafe-inline'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self'",
+        "sandbox",
+    ]
+)
+
+_ARTIFACT_ERROR_MESSAGES: dict[int, str] = {
+    400: "No file path was given.",
+    403: "This file is outside the folders Ciaobot can show.",
+    404: "File not found.",
+    415: "Only .html and .htm files can be previewed.",
+}
+
+
+def _artifact_error_page(status_code: int, message: str) -> Response:
+    """Frameable HTML error for the artifact Preview iframe (same status)."""
+    body = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        "<title>Preview unavailable</title>"
+        "<style>body{font-family:system-ui,sans-serif;font-size:14px;"
+        "color:#9aa0c0;background:transparent;padding:16px;margin:0}</style>"
+        f"</head><body><p>{html.escape(message)}</p></body></html>"
+    )
+    return Response(
+        content=body,
+        status_code=status_code,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": _ARTIFACT_ERROR_CSP,
+            "X-Frame-Options": "SAMEORIGIN",
+            "Cache-Control": "no-cache",
+        },
+    )
+
 
 async def workspace_html(request: Request) -> Response:
     """Serve a workspace ``.html`` file as a renderable page, not as source.
@@ -3900,9 +3943,10 @@ async def workspace_html(request: Request) -> Response:
 
     The size cap is deliberately the same 2 MB as the text viewer and the
     snapshot store, so there is no state where a file renders but has no
-    history, or has history but refuses to render. Over the cap the panel
-    shows a 413 and the user opens the file in a real browser instead
-    (``/api/workspace-open``).
+    history, or has history but refuses to render. Over the cap, and on every
+    other error, the response is a small frameable HTML page
+    (``_artifact_error_page``) with the same status, so the Preview frame shows
+    why instead of the browser's blocked-frame page.
 
     Fuzzy resolution is kept for parity with the Code view, so the same path
     string that shows the source also renders the page. Note that this means
@@ -3914,13 +3958,23 @@ async def workspace_html(request: Request) -> Response:
     roots = _allowed_roots(config)
     result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
-        return result
+        return _artifact_error_page(
+            result.status_code,
+            _ARTIFACT_ERROR_MESSAGES.get(
+                result.status_code, f"Preview failed (HTTP {result.status_code})."
+            ),
+        )
     resolved = result
 
     if resolved.suffix.lower() not in _WORKSPACE_HTML_EXTS:
-        return JSONResponse({"error": "unsupported type"}, status_code=415)
-    if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
-        return JSONResponse({"error": "file too large"}, status_code=413)
+        return _artifact_error_page(415, _ARTIFACT_ERROR_MESSAGES[415])
+    size = resolved.stat().st_size
+    if size > _WORKSPACE_FILE_MAX_BYTES:
+        return _artifact_error_page(
+            413,
+            f"This page is {size / (1024 * 1024):.1f} MB, over the 2 MB preview limit. "
+            "Use the ⋯ menu → Download to open it in your browser.",
+        )
 
     # The bridge script is what makes the rendered page commentable: it watches
     # selections inside the sandboxed frame and posts anchors to the panel via

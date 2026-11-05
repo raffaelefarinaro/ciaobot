@@ -352,3 +352,65 @@ def test_non_utf8_artifact_still_renders(workspace: Path) -> None:
     assert "<p>caf" in resp.text
     # The bridge is still injected into the salvaged document.
     assert "data-ciao-artifact-bridge" in resp.text
+
+
+@pytest.mark.parametrize(
+    ("setup", "params", "status"),
+    [
+        ("huge", {"path": "Workspace/huge.html"}, 413),
+        (None, {"path": "Workspace/nope.html"}, 404),
+        ("notes", {"path": "Workspace/notes.txt"}, 415),
+        (None, {}, 400),
+    ],
+)
+def test_error_pages_are_frameable_under_middleware(
+    workspace: Path, setup: str | None, params: dict[str, str], status: int
+) -> None:
+    # An error body without frame headers is blocked by the middleware's
+    # X-Frame-Options: DENY, so the Preview iframe shows "refused to connect"
+    # instead of the reason. Every error must stay frameable by the PWA.
+    if setup == "huge":
+        (workspace / "Workspace" / "huge.html").write_text(
+            "<p>" + "x" * (2 * 1024 * 1024 + 1), encoding="utf-8"
+        )
+    elif setup == "notes":
+        (workspace / "Workspace" / "notes.txt").write_text("plain\n", encoding="utf-8")
+    client = _make_client(workspace, with_middleware=True)
+
+    resp = client.get("/api/workspace-html", params=params)
+
+    assert resp.status_code == status
+    assert resp.headers["x-frame-options"] == "SAMEORIGIN"
+    assert resp.headers["content-type"].startswith("text/html")
+    directives = [d.strip() for d in resp.headers["content-security-policy"].split(";")]
+    assert "default-src 'none'" in directives
+    assert "frame-ancestors 'self'" in directives
+    assert "sandbox" in directives
+    assert "frame-ancestors 'none'" not in directives
+
+
+def test_over_cap_error_page_explains_size_and_download(workspace: Path) -> None:
+    (workspace / "Workspace" / "huge.html").write_text(
+        "<p>" + "x" * (2 * 1024 * 1024 + 1), encoding="utf-8"
+    )
+    client = _make_client(workspace)
+
+    resp = client.get("/api/workspace-html", params={"path": "Workspace/huge.html"})
+
+    assert resp.status_code == 413
+    assert "MB, over the 2 MB preview limit" in resp.text
+    assert "Download" in resp.text
+    assert "<script" not in resp.text
+
+
+def test_error_page_escapes_nothing_user_controlled(workspace: Path) -> None:
+    # The requested path is never echoed into the error body, so a crafted
+    # file name cannot inject markup into the frame.
+    client = _make_client(workspace)
+
+    resp = client.get(
+        "/api/workspace-html", params={"path": "Workspace/<img src=x>.html"}
+    )
+
+    assert resp.status_code == 404
+    assert "<img" not in resp.text
