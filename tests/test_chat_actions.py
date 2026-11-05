@@ -87,7 +87,13 @@ def test_an_unknown_kind_is_refused() -> None:
 
 
 def test_a_kind_without_a_validator_is_refused() -> None:
-    assert _refusal("command", {}) == "unsupported_kind"
+    # Each child of the needs-you run registers its own kind; pick one that has none yet.
+    from ciao.chat_actions import ACTION_KINDS, _VALIDATORS
+
+    missing = [kind for kind in ACTION_KINDS if kind not in _VALIDATORS]
+    if not missing:
+        pytest.skip("every action kind has a validator")
+    assert _refusal(missing[0], {}) == "unsupported_kind"
 
 
 def test_action_key() -> None:

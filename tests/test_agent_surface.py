@@ -824,7 +824,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     # rather than the placeholder names the flag-only rows get.
     summary = tmp_path / "summary.md"
     summary.write_text("did the thing\n", encoding="utf-8")
-    # `chat terminal-offer` reads its command at parse time too.
+    # `chat needs-action command` reads its command at parse time too.
     command = tmp_path / "command.txt"
     command.write_text("ls -la\n", encoding="utf-8")
     required = {
@@ -836,7 +836,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "note create": ["--type", "note", "--title", "t"],
         "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
-        "chat terminal-offer": ["--command-file", str(command)],
+        "chat needs-action": ["command", "--command-file", str(command)],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
@@ -1694,7 +1694,7 @@ def _marker_command(marker: Path) -> str:
     return " ".join(shlex.quote(part) for part in argv)
 
 
-def test_a_terminal_offer_is_a_read_with_no_caller_target() -> None:
+def test_a_needs_action_is_a_read_with_no_caller_target() -> None:
     """The operation takes the command and nothing else.
 
     A chat argument would be a target: an offer is a command on a screen, and
@@ -1704,29 +1704,29 @@ def test_a_terminal_offer_is_a_read_with_no_caller_target() -> None:
     """
     from ciao import mcp_server
 
-    operation = mcp_server.OPERATIONS_BY_NAME["chat_terminal_offer"]
+    operation = mcp_server.OPERATIONS_BY_NAME["chat_needs_action"]
     assert operation.annotations == mcp_server._READ
-    assert set(inspect.signature(operation.fn).parameters) == {"service", "command"}
+    assert set(inspect.signature(operation.fn).parameters) == {"service", "kind", "params"}
 
 
-def test_a_terminal_offer_lands_in_the_calling_chat(tmp_path: Path) -> None:
+def test_a_needs_action_lands_in_the_calling_chat(tmp_path: Path) -> None:
     service, manager, _config = _offer_service(tmp_path)
     project, chat = _offer_chat(manager)
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "npm install -g ciao"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "npm install -g ciao"}})
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
     assert body["data"]["chat_id"] == chat.chat_id
-    offer = body["data"]["terminal_offer"]
-    assert offer["command"] == "npm install -g ciao"
-    assert len(offer["id"]) == 32
+    action = body["data"]["action"]
+    assert action["params"]["command"] == "npm install -g ciao"
+    assert len(action["id"]) == 32
     # The state the manager holds is the state the caller was told about.
-    assert manager.get_chat(chat.chat_id).terminal_offer.id == offer["id"]
+    assert manager.get_chat(chat.chat_id).actions[0].id == action["id"]
 
 
-def test_a_terminal_offer_cannot_target_another_chat(tmp_path: Path) -> None:
+def test_a_needs_action_cannot_target_another_chat(tmp_path: Path) -> None:
     """A sibling chat id in the arguments changes nothing.
 
     The schema has no chat argument, so an extra one is ignored and the offer
@@ -1740,26 +1740,31 @@ def test_a_terminal_offer_cannot_target_another_chat(tmp_path: Path) -> None:
         response = _post(
             client,
             token,
-            "chat_terminal_offer",
-            {"command": "ls -la", "chat_id": sibling.chat_id, "path": "/etc/passwd"},
+            "chat_needs_action",
+            {
+                "kind": "command",
+                "params": {"command": "ls -la"},
+                "chat_id": sibling.chat_id,
+                "path": "/etc/passwd",
+            },
         )
     assert response.status_code == 200
     assert response.json()["data"]["chat_id"] == chat.chat_id
-    assert manager.get_chat(sibling.chat_id).terminal_offer is None
+    assert manager.get_chat(sibling.chat_id).actions == []
 
 
-def test_a_terminal_offer_refuses_an_archived_chat(tmp_path: Path) -> None:
+def test_a_needs_action_refuses_an_archived_chat(tmp_path: Path) -> None:
     service, manager, _config = _offer_service(tmp_path)
     project, chat = _offer_chat(manager)
     manager.get_chat(chat.chat_id).archived = True
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "chat_archived"
 
 
-def test_a_terminal_offer_refuses_an_unattended_turn(tmp_path: Path) -> None:
+def test_a_needs_action_refuses_an_unattended_turn(tmp_path: Path) -> None:
     """A schedule must not put a command in front of a user who is not there."""
     service, manager, _config = _offer_service(tmp_path)
     project, chat = _offer_chat(manager)
@@ -1767,14 +1772,14 @@ def test_a_terminal_offer_refuses_an_unattended_turn(tmp_path: Path) -> None:
     chat.user_turn_unattended = {"0": True}
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "unattended_forbidden"
-    assert manager.get_chat(chat.chat_id).terminal_offer is None
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
 @pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task", "restart_resume"])
-def test_a_terminal_offer_refuses_a_turn_the_person_did_not_type(
+def test_a_needs_action_refuses_a_turn_the_person_did_not_type(
     tmp_path: Path, origin: str
 ) -> None:
     """A webhook payload must not put a command card in front of the user (#2076)."""
@@ -1784,23 +1789,23 @@ def test_a_terminal_offer_refuses_a_turn_the_person_did_not_type(
     chat.user_turn_origin = {"0": origin}
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "unattended_forbidden"
-    assert manager.get_chat(chat.chat_id).terminal_offer is None
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
-def test_a_terminal_offer_refuses_a_chat_in_another_workspace(tmp_path: Path) -> None:
+def test_a_needs_action_refuses_a_chat_in_another_workspace(tmp_path: Path) -> None:
     service, manager, _config = _offer_service(tmp_path)
     project, chat = _offer_chat(manager, workspace="work")
     token = _offer_token(service, chat, project, workspace="personal")
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "project_not_found"
 
 
-def test_a_terminal_offer_resolves_only_an_exact_chat_id(tmp_path: Path) -> None:
+def test_a_needs_action_resolves_only_an_exact_chat_id(tmp_path: Path) -> None:
     """A title is a name the caller chose; an offer is not aimed by name.
 
     The principal's chat id is resolved exactly. `_chat_scope` would fall back
@@ -1821,11 +1826,11 @@ def test_a_terminal_offer_resolves_only_an_exact_chat_id(tmp_path: Path) -> None
         provider="claude",
     )
     with pytest.raises(ControlPlaneError) as excinfo:
-        service.control_plane.chat_terminal_offer(principal, "ls -la")
+        service.control_plane.chat_needs_action(principal, "command", {"command": "ls -la"})
     assert excinfo.value.code == "chat_not_found"
 
 
-def test_a_terminal_offer_needs_a_calling_chat(tmp_path: Path) -> None:
+def test_a_needs_action_needs_a_calling_chat(tmp_path: Path) -> None:
     from ciao.control_plane import ControlPlaneError
 
     service, manager, _config = _offer_service(tmp_path)
@@ -1833,11 +1838,11 @@ def test_a_terminal_offer_needs_a_calling_chat(tmp_path: Path) -> None:
         token_id="t", chat_id="", project_id="", workspace="personal", provider="claude"
     )
     with pytest.raises(ControlPlaneError) as excinfo:
-        service.control_plane.chat_terminal_offer(principal, "ls -la")
+        service.control_plane.chat_needs_action(principal, "command", {"command": "ls -la"})
     assert excinfo.value.code == "chat_required"
 
 
-def test_a_terminal_offer_is_allowed_in_plan_mode(tmp_path: Path) -> None:
+def test_a_needs_action_is_allowed_in_plan_mode(tmp_path: Path) -> None:
     """Guidance is not mutation: a plan-mode chat may still suggest a command.
 
     The operation is a read, so the plan-mode gate does not fire — the same
@@ -1849,9 +1854,9 @@ def test_a_terminal_offer_is_allowed_in_plan_mode(tmp_path: Path) -> None:
     manager.get_chat(chat.chat_id).mode = "plan"
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     assert response.status_code == 200
-    assert response.json()["data"]["terminal_offer"]["command"] == "ls -la"
+    assert response.json()["data"]["action"]["params"]["command"] == "ls -la"
 
 
 def test_an_invalid_command_is_refused_without_echoing_it(tmp_path: Path) -> None:
@@ -1864,22 +1869,22 @@ def test_an_invalid_command_is_refused_without_echoing_it(tmp_path: Path) -> Non
         response = _post(
             client,
             token,
-            "chat_terminal_offer",
-            {"command": f"curl -H 'Authorization: {sentinel}'\x00"},
+            "chat_needs_action",
+            {"kind": "command", "params": {"command": f"curl -H 'Authorization: {sentinel}'\x00"}},
         )
     assert response.status_code == 422
     body = response.json()
-    assert body["error"]["code"] == "invalid_terminal_command"
+    assert body["error"]["code"] == "invalid_action"
     assert sentinel not in json.dumps(body)
-    assert manager.get_chat(chat.chat_id).terminal_offer is None
+    assert manager.get_chat(chat.chat_id).actions == []
     # The telemetry names the operation and the reason, not the text.
     records = _telemetry(service)
-    assert records[-1]["tool"] == "chat_terminal_offer"
-    assert records[-1]["error_code"] == "invalid_terminal_command"
+    assert records[-1]["tool"] == "chat_needs_action"
+    assert records[-1]["error_code"] == "invalid_action"
     assert sentinel not in json.dumps(records)
 
 
-def test_a_successful_terminal_offer_leaves_no_command_in_the_telemetry(
+def test_a_successful_needs_action_leaves_no_command_in_the_telemetry(
     tmp_path: Path,
 ) -> None:
     """The command is absent from the telemetry on the *success* path too.
@@ -1898,10 +1903,10 @@ def test_a_successful_terminal_offer_leaves_no_command_in_the_telemetry(
     token = _offer_token(service, chat, project)
     sentinel = "npm install -g ciao-SENTINEL-4f2a9c"
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": sentinel})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": sentinel}})
     assert response.status_code == 200
     # The user does get the text: the offer is the point.
-    assert response.json()["data"]["terminal_offer"]["command"] == sentinel
+    assert response.json()["data"]["action"]["params"]["command"] == sentinel
 
     path = Path(service._telemetry_path)
     assert path.name == "mcp_tool_calls.jsonl"
@@ -1909,7 +1914,7 @@ def test_a_successful_terminal_offer_leaves_no_command_in_the_telemetry(
     assert sentinel not in text
     records = [json.loads(line) for line in text.splitlines() if line.strip()]
     row = records[-1]
-    assert row["tool"] == "chat_terminal_offer"
+    assert row["tool"] == "chat_needs_action"
     assert row["status"] == "ok"
     assert row["chat_id"] == chat.chat_id
     assert row["surface"] == "cli"
@@ -1934,12 +1939,12 @@ def test_a_wrong_type_command_never_echoes_the_value(tmp_path: Path) -> None:
     project, chat = _offer_chat(manager)
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": 12345})
-    assert response.status_code == 400
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": 12345}})
+    assert response.status_code == 422
     body = response.json()
-    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["code"] == "invalid_action"
     assert "12345" not in json.dumps(body)
-    assert manager.get_chat(chat.chat_id).terminal_offer is None
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
 def test_the_same_command_offered_twice_keeps_the_offer_id(tmp_path: Path) -> None:
@@ -1954,16 +1959,16 @@ def test_the_same_command_offered_twice_keeps_the_offer_id(tmp_path: Path) -> No
     hub.publish = published.append  # type: ignore[method-assign]
     try:
         with _client(service) as client:
-            first = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
-            second = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+            first = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
+            second = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
     finally:
         hub.publish = original  # type: ignore[method-assign]
-    assert first.json()["data"]["terminal_offer"]["id"] == second.json()["data"]["terminal_offer"]["id"]
-    offers = [event for event in published if event["type"] == "chat_terminal_offer_changed"]
+    assert first.json()["data"]["action"]["id"] == second.json()["data"]["action"]["id"]
+    offers = [event for event in published if event["type"] == "chat_actions_changed"]
     assert len(offers) == 1
 
 
-def test_a_terminal_offer_never_touches_the_host_terminal(
+def test_a_needs_action_never_touches_the_host_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nothing is launched, unlocked, typed or read back.
@@ -2029,11 +2034,11 @@ def test_a_terminal_offer_never_touches_the_host_terminal(
     project, chat = _offer_chat(manager)
     token = _offer_token(service, chat, project)
     with _client(service) as client:
-        response = _post(client, token, "chat_terminal_offer", {"command": command})
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": command}})
     assert not reached, f"a terminal offer reached {reached}"
     assert response.status_code == 200
     # The suggestion was stored for the user to read — and never run.
-    assert response.json()["data"]["terminal_offer"]["command"] == command
+    assert response.json()["data"]["action"]["params"]["command"] == command
     assert not marker.exists()
 
 
@@ -2055,7 +2060,7 @@ def _command_file(tmp_path: Path, text: str, *, name: str = "command.txt") -> Pa
     return path
 
 
-def test_chat_terminal_offer_takes_only_a_command_file(tmp_path: Path) -> None:
+def test_chat_needs_action_takes_only_a_command_file(tmp_path: Path) -> None:
     """One required flag, and no way to name a chat.
 
     The offer belongs to the chat that asked, so there is no `--chat`; and the
@@ -2063,16 +2068,16 @@ def test_chat_terminal_offer_takes_only_a_command_file(tmp_path: Path) -> None:
     """
     parser = agent_cli.build_parser()
     path = _command_file(tmp_path, "npm install -g ciao")
-    assert agent_cli.resolve(parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])) == (
-        "chat_terminal_offer",
-        {"command": "npm install -g ciao"},
+    assert agent_cli.resolve(parser.parse_args(["chat", "needs-action", "command", "--command-file", str(path)])) == (
+        "chat_needs_action",
+        {"kind": "command", "params": {"command": "npm install -g ciao"}},
     )
     for forbidden in ("--chat", "--command"):
         with pytest.raises(SystemExit) as excinfo:
-            parser.parse_args(["chat", "terminal-offer", forbidden, "x"])
+            parser.parse_args(["chat", "needs-action", "command", forbidden, "x"])
         assert excinfo.value.code == 2
     with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(["chat", "terminal-offer"])
+        parser.parse_args(["chat", "needs-action"])
     assert excinfo.value.code == 2
 
 
@@ -2087,25 +2092,25 @@ def test_the_command_file_is_read_literally(tmp_path: Path) -> None:
     command = "echo \"$HOME\" `whoami` 'quoted' — ünïcode\n\tindented"
     path = _command_file(tmp_path, command)
     _op, arguments = agent_cli.resolve(
-        parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])
+        parser.parse_args(["chat", "needs-action", "command", "--command-file", str(path)])
     )
-    assert arguments == {"command": command}
+    assert arguments == {"kind": "command", "params": {"command": command}}
 
 
 def test_the_command_file_accepts_the_at_prefix(tmp_path: Path) -> None:
     parser = agent_cli.build_parser()
     path = _command_file(tmp_path, "ls -la")
     _op, arguments = agent_cli.resolve(
-        parser.parse_args(["chat", "terminal-offer", "--command-file", f"@{path}"])
+        parser.parse_args(["chat", "needs-action", "command", "--command-file", f"@{path}"])
     )
-    assert arguments == {"command": "ls -la"}
+    assert arguments == {"kind": "command", "params": {"command": "ls -la"}}
 
 
 #: The static reasons the CLI answers a bad ``--command-file`` with. They are
 #: a closed set on purpose: a refusal is a *reason*, never a quotation of the
 #: path or of the text it refused. A command can carry a credential, and the
 #: refusal ends up in a log line and in the agent's transcript.
-_TERMINAL_OFFER_REFUSALS = {
+_COMMAND_FILE_REFUSALS = {
     "unreadable": "--command-file cannot be read.",
     "credential": "--command-file refuses a credential-adjacent path.",
     "not_regular": "--command-file must be an ordinary file.",
@@ -2142,9 +2147,9 @@ def _assert_static_refusal(
 def test_an_unreadable_command_file_is_a_usage_error(tmp_path: Path) -> None:
     missing = tmp_path / "nope.txt"
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(missing))
+        agent_cli._command_file_text(str(missing))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["unreadable"], secrets=(str(missing),)
+        excinfo, _COMMAND_FILE_REFUSALS["unreadable"], secrets=(str(missing),)
     )
 
 
@@ -2154,19 +2159,19 @@ def test_a_credential_adjacent_command_file_is_refused(tmp_path: Path) -> None:
     secret = tmp_path / ".env"
     secret.write_text("TOKEN=x", encoding="utf-8")
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(secret))
+        agent_cli._command_file_text(str(secret))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
+        excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
     )
 
     nested = tmp_path / ".runtime" / "a" / "b" / "command.txt"
     nested.parent.mkdir(parents=True)
     nested.write_text("ls -la", encoding="utf-8")
     with pytest.raises(agent_cli.UsageError) as nested_info:
-        agent_cli._terminal_offer_command(str(nested))
+        agent_cli._command_file_text(str(nested))
     _assert_static_refusal(
         nested_info,
-        _TERMINAL_OFFER_REFUSALS["credential"],
+        _COMMAND_FILE_REFUSALS["credential"],
         secrets=(str(nested),),
     )
 
@@ -2188,10 +2193,10 @@ def test_a_credential_adjacent_command_file_is_refused_before_it_is_read(
     resolved = secret.resolve()
     opened = _record_path_calls(monkeypatch, "open", resolved)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(secret))
+        agent_cli._command_file_text(str(secret))
     assert not opened, "the credential file was opened"
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
+        excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
     )
 
 
@@ -2207,9 +2212,9 @@ def test_a_missing_credential_adjacent_path_is_still_a_credential_refusal(
     """
     missing = tmp_path / ".env"
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(missing))
+        agent_cli._command_file_text(str(missing))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(missing),)
+        excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(missing),)
     )
 
 
@@ -2238,9 +2243,9 @@ def test_a_command_path_that_aliases_a_credential_is_refused(
         pass
     else:
         with pytest.raises(agent_cli.UsageError) as excinfo:
-            agent_cli._terminal_offer_command(str(safe))
+            agent_cli._command_file_text(str(safe))
         _assert_static_refusal(
-            excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+            excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(safe),)
         )
 
     real_resolve = Path.resolve
@@ -2252,9 +2257,9 @@ def test_a_command_path_that_aliases_a_credential_is_refused(
 
     monkeypatch.setattr(Path, "resolve", _resolve)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(safe))
+        agent_cli._command_file_text(str(safe))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+        excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(safe),)
     )
 
 
@@ -2281,10 +2286,10 @@ def test_an_aliased_credential_path_is_refused_before_it_is_read(
     else:
         opened = _record_path_calls(monkeypatch, "open", target)
         with pytest.raises(agent_cli.UsageError) as excinfo:
-            agent_cli._terminal_offer_command(str(safe))
+            agent_cli._command_file_text(str(safe))
         assert not opened, "the aliased credential was opened"
         _assert_static_refusal(
-            excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+            excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(safe),)
         )
 
     # And deterministically, where the OS will not make a symlink.
@@ -2298,10 +2303,10 @@ def test_an_aliased_credential_path_is_refused_before_it_is_read(
     monkeypatch.setattr(Path, "resolve", _resolve)
     opened = _record_path_calls(monkeypatch, "open", target)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(safe))
+        agent_cli._command_file_text(str(safe))
     assert not opened, "the aliased credential was opened"
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+        excinfo, _COMMAND_FILE_REFUSALS["credential"], secrets=(str(safe),)
     )
 
 
@@ -2309,10 +2314,10 @@ def test_an_invalid_utf8_command_file_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "command.txt"
     path.write_bytes(b"TOKEN-SENTINEL-\xff\xfe-secret")
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
         excinfo,
-        _TERMINAL_OFFER_REFUSALS["encoding"],
+        _COMMAND_FILE_REFUSALS["encoding"],
         secrets=(str(path), "TOKEN-SENTINEL", "\ufffd"),
     )
 
@@ -2325,10 +2330,10 @@ def test_an_oversize_command_file_is_refused(tmp_path: Path) -> None:
         "OVERSIZE-SENTINEL-" + "a" * TERMINAL_OFFER_MAX_BYTES, encoding="utf-8"
     )
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
         excinfo,
-        _TERMINAL_OFFER_REFUSALS["oversize"],
+        _COMMAND_FILE_REFUSALS["oversize"],
         secrets=(str(path), "OVERSIZE-SENTINEL"),
     )
 
@@ -2348,13 +2353,13 @@ def test_a_command_file_at_the_byte_bound_is_accepted(tmp_path: Path) -> None:
     raw += " " * (TERMINAL_OFFER_MAX_BYTES - len(raw.encode("utf-8")))
     assert len(raw.encode("utf-8")) == TERMINAL_OFFER_MAX_BYTES
     path = _command_file(tmp_path, raw)
-    assert agent_cli._terminal_offer_command(str(path)) == body
+    assert agent_cli._command_file_text(str(path)) == body
 
     over = _command_file(tmp_path, raw + " ", name="over.txt")
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(over))
+        agent_cli._command_file_text(str(over))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["oversize"], secrets=(str(over),)
+        excinfo, _COMMAND_FILE_REFUSALS["oversize"], secrets=(str(over),)
     )
 
 
@@ -2364,10 +2369,10 @@ def test_a_command_file_with_an_invisible_character_is_refused(tmp_path: Path) -
     for text in ("ls -la\x00", "ls \u202e -la", "ls \u202c -la"):
         path = _command_file(tmp_path, text)
         with pytest.raises(agent_cli.UsageError) as excinfo:
-            agent_cli._terminal_offer_command(str(path))
+            agent_cli._command_file_text(str(path))
         _assert_static_refusal(
             excinfo,
-            _TERMINAL_OFFER_REFUSALS["characters"],
+            _COMMAND_FILE_REFUSALS["characters"],
             secrets=(str(path), text),
         )
 
@@ -2375,9 +2380,9 @@ def test_a_command_file_with_an_invisible_character_is_refused(tmp_path: Path) -
 def test_an_empty_command_file_is_refused(tmp_path: Path) -> None:
     path = _command_file(tmp_path, "   \n")
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["empty"], secrets=(str(path), "   \n")
+        excinfo, _COMMAND_FILE_REFUSALS["empty"], secrets=(str(path), "   \n")
     )
 
 
@@ -2430,7 +2435,7 @@ def test_the_command_file_is_read_with_a_bound(
     monkeypatch.setattr(_Path, "read_text", _refuse)
     monkeypatch.setattr(_Path, "read_bytes", _refuse)
 
-    assert agent_cli._terminal_offer_command(str(path)) == "ls -la"
+    assert agent_cli._command_file_text(str(path)) == "ls -la"
     # One read, of exactly the bound plus the byte that says "there is more".
     # An unbounded read (no size) or a larger one would show up here.
     assert reads == [TERMINAL_OFFER_MAX_BYTES + 1]
@@ -2498,9 +2503,9 @@ def test_an_unknown_home_user_command_file_is_a_usage_error(
     is the same static refusal, and the name never comes back.
     """
     raw = "~no-such-user-1842/command.txt"
-    assert agent_cli.main(["chat", "terminal-offer", "--command-file", raw]) == 2
+    assert agent_cli.main(["chat", "needs-action", "command", "--command-file", raw]) == 2
     captured = capsys.readouterr()
-    assert f"error: {_TERMINAL_OFFER_REFUSALS['unreadable']}" in captured.err
+    assert f"error: {_COMMAND_FILE_REFUSALS['unreadable']}" in captured.err
     assert raw not in captured.err
     assert "no-such-user-1842" not in captured.err
     assert captured.out == ""
@@ -2515,9 +2520,9 @@ def test_a_nul_in_the_command_file_path_is_refused(tmp_path: Path) -> None:
     """
     raw = str(tmp_path / "command.txt") + "\x00"
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(raw)
+        agent_cli._command_file_text(raw)
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["unreadable"], secrets=(raw, "\x00")
+        excinfo, _COMMAND_FILE_REFUSALS["unreadable"], secrets=(raw, "\x00")
     )
 
 
@@ -2541,10 +2546,10 @@ def test_a_path_operation_failure_is_a_static_refusal(
 
     _patch_path_operation(monkeypatch, operation, target, _fail)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
         excinfo,
-        _TERMINAL_OFFER_REFUSALS["unreadable"],
+        _COMMAND_FILE_REFUSALS["unreadable"],
         secrets=(str(path), "path operation failed"),
     )
 
@@ -2581,10 +2586,10 @@ def test_a_non_regular_command_file_is_refused_without_being_opened(
     _patch_path_operation(monkeypatch, "stat", resolved, _mode)
     _patch_path_operation(monkeypatch, "open", resolved, _open)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     assert not opened, f"the {kind} was opened"
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["not_regular"], secrets=(str(path),)
+        excinfo, _COMMAND_FILE_REFUSALS["not_regular"], secrets=(str(path),)
     )
 
 
@@ -2599,10 +2604,10 @@ def test_a_command_file_that_cannot_be_inspected_is_refused(
 
     _patch_path_operation(monkeypatch, "stat", path.resolve(), _deny)
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
         excinfo,
-        _TERMINAL_OFFER_REFUSALS["unreadable"],
+        _COMMAND_FILE_REFUSALS["unreadable"],
         secrets=(str(path), "Permission denied"),
     )
 
@@ -2622,9 +2627,9 @@ def test_a_command_file_whose_handle_is_not_ordinary_is_refused(
         os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFCHR | 0o600)
     )
     with pytest.raises(agent_cli.UsageError) as excinfo:
-        agent_cli._terminal_offer_command(str(path))
+        agent_cli._command_file_text(str(path))
     _assert_static_refusal(
-        excinfo, _TERMINAL_OFFER_REFUSALS["not_regular"], secrets=(str(path),)
+        excinfo, _COMMAND_FILE_REFUSALS["not_regular"], secrets=(str(path),)
     )
 
 
@@ -2633,13 +2638,13 @@ def test_a_bad_command_file_exits_2_before_any_request(
 ) -> None:
     """A usage error is caught before the engine is contacted."""
     monkey = tmp_path / "missing.txt"
-    assert agent_cli.main(["chat", "terminal-offer", "--command-file", str(monkey)]) == 2
+    assert agent_cli.main(["chat", "needs-action", "command", "--command-file", str(monkey)]) == 2
     captured = capsys.readouterr()
     assert "--command-file" in captured.err
     assert captured.out == ""
 
 
-def test_a_terminal_offer_crosses_from_the_file_to_the_chat(tmp_path: Path) -> None:
+def test_a_needs_action_crosses_from_the_file_to_the_chat(tmp_path: Path) -> None:
     """The whole path, once: a file, the CLI, the engine, the chat.
 
     The command is read from the file here, travels as one argument, and
@@ -2653,12 +2658,12 @@ def test_a_terminal_offer_crosses_from_the_file_to_the_chat(tmp_path: Path) -> N
     path = _command_file(tmp_path, "npm install -g ciao\n")
     parser = agent_cli.build_parser()
     operation, arguments = agent_cli.resolve(
-        parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])
+        parser.parse_args(["chat", "needs-action", "command", "--command-file", str(path)])
     )
     with _client(service) as client:
         response = _post(client, token, operation, arguments)
     assert response.status_code == 200
-    assert response.json()["data"]["terminal_offer"]["command"] == "npm install -g ciao"
+    assert response.json()["data"]["action"]["params"]["command"] == "npm install -g ciao"
     registry = (tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
     assert "npm install -g ciao" not in registry
 
@@ -2682,3 +2687,34 @@ def test_schedule_create_help_documents_days_time_timezone_and_frequency(
     assert "default UTC" not in help_text
     for frequency in FREQUENCIES:
         assert frequency in help_text
+
+
+def test_a_kind_the_agent_may_not_raise_is_refused(tmp_path: Path) -> None:
+    """`limit` is the engine's own kind: the agent is refused before any state changes."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_needs_action", {"kind": "limit", "params": {}})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_action_kind"
+    assert manager.get_chat(chat.chat_id).actions == []
+
+
+def test_an_unsupported_kind_is_a_static_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kind with no registered validator is refused with its static reason and stores nothing."""
+    from ciao import chat_actions
+
+    monkeypatch.delitem(chat_actions._VALIDATORS, "command")
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": "ls -la"}})
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_action"
+    assert "(unsupported_kind)" in body["error"]["message"]
+    assert manager.get_chat(chat.chat_id).actions == []

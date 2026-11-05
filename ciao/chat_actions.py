@@ -24,6 +24,8 @@ from types import MappingProxyType
 from typing import Literal, get_args
 from urllib.parse import urlsplit
 
+from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
+
 ActionKind = Literal[
     "mcp_auth",
     "command",
@@ -39,6 +41,12 @@ ActionOrigin = Literal["engine", "agent"]
 
 ACTION_KINDS: tuple[str, ...] = get_args(ActionKind)
 ACTION_STATES: tuple[str, ...] = get_args(ActionState)
+
+#: The kinds an agent may raise with `ciao chat needs-action`. `limit` is the
+#: engine's own and is never agent-raisable.
+AGENT_ACTION_KINDS: frozenset[str] = frozenset(
+    {"command", "gws_auth", "permission_mode", "device_code", "system_setting", "restart", "mcp_auth"}
+)
 
 ChatActionErrorReason = Literal[
     "invalid_kind",          # not one of ACTION_KINDS
@@ -144,8 +152,41 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
     return validated
 
 
+_COMMAND_REASONS: dict[str, ChatActionErrorReason] = {
+    "invalid_type": "invalid_type",
+    "invalid_encoding": "invalid_encoding",
+    "too_long": "too_long",
+    "empty": "empty",
+    "invalid_characters": "invalid_characters",
+}
+
+
+def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `command` kind: a shell command the user reviews, then runs.
+
+    The text is model-authored. The shared text contract refuses every
+    control character (ESC included), so a command can never close a
+    bracketed paste early when the PWA types it. A refusal names a reason
+    and never the text.
+    """
+    if set(raw) - {"command", "note"}:
+        raise ChatActionError("unknown_param")
+    value = raw.get("command")
+    if not isinstance(value, str):
+        raise ChatActionError("invalid_type")
+    try:
+        command = normalize_terminal_offer(value)
+    except TerminalOfferError as exc:
+        raise ChatActionError(_COMMAND_REASONS[exc.reason]) from None
+    params = {"command": command}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    return params
+
+
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
+    "command": _validate_command,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
 
