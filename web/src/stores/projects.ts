@@ -26,6 +26,7 @@ import type {
   ArchivedWorkspacesResponse,
   ProjectDeleteReport,
   ProjectInfo,
+  ChatAction,
   ChatInfo,
   ChatPinState,
   ChatPostprocess,
@@ -49,6 +50,7 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
+import { isChatAction, normalizeChatActions } from '../lib/chatActions'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -1911,6 +1913,8 @@ export const useProjectStore = defineStore('projects', () => {
     if (chatIsMemoryPass(chatId)) return false
     if (chatNeedsInput(chatId)) return true
     if (chatFailed(chatId)) return true
+    // A needs-you card (an MCP sign-in, ...) is waiting on the user.
+    if (chatActions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return false
     // Only the loaded workspace's tasks are held, and slugs collide across
@@ -2258,6 +2262,12 @@ export const useProjectStore = defineStore('projects', () => {
   // executes it.
   const terminalOffers = ref<Record<string, TerminalOffer>>({})
 
+  // Needs-you actions: engine-owned, memory only, the same read-start watermark
+  // rules as the offers, on the same clock.
+  const chatActions = ref<Record<string, ChatAction[]>>({})
+  let chatActionsSnapshotClock = 0
+  const chatActionsChatClock: Record<string, number> = {}
+
   // A monotonic counter that orders the offer state against the HTTP reads
   // that can overwrite it. Every read start and every accepted change takes
   // the next value, so "did this read start before that change?" is a
@@ -2340,6 +2350,8 @@ export const useProjectStore = defineStore('projects', () => {
   function applyTerminalOfferFromChatInfo(chat: ChatInfo, readStartedAt: number): void {
     if (chat.archived) return
     applyTerminalOfferRead(chat.chat_id, chat.terminal_offer ?? null, readStartedAt)
+    // Needs-you actions ride on the same reads and the same clock.
+    applyChatActionsRead(chat.chat_id, normalizeChatActions(chat.actions), readStartedAt)
   }
 
   /**
@@ -2378,7 +2390,128 @@ export const useProjectStore = defineStore('projects', () => {
    */
   function clearTerminalOffersForProjects(projectIds: Set<string>): void {
     for (const chat of chats.value) {
-      if (projectIds.has(chat.project_id)) setTerminalOffer(chat.chat_id, null)
+      if (projectIds.has(chat.project_id)) {
+        setTerminalOffer(chat.chat_id, null)
+        setChatActions(chat.chat_id, [])
+      }
+    }
+  }
+
+  function chatActionsWatermark(chatId: string): number {
+    return Math.max(chatActionsSnapshotClock, chatActionsChatClock[chatId] ?? 0)
+  }
+
+  function writeChatActions(chatId: string, actions: ChatAction[]): void {
+    if (actions.length) chatActions.value[chatId] = actions
+    else delete chatActions.value[chatId]
+  }
+
+  function applyChatActionsRead(chatId: string, actions: ChatAction[], readStartedAt: number): boolean {
+    if (readStartedAt < chatActionsWatermark(chatId)) return false
+    writeChatActions(chatId, actions)
+    return true
+  }
+
+  function applyChatActionsSnapshot(map: unknown): void {
+    const next: Record<string, ChatAction[]> = {}
+    if (map && typeof map === 'object') {
+      for (const [chatId, list] of Object.entries(map as Record<string, unknown>)) {
+        const actions = normalizeChatActions(list)
+        if (actions.length) next[chatId] = actions
+      }
+    }
+    chatActions.value = next
+    chatActionsSnapshotClock = nextTerminalOfferClock()
+  }
+
+  function setChatActions(chatId: string, actions: ChatAction[]): void {
+    chatActionsChatClock[chatId] = nextTerminalOfferClock()
+    writeChatActions(chatId, actions)
+  }
+
+  function upsertChatAction(chatId: string, action: ChatAction, readStartedAt: number): void {
+    if (readStartedAt < chatActionsWatermark(chatId)) return
+    const list = (chatActions.value[chatId] ?? []).slice()
+    const index = list.findIndex(a => a.id === action.id)
+    if (index >= 0) list[index] = action
+    else list.push(action)
+    setChatActions(chatId, list)
+  }
+
+  /**
+   * Adopt the engine's state from a refusal. A 409 (unknown or stale id)
+   * carries the whole list; a 400 (a ChatActionError) carries the current
+   * action or null. True only for a 409, which the caller treats as handled;
+   * a 400 is adopted and then rethrown so the body can show the reason.
+   */
+  function adoptChatActionConflict(chatId: string, e: unknown, readStartedAt: number): boolean {
+    const err = e as { status?: number; payload?: { actions?: unknown; action?: unknown } } | null
+    const payload = err?.payload
+    const refused = payload?.action
+    if (err?.status === 400 && isChatAction(refused)) {
+      upsertChatAction(chatId, refused, readStartedAt)
+      return false
+    }
+    if (err?.status !== 409) return false
+    if (Array.isArray(payload?.actions)) {
+      if (applyChatActionsRead(chatId, normalizeChatActions(payload.actions), readStartedAt)) {
+        chatActionsChatClock[chatId] = nextTerminalOfferClock()
+      }
+    }
+    return true
+  }
+
+  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue'): string {
+    return `/api/chats/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(actionId)}/${verb}`
+  }
+
+  async function startChatAction(
+    chatId: string, actionId: string, body: Record<string, unknown> = {},
+  ): Promise<ChatAction | null> {
+    const readStartedAt = terminalOfferReadStart()
+    try {
+      const res = await api.post<{ action?: unknown }>(chatActionPath(chatId, actionId, 'start'), body)
+      const started = res?.action
+      if (!isChatAction(started)) return null
+      upsertChatAction(chatId, started, readStartedAt)
+      if (started.kind === 'permission_mode' && started.state === 'done') {
+        // There is no chat_mode_changed event. This card is the only PWA
+        // surface that shows a chat's mode, so the cached chat is updated here.
+        const cached = chats.value.find(c => c.chat_id === chatId)
+        if (cached) cached.mode = started.params.mode
+      }
+      return started
+    } catch (e) {
+      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
+      return null
+    }
+  }
+
+  async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
+    const readStartedAt = terminalOfferReadStart()
+    try {
+      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'dismiss'), {})
+      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
+        chatActionsChatClock[chatId] = nextTerminalOfferClock()
+      }
+      return 'dismissed'
+    } catch (e) {
+      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
+      return 'conflict'
+    }
+  }
+
+  async function continueChatAction(chatId: string, actionId: string): Promise<'continued' | 'conflict'> {
+    const readStartedAt = terminalOfferReadStart()
+    try {
+      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'continue'), {})
+      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
+        chatActionsChatClock[chatId] = nextTerminalOfferClock()
+      }
+      return 'continued'
+    } catch (e) {
+      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
+      return 'conflict'
     }
   }
 
@@ -3055,6 +3188,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (options?.onlyIfEmpty && result?.deleted === false) return false
     // The chat is gone for good, and the command it offered went with it.
     setTerminalOffer(chatId, null)
+    setChatActions(chatId, [])
     // Deliberate delete: the chat is really gone, so any draft riding along
     // with it is by construction never a sweep casualty — clear it now.
     clearChatDraft(chatId)
@@ -3249,6 +3383,7 @@ export const useProjectStore = defineStore('projects', () => {
     // The archive committed, so the command the chat offered died with it.
     // Not before: a refused archive leaves the chat, and its offer, alone.
     setTerminalOffer(chatId, null)
+    setChatActions(chatId, [])
     delete archivingChats.value[chatId]
     // Active already cleared optimistically; keep the guard for races where
     // the user switched chats between the optimistic clear and the response.
@@ -4984,6 +5119,7 @@ export const useProjectStore = defineStore('projects', () => {
         // so an offer the engine no longer holds is cleared, and one it
         // holds for a chat this client has not listed yet is kept.
         applyTerminalOfferSnapshot(msg.chat_terminal_offers)
+        applyChatActionsSnapshot(msg.chat_actions)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -5233,6 +5369,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
         // The command died with the chat.
         setTerminalOffer(msg.chat_id, null)
+        setChatActions(msg.chat_id, [])
         // Hold the local flag until a chat-list payload agrees: a GET that left
         // before the archive committed can still resolve after this event.
         pendingArchived.value.add(msg.chat_id)
@@ -5291,6 +5428,14 @@ export const useProjectStore = defineStore('projects', () => {
         setTerminalOffer(msg.chat_id, msg.terminal_offer)
         break
       }
+      case 'chat_actions_changed': {
+        // The engine raised, updated or dropped a needs-you action. An archived
+        // chat holds none, so a late event cannot give it one.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat?.archived) break
+        setChatActions(msg.chat_id, normalizeChatActions(msg.actions))
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -5303,6 +5448,7 @@ export const useProjectStore = defineStore('projects', () => {
         dropBesideChat(msg.chat_id)
         // The chat is gone, and so is the command it offered.
         setTerminalOffer(msg.chat_id, null)
+        setChatActions(msg.chat_id, [])
         dropChatPinState(msg.chat_id)
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
@@ -7271,6 +7417,7 @@ export const useProjectStore = defineStore('projects', () => {
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
+    chatActions,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
@@ -7304,6 +7451,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     terminalOfferReadStart, dismissTerminalOffer,
+    startChatAction, dismissChatAction, continueChatAction,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,

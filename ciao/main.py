@@ -1207,6 +1207,8 @@ async def _run_server_locked(
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+    # Needs-you handlers reach app singletons (terminal sessions, the gws re-login manager) through this.
+    pcm.actions_runtime.bind_app_state(app.state)
 
     from ciao.web.connection_tracker import ConnectionTracker
 

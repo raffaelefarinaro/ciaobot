@@ -85,6 +85,11 @@
     <template v-else-if="name === 'spark'">
       <path d="M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z" />
     </template>
+
+    <!-- Check: done. A stroke-only tick, so it keeps the set's caps and joins. -->
+    <template v-else-if="name === 'check'">
+      <polyline points="4 12 10 18 20 6" />
+    </template>
   </svg>
 </template>
 
@@ -111,6 +116,7 @@ export type AppIconName =
   | 'activity'
   | 'shield'
   | 'spark'
+  | 'check'
 
 withDefaults(defineProps<{
   name: AppIconName

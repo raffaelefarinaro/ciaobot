@@ -147,6 +147,7 @@ class _DriveHost:
         self.discarded: list[str] = []
         self.detached_names: list[str] = []
         self.drain_awaits: list[str] = []
+        self.detections: list[str] = []
 
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         del chat_id
@@ -266,6 +267,9 @@ class _DriveHost:
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
         del chat_id, project_id
+
+    def _schedule_action_detection(self, chat_id: str) -> None:
+        self.detections.append(chat_id)
 
     def _native_question_request_id(self, pending_question: str) -> str:
         del pending_question

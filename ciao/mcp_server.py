@@ -739,28 +739,21 @@ async def _op_chat_send(service: CiaoMcpService, chat_id: str, prompt: str) -> d
     return await service._invoke("chat_send", lambda cp, p: cp.chat_send(p, chat_id, prompt), mutating=True)
 
 
-async def _op_chat_terminal_offer(service: CiaoMcpService, command: str) -> dict[str, Any]:
-    """Suggest a terminal command for the calling chat.
+async def _op_chat_needs_action(
+    service: CiaoMcpService, kind: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Ask the user, in the calling chat, to do something only they can do.
 
-    The command is untrusted, model-authored text the user reads, copies and
-    runs themselves. Nothing is executed, no terminal is opened, nothing is
-    unlocked and no output is collected: the call only records the suggestion
-    on the calling chat, which is transient and in memory only.
-
-    There is no chat argument, and no label, kind or path: the offer belongs
-    to the chat that asked for it. The argument is a plain string on purpose:
-    a schema *constraint* on the text would put a rejected command inside
-    pydantic's validation error, so the engine validates the text itself and
-    refuses it with a static reason.
-
-    A malformed *type* is the schema's refusal, and the raw tool error does
-    carry the value that was submitted. What keeps it out of the engine's
-    HTTP envelope, its log and its telemetry is the dispatcher, which
-    answers with the error's first line only. The raw exception still holds
-    the value, so a transport that surfaced it whole would show it.
+    ``kind`` is one of command, gws_auth, permission_mode, device_code,
+    system_setting, restart, mcp_auth. ``params`` holds that kind's values as
+    strings (for command: ``command``, optional ``note``). Nothing is executed:
+    the request becomes a card the user acts on. There is no chat argument; the
+    request belongs to the calling chat. Values are plain strings on purpose, so
+    a schema constraint can never quote a rejected value. The engine validates
+    them and refuses with a static reason.
     """
     return await service._invoke(
-        "chat_terminal_offer", lambda cp, p: cp.chat_terminal_offer(p, command)
+        "chat_needs_action", lambda cp, p: cp.chat_needs_action(p, kind, params or {})
     )
 
 
@@ -1514,7 +1507,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_create", _WRITE, _op_chat_create.__doc__ or "", _op_chat_create),
     Operation("chat_update", _WRITE, _op_chat_update.__doc__ or "", _op_chat_update),
     Operation("chat_send", _WRITE, _op_chat_send.__doc__ or "", _op_chat_send),
-    Operation("chat_terminal_offer", _READ, _op_chat_terminal_offer.__doc__ or "", _op_chat_terminal_offer),
+    Operation("chat_needs_action", _READ, _op_chat_needs_action.__doc__ or "", _op_chat_needs_action),
     Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
     Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
     Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),
