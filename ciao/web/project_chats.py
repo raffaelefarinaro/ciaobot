@@ -10214,6 +10214,45 @@ class ProjectChatManager:
             entry, prompt, model, mode, provider, target_chat_id=target_chat_id
         )
 
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is the app's memory machinery, or ''.
+
+        The Memory project is app-owned: it holds the engine's own memory
+        passes, and a routine run there would put an ordinary chat in a
+        project where every chat is silenced. A pass is the app's own turn: a
+        routine posted into it runs under the pass's restrictions and never
+        reaches the owner.
+
+        The re-home of a deleted target counts too: that project is where the
+        run's chat would be opened.
+        """
+        project_id = getattr(entry, "web_project_id", "") or ""
+        if project_id:
+            project = self._projects.get(project_id)
+            if project is None:
+                # A stale id: the recorded name is what survives it. Looked up
+                # without repairing the entry — a quiet command must not
+                # resolve or repair a target.
+                project = self.find_project(
+                    getattr(entry, "web_project_name", "") or "",
+                    getattr(entry, "workspace", "") or "",
+                )
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if chat_id:
+            chat = self._chats.get(chat_id)
+            if chat is not None and is_memory_pass_chat(
+                chat, self._projects.get(chat.project_id)
+            ):
+                return "a memory pass is not a target for a schedule"
+        fallback_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_id:
+            project = self._projects.get(fallback_id)
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        return ""
+
     def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
         """The project with this name in this workspace, or None.
 
@@ -10326,7 +10365,10 @@ class ProjectChatManager:
                 if p.workspace == workspace and p.name == "General":
                     return p
             for p in self._projects.values():
-                if p.workspace == workspace:
+                # The app's own Memory project is never a re-home target: a
+                # run there would open an ordinary chat in a project where
+                # every chat is silenced.
+                if p.workspace == workspace and p.kind != MEMORY_PROJECT_KIND:
                     return p
         return None
 

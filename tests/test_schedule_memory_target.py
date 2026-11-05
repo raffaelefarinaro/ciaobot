@@ -248,6 +248,52 @@ async def test_a_refused_entry_does_not_stop_the_tick(tmp_path: Path) -> None:
     assert stored.last_status == "error"
 
 
+async def test_a_refused_one_shot_command_routine_is_not_consumed(
+    tmp_path: Path,
+) -> None:
+    """A command entry is never prepared before the dispatch.
+
+    So the refusal has to be asked for before the entry is consumed: the
+    dispatch's own check runs after the one-shot has already been deleted.
+    """
+    store = ScheduleStore(tmp_path)
+    dispatched: list[str] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(entry.schedule_id)
+
+    mgr = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch,
+        prepare_chat=lambda entry, prompt, model, mode, provider: None,
+        target_refusal=lambda entry: (
+            "the Memory project holds the engine's own memory passes"
+        ),
+    )
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="once",
+        run_at_date="2026-06-15",
+        timezone_name="UTC",
+        workspace="personal",
+        command="echo hello",
+    )
+    entry.created_at = "2026-01-01T00:00:00Z"
+    store.replace(entry)
+
+    await mgr.tick(now=datetime(2026, 6, 15, 8, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+
+    assert dispatched == []
+    stored = store.get(entry.schedule_id)
+    assert stored is not None
+    assert stored.last_status == "error"
+
+
 async def test_a_refused_command_routine_does_not_run_its_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

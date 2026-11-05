@@ -139,6 +139,8 @@ class ScheduleDispatchHost(Protocol):
 
     def schedule_default_provider(self, project_id: str | None) -> str: ...
 
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str: ...
+
     def prepare_schedule_chat(
         self,
         entry: ScheduleEntry,
@@ -588,58 +590,10 @@ class ScheduleDispatcher:
     def _target_refusal(self, entry: ScheduleEntry) -> str:
         """Why this entry's target is the app's memory machinery, or ''.
 
-        The Memory project is app-owned: it holds the engine's own memory
-        passes, and a routine run there would put an ordinary chat in a
-        project where every chat is silenced. A pass is the app's own turn: a
-        routine posted into it runs under the pass's restrictions and never
-        reaches the owner.
+        The manager owns the rule: it knows the projects and the chats, and it
+        is the same answer the scheduler gets before it dispatches.
         """
-        project_id = getattr(entry, "web_project_id", "") or ""
-        if project_id:
-            project = self._host._projects.get(project_id)
-            if project is None:
-                # A stale id: the recorded name is what survives it. Looked up
-                # here without repairing the entry — a quiet command must not
-                # resolve or repair a target.
-                project = self._project_named(entry)
-            if project is not None and is_memory_pass_project(project):
-                return "the Memory project holds the engine's own memory passes"
-        chat_id = getattr(entry, "web_chat_id", "") or ""
-        if chat_id:
-            chat = self._host._chats.get(chat_id)
-            if chat is not None and is_memory_pass_chat(
-                chat, self._host._projects.get(chat.project_id)
-            ):
-                return "a memory pass is not a target for a schedule"
-        # The project a deleted target re-homes into. It is the project's the
-        # chat lived in, so it is the app's own Memory project when the chat
-        # was a pass — and the run would land there.
-        fallback_id = getattr(entry, "fallback_project_id", "") or ""
-        if fallback_id:
-            project = self._host._projects.get(fallback_id)
-            if project is not None and is_memory_pass_project(project):
-                return "the Memory project holds the engine's own memory passes"
-        return ""
-
-    def _project_named(self, entry: ScheduleEntry) -> ProjectInfo | None:
-        """The project the entry's recorded name points at, or None.
-
-        The user's project wins when the name is shared: the app-owned Memory
-        project is called "Memory", and a user project may be too.
-        """
-        name = (getattr(entry, "web_project_name", "") or "").strip()
-        workspace = getattr(entry, "workspace", "") or ""
-        if not name:
-            return None
-        matches = [
-            project
-            for project in self._host._projects.values()
-            if project.name == name and project.workspace == workspace
-        ]
-        for project in matches:
-            if not is_memory_pass_project(project):
-                return project
-        return matches[0] if matches else None
+        return self._host.schedule_target_refusal(entry)
 
     def _supersede_earlier_runs(self, chat: ChatInfo) -> None:
         """Retire the earlier runs' retries and errors when a routine runs again.

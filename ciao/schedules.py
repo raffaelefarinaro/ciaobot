@@ -1836,6 +1836,7 @@ class ScheduleManager:
         is_node_active: Callable[[], bool] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
         chat_dispatchable: Callable[[ScheduleEntry], bool] | None = None,
+        target_refusal: Callable[[ScheduleEntry], str] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
@@ -1844,6 +1845,11 @@ class ScheduleManager:
         self._is_node_active = is_node_active
         self._chat_busy = chat_busy
         self._chat_dispatchable = chat_dispatchable
+        # Why an entry's target is refused, or '' when it may run. The engine
+        # owns that rule (its Memory project holds its own passes), and the
+        # scheduler asks before it dispatches: a run that never happens must
+        # not consume a one-shot entry or run a command.
+        self._target_refusal = target_refusal
         # Interval runs are awaited (not fire-and-forget) so their outcome can
         # be stamped, which means a long run can still be in flight when the
         # next tick comes due. Tracked here so the cadence skips instead of
@@ -2017,6 +2023,17 @@ class ScheduleManager:
             return None
         return self._prepare_chat(entry, entry.prompt, model, mode, provider)
 
+    def _refused_target(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is refused, or '' when it may run.
+
+        Asked before the dispatch, because a command entry is never prepared
+        here and the dispatch's own check runs after the entry has already
+        been consumed.
+        """
+        if self._target_refusal is None:
+            return ""
+        return self._target_refusal(entry)
+
     def _begin_dispatch(
         self,
         entry: ScheduleEntry,
@@ -2145,6 +2162,11 @@ class ScheduleManager:
         # Sampling it in there instead read the already-re-pointed value, so
         # the carry-over below could never fire.
         bound_before = entry.web_chat_id
+        refusal = self._refused_target(entry)
+        if refusal:
+            # The entry is disabled rather than left to fail every tick.
+            self._disable_interval(entry, refusal)
+            return None
         try:
             chat_id = self._prepare_run_chat(entry, model, mode, provider)
         except ValueError as exc:
@@ -2417,6 +2439,19 @@ class ScheduleManager:
                 # one-shot that never ran.
                 logger.warning(
                     "Schedule %s could not be prepared: %s", entry.schedule_id, exc
+                )
+                if entry.last_status != "error":
+                    entry.last_status = "error"
+                    self._store.replace(entry)
+                continue
+            # A command entry is never prepared here, so the refusal has to be
+            # asked for: the dispatch's own check runs after this entry has
+            # already been consumed.
+            refusal = self._refused_target(entry)
+            if refusal:
+                logger.warning(
+                    "Schedule %s cannot run in its target: %s",
+                    entry.schedule_id, refusal,
                 )
                 if entry.last_status != "error":
                     entry.last_status = "error"

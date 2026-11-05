@@ -1122,6 +1122,7 @@ async def _run_server_locked(
         is_node_active=lambda: legacy_writers_armed,
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
+        target_refusal=pcm.schedule_target_refusal,
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;
