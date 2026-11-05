@@ -400,3 +400,27 @@ async def test_a_lifecycle_clear_cancels_each_removed_action(
     manager.new_session(chat.chat_id)
 
     assert removed_calls == [(chat.chat_id, before)]
+
+
+def test_replacing_an_action_cancels_the_old_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = make_manager(tmp_path)
+    chat = _one_chat(manager)
+    first = _sign_in(manager, chat.chat_id)
+    old = manager.get_action(chat.chat_id, first["id"])  # type: ignore[arg-type]
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(
+        manager.actions_runtime,
+        "cancel_removed",
+        lambda chat_id, actions: calls.append((chat_id, list(actions))),
+    )
+
+    manager.raise_action(
+        chat.chat_id,
+        "mcp_auth",
+        {"server": "linear", "provider": "claude"},
+        origin="engine",
+    )
+
+    assert calls == [(chat.chat_id, [old])]

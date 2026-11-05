@@ -4250,6 +4250,8 @@ class ProjectChatManager:
                 error="",
                 created_at=time.time(),
             )
+            # The replaced card's attempt, if any, must not outlive it.
+            self.actions_runtime.cancel_removed(chat_id, [current])
             chat.actions[index] = new
             self._publish_actions(chat)
             return action_payload(new)

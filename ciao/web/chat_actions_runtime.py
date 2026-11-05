@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -92,8 +93,9 @@ class OpencodeMcpAuthFlow(ActionHandler):
     """The OpenCode MCP sign-in, through OpenCode's V2 integration API."""
 
     def __init__(self) -> None:
-        # Action id -> (integration id, attempt id) of the OAuth attempt in flight.
-        self._attempts: dict[str, tuple[str, str]] = {}
+        # Action id -> (the provider that opened it, integration id, attempt id).
+        # The provider is kept so a cancel after a lifecycle clear still reaches OpenCode.
+        self._attempts: dict[str, tuple[OpencodeProvider, str, str]] = {}
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
         cid = ctx.chat.chat_id
@@ -120,7 +122,12 @@ class OpencodeMcpAuthFlow(ActionHandler):
                 await provider.cancel_mcp_oauth(attempt.integration_id, attempt.attempt_id)
             ctx.pcm.update_action(cid, action.id, state="failed", error=CODE_MODE_ERROR)
             return
-        self._attempts[action.id] = (attempt.integration_id, attempt.attempt_id)
+        if ctx.pcm.get_action(cid, action.id) is None:
+            # Dismissed while the attempt was being opened: nothing will poll or cancel it, so cancel it here.
+            with contextlib.suppress(Exception):
+                await provider.cancel_mcp_oauth(attempt.integration_id, attempt.attempt_id)
+            return
+        self._attempts[action.id] = (provider, attempt.integration_id, attempt.attempt_id)
         try:
             ctx.pcm.update_action(
                 cid, action.id, state="waiting", params_update={"url": attempt.url}
@@ -147,7 +154,8 @@ class OpencodeMcpAuthFlow(ActionHandler):
         attempt = self._attempts.get(action.id)
         if attempt is None:
             return
-        status, message = await provider.read_mcp_oauth_attempt(*attempt)
+        _, integration_id, attempt_id = attempt
+        status, message = await provider.read_mcp_oauth_attempt(integration_id, attempt_id)
         if status == "failed":
             self._attempts.pop(action.id, None)
             ctx.pcm.update_action(
@@ -159,13 +167,13 @@ class OpencodeMcpAuthFlow(ActionHandler):
 
     async def cancel(self, ctx: ActionContext, action: ChatAction) -> None:
         attempt = self._attempts.pop(action.id, None)
-        provider = ctx.provider
-        if attempt is not None and isinstance(provider, OpencodeProvider) and provider.has_live_server:
-            await provider.cancel_mcp_oauth(*attempt)
+        if attempt is not None:
+            owner, integration_id, attempt_id = attempt
+            await owner.cancel_mcp_oauth(integration_id, attempt_id)
 
     def wake_prompt(self, action: ChatAction) -> str:
         return (
-            f"[Ciaobot] The user signed in to the MCP server {action.params['server']}. "
+            f"[Ciaobot] The user signed in to the MCP server {json.dumps(action.params['server'])}. "
             "Its tools are available in this chat now; continue the task you were working on."
         )
 

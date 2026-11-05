@@ -7,8 +7,12 @@ The shared fakes live here; ``tests/test_opencode_mcp_oauth.py`` and
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
+from types import MappingProxyType
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,7 +20,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from ciao.chat_actions import ChatActionError, _VALIDATORS
+from ciao.chat_actions import ChatAction, ChatActionError, _VALIDATORS
 from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
 from ciao.providers.opencode import OpencodeProvider
@@ -25,12 +29,17 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.chat_actions_runtime import (
     ACTION_HANDLERS,
+    BAD_URL_ERROR,
     CODE_MODE_ERROR,
     EXPIRED_ERROR,
     NO_SIGN_IN_ERROR,
+    MCP_AUTH_FLOWS,
     NOT_RUNNING_ERROR,
+    START_FAILED_ERROR,
+    STOPPED_ERROR,
     TIMEOUT_ERROR,
     ChatActionsRuntime,
+    McpAuthHandler,
 )
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost
@@ -40,6 +49,19 @@ from ciao.web.project_chats import (
     ProjectChatManager,
 )
 from tests.test_chat_streaming_boundary import _DriveHost
+
+
+@contextmanager
+def _record_events(manager: ProjectChatManager) -> Iterator[list[dict]]:
+    """Collect the events the manager publishes while the block runs."""
+    published: list[dict] = []
+    hub = manager._events
+    original = hub.publish
+    hub.publish = published.append  # type: ignore[method-assign]
+    try:
+        yield published
+    finally:
+        hub.publish = original  # type: ignore[method-assign]
 
 
 # ── Shared fakes ───────────────────────────────────────────────────────────
@@ -718,3 +740,220 @@ async def test_detection_is_only_spawned_for_a_live_opencode_chat(tmp_path: Path
     tasks = detection_tasks(manager)
     assert len(tasks) == 1
     await tasks[0]
+
+
+# ── Fix round 1 (review of #2569) ─────────────────────────────────────────
+
+
+class _Service:
+    """A provider service as the lifecycle paths see it: a provider and a disconnect."""
+
+    def __init__(self, provider: object) -> None:
+        self.provider = provider
+
+    async def disconnect(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_during_start_cancels_the_attempt(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+
+    class GatedClient(FakeClient):
+        async def post(self, path: str, json: object = None, timeout: float | None = None) -> FakeResponse:
+            if path == CONNECT_PATH:
+                await gate.wait()
+            return await super().post(path, json=json, timeout=timeout)
+
+    client = GatedClient(sign_in_routes())
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+    start = asyncio.create_task(runtime.start(chat.chat_id, action_id, {}, is_loopback=True))
+    await until(lambda: _state(manager, chat, action_id) == "working")
+
+    await runtime.dismiss(chat.chat_id, action_id)
+    gate.set()
+
+    with pytest.raises(ChatActionConflictError):
+        await start
+    assert ("DELETE", ATTEMPT_PATH, None) in client.calls
+    assert action_id not in MCP_AUTH_FLOWS["opencode"]._attempts  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["new_session", "handover", "archive"])
+async def test_a_lifecycle_clear_cancels_the_opencode_attempt(tmp_path: Path, lifecycle: str) -> None:
+    client = FakeClient(sign_in_routes())
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    manager._providers[chat.chat_id] = cast(Any, _Service(live_opencode(tmp_path, client)))
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    if lifecycle == "new_session":
+        manager.new_session(chat.chat_id)
+    elif lifecycle == "handover":
+        manager.handover_chat(chat.chat_id, provider="claude", model="haiku")
+    else:
+        await manager.archive_chat(chat.chat_id)
+
+    await until(lambda: ("DELETE", ATTEMPT_PATH, None) in client.calls)
+    assert action_id not in runtime._polls
+
+
+def test_the_wake_prompt_quotes_the_server_name() -> None:
+    server = 'lin\near "x"'
+    action = ChatAction(
+        id="a1",
+        kind="mcp_auth",
+        origin="engine",
+        state="done",
+        params=MappingProxyType({"server": server, "provider": "opencode"}),
+    )
+
+    prompt = McpAuthHandler().wake_prompt(action)
+
+    assert json.dumps(server) in prompt
+    assert server not in prompt
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_an_authorize_url_that_is_not_http(tmp_path: Path) -> None:
+    routes = sign_in_routes()
+    routes[("POST", CONNECT_PATH)] = FakeResponse(200, {
+        "data": {"attemptID": ATTEMPT_ID, "url": "javascript:alert(1)", "mode": "auto"},
+    })
+    client = FakeClient(routes)
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    action = manager.get_action(chat.chat_id, action_id)
+    assert action is not None
+    assert action.state == "failed"
+    assert action.error == BAD_URL_ERROR
+    assert "url" not in action.params
+    assert ("DELETE", ATTEMPT_PATH, None) in client.calls
+    assert action_id not in runtime._polls
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_stops_after_start_fails_the_action(tmp_path: Path) -> None:
+    client = FakeClient(sign_in_routes())
+    manager = make_manager(tmp_path)
+    provider = live_opencode(tmp_path, client)
+    chat = opencode_chat(manager, provider)
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    provider._process = cast(Any, SimpleNamespace(returncode=1))
+
+    await until(lambda: _state(manager, chat, action_id) == "failed" and action_id not in runtime._polls)
+    action = manager.get_action(chat.chat_id, action_id)
+    assert action is not None
+    assert action.error == STOPPED_ERROR
+
+
+@pytest.mark.asyncio
+async def test_a_connect_failure_fails_the_action_without_logging_the_url(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    routes = sign_in_routes()
+    routes[("POST", CONNECT_PATH)] = FakeResponse(500, {})
+    client = FakeClient(routes)
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager)
+    action_id = raise_sign_in(manager, chat)
+
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    action = manager.get_action(chat.chat_id, action_id)
+    assert action is not None
+    assert action.state == "failed"
+    assert action.error == START_FAILED_ERROR
+    assert AUTH_URL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_poll_tick_that_raises_does_not_end_the_wait(tmp_path: Path) -> None:
+    client = FakeClient(sign_in_routes(
+        mcp=[
+            FakeResponse(200, mcp_listing(("linear", "needs_auth"))),
+            FakeResponse(500, {}),
+            FakeResponse(200, mcp_listing(("linear", "connected"))),
+        ],
+    ))
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    await until(
+        lambda: _state(manager, chat, action_id) == "done" and action_id not in runtime._polls
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_cancel_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ciao.web.chat_actions_runtime as runtime_module
+
+    class HangingHandler(ActionHandler):
+        async def cancel(self, ctx: ActionContext, action: Any) -> None:
+            del ctx, action
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(runtime_module, "CANCEL_TIMEOUT_S", 0.05)
+    monkeypatch.setitem(ACTION_HANDLERS, "restart", HangingHandler())
+    monkeypatch.setitem(_VALIDATORS, "restart", lambda raw: {})
+    manager = make_manager(tmp_path)
+    chat = manager.create_chat(manager.create_project("P", workspace="work").project_id)
+    runtime = make_runtime(manager)
+    action = manager.raise_action(chat.chat_id, "restart", {}, origin="engine")
+    assert action is not None
+
+    started = time.monotonic()
+    remaining = await runtime.dismiss(chat.chat_id, str(action["id"]))
+
+    assert time.monotonic() - started < 1.0
+    assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_detection_twice_keeps_one_action_and_its_id(tmp_path: Path) -> None:
+    client = _detection_routes([("linear", "needs_auth")])
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager)
+
+    with _record_events(manager) as published:
+        await runtime.detect_mcp_auth(chat.chat_id)
+        first_id = chat.actions[0].id
+        await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert [a.id for a in chat.actions] == [first_id]
+    assert len([e for e in published if e["type"] == "chat_actions_changed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_detection_leaves_a_waiting_action_waiting(tmp_path: Path) -> None:
+    client = _detection_routes([("linear", "needs_auth")])
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    runtime = make_runtime(manager)
+    action_id = raise_sign_in(manager, chat)
+    manager.update_action(chat.chat_id, action_id, state="waiting")
+
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert [a.id for a in chat.actions] == [action_id]
+    assert _state(manager, chat, action_id) == "waiting"

@@ -235,3 +235,41 @@ def test_the_events_snapshot_carries_chat_actions(tmp_path: Path) -> None:
             "chat_id": chat.chat_id,
             "actions": [],
         }
+
+
+def test_continue_of_an_unknown_chat_is_404(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+
+    response = _client(manager).post(
+        "/api/chats/no-such-chat/actions/x/continue", headers=_HEADERS
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+
+
+def test_dismiss_of_an_unknown_chat_is_404(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+
+    response = _client(manager).post(
+        "/api/chats/no-such-chat/actions/x/dismiss", headers=_HEADERS
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+
+
+def test_a_stale_continue_is_409_with_the_current_list(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    project = manager.create_project("Stale continue", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Stale continue", provider="opencode")
+    current = _raise(manager, chat.chat_id)
+
+    response = _client(manager).post(
+        f"/api/chats/{chat.chat_id}/actions/stale-id/continue", headers=_HEADERS
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "chat_action_conflict"
+    assert body["actions"] == [current]
