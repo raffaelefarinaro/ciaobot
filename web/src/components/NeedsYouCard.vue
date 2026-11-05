@@ -115,7 +115,11 @@ onBeforeUnmount(() => {
     <div class="needs-you-card-head">
       <span class="needs-you-card-glyph" aria-hidden="true">
         <span v-if="busy" class="needs-you-card-spinner" />
-        <AppIcon v-else :name="ICONS[action.kind] ?? 'activity'" :size="16" />
+        <AppIcon
+          v-else
+          :name="action.state === 'done' ? 'check' : (ICONS[action.kind] ?? 'activity')"
+          :size="16"
+        />
       </span>
       <div class="needs-you-card-text">
         <p :id="titleId" class="needs-you-card-title">{{ copy.title }}</p>

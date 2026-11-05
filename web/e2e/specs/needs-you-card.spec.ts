@@ -14,9 +14,11 @@ const CHAT_ID = 'alpha-chat-1'
 const TOUCH_MIN = 44
 
 /** Put an `mcp_auth` action on the chat, before the app boots. */
-async function raiseSignIn(page: Page): Promise<void> {
+async function raiseSignIn(page: Page, state?: 'waiting'): Promise<void> {
+  const params: Record<string, string> = { server: 'linear', provider: 'opencode' }
+  if (state === 'waiting') params.url = 'https://auth.example.invalid/authorize?state=waiting'
   const res = await page.request.post('/__fixture__/chat-action', {
-    data: { chat_id: CHAT_ID, kind: 'mcp_auth', params: { server: 'linear', provider: 'opencode' } },
+    data: { chat_id: CHAT_ID, kind: 'mcp_auth', state, params },
   })
   expect(res.ok(), 'the fixture refused the action').toBe(true)
 }
@@ -95,6 +97,37 @@ test.describe('the needs-you card on a phone', () => {
     const controls = card.locator('button')
     const count = await controls.count()
     expect(count).toBeGreaterThan(0)
+    for (let i = 0; i < count; i += 1) {
+      const size = (await controls.nth(i).boundingBox())!
+      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    }
+  })
+
+  test('keeps the waiting link 44px and clear of the step list', async ({ page }, testInfo) => {
+    await isolate(page, `needs-you-card-phone-waiting-${testInfo.workerIndex}`)
+    await raiseSignIn(page, 'waiting')
+    await boot(page, CHAT_PATH, COMPOSER)
+
+    const card = page.locator('.needs-you-card')
+    await expect(card).toBeVisible()
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `the phone layout scrolls ${overflow}px sideways; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+
+    const link = card.locator('a.needs-you-btn')
+    const linkBox = (await link.boundingBox())!
+    expect(linkBox.height, `the sign-in link is ${linkBox.height}px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    expect(linkBox.width, `the sign-in link is ${linkBox.width}px wide`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+
+    const stepsBox = (await card.locator('.needs-you-steps').boundingBox())!
+    const gap = linkBox.y - (stepsBox.y + stepsBox.height)
+    expect(gap, `the link sits ${gap}px below the steps`).toBeGreaterThanOrEqual(8)
+
+    const controls = card.locator('button')
+    const count = await controls.count()
     for (let i = 0; i < count; i += 1) {
       const size = (await controls.nth(i).boundingBox())!
       expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)

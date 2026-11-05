@@ -4,7 +4,7 @@
  * its steps. The card owns Not now and Continue the chat / Done; this body
  * never renders them.
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { actionCopy, chatActionErrorReason, MCP_AUTH_STEPS, safeExternalUrl } from '../../lib/chatActions'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
@@ -16,9 +16,23 @@ const store = useProjectStore()
 const starting = ref(false)
 const copy = computed(() => actionCopy(props.action))
 const url = computed(() => safeExternalUrl(props.action.params.url))
+/** This body's root, so a focus inside it can be seen before it leaves. */
+const bodyEl = ref<HTMLElement | null>(null)
+
+// The focus rests on the card while the sign-in moves on. A disabled button or
+// a link that is about to be removed would otherwise drop it onto the page.
+function focusCard(): void {
+  (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')?.focus()
+}
+
+// Runs before the DOM is patched, so the link still holds the focus here.
+watch(() => props.action.state, () => {
+  if (bodyEl.value?.contains(document.activeElement)) focusCard()
+})
 
 async function start(): Promise<void> {
   if (starting.value) return
+  focusCard()
   starting.value = true
   emit('error', '')
   emit('notice', '')
@@ -43,7 +57,7 @@ async function start(): Promise<void> {
 </script>
 
 <template>
-  <div class="needs-you-mcp">
+  <div ref="bodyEl" class="needs-you-mcp">
     <ol v-if="action.state === 'waiting'" class="needs-you-steps">
       <li
         v-for="(step, i) in MCP_AUTH_STEPS"
@@ -72,10 +86,15 @@ async function start(): Promise<void> {
 </template>
 
 <style scoped>
+.needs-you-mcp {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
 .needs-you-steps {
   display: grid;
   gap: 6px;
-  margin: 10px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   font-size: var(--text-sm);

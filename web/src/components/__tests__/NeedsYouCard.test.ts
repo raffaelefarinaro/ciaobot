@@ -222,6 +222,40 @@ describe('NeedsYouCard', () => {
     expect(card.get('[role=status]').text()).toBe('This card changed on another device. The newer state is shown.')
   })
 
+  it('a done card shows a check in the glyph, and an open card does not', () => {
+    const open = mountCard()
+    expect(open.find('.needs-you-card-glyph svg polyline').exists()).toBe(false)
+    const done = mountCard({ action: action({ state: 'done' }) })
+    expect(done.find('.needs-you-card-glyph svg polyline').exists()).toBe(true)
+  })
+
+  it('Sign in keeps the focus on the card while the start request is out', async () => {
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValueOnce(pending.promise)
+    const card = mountCard()
+    const sign = button(card, 'Sign in')
+    sign.element.focus()
+    await sign.trigger('click')
+    expect(document.activeElement).toBe(card.get('.needs-you-card').element)
+
+    pending.resolve({ action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode' } }) })
+    await flushPromises()
+  })
+
+  it('when the sign-in link goes away with the focus on it, the focus moves to the card', async () => {
+    const waiting = action({
+      state: 'waiting',
+      params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/x' },
+    })
+    const card = mountCard({ action: waiting })
+    const link = card.get('a.needs-you-btn')
+    ;(link.element as HTMLElement).focus()
+    expect(document.activeElement).toBe(link.element)
+
+    await card.setProps({ action: action({ state: 'done', params: waiting.params }) })
+    expect(document.activeElement).toBe(card.get('.needs-you-card').element)
+  })
+
   it('every control is a real button or link', () => {
     const card = mountCard({
       action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/x' } }),
