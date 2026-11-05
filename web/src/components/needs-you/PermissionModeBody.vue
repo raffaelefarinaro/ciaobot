@@ -95,7 +95,8 @@ async function start(): Promise<void> {
 .needs-you-perm-line { color: var(--fg2); }
 .needs-you-perm-label {
   display: inline-block;
-  min-width: 5.5em;
+  min-width: 7em;
+  margin-right: 0.5em;
   color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);

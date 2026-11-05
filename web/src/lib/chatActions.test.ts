@@ -98,9 +98,10 @@ describe('actionCopy', () => {
     })
   })
 
-  it('warns in the bypass copy that nothing asks first', () => {
+  it('keeps the bypass card copy to the mode name and what it allows', () => {
     const copy = actionCopy(action({ kind: 'permission_mode', params: { mode: 'bypass' } }))
-    expect(copy?.why).toContain('without asking')
+    expect(copy?.why).toBe('Bypass: allow everything.')
+    expect(copy?.why).not.toContain('without asking')
     expect(copy?.primaryLabel).toBe('Switch to Bypass')
   })
 

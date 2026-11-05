@@ -75,7 +75,6 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
 }
 
 const PERMISSION_MODE_META = 'Permission mode'
-const BYPASS_WARNING = 'Every command and file edit runs without asking you first.'
 
 function permissionModeCopy(action: ChatAction): ActionCopy {
   const mode = action.params.mode
@@ -92,10 +91,9 @@ function permissionModeCopy(action: ChatAction): ActionCopy {
       meta: PERMISSION_MODE_META,
     }
   }
-  const warning = mode === 'bypass' ? ` ${BYPASS_WARNING}` : ''
   return {
     title: `Switch this chat to ${name}?`,
-    why: action.state === 'failed' && action.error ? action.error : `${name}: ${allows}.${warning}`,
+    why: action.state === 'failed' && action.error ? action.error : `${name}: ${allows}.`,
     primaryLabel: `Switch to ${name}`,
     meta: PERMISSION_MODE_META,
   }
