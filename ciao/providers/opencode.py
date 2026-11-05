@@ -1812,6 +1812,9 @@ class OpencodeProvider(BaseSDKProvider):
         # The read-only files' identities when it started (`_read_only_snapshot`).
         self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
+        # Serializes `_ensure_server` per chat: a turn and a sign-in card can both
+        # start this chat's server, and two unserialized starts orphan one process.
+        self._server_lock = asyncio.Lock()
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
@@ -2595,6 +2598,20 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
+        """Start (or reuse) this chat's server; one caller at a time (see `_ensure_server_locked`)."""
+        async with self._server_lock:
+            return await self._ensure_server_locked(request)
+
+    async def ensure_server(self, request: AgentRequest) -> None:
+        """Start this chat's server for ``request`` without sending a prompt, or reuse the live one.
+
+        Used by the MCP sign-in card when the idle sweep stopped the server. ``request``
+        must come from ``ProjectChatManager.build_agent_request`` so the next turn's
+        reuse check matches and does not restart it.
+        """
+        await self._ensure_server(request)
+
+    async def _ensure_server_locked(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.
 
         A changed MCP token forces a full restart: opencode reads MCP

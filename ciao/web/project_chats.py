@@ -5275,6 +5275,41 @@ class ProjectChatManager:
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
+    async def ensure_opencode_server(self, chat_id: str) -> OpencodeProvider:
+        """Start an OpenCode chat's server without a turn, or return the live one.
+
+        The MCP sign-in card needs the server a turn would start; the idle sweep
+        may have stopped it (``_PROVIDER_IDLE_TIMEOUT_SECONDS``). The request is
+        built exactly as a turn builds it, so the next turn reuses this server.
+        ``compact=True`` only skips the capsule and prefix, whose builder mutates
+        chat state. The provider is registered and freshly stamped, so the sweep
+        keeps it for the whole sign-in wait (``POLL_DEADLINE_S`` < the timeout).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived or chat.provider != "opencode":
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        existing = self._providers.get(chat_id)
+        live = existing.provider if existing is not None else None
+        if isinstance(live, OpencodeProvider) and live.has_live_server:
+            self._provider_last_used[chat_id] = time.monotonic()
+            return live
+        service = self._get_provider(chat_id)
+        provider = service.ensure_provider(chat.provider)
+        if not isinstance(provider, OpencodeProvider):
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        await self.warm_gh_token(chat)
+        request = self.build_agent_request(
+            chat, prompt="", resume_session=chat.session_id or None, compact=True
+        )
+        await provider.ensure_server(request)
+        if self._providers.get(chat_id) is not service:
+            # Archive, new session, handover or reload dropped this service while
+            # the server started; nothing else holds it, so stop it here.
+            await service.disconnect()
+            raise RuntimeError(f"chat {chat_id} changed while its OpenCode server started")
+        self._provider_last_used[chat_id] = time.monotonic()
+        return provider
+
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.
 
