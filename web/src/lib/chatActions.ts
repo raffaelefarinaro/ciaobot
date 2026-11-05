@@ -73,11 +73,40 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
   }
 }
 
+function commandCopy(action: ChatAction): ActionCopy {
+  const meta = 'Suggested command'
+  switch (action.state) {
+    case 'working':
+      return {
+        title: 'Review it, then press Enter in the terminal',
+        why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+        primaryLabel: 'I ran it',
+        meta,
+      }
+    case 'done':
+      return {
+        title: 'You ran the command',
+        why: 'Continue lets the assistant check the result.',
+        primaryLabel: 'Continue',
+        meta,
+      }
+    default:
+      return {
+        title: 'Suggested command — review before running',
+        why: action.params.note || "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+        primaryLabel: 'Type it in a terminal',
+        meta,
+      }
+  }
+}
+
 /** The card copy for an action, or null for a kind with no copy yet. */
 export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
     case 'mcp_auth':
       return mcpAuthCopy(action)
+    case 'command':
+      return commandCopy(action)
     default:
       return null
   }
