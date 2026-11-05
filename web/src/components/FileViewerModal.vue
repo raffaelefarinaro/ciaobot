@@ -1016,7 +1016,7 @@ useTypeToComment({
   addImages: (files: File[]) => addDraftImages(files),
 })
 
-const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(store.path)}`)
+const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
 // Why the current image URL failed to load; empty while it has not failed.
 const imageError = ref('')
 async function onImageError(): Promise<void> {
@@ -1024,7 +1024,7 @@ async function onImageError(): Promise<void> {
   const message = await imageLoadErrorMessage(src)
   if (src === imageSrc.value) imageError.value = message
 }
-watch(imageSrc, () => { imageError.value = '' })
+watch([imageSrc, () => store.isOpen], () => { imageError.value = '' })
 
 const basename = computed(() => {
   const p = store.path

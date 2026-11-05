@@ -483,4 +483,22 @@ describe('FileViewerModal', () => {
     expect(wrapper!.get('.fv-error').text()).toBe('File not found.')
     expect(wrapper!.find('img.fv-img').exists()).toBe(false)
   })
+
+  it('clears a previous image error when the same image is reopened', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })))
+    const store = openViewer()
+    await store.openImage('/ws/pic.png')
+    await settle()
+    await wrapper!.get('img.fv-img').trigger('error')
+    await settle()
+    expect(wrapper!.get('.fv-error').text()).toBe('File not found.')
+
+    // Reopen the same path without a close: close() clears the path, which the
+    // imageSrc watcher already reacts to, so only this path exposes a stale error.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('bytes', { status: 200 })))
+    await store.openImage('/ws/pic.png')
+    await settle()
+    expect(wrapper!.find('.fv-error').exists()).toBe(false)
+    expect(wrapper!.find('img.fv-img').exists()).toBe(true)
+  })
 })
