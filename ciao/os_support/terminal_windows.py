@@ -66,10 +66,12 @@ import sys
 
 if sys.platform == "win32":
     import ctypes
+    import os
     import queue
     import subprocess
     import threading
     import time
+    from collections.abc import Sequence
     from ctypes import wintypes
     from pathlib import Path
     from typing import Any
@@ -964,7 +966,7 @@ if sys.platform == "win32":
     # ── starting a terminal ────────────────────────────────────────────────
 
     def spawn_terminal(
-        *, cwd: Path, cols: int = 80, rows: int = 24
+        *, cwd: Path, cols: int = 80, rows: int = 24, argv: Sequence[str] | None = None
     ) -> WindowsTerminalProcess:
         """Start a shell in a pseudoconsole and return the running terminal.
 
@@ -992,7 +994,13 @@ if sys.platform == "win32":
         folder = _validated_folder(cwd)
         _validated_dimension(cols, "cols", 20, 500)
         _validated_dimension(rows, "rows", 5, 200)
-        argv = default_shell()
+        argv_list = default_shell() if argv is None else [str(part) for part in argv]
+        if argv is not None and (
+            not argv_list
+            or not os.path.isabs(argv_list[0])
+            or not os.path.isfile(argv_list[0])
+        ):
+            raise OSError("the program is not an executable file")
         env = terminal_environment()
 
         input_read = wintypes.HANDLE()
@@ -1077,8 +1085,8 @@ if sys.platform == "win32":
                 "-I",
                 "-S",
                 str(CHILD_HELPER),
-                argv[0],
-                subprocess.list2cmdline(argv),
+                argv_list[0],
+                subprocess.list2cmdline(argv_list),
             ]
             command = ctypes.create_unicode_buffer(
                 subprocess.list2cmdline(helper_argv)
