@@ -97,8 +97,9 @@ QUEUE_DELIVERIES = frozenset({"queue", "steer"})
 #: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
 #: user bubble. Empty string = typed by the person. ``restart_resume`` is the
 #: one turn the engine sends into a chat whose turn a restart cut off (#2128).
+#: ``chat_action`` is the wake a Needs-you card's Continue sends.
 TURN_ORIGINS = frozenset({
-    "background_run", "cli_task_wake", "retry", "restart_resume", "schedule",
+    "background_run", "chat_action", "cli_task_wake", "retry", "restart_resume", "schedule",
     "task_delegation", "task_resume", "webhook", "update_task",
 })
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not

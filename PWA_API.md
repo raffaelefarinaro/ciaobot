@@ -71,6 +71,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
 | POST | `/api/chats/{chat_id}/move-to-background` | OpenCode's Ctrl+B: move the running turn's foreground shell or subagent to the background. `{moved: bool}`; 409 `{"error":"unsupported"|"not_running"}`, 502 when OpenCode refused. The turn then ends normally and the work finishes as a background wake |
 | POST | `/api/chats/{chat_id}/background-tasks/{task_id}/stop` | Stop one running native background task (Claude Bash `run_in_background` or `Monitor`) or OpenCode shell from the Processes list. `task_id` is the row's `agent_id` without its `task:`/`shell:` prefix. `{ok: true}`; 404 when the chat, its live provider or the id is unknown (or OpenCode refused it), 502 when the provider could not be reached or refused. The row leaves `/api/subagents/running` when the provider reports the task finished, not on this response |
+| POST | `/api/chats/{chat_id}/actions/{action_id}/start` | Start a needs-you card's work (the OpenCode MCP sign-in). Body: a JSON object, usually `{}`, or empty. `{action}` with state `waiting` (the sign-in URL is in `params.url`) or `failed`. 400 `{"error":"invalid_body","action":null}` when the body is not an object; 400 `{"error": <reason>, "action": <payload>}` for any refusal such as `invalid_state` or `unsupported_provider`; 404 `{"error":"not found"}` for an unknown chat; 409 `{"error":"chat_action_conflict","actions":[...]}` for an unknown or stale action id. Browser-only; an agent cannot start a card |
+| POST | `/api/chats/{chat_id}/actions/{action_id}/dismiss` | "Not now" on a needs-you card. Removes the card, cancels any sign-in attempt, and remembers its key so later turns do not re-raise it. `{actions}` with the remaining list; 404 unknown chat; 409 `chat_action_conflict` for a stale id. Browser-only |
+| POST | `/api/chats/{chat_id}/actions/{action_id}/continue` | Continue on a `done` needs-you card. Wakes the chat once (origin `chat_action`) and removes the card. `{actions, delivery}` with `delivery` one of `queued`, `deferred` or `started`; 400 `{"error":"invalid_state","action":...}` unless the card is `done`; 404 and 409 as above. Browser-only |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
@@ -1869,6 +1872,16 @@ escaped text: no Markdown, no HTML, no link parsing, no action registry.
   it has no offer, so a stale offer is cleared by its absence and a
   reconnecting client converges.
 
+**Chat actions (needs-you cards)**
+
+A chat's `actions` field (on every chat payload) lists its transient needs-you cards, each as `{id, kind, origin, state, params, error, created_at}`. `kind` is one of `mcp_auth`, `command`, `gws_auth`, `permission_mode`, `device_code`, `system_setting`, `restart` or `limit`; `state` is one of `open`, `working`, `waiting`, `done` or `failed`; `origin` is `engine` or `agent`. In B1 only `mcp_auth` is live. Its params are `server` and `provider` (`opencode` for an engine-raised card; `claude` is accepted but refused until the Claude flow ships), plus the engine-only `url`, the sign-in address.
+
+Cards live in memory only. Archive, a new session and a handover clear them, and a restart starts without any. A dismissal remembers the card's key (`mcp_auth:<server>`), so detection does not raise the same sign-in again until the provider session restarts. Raising a card with the same key and params is a no-op; a different param value replaces the card with a new id.
+
+The OpenCode sign-in runs through OpenCode's V2 integration API. After a turn, detection checks `/api/mcp`; a server that reports `needs_auth` gets a card in state `open`. Start moves it to `waiting` with the authorize URL in `params.url`. The engine polls every 2 seconds until the server reports `connected` (the card becomes `done`), or until the attempt fails or expires (the card becomes `failed` with its first error line). After 10 minutes the card is `failed` with "Timed out waiting for sign-in". Continue on a `done` card wakes the chat once.
+
+Agents may raise a card with `ciao chat needs-action`, but they never start, dismiss or continue one; those are the card's own buttons, on a signed session.
+
 **WebSocket events**
 
 Global `/ws/events` payloads the PWA reacts to:
@@ -1877,6 +1890,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
 - `chat_runs_reported`: emitted on a chat once a wake turn for finished background CLI tasks (the `cli_task_wake` origin) has been delivered into it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_pin_changed`: the chat's pinned file changed (a manual pin write or an agent `file_surface`), on this or another device. Fields: `{chat_id, path, dismissed_paths, revision}`, where `path` is the canonical POSIX path or `""` for closed and `revision` is the per-chat counter a later pin PATCH must quote. The connect `snapshot` carries the same payloads for every chat under `chat_pins`, so a client that missed this event still converges.
+- `chat_actions_changed`: a chat's needs-you cards changed. Fields: `{chat_id, actions}`, the complete list (`[]` clears it). The connect `snapshot` carries the same lists under `chat_actions`, a sparse and complete map that replaces the client's cache.
 - `chat_terminal_offer_changed`: the chat's suggested terminal command changed (an assistant offer, or the user dismissing it), on this or another device. Fields: `{chat_id, terminal_offer}`, where `terminal_offer` is the complete `{id, command}` payload or `null` when the offer was cleared. The connect `snapshot` carries the same payloads under `chat_terminal_offers`, a sparse and complete map that REPLACES the client's cache: a chat missing from it has no offer, so a stale offer is cleared by its absence.
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
