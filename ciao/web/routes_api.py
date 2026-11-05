@@ -4245,23 +4245,8 @@ async def vault_backlinks(request: Request) -> JSONResponse:
 _MAP_ENTRY_FINDINGS = 3
 
 
-async def vault_graph(request: Request) -> JSONResponse:
-    """Return the vault as a note graph for the Memory Map page.
-
-    Nodes are notes with frontmatter (or an inferred type); edges come from
-    both frontmatter ``related:``/``relatedTo:`` and body markdown links,
-    already merged and resolved to real paths by ``vault_index.scan_vault``.
-    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
-    edges are dropped rather than left dangling.
-
-    Each node also carries ``entry_coverage``: what
-    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
-    from the node's own age. A note is not the unit a person keeps current, and
-    a map that could only say "this note is current" would show a re-stamped
-    person note as clean while it held an address from 2019.
-    """
-    config = request.app.state.config
-    workspace = request.query_params.get("workspace", "").strip() or None
+def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
+    """Everything vault_graph returns, built off the event loop."""
     # Every vault in the install, which is ONE shared vault before the
     # re-rooting and one per agent root after it. Scanning `config.vault_root`
     # returned zero notes on a migrated install, so the whole map went blank.
@@ -4274,10 +4259,10 @@ async def vault_graph(request: Request) -> JSONResponse:
     # is why the `filter_entries` scoping stays where it is either way.
     in_scope = [t for t in targets if workspace and t[1] == workspace]
     scan_list = in_scope or targets
-    # Reads and parses every markdown file, so run it off the event loop or a
-    # large vault stalls other requests, including the 5s chat-socket keepalives
-    # (see chat_messages above for the same fix).
-    entries, absolute = await asyncio.to_thread(scan_targets, scan_list)
+    # Reads and parses every markdown file. The caller threads the whole
+    # payload, so this scan runs off the event loop with the rest of it (a
+    # large vault otherwise stalls the 5s chat-socket keepalives too).
+    entries, absolute = scan_targets(scan_list)
     if in_scope:
         # The picker lists every workspace, and this scan only saw one. Taken
         # from the targets whose vault exists, which is the same set the full
@@ -4293,21 +4278,27 @@ async def vault_graph(request: Request) -> JSONResponse:
     # most recently, which is a far more useful entry point than "whatever the
     # biggest hub is". Entry carries no timestamp, so stat the files here; it is
     # one stat per note against files scan_vault has just read anyway.
+    mtimes: dict[str, float] = {}
+
     def _mtime(rel: str) -> float:
         # Resolved through the scan's own map. Rendered paths are no longer a
         # fixed offset from one vault root, so stripping a `memory-vault/`
         # prefix and joining resolved to nothing on a migrated install and every
         # note reported mtime 0 — which silently broke the map's "most recently
         # touched note" entry point rather than failing loudly.
+        if rel in mtimes:
+            return mtimes[rel]
         target = absolute.get(rel)
         if target is None:
+            mtimes[rel] = 0.0
             return 0.0
         try:
-            return target.stat().st_mtime
+            mtimes[rel] = target.stat().st_mtime
         except OSError:
             # A note indexed but unreadable (race with a delete, broken
             # symlink) must not fail the whole graph request.
-            return 0.0
+            mtimes[rel] = 0.0
+        return mtimes[rel]
 
     # Aging uses the one predicate the audit and the review queue's
     # `unverified` signal also use, so the map's "unchecked" count cannot
@@ -4407,6 +4398,9 @@ async def vault_graph(request: Request) -> JSONResponse:
         """
         from ciao.memory_audit import note_entry_coverage
 
+        # The queue never lists this note, so its entries are not worth parsing.
+        if never_queued(e.path_key):
+            return None
         target = absolute.get(e.path_key)
         if target is None:
             return None
@@ -4431,8 +4425,6 @@ async def vault_graph(request: Request) -> JSONResponse:
             workspace=str(e.workspace or ""),
             today=current_date,
         )
-        if never_queued(e.path_key):
-            return None
         return {
             "entries": coverage.entries,
             "checked": coverage.checked,
@@ -4578,12 +4570,35 @@ async def vault_graph(request: Request) -> JSONResponse:
                 continue
             seen.add(key)
             edges.append({"source": key[0], "target": key[1]})
-    return JSONResponse({
+    return {
         "workspace": workspace or "all",
         "workspaces": workspaces,
         "nodes": nodes,
         "edges": edges,
-    })
+    }
+
+
+async def vault_graph(request: Request) -> JSONResponse:
+    """Return the vault as a note graph for the Memory Map page.
+
+    Nodes are notes with frontmatter (or an inferred type); edges come from
+    both frontmatter ``related:``/``relatedTo:`` and body markdown links,
+    already merged and resolved to real paths by ``vault_index.scan_vault``.
+    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
+    edges are dropped rather than left dangling.
+
+    Each node also carries ``entry_coverage``: what
+    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
+    from the node's own age. A note is not the unit a person keeps current, and
+    a map that could only say "this note is current" would show a re-stamped
+    person note as clean while it held an address from 2019.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip() or None
+    # Scanning, parsing every note body for entry coverage and reading the
+    # check state are all synchronous file and CPU work; on the loop they
+    # stalled every other request for over a second on a real vault.
+    return JSONResponse(await asyncio.to_thread(_vault_graph_payload, config, workspace))
 
 
 async def vault_review(request: Request) -> JSONResponse:
