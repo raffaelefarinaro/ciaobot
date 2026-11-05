@@ -244,7 +244,6 @@ class _DrainingProvider:
     #: Stands in for the chat's ProviderService; no live implementation behind it.
     provider = None
 
-
     can_drain = True
 
     background_work_outstanding = False

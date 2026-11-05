@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -392,3 +393,59 @@ def test_a_claude_session_id_is_engine_only() -> None:
         validate_params("mcp_auth", {**raw, "session_id": "a/b"})
     assert bad.value.reason == "invalid_param"
 
+
+class _DismissedPcm(FakePcm):
+    """A card the user dismissed while the helper was starting."""
+
+    def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_start_ends_the_helper_when_the_action_was_dismissed_meanwhile(
+    tmp_path: Path, binary: str
+) -> None:
+    provider = FakeClaude(tmp_path, states={"notion": "needs_auth"})
+    terminals = FakeTerminals()
+    pcm = _DismissedPcm(_action())
+
+    await ClaudeMcpAuthFlow().start(_ctx(pcm, provider, terminals), pcm.action, {})
+
+    assert terminals.ended == ["sess_1"]
+    assert pcm.updates == []
+
+
+@pytest.mark.asyncio
+async def test_exit_zero_without_a_live_provider_is_done(tmp_path: Path) -> None:
+    terminals = FakeTerminals(exited=True, exit_code=0, output=CLAUDE_OUTPUT)
+    pcm = FakePcm(_action(session_id="sess_1", url=AUTH_URL))
+
+    await ClaudeMcpAuthFlow().poll(_ctx(pcm, None, terminals), pcm.action)
+
+    assert pcm.last[0] == "done"
+    assert terminals.ended == ["sess_1"]
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_that_raises_lets_the_status_read_decide(tmp_path: Path) -> None:
+    class _RaisingReconnect(FakeClaude):
+        async def reconnect_mcp_server(self, server_name: str) -> bool:
+            raise RuntimeError("reconnect failed")
+
+    provider = _RaisingReconnect(tmp_path, states={"notion": "connected"})
+    terminals = FakeTerminals(exited=True, exit_code=0, output=CLAUDE_OUTPUT)
+    pcm = FakePcm(_action(session_id="sess_1", url=AUTH_URL))
+
+    await ClaudeMcpAuthFlow().poll(_ctx(pcm, provider, terminals), pcm.action)
+
+    assert pcm.last[0] == "done"
+    assert terminals.ended == ["sess_1"]
+
+
+def test_the_wake_prompt_quotes_the_server_name() -> None:
+    prompt = ClaudeMcpAuthFlow().wake_prompt(_action("claude.ai Slack"))
+
+    assert prompt.startswith("[Ciaobot] ")
+    assert prompt.startswith(
+        "[Ciaobot] The user signed in to the MCP server " + json.dumps("claude.ai Slack") + "."
+    )
