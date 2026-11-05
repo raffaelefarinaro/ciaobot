@@ -1,6 +1,7 @@
 import { computed, type Ref } from 'vue'
 import type { ModelSection } from '../lib/modelSections'
 import { modelDisplayName, modelProviderPrefix } from '../lib/modelLabels'
+import { modeLabel } from '../lib/permissionModes'
 import type { ModelsResponse, RoutineSettings, RuntimeProvider } from '../lib/types'
 
 // Every provider with models is a runtime provider now.
@@ -24,9 +25,9 @@ export const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 // PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
 export const PROVIDER_MODE_OPTIONS = [
   { value: DEFAULT_MODE_SELECTION, label: 'Automatic (app default)' },
-  { value: 'manual', label: 'Manual — ask for every action' },
-  { value: 'auto', label: 'Auto — allow safe work, ask on risky' },
-  { value: 'bypass', label: 'Bypass — allow everything' },
+  { value: 'manual', label: modeLabel('normal') },
+  { value: 'auto', label: modeLabel('auto') },
+  { value: 'bypass', label: modeLabel('bypass') },
 ]
 
 /**
