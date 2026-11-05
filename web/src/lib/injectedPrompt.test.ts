@@ -436,6 +436,16 @@ describe('summarizeInjectedPrompt', () => {
     })
   })
 
+  it('parses a chat_action wake by its origin', () => {
+    expect(parseInjectedPrompt('[Ciaobot] The user signed in…', 'chat_action')).toEqual({ kind: 'chat_action' })
+  })
+
+  it('summarizes a chat_action wake', () => {
+    expect(summarizeInjectedPrompt({ kind: 'chat_action' })).toEqual({
+      label: 'Continue after your action', facts: 'You finished what this chat needed', tone: null,
+    })
+  })
+
   it('summarizes an error notice', () => {
     const quota = errorNoticePrompt('you have reached your weekly usage limit, upgrade for higher limits')
     expect(quota).toMatchObject({ kind: 'error', label: 'Usage limit reached' })
