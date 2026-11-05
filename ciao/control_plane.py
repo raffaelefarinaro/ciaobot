@@ -2916,8 +2916,10 @@ class CiaoControlPlane:
                 "invalid_action", f"The request was refused ({exc.reason})."
             ) from None
         # Kind-specific raise-time refusals, on validated params, go here:
-        # F (gws_auth: only the workspace's linked profile), G (permission_mode:
-        # not the chat's current mode), J (system_setting: macOS hosts only).
+        # F (gws_auth: only the workspace's linked profile), J (system_setting:
+        # macOS hosts only).
+        if kind == "permission_mode" and validated["mode"] == self.chat_mode(principal):
+            raise ControlPlaneError("invalid_action", f"This chat is already in {validated['mode']} mode.")
         try:
             payload = self.pcm.raise_action(chat.chat_id, kind, validated, origin="agent")
         except ChatActionError as exc:

@@ -3312,6 +3312,16 @@ describe('needs-you chat actions', () => {
     expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c-1/actions/a1/start', {})
   })
 
+  test('a permission_mode start that is done updates the cached chat mode', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', { mode: 'auto' })]
+    apiPost.mockResolvedValueOnce({
+      action: action('a1', { kind: 'permission_mode', state: 'done', params: { mode: 'plan' } }),
+    })
+    await store.startChatAction('c-1', 'a1')
+    expect(store.chats[0]?.mode).toBe('plan')
+  })
+
   test('a 400 start adopts the current action and rethrows', async () => {
     const store = useProjectStore()
     apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), {

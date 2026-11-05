@@ -209,10 +209,55 @@ class CommandActionHandler(ActionHandler):
         return COMMAND_WAKE_PROMPT
 
 
+MODE_WAKE_DESCRIPTIONS: dict[str, str] = {
+    "plan": "read-only, propose changes",
+    "normal": "ask before every action",
+    "auto": "safe work runs, risky actions ask",
+    "bypass": "every action runs without asking",
+}
+ARCHIVED_MODE_ERROR = "This chat is archived; its mode cannot change."
+MODE_FAILED_ERROR = "The mode could not be changed."
+
+
+class PermissionModeHandler(ActionHandler):
+    """The `permission_mode` kind. The agent asks for a mode; the user's Start applies it.
+
+    The mode is read from the raised params, never from the start body, so the
+    user approves exactly what the card showed. It is applied through
+    ``update_chat``, the validated path ``PATCH /api/chats/{id}`` uses. Nothing the
+    agent can reach calls this: only the PWA's Start does.
+    """
+
+    async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        mode = action.params["mode"]
+        chat_id = ctx.chat.chat_id
+        chat = ctx.pcm.get_chat(chat_id)
+        if chat is None or chat.archived:
+            ctx.pcm.update_action(chat_id, action.id, state="failed", error=ARCHIVED_MODE_ERROR)
+            return
+        try:
+            updated = ctx.pcm.update_chat(chat_id, mode=mode)
+        except ValueError:
+            updated = None
+        if updated is None:
+            ctx.pcm.update_action(chat_id, action.id, state="failed", error=MODE_FAILED_ERROR)
+            return
+        logger.info("chat %s permission mode -> %s (user-approved request)", chat_id, mode)
+        ctx.pcm.update_action(chat_id, action.id, state="done")
+
+    def wake_prompt(self, action: ChatAction) -> str:
+        mode = action.params["mode"]
+        return (
+            f"The user switched this chat's permission mode to {mode} "
+            f"({MODE_WAKE_DESCRIPTIONS[mode]}). It applies from this turn."
+        )
+
+
 #: The handler for each kind. Kinds with a handler register here.
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "mcp_auth": McpAuthHandler(),
     "command": CommandActionHandler(),
+    "permission_mode": PermissionModeHandler(),
 }
 
 
