@@ -7,7 +7,7 @@ the label the terminal button actually carries, and the boundaries the
 terminal offer keeps. None of them is a snapshot of the wording, and none
 of them is skipped.
 
-Ownership: this file checks the ``ciao chat terminal-offer`` command form on
+Ownership: this file checks the ``ciao chat needs-action command`` command form on
 both sides — the form the guidance documents and the form the CLI parser
 accepts — so the two cannot drift apart.
 """
@@ -44,17 +44,18 @@ WRONG_TERMINAL_CLAIMS = (
 )
 
 #: The boundaries the offer keeps, in the words the guidance uses for them:
-#: it never types, runs or starts anything, it never brings the shell's
-#: output back, the engine has not checked the text, and the provider's own
-#: transcript may still hold the tool arguments — so the guidance never
-#: promises that a suggested command leaves no trace. ("Never unlocks" used
-#: to be one of them: the terminal used to ask for the password again, and
-#: the card had no business doing that. There is no unlock secret any more,
-#: so the boundary that still matters is the one above.)
+#: the card types the text only on the user's click and never presses Enter,
+#: it never runs anything, it never brings the shell's output back, the
+#: engine has not checked the text, and the provider's own transcript may
+#: still hold the tool arguments — so the guidance never promises that a
+#: suggested command leaves no trace. ("Never unlocks" used to be one of
+#: them: the terminal used to ask for the password again, and the card had no
+#: business doing that. There is no unlock secret any more, so the boundary
+#: that still matters is the one above.)
 OFFER_BOUNDARIES = (
-    "never types",
     "never runs",
-    "never starts a shell",
+    "press",
+    "Enter",
     "never brings",
     "output",
     "has not checked",
@@ -84,7 +85,7 @@ def _offer_help() -> str:
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         with pytest.raises(SystemExit) as caught:
-            agent_cli.build_parser().parse_args(["chat", "terminal-offer", "--help"])
+            agent_cli.build_parser().parse_args(["chat", "needs-action", "--help"])
     assert caught.value.code == 0, "argparse did not print the offer's help"
     return buffer.getvalue()
 
@@ -207,7 +208,7 @@ def test_terminal_guidance_names_the_entry_the_app_offers() -> None:
 
 def test_the_offer_keeps_its_boundaries() -> None:
     """The offer is guidance the user acts on, and the guidance says so."""
-    section = _section(_reference("terminal.md"), "Offering a command")
+    section = _section(_reference("terminal.md"), "Asking the user to run a command")
     missing = sorted(term for term in OFFER_BOUNDARIES if term not in section)
     assert not missing, f"the offer section never mentions {missing}"
 
@@ -219,7 +220,7 @@ def test_guidance_documents_the_offer_command_form() -> None:
     ``test_the_documented_offer_form_is_the_form_the_parser_accepts``.
     """
     guidance = _reference("terminal.md")
-    assert "ciao chat terminal-offer --command-file" in guidance
+    assert "ciao chat needs-action command --command-file" in guidance
     assert "Suggested command — review before running" in guidance
     assert "placeholder" in guidance, "the guidance must say secrets stay placeholders"
 
@@ -227,14 +228,14 @@ def test_guidance_documents_the_offer_command_form() -> None:
 def test_the_documented_offer_form_is_the_form_the_parser_accepts() -> None:
     """The guidance's command form is the form the real parser takes."""
     guidance = _reference("terminal.md")
-    assert "ciao chat terminal-offer --command-file FILE" in guidance
+    assert "ciao chat needs-action command --command-file FILE" in guidance
     # The flag and its metavar as one token, so a metavar change to
     # FILEPATH (a substring match) cannot pass unnoticed.
     assert re.search(r"--command-file\s+FILE(?!\w)", _offer_help()), (
         "the parser renders another form"
     )
     parsed = agent_cli.build_parser().parse_args(
-        ["chat", "terminal-offer", "--command-file", "command.txt"]
+        ["chat", "needs-action", "command", "--command-file", "command.txt"]
     )
     assert parsed.command_file == "command.txt"
 
@@ -246,18 +247,18 @@ def test_the_offer_takes_a_command_file_and_nothing_else() -> None:
     user did not ask for, and an inline ``--command`` would put the text on a
     command line, so the parser refuses both.
     """
-    assert _refused(["chat", "terminal-offer"]), "--command-file must be required"
+    assert _refused(["chat", "needs-action"]), "the kind must be required"
     assert _refused(
-        ["chat", "terminal-offer", "--command-file", "command.txt", "--chat", "other"]
+        ["chat", "needs-action", "command", "--command-file", "command.txt", "--chat", "other"]
     ), "the offer takes no target"
     # With the required file present, the only objection left is `--command`
     # itself; without it argparse would refuse for the missing file and the
     # assertion could never observe an inline option.
     assert _refused(
-        ["chat", "terminal-offer", "--command-file", "command.txt", "--command", "echo hello"]
+        ["chat", "needs-action", "command", "--command-file", "command.txt", "--command", "echo hello"]
     ), "the offer takes no inline command"
     assert _refused(
-        ["chat", "terminal-offer", "--command-file", "command.txt", "echo hello"]
+        ["chat", "needs-action", "command", "--command-file", "command.txt", "echo hello"]
     ), "the offer takes no positional text"
 
 
@@ -266,12 +267,13 @@ def test_the_offer_reaches_the_calling_chat_only(tmp_path: Path) -> None:
     command_file = tmp_path / "command.txt"
     command_file.write_text("echo hello\n", encoding="utf-8")
     parsed = agent_cli.build_parser().parse_args(
-        ["chat", "terminal-offer", "--command-file", str(command_file)]
+        ["chat", "needs-action", "command", "--command-file", str(command_file)]
     )
     operation, arguments = agent_cli.resolve(parsed)
-    assert operation == "chat_terminal_offer"
-    assert arguments["command"] == "echo hello"
-    assert "chat_id" not in arguments, "an offer belongs to the calling chat"
+    assert operation == "chat_needs_action"
+    assert arguments["params"]["command"] == "echo hello"
+    assert "chat_id" not in arguments, "a request belongs to the calling chat"
+    assert "chat_id" not in arguments["params"]
 
 
 def test_the_offer_is_a_documented_cli_command() -> None:
@@ -279,7 +281,8 @@ def test_the_offer_is_a_documented_cli_command() -> None:
     commands = json.loads(
         (STOCK / "skills" / "ciao-cli" / "commands.json").read_text(encoding="utf-8")
     )
-    assert commands.get("chat terminal-offer") == "chat_terminal_offer"
+    assert commands.get("chat needs-action") == "chat_needs_action"
+    assert "chat terminal-offer" not in commands
 
 
 def test_capability_skill_points_at_the_guidance() -> None:
@@ -287,7 +290,8 @@ def test_capability_skill_points_at_the_guidance() -> None:
     skill = _skill()
     assert "references/terminal.md" in skill
     assert "references/install-and-settings.md" in skill
-    assert "terminal-offer" in skill
+    assert "needs-action" in skill
+    assert "terminal-offer" not in skill
 
 
 def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:

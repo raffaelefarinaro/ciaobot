@@ -35,7 +35,7 @@ for current commands; do not invent version-sensitive install or login syntax.
 When a user has to sign in, install a CLI, or set up an MCP server, read
 `references/install-and-settings.md`: it carries the current verified commands
 and the exact places in the app. The agent hands over a command to review and
-run — `ciao chat terminal-offer` puts one in the chat as a copyable card — and
+run — `ciao chat needs-action command --command-file FILE` puts one in the chat as a card that types it into the chat's terminal for the user to run — and
 never runs a sign-in, an install or an MCP setup on the user's behalf.
 When the user asks for that setup in a chat, offer the command in that chat
 straight away rather than pointing them to a Settings page, and link any
