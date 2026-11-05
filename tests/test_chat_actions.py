@@ -86,14 +86,12 @@ def test_an_unknown_kind_is_refused() -> None:
     assert _refusal("nope", {}) == "invalid_kind"
 
 
-def test_a_kind_without_a_validator_is_refused() -> None:
-    # Each child of the needs-you run registers its own kind; pick one that has none yet.
-    from ciao.chat_actions import ACTION_KINDS, _VALIDATORS
+def test_a_kind_without_a_validator_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each child of the needs-you run registers its own kind; take one out to see the refusal.
+    from ciao import chat_actions
 
-    missing = [kind for kind in ACTION_KINDS if kind not in _VALIDATORS]
-    if not missing:
-        pytest.skip("every action kind has a validator")
-    assert _refusal(missing[0], {}) == "unsupported_kind"
+    monkeypatch.delitem(chat_actions._VALIDATORS, "mcp_auth")
+    assert _refusal("mcp_auth", {"server": "linear", "provider": "opencode"}) == "unsupported_kind"
 
 
 def test_action_key() -> None:

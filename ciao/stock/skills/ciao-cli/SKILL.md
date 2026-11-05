@@ -30,7 +30,7 @@ Not for:
 - A plan-mode chat gets `plan_mode_read_only` back from any mutating command — plan mode is read-only by design, not a permission you can flag past.
 - Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `webhook delete`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
 - `schedule create|update --command` sets a shell command that later runs with no permission prompt. Outside bypass mode it returns `command_requires_operator`: create the schedule without it and ask the user to add the command in the schedule's Prompt card. Do not retry.
-- Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `chat needs-action command --command-file FILE` takes it. Everywhere else, arguments are scalar flags or a constrained enum value.
+- Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `chat needs-action command --command-file FILE` take it. Everywhere else, arguments are scalar flags or a constrained enum value.
 
 ### Reloading tools
 
