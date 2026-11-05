@@ -90,6 +90,7 @@ from ciao.task_updates import (
 )
 from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
+from ciao.web.memory_pass import MemoryProjectRefused
 from ciao.web.transcript_service import _assemble_chat_messages
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
@@ -2747,9 +2748,15 @@ class CiaoControlPlane:
         project = self._resolve_project(principal, project_id)
         requested_mode = mode
         mode = self._child_mode(principal, mode)
-        chat = self.pcm.create_chat(
-            project.project_id, title=title, provider=provider, model=model, mode=mode
-        )
+        try:
+            chat = self.pcm.create_chat(
+                project.project_id, title=title, provider=provider, model=model, mode=mode
+            )
+        except MemoryProjectRefused as exc:
+            # The Memory project is app-owned: it holds the engine's own
+            # memory passes, and an ordinary chat there would be silenced by
+            # the project-kind half of the pass predicate without being one.
+            raise ControlPlaneError("invalid_project", str(exc)) from None
         result = chat.to_dict(local=True)
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True
@@ -2788,15 +2795,21 @@ class CiaoControlPlane:
             # chat to bypass through the auto-approved metadata tool. Keep the
             # same ceiling used for newly-created child chats.
             mode = self._child_mode(principal, mode)
-        updated = self.pcm.update_chat(
-            chat_id,
-            title=title,
-            provider=provider,
-            model=model,
-            mode=mode,
-            thinking_level=thinking_level,
-            project_id=project_id,
-        )
+        try:
+            updated = self.pcm.update_chat(
+                chat_id,
+                title=title,
+                provider=provider,
+                model=model,
+                mode=mode,
+                thinking_level=thinking_level,
+                project_id=project_id,
+            )
+        except MemoryProjectRefused as exc:
+            # The Memory project is app-owned: it holds the engine's own
+            # memory passes, and a chat moved there would be silenced by the
+            # project-kind half of the pass predicate without being one.
+            raise ControlPlaneError("invalid_project", str(exc)) from None
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         turned_on = False

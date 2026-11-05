@@ -1393,7 +1393,15 @@ malformed helper in a Memory project cannot start notifying again. That
 malformed-helper pass is the exception in the display filters: because it has
 no memory-insight row, it must stay in `activeChatsAll` and `projectChats` so its
 pending question remains reachable, while `projectNeedsInput`, unread and every
-notification predicate still exclude it by project kind. A pass's own archive is
+notification predicate still exclude it by project kind. The project kind is a
+signal the app owns, so the engine keeps it true: **the Memory project holds
+the engine's own passes and nothing else.** `create_chat` refuses an ordinary
+chat there (`MemoryProjectRefused`), `update_chat` refuses to move one in, a
+fork or a continuation of a pass is placed in the workspace's General project
+instead, the create route refuses a client-supplied `memory_pass` helper, and
+the agent surface reports the refusal as `invalid_project`. Without that, a
+client could silence any chat it created by moving it into the Memory project
+or by labelling it a pass. A pass's own archive is
 not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
 For **After this update** changes (Home's update-task group, or the Settings

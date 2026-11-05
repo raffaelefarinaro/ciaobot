@@ -930,12 +930,16 @@ def test_ensure_project_is_idempotent_and_stable(
     # Not `is_auto`: the PWA picks General with that flag, and the Memory
     # project must not be one of the two special cases it knows about.
     assert first.is_auto is False
-    assert memory_pass.is_memory_pass_chat(
-        manager.create_chat(first.project_id, title="x"), first
+    # A chat in the Memory project is a pass even when its helper failed
+    # closed: the project kind is the recursion guard's fallback. The engine
+    # never puts an ordinary chat there — that invariant is what makes the
+    # fallback safe — so this is the state a hand-edited registry produces.
+    ordinary = manager.create_chat(
+        manager.create_project("Shipped", workspace="work").project_id, title="x"
     )
-    assert not memory_pass.is_memory_pass_chat(
-        manager.create_chat(first.project_id, title="y", helper={}), None
-    )
+    ordinary.project_id = first.project_id
+    assert memory_pass.is_memory_pass_chat(ordinary, first)
+    assert not memory_pass.is_memory_pass_chat(ordinary, None)
 
     reloaded = _make_manager(tmp_path)._projects[first.project_id]
     assert reloaded.kind == memory_pass.MEMORY_PROJECT_KIND
@@ -1552,8 +1556,15 @@ async def test_result_push_suppressed_by_memory_project_fallback(
     malformed = manager.create_chat(
         memory_project.project_id,
         title="Memory pass · Pricing rework",
-        helper={"kind": "legacy-memory-pass"},
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
     )
+    # A hand-edited registry: the helper no longer normalizes, so the chat is
+    # recognisable as a pass only by the project it lives in.
+    malformed.helper = {"kind": "legacy-memory-pass"}
 
     manager._schedule_push(malformed.chat_id, "t", "s")
 
@@ -1630,6 +1641,129 @@ def test_start_stream_is_attended(
     assert "doc.md" in prompt
     assert project.name in prompt
     assert streams.chat_ids == [memory_id]
+
+
+# ── The Memory project holds only passes ─────────────────────────────────
+# The pass predicate falls back on the project kind: a chat in the Memory
+# project is silenced whatever its helper says, because a helper that failed
+# to normalize no longer identifies its pass. That fallback is only safe while
+# the project holds the engine's own passes and nothing else — these tests are
+# the invariant that makes it safe.
+
+
+def _pass_helper() -> dict[str, Any]:
+    return {
+        "kind": "memory_pass",
+        "source_chat_id": "chat-1",
+        "archive_policy": "when_clean",
+    }
+
+
+def test_create_chat_refuses_an_ordinary_chat_in_the_memory_project(
+    tmp_path: Path,
+) -> None:
+    """An ordinary chat must never land in the app-owned Memory project."""
+    manager = _make_manager(tmp_path)
+    memory_project = manager._memory_pass.ensure_project("work")
+
+    with pytest.raises(ValueError, match="memory passes only"):
+        manager.create_chat(memory_project.project_id, title="Ordinary")
+
+    # A pass helper is what opens a chat there.
+    allowed = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper=_pass_helper(),
+    )
+    assert allowed.project_id == memory_project.project_id
+
+
+def test_update_chat_refuses_to_move_a_chat_into_the_memory_project(
+    tmp_path: Path,
+) -> None:
+    """Moving a chat in would silence it without making it a pass."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Shipped", workspace="work")
+    memory_project = manager._memory_pass.ensure_project("work")
+    chat = manager.create_chat(project.project_id, title="Ordinary")
+
+    with pytest.raises(ValueError, match="Memory project"):
+        manager.update_chat(chat.chat_id, project_id=memory_project.project_id)
+
+    assert manager.get_chat(chat.chat_id).project_id == project.project_id
+
+
+def test_a_fork_of_a_pass_lands_in_the_workspace_general_project(
+    tmp_path: Path,
+) -> None:
+    """A fork is the owner's own conversation, so it must not be a pass."""
+    manager = _make_manager(tmp_path)
+    general = manager.create_project("General", workspace="work")
+    memory_project = manager._memory_pass.ensure_project("work")
+    pass_chat = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper=_pass_helper(),
+    )
+
+    fork = manager.fork_chat(
+        pass_chat.chat_id,
+        messages=[
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ],
+        turn_index=0,
+    )
+
+    assert fork.project_id == general.project_id
+    # An ordinary chat again: it is not a pass, so it notifies.
+    assert not memory_pass.is_memory_pass_chat(
+        fork, manager.get_project(fork.project_id)
+    )
+
+
+def test_continuing_an_archived_pass_lands_in_the_workspace_general_project(
+    tmp_path: Path,
+) -> None:
+    """A continuation is the owner's own conversation, so it must not be a pass."""
+    manager = _make_manager(tmp_path)
+    general = manager.create_project("General", workspace="work")
+    memory_project = manager._memory_pass.ensure_project("work")
+    pass_chat = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper=_pass_helper(),
+    )
+    transcript = tmp_path / "memory-vault" / "Logs" / "Chats" / "chat-pass.md"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "---\n"
+        "provider: claude\n"
+        "context: Memory pass · Pricing rework\n"
+        "active_model: sonnet\n"
+        "session_id: sess1\n"
+        "---\n\n"
+        "## Turn 1\n\n"
+        "- Time: 2026-06-10T12:00:00Z\n"
+        "### User\n\n"
+        "```text\n"
+        "What did the pass find?\n"
+        "```\n\n"
+        "### Assistant\n\n"
+        "```text\n"
+        "Two observations.\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    pass_chat.archived = True
+    pass_chat.archive_path = "memory-vault/Logs/Chats/chat-pass.md"
+
+    continued = manager.continue_archived_chat(pass_chat.chat_id)
+
+    assert continued.project_id == general.project_id
+    assert not memory_pass.is_memory_pass_chat(
+        continued, manager.get_project(continued.project_id)
+    )
 
 
 # ── Guardrails ───────────────────────────────────────────────────────────

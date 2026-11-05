@@ -13,6 +13,14 @@ now. The archive pipeline reads that module attribute — never a
 one-shot insights / project-doc / memory-proposal stages and to enqueue the pass
 chat.
 
+The Memory project holds those passes and nothing else. The pass predicate
+falls back on the project kind — a chat there is silenced whatever its helper
+says, because a helper that failed to normalize no longer identifies its pass
+— so an ordinary chat must never land in that project, or it would lose its
+notifications without being one. The engine therefore refuses an ordinary chat
+there and refuses a move into it (:class:`MemoryProjectRefused`), and places a
+fork or a continuation of a pass in the workspace's General project instead.
+
 The project id is derived from a vault folder that is never written to disk, so
 auto-discovery cannot claim the project, the name is free to be localised, and
 the id stays stable across a registry rebuild.
@@ -69,6 +77,18 @@ MEMORY_PASS_KIND = "memory_pass"
 # vault folder, and never looked up by name: a user project called "Memory"
 # must not be mistaken for this one.
 _MEMORY_VAULT_FOLDER = "__memory__"
+
+
+class MemoryProjectRefused(ValueError):
+    """Raised when a caller asks the Memory project to hold an ordinary chat.
+
+    The Memory project is app-owned: it holds the engine's own passes and
+    nothing else. The pass predicate falls back on the project kind — a chat
+    in that project is silenced whatever its helper says — so an ordinary chat
+    must never land there, or it would lose its notifications without being a
+    pass. A dedicated type lets every surface that has to refuse this say so
+    without reading the message.
+    """
 
 MEMORY_PASS_PROMPT = (
     'A conversation in this workspace just ended: "{title}". Its archived '

@@ -43,6 +43,36 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def _pass(pcm: ProjectChatManager, title: str):
+    """A memory pass chat in this workspace's Memory project.
+
+    The engine only opens a chat there for a pass, so this is the only way to
+    get one: an ordinary chat in that project would be refused.
+    """
+    memory_project = pcm._memory_pass.ensure_project("personal")
+    return pcm.create_chat(
+        memory_project.project_id,
+        title=title,
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
+    )
+
+
+def _failed_closed_pass(pcm: ProjectChatManager, title: str):
+    """A pass whose helper no longer normalizes.
+
+    The state a hand-edited registry produces: the chat is recognisable as a
+    pass only by the project it lives in, which is what the project-kind
+    fallback of the pass predicate is for.
+    """
+    chat = _pass(pcm, title)
+    chat.helper = {"kind": "legacy-memory-pass"}
+    return chat
+
+
 def test_notify_permission_invokes_callback(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
@@ -176,21 +206,8 @@ async def test_delayed_push_suppressed_for_memory_pass_and_project_fallback(
     """A push already in the delay window is still silent for a pass."""
     pcm = _make_manager(tmp_path)
     pcm._push_delay_seconds = 0
-    memory_project = pcm._memory_pass.ensure_project("personal")
-    declared = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Pricing rework",
-        helper={
-            "kind": "memory_pass",
-            "source_chat_id": "chat-1",
-            "archive_policy": "when_clean",
-        },
-    )
-    fallback = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Deck figures",
-        helper={"kind": "legacy-memory-pass"},
-    )
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
     for chat in (declared, fallback):
         chat.last_activity_at = "2026-07-14T09:00:00Z"
         chat.last_read_at = ""
@@ -210,21 +227,8 @@ def test_notify_permission_silent_for_memory_pass_but_persists_state(
 ) -> None:
     """A blocked pass keeps the pending card and lifecycle, but never pushes."""
     pcm = _make_manager(tmp_path)
-    memory_project = pcm._memory_pass.ensure_project("personal")
-    declared = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Pricing rework",
-        helper={
-            "kind": "memory_pass",
-            "source_chat_id": "chat-1",
-            "archive_policy": "when_clean",
-        },
-    )
-    fallback = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Deck figures",
-        helper={"kind": "legacy-memory-pass"},
-    )
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
     ordinary_project = pcm.create_project("General", workspace="personal")
     ordinary = pcm.create_chat(ordinary_project.project_id, title="Live chat")
 
@@ -255,21 +259,8 @@ def test_notify_permission_silent_for_memory_pass_but_persists_state(
 def test_notify_question_silent_for_memory_pass(tmp_path: Path) -> None:
     """A pass asking a question is still visible in its memory-insight row, not a push."""
     pcm = _make_manager(tmp_path)
-    memory_project = pcm._memory_pass.ensure_project("personal")
-    declared = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Pricing rework",
-        helper={
-            "kind": "memory_pass",
-            "source_chat_id": "chat-1",
-            "archive_policy": "when_clean",
-        },
-    )
-    fallback = pcm.create_chat(
-        memory_project.project_id,
-        title="Memory pass · Deck figures",
-        helper={"kind": "legacy-memory-pass"},
-    )
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
     ordinary_project = pcm.create_project("General", workspace="personal")
     ordinary = pcm.create_chat(ordinary_project.project_id, title="Live chat")
 

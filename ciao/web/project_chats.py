@@ -192,7 +192,10 @@ from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
 from ciao.web.memory_pass import (
     CLOSURE_FENCE_CLOSE,
+    MEMORY_PASS_KIND,
+    MEMORY_PROJECT_KIND,
     MemoryPassCoordinator,
+    MemoryProjectRefused,
     is_memory_pass_chat,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher
@@ -2778,6 +2781,26 @@ class ProjectChatManager:
                 return project
         return None
 
+    def _ordinary_project_for(self, chat: ChatInfo) -> str:
+        """The project an ordinary chat derived from *chat* belongs in.
+
+        A fork or a continuation of a memory pass is the owner's own
+        conversation, not a pass. It must live outside the app-owned Memory
+        project, or the project-kind half of the pass predicate would silence
+        a chat the app itself has just created. The workspace's General
+        project is where every other ad-hoc conversation lives.
+        """
+        project = self._projects.get(chat.project_id)
+        if project is None or project.kind != MEMORY_PROJECT_KIND:
+            return chat.project_id
+        general = self._general_project_for(project.workspace)
+        if general is None:
+            raise ValueError(
+                f"The {project.workspace} workspace has no General project "
+                "to host this chat."
+            )
+        return general.project_id
+
     def _rehome_orphaned_chats(self) -> None:
         """Re-parent chats whose project no longer exists onto a valid General.
 
@@ -3673,6 +3696,16 @@ class ProjectChatManager:
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
         project = self._projects.get(project_id)
+        # The Memory project is app-owned: it holds the engine's own passes and
+        # nothing else. The pass predicate falls back on the project kind (a
+        # pass whose helper failed closed must stay silent), so an ordinary
+        # chat created here would be silenced without being one. Only a pass
+        # helper opens a chat in this project.
+        if project is not None and project.kind == MEMORY_PROJECT_KIND:
+            if chat_service._normalize_chat_helper(helper).get("kind") != MEMORY_PASS_KIND:
+                raise MemoryProjectRefused(
+                    "The Memory project holds memory passes only."
+                )
         workspace = project.workspace if project else None
         chat_provider = provider
         if not chat_provider:
@@ -3843,6 +3876,14 @@ class ProjectChatManager:
             target = self._projects.get(project_id)
             if target is None:
                 raise ValueError(f"Project '{project_id}' not found")
+            if target.kind == MEMORY_PROJECT_KIND:
+                # The Memory project holds the engine's own passes. A chat
+                # moved in there is silenced by the project-kind half of the
+                # pass predicate without being a pass, so the move is refused
+                # rather than the chat quietly losing its notifications.
+                raise MemoryProjectRefused(
+                    "Cannot move a chat into the Memory project."
+                )
             current = self._projects.get(chat.project_id)
             if current is not None and target.workspace != current.workspace:
                 raise ValueError(
@@ -4251,7 +4292,7 @@ class ProjectChatManager:
             
         # Create a new active chat in the same project, title, model, and provider
         new_chat = self.create_chat(
-            project_id=chat.project_id,
+            project_id=self._ordinary_project_for(chat),
             title=chat.title,
             model=chat.model,
             mode=chat.mode,
@@ -4346,7 +4387,7 @@ class ProjectChatManager:
 
         fork = ChatInfo(
             chat_id=f"chat-{chat_service._uuid8()}",
-            project_id=source.project_id,
+            project_id=self._ordinary_project_for(source),
             title=f"{base_title} · Fork {next_index}",
             model=source.model,
             mode=source.mode,

@@ -131,7 +131,7 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
-from ciao.web.memory_pass import is_memory_pass_chat
+from ciao.web.memory_pass import MemoryProjectRefused, is_memory_pass_chat
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
@@ -2347,6 +2347,16 @@ async def create_project_chat(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     body = await request.json()
+    helper = body.get("helper")
+    if isinstance(helper, dict) and helper.get("kind") == "memory_pass":
+        # A pass helper marks the chat as the engine's own housekeeping, and
+        # that is what silences its notifications. The helper is the engine's
+        # to write: a client that could set it could silence any chat it
+        # created. Read on the raw kind, so a malformed forgery is refused
+        # as well.
+        return JSONResponse(
+            {"error": "a memory pass helper is the engine's own"}, status_code=400
+        )
     try:
         chat = pcm.create_chat(
             project_id,
@@ -2354,8 +2364,13 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            helper=body.get("helper"),
+            helper=helper,
         )
+    except MemoryProjectRefused as exc:
+        # The Memory project is app-owned: it holds the engine's own memory
+        # passes, and an ordinary chat there would be silenced by the
+        # project-kind half of the pass predicate without being one.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(chat.to_dict(local=True), status_code=201)
