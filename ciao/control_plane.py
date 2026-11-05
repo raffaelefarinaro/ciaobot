@@ -88,7 +88,12 @@ from ciao.task_updates import (
     strip_updates,
     unseen_updates,
 )
-from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
+from ciao.chat_actions import (
+    AGENT_ACTION_KINDS,
+    ChatActionError,
+    check_agent_params,
+    validate_params,
+)
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.transcript_service import _assemble_chat_messages
 from ciao.web.routes_webhooks import webhook_store
@@ -2856,76 +2861,75 @@ class CiaoControlPlane:
         self.pcm.start_stream(chat_id, text)
         return _ok({"chat_id": chat_id, "status": "started"})
 
-    def chat_terminal_offer(self, principal: AgentPrincipal, command: str) -> dict[str, Any]:
-        """Offer a suggested terminal command to the *calling* chat.
+    def chat_needs_action(
+        self, principal: AgentPrincipal, kind: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Put a request for the user on the *calling* chat.
 
-        The command is guidance, not an action: the user reads it, copies it and
-        runs it themselves. Nothing here executes it, opens a terminal, unlocks
-        a session or reads output back — the state that holds it is transient
-        and in memory only (#1840).
+        A request is a card the user acts on. Nothing here executes it, opens a
+        terminal or reads output back: the card's state is transient and in
+        memory only (#1840).
 
         There is no chat argument, and that is the whole point of the shape.
-        An offer is a command on somebody's screen, so the screen is the chat
-        that asked for it; a target argument would let a caller put one
-        anywhere it could name. The chat is therefore the principal's own, and
-        it is resolved by its *exact* id: ``_chat_scope`` falls back to an
-        unambiguous title, which is right for ``chat get`` and wrong here,
-        because a title is a name the caller chose.
+        A request is shown on somebody's screen, so the screen is the chat that
+        asked for it; a target argument would let a caller put one anywhere it
+        could name. The chat is therefore the principal's own, and it is
+        resolved by its *exact* id: ``_chat_scope`` falls back to an unambiguous
+        title, which is right for ``chat get`` and wrong here, because a title
+        is a name the caller chose.
 
-        The command is untrusted, model-authored text and can carry a
-        credential, so a refusal is static: it names a reason and never the
-        rejected text, which would end up in a log line and a telemetry
-        field. A value of the wrong *type* never reaches this method — the
-        transport's schema refuses it first — and a *constraint* on the text
-        is deliberately not part of that schema, because a constraint would
-        put a rejected command inside the validation error.
+        The values are untrusted, model-authored text and can carry a
+        credential, so a refusal is static: it names a closed reason and never
+        the rejected value. A value of the wrong *type* at the top level never
+        reaches this method, because the transport's schema refuses it first;
+        the engine validates the rest through ``validate_params``.
 
-        Plan mode may still offer: the command is text the user reviews, the
+        Plan mode may still ask: the request is a card the user reviews, the
         same classification ``file_surface`` has. An unattended turn may not:
-        a schedule has nobody in front of the screen to review the text.
+        a schedule has nobody in front of the screen to review it.
         """
         chat_id = str(principal.chat_id or "").strip()
         if not chat_id:
-            raise ControlPlaneError(
-                "chat_required", "No active chat to offer a terminal command to."
-            )
+            raise ControlPlaneError("chat_required", "No active chat to ask the user in.")
         if self.pcm.get_chat(chat_id) is None:
             # The exact id or nothing: a title must not resolve here.
             raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
         # Authorization: the chat must live in the principal's own workspace.
         chat, _project = self._chat_scope(principal, chat_id)
         if chat.archived:
-            raise ControlPlaneError(
-                "chat_archived", "Cannot offer a terminal command in an archived chat."
-            )
+            raise ControlPlaneError("chat_archived", "Cannot ask the user in an archived chat.")
+        if kind not in AGENT_ACTION_KINDS:
+            raise ControlPlaneError("invalid_action_kind", "The agent cannot raise this kind of request.")
         # Not just "not scheduled": a webhook or task turn runs with nobody
-        # watching, and its payload must not put a command in front of the user.
-        self._require_person_typed_turn(principal, "A suggested terminal command")
+        # watching, and its payload must not put a card in front of the user.
+        self._require_person_typed_turn(principal, "A request for the user")
+        if not isinstance(params, Mapping):
+            raise ControlPlaneError("invalid_action", "The request was refused (invalid_type).")
+        raw: dict[str, Any] = dict(params)
+        if kind == "mcp_auth" and "provider" not in raw:
+            raw["provider"] = chat.provider
         try:
-            normalized = normalize_terminal_offer(command)
-        except TerminalOfferError as exc:
-            # `exc.reason` is a closed word ("empty", "too_long", ...); the
-            # command it came from never appears.
+            check_agent_params(kind, raw)
+            validated = validate_params(kind, raw)
+        except ChatActionError as exc:
             raise ControlPlaneError(
-                "invalid_terminal_command",
-                f"The suggested command was refused ({exc.reason}).",
-            ) from exc
-        try:
-            payload = self.pcm.set_terminal_offer(chat.chat_id, normalized)
-        except TerminalOfferError as exc:
-            raise ControlPlaneError(
-                "invalid_terminal_command",
-                f"The suggested command was refused ({exc.reason}).",
-            ) from exc
-        except ValueError:
-            # The manager's own refusals are static, and so is this one: the
-            # command never appears in an error string.
-            raise ControlPlaneError(
-                "invalid_terminal_command", "The suggested command was refused."
+                "invalid_action", f"The request was refused ({exc.reason})."
             ) from None
+        # Kind-specific raise-time refusals, on validated params, go here:
+        # F (gws_auth: only the workspace's linked profile), G (permission_mode:
+        # not the chat's current mode), J (system_setting: macOS hosts only).
+        try:
+            payload = self.pcm.raise_action(chat.chat_id, kind, validated, origin="agent")
+        except ChatActionError as exc:
+            raise ControlPlaneError(
+                "invalid_action", f"The request was refused ({exc.reason})."
+            ) from None
+        except ValueError:
+            # The manager's own refusals are static, and so is this one.
+            raise ControlPlaneError("invalid_action", "The request was refused.") from None
         if payload is None:
             raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
-        return _ok({"chat_id": chat.chat_id, "terminal_offer": payload})
+        return _ok({"chat_id": chat.chat_id, "action": payload})
 
     def chat_continue(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)

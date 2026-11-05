@@ -86,8 +86,12 @@ def test_an_unknown_kind_is_refused() -> None:
     assert _refusal("nope", {}) == "invalid_kind"
 
 
-def test_a_kind_without_a_validator_is_refused() -> None:
-    assert _refusal("command", {}) == "unsupported_kind"
+def test_a_kind_without_a_validator_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each child of the needs-you run registers its own kind; take one out to see the refusal.
+    from ciao import chat_actions
+
+    monkeypatch.delitem(chat_actions._VALIDATORS, "mcp_auth")
+    assert _refusal("mcp_auth", {"server": "linear", "provider": "opencode"}) == "unsupported_kind"
 
 
 def test_action_key() -> None:

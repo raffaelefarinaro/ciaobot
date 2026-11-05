@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+from ciao.chat_actions import AGENT_ACTION_KINDS
 from ciao.execution_modes import is_credential_adjacent
 from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 from ciao.terminal_offer import (
@@ -172,6 +173,25 @@ def _verbs(parent: argparse.ArgumentParser, dest: str = "verb") -> argparse._Sub
     return parent.add_subparsers(dest=dest, metavar=f"<{dest}>", required=True)
 
 
+#: Every flag `chat needs-action` takes, and the param it fills.
+_NEEDS_ACTION_FLAG_PARAMS: tuple[tuple[str, str], ...] = (
+    ("--command-file", "command"), ("--note", "note"), ("--profile", "profile"),
+    ("--mode", "mode"), ("--tool", "tool"), ("--setting", "setting"),
+    ("--reason", "reason"), ("--server", "server"), ("--provider", "provider"),
+)
+#: The flags each agent-raisable kind accepts. Values are checked by the engine.
+_NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
+    "command": frozenset({"--command-file", "--note"}),
+    "gws_auth": frozenset({"--profile"}),
+    "permission_mode": frozenset({"--mode", "--note"}),
+    "device_code": frozenset({"--tool"}),
+    "system_setting": frozenset({"--setting", "--note"}),
+    "restart": frozenset({"--reason", "--note"}),
+    "mcp_auth": frozenset({"--server", "--provider"}),
+}
+assert set(_NEEDS_ACTION_FLAGS) == AGENT_ACTION_KINDS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ciao",
@@ -301,23 +321,30 @@ def build_parser() -> argparse.ArgumentParser:
         # so the calling chat is never a valid default. Make the target
         # explicit rather than advertising a default that can only error.
         sub.add_argument("--chat", required=True)
-    # The one chat verb with no `--chat`: an offer is a command on somebody's
-    # screen, and the screen is the chat that asked for it.
-    offer = chat.add_parser(
-        "terminal-offer",
-        help="Suggest a terminal command for the calling chat.",
-        # No abbreviation: `--command` would otherwise be an accepted spelling
-        # of `--command-file`, and a near-miss that reads as a path is a
-        # command offered by accident.
+    # The one chat verb with no `--chat`: a request is put in front of the
+    # person in the chat that asked for it.
+    needs = chat.add_parser(
+        "needs-action",
+        help="Ask the user, in this chat, to do something only they can do.",
+        # No abbreviation: `--command` would otherwise be accepted as
+        # `--command-file`.
         allow_abbrev=False,
     )
-    offer.add_argument(
-        "--command-file",
-        required=True,
-        metavar="FILE",
-        help="File holding the command to suggest: @file.txt or a plain path. "
-        "The text is shown to the user to review and run; nothing is executed.",
+    needs.add_argument("kind", choices=sorted(AGENT_ACTION_KINDS), help="What the user is asked to do.")
+    needs.add_argument(
+        "--command-file", default=None, metavar="FILE",
+        help="command: file holding the shell command (@file.txt or a plain path). "
+        "The user reviews it; Ciaobot types it into the chat's terminal only when the user asks "
+        "and never presses Enter.",
     )
+    needs.add_argument("--note", default=None, help="One short line shown on the card.")
+    needs.add_argument("--profile", default=None, help="gws_auth: the gws profile to sign in again.")
+    needs.add_argument("--mode", default=None, help="permission_mode: the mode to ask for.")
+    needs.add_argument("--tool", default=None, help="device_code: gh or az.")
+    needs.add_argument("--setting", default=None, help="system_setting: the macOS privacy setting.")
+    needs.add_argument("--reason", default=None, help="restart: config or update.")
+    needs.add_argument("--server", default=None, help="mcp_auth: the MCP server to sign in to.")
+    needs.add_argument("--provider", default=None, help="mcp_auth: claude or opencode (defaults to this chat's).")
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list", help="List projects.")
@@ -566,8 +593,24 @@ def _webhook_instructions(raw: str | None) -> str | None:
     return _task_body(raw, flag="--instructions-file")
 
 
-def _terminal_offer_command(raw: str) -> str:
-    """The suggested command read from a file, validated and normalized.
+def _needs_action_params(args: argparse.Namespace) -> dict[str, str]:
+    """The raw params for `chat needs-action`; the engine validates the values."""
+    allowed = _NEEDS_ACTION_FLAGS[args.kind]
+    params: dict[str, str] = {}
+    for flag, param in _NEEDS_ACTION_FLAG_PARAMS:
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value is None:
+            continue
+        if flag not in allowed:
+            raise UsageError(f"{flag} does not apply to needs-action {args.kind}.")
+        params[param] = _command_file_text(value) if flag == "--command-file" else value
+    if args.kind == "command" and "command" not in params:
+        raise UsageError("needs-action command requires --command-file.")
+    return params
+
+
+def _command_file_text(raw: str) -> str:
+    """The command text read from a file, validated and normalized.
 
     The command is untrusted, model-authored text, so it travels in a file for
     the same reason prose does: as a shell argument it would be mangled by
@@ -729,12 +772,9 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if messages is not None:
                 arguments["messages"] = messages
             return "chat_handover", arguments
-        if verb == "terminal-offer":
-            # No chat id: the offer belongs to the calling chat, and the
-            # command travels as text read here rather than as an argument.
-            return "chat_terminal_offer", {
-                "command": _terminal_offer_command(args.command_file)
-            }
+        if verb == "needs-action":
+            # No chat id: the request belongs to the calling chat.
+            return "chat_needs_action", {"kind": args.kind, "params": _needs_action_params(args)}
     if noun == "project":
         if verb == "list":
             return "projects_list", {"include_completed": bool(args.include_completed)}
