@@ -5807,10 +5807,13 @@ describe('memoryInsightRows', () => {
     ] as unknown as typeof store.projects
     const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
     const blocked = passChat({ chat_id: 'blocked', pending_question: question })
+    // A pass whose helper failed closed: the registry loader normalises the
+    // helper away, so what the server sends is a chat with no helper at all —
+    // the project kind is the only thing that still identifies it.
     const fallback = passChat({
       chat_id: 'fallback-blocked',
       pending_question: question,
-      helper: { kind: 'legacy-memory-pass' },
+      helper: {},
     })
     store.chats = [
       sourceChat(),
@@ -5839,9 +5842,11 @@ describe('memoryInsightRows', () => {
       { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
     ] as unknown as typeof store.projects
     const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+    // The loader normalises a malformed helper away, so a failed-closed pass
+    // reaches the PWA with no helper: only the project kind still names it.
     const fallback = passChat({
       chat_id: 'fallback-blocked',
-      helper: { kind: 'legacy-memory-pass' },
+      helper: {},
       pending_question: question,
       last_activity_at: '2026-08-27T02:00:00Z',
       last_read_at: '2026-08-27T01:00:00Z',
@@ -5891,7 +5896,7 @@ describe('memoryInsightRows', () => {
         passChat({ chat_id: 'declared', last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' }),
         passChat({
           chat_id: 'fallback',
-          helper: { kind: 'legacy-memory-pass' },
+          helper: {},
           last_activity_at: '2026-08-24T10:00:00Z',
           last_read_at: '2026-08-24T09:00:00Z',
         }),
@@ -5924,7 +5929,7 @@ describe('memoryInsightRows', () => {
     store.chats = [
       passChat(),
       passChat({ chat_id: 'blocked', pending_question: question }),
-      passChat({ chat_id: 'fallback', helper: { kind: 'legacy-memory-pass' } }),
+      passChat({ chat_id: 'fallback', helper: {} }),
     ] as unknown as typeof store.chats
     // The archived source closed the pane it was archived from, so nothing is
     // focused: the exact state the toast used to fire in.
@@ -5969,7 +5974,7 @@ describe('memoryInsightRows', () => {
     ] as unknown as typeof store.projects
     store.chats = [
       passChat({ chat_id: 'declared' }),
-      passChat({ chat_id: 'fallback', helper: { kind: 'legacy-memory-pass' } }),
+      passChat({ chat_id: 'fallback', helper: {} }),
       { chat_id: 'plain', project_id: 'p1', title: 'Pricing rework', archived: false, local: true, created_at: '', last_activity_at: '' },
     ] as unknown as typeof store.chats
     store.activeChatId = null

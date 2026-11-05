@@ -126,6 +126,31 @@ def test_a_routine_still_runs_in_an_ordinary_project(tmp_path: Path) -> None:
     assert manager.get_chat(chat_id).project_id == project.project_id
 
 
+def test_a_deleted_target_that_re_homes_into_the_memory_project_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A deleted chat re-homes into the project it lived in.
+
+    A pass's project is the app's own, so that re-home has to be refused — and
+    refused loudly: a command routine would otherwise run its command, and a
+    one-shot entry would be consumed for a run that never happened.
+    """
+    manager = _make_manager(tmp_path)
+    memory_project = _memory_project(manager)
+    pass_chat = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper=_pass_helper(),
+    )
+    entry = _entry(web_chat_id=pass_chat.chat_id)
+    entry.fallback_project_id = memory_project.project_id
+    # The target chat is gone: the run would re-home into its project.
+    del manager._chats[pass_chat.chat_id]
+
+    with pytest.raises(MemoryProjectRefused):
+        manager.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
+
+
 def test_a_user_project_named_memory_is_not_the_apps_own(tmp_path: Path) -> None:
     """A user project may be called "Memory"; only the kind is the app's."""
     manager = _make_manager(tmp_path)
@@ -243,6 +268,38 @@ async def test_a_refused_command_routine_does_not_run_its_command(
     entry = _entry(
         web_project_id=memory_project.project_id, command="echo hello"
     )
+
+    result = await manager.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert ran == []
+    assert result["status"] == "error"
+
+
+async def test_a_command_routine_whose_rehome_is_the_memory_project_does_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deleted target's re-home is the target the run would use."""
+    manager = _make_manager(tmp_path)
+    memory_project = _memory_project(manager)
+    pass_chat = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper=_pass_helper(),
+    )
+    ran: list[str] = []
+
+    async def fake_run_command(command, cwd, env):
+        ran.append(command)
+        raise AssertionError("the command must not run")
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", fake_run_command
+    )
+    entry = _entry(web_chat_id=pass_chat.chat_id, command="echo hello")
+    entry.fallback_project_id = memory_project.project_id
+    del manager._chats[pass_chat.chat_id]
 
     result = await manager.dispatch_schedule(
         entry, entry.prompt, "opus", "auto", "claude"

@@ -1548,12 +1548,14 @@ async def test_result_push_suppressed_by_memory_project_fallback(
     The helper kind is the fast path; the project kind is the recursion guard's
     fallback and must also gate notifications, or an existing pass whose helper
     failed closed would resume notifying the owner.
+
+    The registry is what decides this, not the chat object: the loader
+    normalises every stored helper, so a hand-edited one comes back empty and
+    the project kind is the only thing left that names the pass.
     """
     manager = _make_manager(tmp_path)
-    sent: list[tuple[str, str, str]] = []
-    manager.notify_result_cb = lambda *args: sent.append(args)
     memory_project = manager._memory_pass.ensure_project("work")
-    malformed = manager.create_chat(
+    pass_chat = manager.create_chat(
         memory_project.project_id,
         title="Memory pass · Pricing rework",
         helper={
@@ -1562,14 +1564,29 @@ async def test_result_push_suppressed_by_memory_project_fallback(
             "archive_policy": "when_clean",
         },
     )
-    # A hand-edited registry: the helper no longer normalizes, so the chat is
-    # recognisable as a pass only by the project it lives in.
-    malformed.helper = {"kind": "legacy-memory-pass"}
+    # A hand-edited registry: the stored helper no longer normalizes.
+    registry = tmp_path / ".runtime" / "web_projects.json"
+    stored = json.loads(registry.read_text(encoding="utf-8"))
+    stored["chats"][pass_chat.chat_id]["helper"] = {"kind": "legacy-memory-pass"}
+    registry.write_text(json.dumps(stored), encoding="utf-8")
 
-    manager._schedule_push(malformed.chat_id, "t", "s")
+    reloaded = _make_manager(tmp_path)
+    malformed = reloaded.get_chat(pass_chat.chat_id)
+    assert malformed is not None
+    # The loader normalised the helper away: nothing identifies the pass but
+    # the project it lives in.
+    assert malformed.helper == {}
+    assert memory_pass.is_memory_pass_chat(
+        malformed, reloaded.get_project(malformed.project_id)
+    )
+
+    sent: list[tuple[str, str, str]] = []
+    reloaded.notify_result_cb = lambda *args: sent.append(args)
+
+    reloaded._schedule_push(malformed.chat_id, "t", "s")
 
     assert sent == []
-    assert malformed.chat_id not in manager._pending_push
+    assert malformed.chat_id not in reloaded._pending_push
 
 
 async def test_result_announce_keeps_lifecycle_event_for_memory_pass(

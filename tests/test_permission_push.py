@@ -62,14 +62,14 @@ def _pass(pcm: ProjectChatManager, title: str):
 
 
 def _failed_closed_pass(pcm: ProjectChatManager, title: str):
-    """A pass whose helper no longer normalizes.
+    """A pass whose helper no longer identifies it.
 
-    The state a hand-edited registry produces: the chat is recognisable as a
-    pass only by the project it lives in, which is what the project-kind
-    fallback of the pass predicate is for.
+    The registry loader normalises every stored helper, so a malformed one
+    comes back empty: the chat is a pass only by the project it lives in,
+    which is what the project-kind fallback of the pass predicate is for.
     """
     chat = _pass(pcm, title)
-    chat.helper = {"kind": "legacy-memory-pass"}
+    chat.helper = {}
     return chat
 
 

@@ -611,6 +611,14 @@ class ScheduleDispatcher:
                 chat, self._host._projects.get(chat.project_id)
             ):
                 return "a memory pass is not a target for a schedule"
+        # The project a deleted target re-homes into. It is the project's the
+        # chat lived in, so it is the app's own Memory project when the chat
+        # was a pass — and the run would land there.
+        fallback_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_id:
+            project = self._host._projects.get(fallback_id)
+            if project is not None and is_memory_pass_project(project):
+                return "the Memory project holds the engine's own memory passes"
         return ""
 
     def _project_named(self, entry: ScheduleEntry) -> ProjectInfo | None:

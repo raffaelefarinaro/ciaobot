@@ -10185,13 +10185,13 @@ class ProjectChatManager:
             return None
         if project.kind == MEMORY_PROJECT_KIND:
             # The Memory project is app-owned: it holds the engine's own
-            # memory passes, so a routine cannot run in it.
-            logger.warning(
-                "Interval schedule %s resolves to the Memory project, which "
-                "holds the engine's own passes; skipping",
-                getattr(entry, "schedule_id", ""),
+            # memory passes, so a routine cannot run in it. Refused rather
+            # than skipped: the caller has to record that the run never
+            # happened, and a one-shot entry that never ran must not be
+            # consumed.
+            raise MemoryProjectRefused(
+                "the Memory project holds the engine's own memory passes"
             )
-            return None
         fresh = self.create_chat(
             project.project_id,
             title=title or f"Every run: {prompt[:30]}",
