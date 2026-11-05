@@ -49,7 +49,7 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
     case 'open':
       return {
         title: `Sign in to ${server}`,
-        why: 'It is set up but not signed in. Sign in once and this chat can use it.',
+        why: `${server} is set up for this chat but not signed in. Sign in once so this chat can use its tools.`,
         primaryLabel: 'Sign in',
         meta,
       }
@@ -66,7 +66,7 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
       return { title: `${server} is connected`, why: 'This chat can use it now.', primaryLabel: 'Continue the chat', meta }
     case 'failed':
       return {
-        title: `Sign-in to ${server} didn't finish`,
+        title: `Couldn't sign in to ${server}`,
         why: action.error || 'The sign-in did not finish.',
         primaryLabel: 'Try again',
         meta,
