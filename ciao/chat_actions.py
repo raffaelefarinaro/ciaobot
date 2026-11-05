@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Literal, get_args
 from urllib.parse import urlsplit
 
+from ciao.execution_modes import MODE_RANK
 from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
 
 ActionKind = Literal[
@@ -184,9 +185,32 @@ def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `permission_mode` kind: a mode the user approves for this chat.
+
+    The mode is a closed set (``MODE_RANK``). The PWA's ``manual`` is refused:
+    an agent asks for ``normal``. The key is the kind alone, so one request
+    is open per chat and a re-raise replaces it.
+    """
+    if set(raw) - {"mode", "note"}:
+        raise ChatActionError("unknown_param")
+    if "mode" not in raw:
+        raise ChatActionError("missing_param")
+    mode = raw["mode"]
+    if not isinstance(mode, str):
+        raise ChatActionError("invalid_type")
+    if mode not in MODE_RANK:
+        raise ChatActionError("invalid_param")
+    params = {"mode": mode}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    return params
+
+
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
+    "permission_mode": _validate_permission_mode,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
 
