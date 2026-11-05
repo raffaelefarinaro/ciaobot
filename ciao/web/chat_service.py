@@ -386,7 +386,22 @@ def _is_retryable_quota_error(text: str) -> bool:
     # chat open and press Retry manually.
     if "at capacity" in low:
         return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+    # A provider that is out of money says so in its own words. OpenRouter
+    # rejects the turn with "This request would exceed your available credits
+    # given your current balance", which is a 402 rather than a 429, and no
+    # rate-limit noun appears at all.
+    if any(
+        needle in low
+        for needle in (
+            "out of credit",
+            "out of credits",
+            "spend limit",
+            "insufficient credit",
+            "credit balance",
+            "available credit",
+            "add credits",
+        )
+    ):
         return True
     # A provider that just states the limit, with no 429 and none of the vendor
     # phrasings above — opencode/OpenAI surfaces "The usage limit has been

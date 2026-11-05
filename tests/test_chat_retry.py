@@ -474,6 +474,13 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_retryable_quota_error(spend_limit_err) is True
     assert _is_retryable_quota_error(rate_limit_err) is True
     assert _is_retryable_quota_error(claude_code_session_limit) is True
+    # OpenRouter rejects a turn once the balance cannot cover it, as a 402 with
+    # no rate-limit noun at all. It is still a budget error: the turn recovers
+    # on its own as soon as the account is topped up.
+    assert _is_retryable_quota_error(
+        "This request would exceed your available credits given your "
+        "current balance. Add credits to continue."
+    ) is True
 
 
 async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:

@@ -15,6 +15,20 @@ export function isProviderAuthError(errorText: string): boolean {
   return text.includes('not logged in') && text.includes('/login')
 }
 
+// The provider account is out of money, not out of rate budget. There is no
+// reset time to wait for, so this must not borrow the "resets later" copy.
+// Same shapes as the credit needles in `_is_retryable_quota_error`
+// (ciao/web/chat_service.py): OpenRouter answers "This request would exceed
+// your available credits given your current balance", Anthropic says the
+// credit balance is too low.
+export function isCreditExhaustionError(errorText: string): boolean {
+  const text = (errorText || '').toLowerCase()
+  return /\b(?:available|insufficient|exhausted) credits?\b/.test(text)
+    || /\bcredit balance\b/.test(text)
+    || /\badd credits\b/.test(text)
+    || /\bout of (?:extra )?(?:credits?|usage)\b/.test(text)
+}
+
 // A provider usage or rate limit. Same shapes as `_is_terminal_quota_error`
 // and `_is_retryable_quota_error` in ciao/web/chat_service.py. Bare "quota"
 // or "rate limit" is not enough: tools report those too ("disk quota
@@ -22,6 +36,7 @@ export function isProviderAuthError(errorText: string): boolean {
 // name or an exhaustion verb.
 export function isUsageLimitError(errorText: string): boolean {
   const text = (errorText || '').toLowerCase()
+  if (isCreditExhaustionError(text)) return true
   return /\b(usage limit|session limit|weekly limit|monthly limit|upgrade for higher limits|usage credits|out of (?:extra )?usage)\b/.test(text)
     || /\b(?:reached|hit) your\b[^.]*\blimit\b/.test(text)
     || /\brate limit (?:exceeded|reached|hit|exhausted)\b/.test(text)
@@ -45,6 +60,9 @@ export function classifyError(errorText: string): ErrorAttribution {
     return { kind: 'auth', label: 'Signed out', copy: 'The AI provider\'s login expired. Sign in again to continue.' }
   }
   if (isUsageLimitError(text)) {
+    if (isCreditExhaustionError(text)) {
+      return { kind: 'quota', label: 'Out of credits', copy: 'The provider account is out of credits, so nothing runs until it is topped up. Add credits, or switch this chat to another model; an hourly retry picks up once it is.' }
+    }
     return isTerminalUsageLimit(text)
       ? { kind: 'quota', label: 'Usage limit reached', copy: 'The AI provider\'s usage limit is used up and won\'t reset for a while. Its message above says when, or how to upgrade or add credits.' }
       : { kind: 'quota', label: 'Usage limit reached', copy: 'The AI provider\'s usage limit was reached. Its message above says when it resets.' }
