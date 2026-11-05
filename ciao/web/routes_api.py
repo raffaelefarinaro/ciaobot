@@ -5724,11 +5724,7 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     # skipped by the dispatch and the click would look like it worked.
     entry = sm._store.get(schedule_id)
     if entry is not None:
-        refusal = _schedule_target_refusal(
-            request.app.state.project_chat_manager,
-            entry.web_project_id,
-            entry.web_chat_id,
-        )
+        refusal = request.app.state.project_chat_manager.schedule_target_refusal(entry)
         if refusal:
             return JSONResponse({"error": refusal}, status_code=400)
     try:
@@ -5743,6 +5739,12 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         if "paused" in str(exc).lower():
             return JSONResponse({"error": str(exc)}, status_code=409)
         raise
+    if result.get("status") == "refused":
+        # The scheduler asked the engine and the engine refused the target.
+        return JSONResponse(
+            {"error": result.get("error") or "the app will not run this routine here"},
+            status_code=400,
+        )
     # Interval entries refuse rather than queue: a manual run into a chat that
     # is already streaming would stack a second prompt behind the live turn.
     if result.get("status") == "busy":

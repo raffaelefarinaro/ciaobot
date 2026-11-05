@@ -67,6 +67,11 @@ class _ProjectChats:
     def find_project(self, name: str, workspace: str):
         return _Project() if name == "General" else None
 
+    def schedule_target_refusal(self, entry) -> str:
+        """The manager owns this rule; the stand-in refuses nothing."""
+        del entry
+        return ""
+
     def chat_stream_active(self, chat_id: str) -> bool:
         return chat_id == "chat-busy"
 

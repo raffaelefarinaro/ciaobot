@@ -294,6 +294,45 @@ async def test_a_refused_one_shot_command_routine_is_not_consumed(
     assert stored.last_status == "error"
 
 
+async def test_a_refused_one_shot_command_is_not_consumed_by_run_now(
+    tmp_path: Path,
+) -> None:
+    """"Run now" consumes a one-shot entry, so the refusal has to be asked for
+    before the dispatch: a command entry is never prepared on that path."""
+    store = ScheduleStore(tmp_path)
+    dispatched: list[str] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(entry.schedule_id)
+
+    mgr = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch,
+        prepare_chat=lambda entry, prompt, model, mode, provider: None,
+        target_refusal=lambda entry: (
+            "the Memory project holds the engine's own memory passes"
+        ),
+    )
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="once",
+        run_at_date="2026-06-15",
+        timezone_name="UTC",
+        workspace="personal",
+        command="echo hello",
+    )
+
+    result = await mgr.dispatch_now(entry.schedule_id)
+
+    assert result["status"] == "refused"
+    assert dispatched == []
+    assert store.get(entry.schedule_id) is not None
+
+
 async def test_a_refused_command_routine_does_not_run_its_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

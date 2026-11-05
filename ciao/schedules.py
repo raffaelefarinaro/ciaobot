@@ -2330,6 +2330,12 @@ class ScheduleManager:
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
+        # Asked before the dispatch: a command entry is never prepared here,
+        # so the dispatch's own check would come after a one-shot entry had
+        # already been consumed.
+        refusal = self._refused_target(entry)
+        if refusal:
+            return {"status": "refused", "error": refusal}
         current = now or _now_utc()
         if is_interval(entry):
             return await self._dispatch_interval_now(entry, current)

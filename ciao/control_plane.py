@@ -6638,6 +6638,10 @@ class CiaoControlPlane:
             "schedule_target_missing",
             "The target chat no longer exists and could not be re-homed.",
         ),
+        "refused": (
+            "schedule_target_refused",
+            "The app will not run this routine in its target.",
+        ),
     }
 
     def _raise_if_run_refused(self, result: dict[str, Any]) -> dict[str, Any]:
