@@ -73,11 +73,48 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
   }
 }
 
+/** Every restart card says what the restart costs, in the words Settings uses. */
+const RESTART_COST = ' Restarting waits for running chats to finish, and closes any open question or approval cards.'
+
+/** Where a restart card's button leads: the Settings control that restarts or updates. */
+export function restartTarget(reason: string): string {
+  return reason === 'update' ? '/settings#updates' : '/settings/advanced#restart-host'
+}
+
+function restartCopy(action: ChatAction): ActionCopy {
+  const meta = 'Ciaobot · Settings'
+  switch (action.params.reason) {
+    case 'config':
+      return {
+        title: 'Restart Ciaobot to apply a setting',
+        why: `A setting you changed takes effect after Ciaobot restarts.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
+        meta,
+      }
+    case 'update':
+      return {
+        title: 'Update Ciaobot',
+        why: `An update is ready. Installing it restarts Ciaobot.${RESTART_COST}`,
+        primaryLabel: 'Open Updates',
+        meta,
+      }
+    default:
+      return {
+        title: 'Restart requested',
+        why: `Ciaobot needs a restart to apply a change.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
+        meta,
+      }
+  }
+}
+
 /** The card copy for an action, or null for a kind with no copy yet. */
 export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
     case 'mcp_auth':
       return mcpAuthCopy(action)
+    case 'restart':
+      return restartCopy(action)
     default:
       return null
   }

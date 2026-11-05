@@ -178,5 +178,17 @@ describe('Settings pages', () => {
         wrapper.unmount()
       }
     })
+
+    it('#restart-host scrolls on the advanced page', async () => {
+      const { wrapper } = await mountSettings('/settings/advanced#restart-host')
+      try {
+        await flushPromises()
+        const spy = vi.mocked(Element.prototype.scrollIntoView)
+        const targets = spy.mock.contexts.filter(el => (el as Element).id === 'restart-host')
+        expect(targets).toHaveLength(1)
+      } finally {
+        wrapper.unmount()
+      }
+    })
   })
 })

@@ -4,6 +4,7 @@ import {
   chatActionErrorReason,
   isChatAction,
   normalizeChatActions,
+  restartTarget,
   safeExternalUrl,
 } from './chatActions'
 import type { ChatAction } from './types'
@@ -85,7 +86,25 @@ describe('actionCopy', () => {
   })
 
   it('is null for a kind with no copy yet', () => {
-    expect(actionCopy(action({ kind: 'restart' }))).toBeNull()
+    expect(actionCopy(action({ kind: 'not_a_kind' as never }))).toBeNull()
+  })
+})
+
+describe('restart copy', () => {
+  it('sends an update to General and a setting to This host', () => {
+    expect(restartTarget('update')).toBe('/settings#updates')
+    expect(restartTarget('config')).toBe('/settings/advanced#restart-host')
+  })
+
+  it('sends an unknown reason to This host', () => {
+    expect(restartTarget('mcp')).toBe('/settings/advanced#restart-host')
+  })
+
+  it('says every reason waits for running chats', () => {
+    for (const reason of ['config', 'update']) {
+      const copy = actionCopy(action({ kind: 'restart', params: { reason } }))
+      expect(copy?.why).toContain('waits for running chats to finish')
+    }
   })
 })
 

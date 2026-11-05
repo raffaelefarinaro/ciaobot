@@ -12,14 +12,15 @@ import { computed, nextTick, onBeforeUnmount, ref, useId, type Component } from 
 import AppIcon from './AppIcon.vue'
 import type { AppIconName } from './AppIcon.vue'
 import McpAuthBody from './needs-you/McpAuthBody.vue'
+import RestartBody from './needs-you/RestartBody.vue'
 import { actionCopy } from '../lib/chatActions'
 import { shouldRestoreFocus } from '../lib/moveToBackground'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction, ChatActionKind } from '../lib/types'
 
 /** One body per kind; each later child registers its own here. */
-const BODIES: Partial<Record<ChatActionKind, Component>> = { mcp_auth: McpAuthBody }
-const ICONS: Partial<Record<ChatActionKind, AppIconName>> = { mcp_auth: 'shield' }
+const BODIES: Partial<Record<ChatActionKind, Component>> = { mcp_auth: McpAuthBody, restart: RestartBody }
+const ICONS: Partial<Record<ChatActionKind, AppIconName>> = { mcp_auth: 'shield', restart: 'spark' }
 /** Kinds whose card has no Not now: the body owns the way out. */
 const HIDE_DISMISS: Partial<Record<ChatActionKind, true>> = {}
 
