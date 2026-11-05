@@ -2623,8 +2623,13 @@ def test_a_command_file_whose_handle_is_not_ordinary_is_refused(
     having and worth pinning.
     """
     path = _command_file(tmp_path, "ls -la")
+    real_fstat = os.fstat
+    # A whole stat result with only the mode changed: `open()` reads other
+    # fields of the handle's fstat on Python 3.13 (`st_size`).
     monkeypatch.setattr(
-        os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFCHR | 0o600)
+        os,
+        "fstat",
+        lambda fd: os.stat_result((stat.S_IFCHR | 0o600, *real_fstat(fd)[1:])),
     )
     with pytest.raises(agent_cli.UsageError) as excinfo:
         agent_cli._command_file_text(str(path))
