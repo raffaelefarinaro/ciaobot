@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 import os
 from pathlib import Path, PureWindowsPath
@@ -32,6 +32,8 @@ from ciao.vault_links import is_escaped
 # before extracting links so documented syntax isn't flagged.
 _FENCE_RE = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?^[ \t]*\1[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_BRACKET_SCAN_RE = re.compile(r"[\\\[\]]")
+_LINK_START_RE = re.compile(r"[\\!\[]")
 
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
@@ -184,6 +186,13 @@ def _markdown_source_paths(
     ]
 
 
+def _refs_from(destinations: Iterable[str]) -> Iterator[str]:
+    for destination in destinations:
+        ref = vault_link_ref(destination)
+        if ref:
+            yield ref
+
+
 def _links_in(text: str):
     """Yield the in-vault markdown link refs in ``text``.
 
@@ -196,10 +205,7 @@ def _links_in(text: str):
     image, a `<placeholder>`, a bare `#anchor`, a leftover `[[wikilink]]`) is
     dropped.
     """
-    for destination in _markdown_destinations_in(text):
-        ref = vault_link_ref(destination)
-        if ref:
-            yield ref
+    yield from _refs_from(_markdown_destinations_in(text))
 
 
 def is_template_stem(stem: str) -> bool:
@@ -291,6 +297,10 @@ def _matching_bracket(text: str, opening: int) -> int | None:
     depth = 0
     index = opening
     while index < len(text):
+        match = _BRACKET_SCAN_RE.search(text, index)
+        if match is None:
+            return None
+        index = match.start()
         if text[index] == "\\":
             index += 2
             continue
@@ -399,6 +409,10 @@ def _inline_markdown_destinations(text: str):
     destinations: list[tuple[int, str]] = []
     index = 0
     while index < len(text):
+        match = _LINK_START_RE.search(text, index)
+        if match is None:
+            break
+        index = match.start()
         if text[index] == "\\":
             index += 2
             continue
@@ -705,9 +719,16 @@ def run_validation(
         if len(paths) > 1:
             issues["duplicates"].append(paths)
 
+    # Each file's link destinations are parsed once and shared by the incoming,
+    # memory-root and broken-link passes below.
+    destinations = {
+        file.path: list(_markdown_destinations_in(file.content))
+        for file in vault_files
+    }
+
     for file in files_to_scan:
         rel_str = file.relative.as_posix()
-        for ref in _links_in(file.content):
+        for ref in _refs_from(destinations[file.path]):
             target = resolve_vault_link(file.relative, ref)
             # A link to a file that does not exist is reported below as a
             # broken markdown link; here it simply grants no incoming edge.
@@ -737,7 +758,7 @@ def run_validation(
     )
     memory_links = set()
     for record in memory_roots:
-        for ref in _links_in(record.content):
+        for ref in _refs_from(destinations[record.path]):
             target = resolve_vault_link(record.relative, ref)
             if target:
                 memory_links.add(target)
@@ -763,7 +784,7 @@ def run_validation(
             issues["orphans"].append(rel_str)
 
     for file in vault_files:
-        for target in _markdown_destinations_in(file.content):
+        for target in destinations[file.path]:
             error = _markdown_link_error(
                 vault_root=vault_root,
                 file=file,
