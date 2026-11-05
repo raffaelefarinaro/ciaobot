@@ -209,6 +209,9 @@ class _TerminalProvider:
     """
 
     current_session_id = None
+    #: These fakes stand in for the chat's ProviderService, whose ``provider``
+    #: is the live implementation; there is none here, so needs-you detection skips.
+    provider = None
 
     def __init__(self, events: list[StreamEvent]) -> None:
         self._events = events
@@ -237,6 +240,10 @@ class _SilentProvider(_TerminalProvider):
 
 class _DrainingProvider:
     """A between-turns drain that answers with a scripted result."""
+
+    #: Stands in for the chat's ProviderService; no live implementation behind it.
+    provider = None
+
 
     can_drain = True
 

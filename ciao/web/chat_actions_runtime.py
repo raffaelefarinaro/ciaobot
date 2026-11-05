@@ -22,8 +22,10 @@ import httpx
 
 from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_payload
 from ciao.provider_service import ProviderImpl
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
+from ciao.web.mcp_auth_claude import ClaudeMcpAuthFlow
 
 if TYPE_CHECKING:
     from ciao.terminal_sessions import TerminalSessionManager
@@ -68,11 +70,7 @@ class McpAuthHandler(ActionHandler):
         return MCP_AUTH_FLOWS.get(action.params.get("provider", ""))
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
-        flow = self._flow(action)
-        if flow is None:
-            # No flow for this provider: refused before any state change. C2 removes this branch.
-            raise ChatActionError("unsupported_provider")
-        await flow.start(ctx, action, body)
+        await MCP_AUTH_FLOWS[action.params["provider"]].start(ctx, action, body)
 
     async def poll(self, ctx: ActionContext, action: ChatAction) -> None:
         flow = self._flow(action)
@@ -178,8 +176,11 @@ class OpencodeMcpAuthFlow(ActionHandler):
         )
 
 
-#: The flow for each provider. C2 adds "claude".
-MCP_AUTH_FLOWS: dict[str, ActionHandler] = {"opencode": OpencodeMcpAuthFlow()}
+#: The flow for each provider.
+MCP_AUTH_FLOWS: dict[str, ActionHandler] = {
+    "opencode": OpencodeMcpAuthFlow(),
+    "claude": ClaudeMcpAuthFlow(),
+}
 
 COMMAND_WAKE_PROMPT = (
     "The user ran the suggested command in the terminal (exit status unknown). "
@@ -349,14 +350,16 @@ class ChatActionsRuntime:
 
         task.add_done_callback(_forget)
 
-    def detection_provider(self, chat_id: str) -> OpencodeProvider | None:
-        """The provider detection may ask: an OpenCode chat with a live server. B1 covers OpenCode only."""
+    def detection_provider(self, chat_id: str) -> OpencodeProvider | ClaudeProvider | None:
+        """The provider detection may ask: a live OpenCode server, or a connected Claude session."""
         chat = self._pcm.get_chat(chat_id)
-        if chat is None or chat.archived or chat.provider != "opencode":
+        if chat is None or chat.archived:
             return None
         service = self._pcm._providers.get(chat_id)
         provider: ProviderImpl | None = service.provider if service is not None else None
         if isinstance(provider, OpencodeProvider) and provider.has_live_server:
+            return provider
+        if isinstance(provider, ClaudeProvider) and provider._connected:
             return provider
         return None
 
@@ -381,7 +384,7 @@ class ChatActionsRuntime:
                     self._pcm.raise_action(
                         chat_id,
                         "mcp_auth",
-                        {"server": server, "provider": "opencode"},
+                        {"server": server, "provider": chat.provider},
                         origin="engine",
                     )
                 except (ChatActionError, ValueError):
