@@ -10,6 +10,7 @@
  * request says the card changed instead of failing silently.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import NeedsYouCard from '../NeedsYouCard.vue'
@@ -88,7 +89,7 @@ describe('NeedsYouCard', () => {
     expect(root.attributes('data-state')).toBe('open')
     expect(card.get('.needs-you-card-title').text()).toBe('Sign in to linear')
     expect(card.get('.needs-you-card-why').text())
-      .toBe('It is set up but not signed in. Sign in once and this chat can use it.')
+      .toBe('linear is set up for this chat but not signed in. Sign in once so this chat can use its tools.')
     expect(card.get('.needs-you-card-meta').text()).toBe('opencode · MCP')
     expect(button(card, 'Sign in').exists()).toBe(true)
     expect(button(card, 'Not now').exists()).toBe(true)
@@ -261,5 +262,37 @@ describe('NeedsYouCard', () => {
       action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/x' } }),
     })
     for (const b of card.findAll('button')) expect(b.attributes('type')).toBe('button')
+  })
+
+  it('a failed card shows the alert triangle, not the shield', async () => {
+    const card = mountCard({ action: action({ state: 'failed', error: 'x' }) })
+    expect(card.find('.needs-you-card-glyph .activity-glyph--alert').exists()).toBe(true)
+    expect(card.find('.needs-you-card-glyph svg.app-icon').exists()).toBe(false)
+
+    await card.setProps({ action: action({ state: 'open' }) })
+    expect(card.find('.needs-you-card-glyph .activity-glyph--alert').exists()).toBe(false)
+    expect(card.find('.needs-you-card-glyph svg.app-icon').exists()).toBe(true)
+  })
+
+  it('puts the primary action and Not now in one controls row', async () => {
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('server'), { status: 500 }))
+    const card = mountCard()
+    await button(card, 'Not now').trigger('click')
+    await flushPromises()
+
+    const row = card.get('.needs-you-card-controls')
+    expect(row.findAll('button').map(b => b.text())).toEqual(['Sign in', 'Not now'])
+    expect(card.get('.needs-you-card-error').element.closest('.needs-you-card-controls')).toBeNull()
+  })
+
+  it('announces a state change politely', async () => {
+    const card = mountCard()
+    const live = card.get('.needs-you-card-live')
+    expect(live.attributes('aria-live')).toBe('polite')
+    expect(live.text()).toBe('')
+
+    await card.setProps({ action: action({ state: 'failed', error: 'Boom' }) })
+    await nextTick()
+    expect(card.get('.needs-you-card-live').text()).toBe("Couldn't sign in to linear. Boom")
   })
 })
