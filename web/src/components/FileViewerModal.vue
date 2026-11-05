@@ -104,11 +104,13 @@
         <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html' }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
+          <div v-else-if="store.kind === 'image' && imageError" class="fv-error" role="alert">{{ imageError }}</div>
           <img
             v-else-if="store.kind === 'image'"
             class="fv-img"
-            :src="`/api/workspace-image?path=${encodeURIComponent(store.path)}`"
+            :src="imageSrc"
             :alt="basename"
+            @error="onImageError"
           />
           <!-- Edit mode: replaces the preview body with a textarea + actions.
                No history/diff while editing — finish or cancel first. -->
@@ -340,6 +342,7 @@ import {
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { errorMessage } from '../lib/errorMessage'
+import { imageLoadErrorMessage } from '../lib/fileLoadError'
 import { useProjectStore } from '../stores/projects'
 import { router } from '../router'
 import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
@@ -1012,6 +1015,16 @@ useTypeToComment({
   },
   addImages: (files: File[]) => addDraftImages(files),
 })
+
+const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(store.path)}`)
+// Why the current image URL failed to load; empty while it has not failed.
+const imageError = ref('')
+async function onImageError(): Promise<void> {
+  const src = imageSrc.value
+  const message = await imageLoadErrorMessage(src)
+  if (src === imageSrc.value) imageError.value = message
+}
+watch(imageSrc, () => { imageError.value = '' })
 
 const basename = computed(() => {
   const p = store.path

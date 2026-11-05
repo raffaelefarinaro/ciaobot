@@ -472,4 +472,15 @@ describe('FileViewerModal', () => {
     expect(continueArchived).toHaveBeenCalledWith('chat-old')
     expect(store.isOpen).toBe(false)
   })
+
+  it('shows why an image failed to load', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })))
+    const store = openViewer()
+    await store.openImage('/ws/pic.png')
+    await settle()
+    await wrapper!.get('img.fv-img').trigger('error')
+    await settle()
+    expect(wrapper!.get('.fv-error').text()).toBe('File not found.')
+    expect(wrapper!.find('img.fv-img').exists()).toBe(false)
+  })
 })

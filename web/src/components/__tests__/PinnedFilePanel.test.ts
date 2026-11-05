@@ -407,4 +407,13 @@ describe('PinnedFilePanel', () => {
 
     wrapper.unmount()
   })
+
+  it('shows why an image failed to load instead of a blank box', async () => {
+    const wrapper = await mountPanel({ filePath: '/ws/pic.png' })
+    await wrapper.get('img.pfp-img').trigger('error')
+    await flushPromises()
+    expect(wrapper.get('.pfp-error').text()).toBe('File not found.')
+    expect(wrapper.find('img.pfp-img').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
