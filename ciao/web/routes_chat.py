@@ -595,6 +595,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_terminal_offer_changed` {chat_id, terminal_offer}  (null = cleared)
+    - `chat_actions_changed`    {chat_id, actions}  (the whole list; [] = none)
     - `chat_title`              {chat_id, title}
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
@@ -649,6 +650,8 @@ async def ws_events(websocket: WebSocket) -> None:
             # is missing from it has no offer and a stale offer is cleared
             # by its absence.
             "chat_terminal_offers": pcm.chat_terminal_offer_states,
+            # Sparse and COMPLETE like the offers: the map replaces the client's cache.
+            "chat_actions": pcm.chat_action_states,
             "keyboard_shortcuts": (
                 websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
                 if getattr(websocket.app.state, "app_settings", None) is not None else {}

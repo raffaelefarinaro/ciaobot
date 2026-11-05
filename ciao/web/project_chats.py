@@ -11,11 +11,13 @@ import os
 import re
 import shutil
 import tempfile
+import dataclasses
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -90,6 +92,19 @@ class TerminalOfferConflictError(Exception):
         self.terminal_offer = terminal_offer
 
 
+class ChatActionConflictError(Exception):
+    """An action call quoted an action id that is no longer on the chat.
+
+    The id the client quoted is no longer current, so the write conflicts instead
+    of silently acting on a card the user did not see. Carries the chat's current
+    list so the caller can re-apply against it.
+    """
+
+    def __init__(self, actions: list[dict[str, object]]) -> None:
+        super().__init__("Chat action conflict")
+        self.actions = actions
+
+
 def _restored_pin_paths(raw: Any) -> list[str]:
     """Canonical dismissed-pin paths out of a registry record.
 
@@ -156,6 +171,19 @@ from ciao.schedules import (
     settle_retrying_runs,
     settle_runs_for_archived_chat,
 )
+from ciao.chat_actions import (
+    ActionKind,
+    ActionOrigin,
+    ActionState,
+    ChatAction,
+    ChatActionError,
+    action_key,
+    action_payload,
+    check_agent_params,
+    new_action_id,
+    normalize_error,
+    validate_params,
+)
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
 from ciao.terminal_offer import (
@@ -163,6 +191,7 @@ from ciao.terminal_offer import (
     new_terminal_offer,
     terminal_offer_payload,
 )
+from ciao.web.chat_actions_runtime import ChatActionsRuntime
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
@@ -731,6 +760,14 @@ class ChatInfo:
     # the conversation it was made in (archive, new session, handover) or
     # with an explicit dismissal, and a restart ends it with everything else.
     terminal_offer: TerminalOffer | None = None
+    # Needs-you action cards. Transient and memory only, like the offer above:
+    # an action can name a sign-in URL or a helper session, so it never reaches
+    # the chat registry. It ends with the conversation it was raised in (archive,
+    # new session, handover) or with a dismissal, and a restart ends it.
+    actions: list[ChatAction] = field(default_factory=list)
+    # Keys the user said "Not now" to. Detection skips them until the provider
+    # session restarts.
+    dismissed_action_keys: set[str] = field(default_factory=set)
     # Deferred retry state for provider quota/session-limit failures. Pending
     # retries are replayed on their kind's schedule (see _arm_retry) until they
     # succeed, hit the kind's cap, the user stops them, or the chat is
@@ -881,6 +918,7 @@ class ChatInfo:
             "last_error": self.last_error,
             "title_status": self.title_status,
             "terminal_offer": terminal_offer_payload(self.terminal_offer),
+            "actions": [action_payload(a) for a in self.actions],
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
             "pending_queue": [
@@ -1209,6 +1247,7 @@ class ProjectChatManager:
         # mid-flight, and any exception it raised is reported as "Task
         # exception was never retrieved" at GC time instead of being logged.
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self.actions_runtime = ChatActionsRuntime(self)
         self._repo_location_locks: dict[str, asyncio.Lock] = {}
         # Chats with a native-title poll in flight. Both the first-message and
         # the end-of-turn trigger want to title the same chat, and each poll
@@ -4159,6 +4198,176 @@ class ProjectChatManager:
         })
         return True
 
+    # ── Chat actions (transient needs-you cards) ─────────────────────────
+
+    def _publish_actions(self, chat: ChatInfo) -> None:
+        self._events.publish({
+            "type": "chat_actions_changed",
+            "chat_id": chat.chat_id,
+            "actions": [action_payload(a) for a in chat.actions],
+        })
+
+    def _find_action(self, chat: ChatInfo, action_id: str) -> tuple[int, ChatAction] | None:
+        for index, action in enumerate(chat.actions):
+            if action.id == action_id:
+                return index, action
+        return None
+
+    def raise_action(
+        self,
+        chat_id: str,
+        kind: ActionKind,
+        params: dict[str, object],
+        *,
+        origin: ActionOrigin,
+    ) -> dict[str, object] | None:
+        """Put a card on the chat, or return the card already there.
+
+        Same key and every incoming param equal to the card's: the existing card is
+        returned and nothing is published. Otherwise the card is replaced in place by
+        a new one with a new id, or a new card is appended.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if chat.archived:
+            raise ValueError("Cannot raise an action in an archived chat")
+        if origin == "agent":
+            check_agent_params(kind, params)
+        validated = validate_params(kind, params)
+        key = action_key(kind, validated)
+        for index, current in enumerate(chat.actions):
+            if action_key(current.kind, current.params) != key:
+                continue
+            if all(current.params.get(name) == value for name, value in validated.items()):
+                return action_payload(current)
+            new = ChatAction(
+                id=new_action_id(),
+                kind=kind,
+                origin=origin,
+                state="open",
+                params=MappingProxyType(validated),
+                error="",
+                created_at=time.time(),
+            )
+            chat.actions[index] = new
+            self._publish_actions(chat)
+            return action_payload(new)
+        new = ChatAction(
+            id=new_action_id(),
+            kind=kind,
+            origin=origin,
+            state="open",
+            params=MappingProxyType(validated),
+            error="",
+            created_at=time.time(),
+        )
+        chat.actions.append(new)
+        self._publish_actions(chat)
+        return action_payload(new)
+
+    def update_action(
+        self,
+        chat_id: str,
+        action_id: str,
+        *,
+        state: ActionState,
+        params_update: dict[str, object] | None = None,
+        error: str = "",
+    ) -> dict[str, object] | None:
+        """Move a card to ``state``, keeping its id. Unchanged input publishes nothing."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        if found is None:
+            return None
+        index, action = found
+        if params_update:
+            params = validate_params(action.kind, {**action.params, **params_update})
+        else:
+            params = dict(action.params)
+        error_text = normalize_error(error) if error else ""
+        if state == action.state and params == dict(action.params) and error_text == action.error:
+            return action_payload(action)
+        updated = dataclasses.replace(
+            action,
+            state=state,
+            params=MappingProxyType(params),
+            error=error_text,
+        )
+        chat.actions[index] = updated
+        self._publish_actions(chat)
+        return action_payload(updated)
+
+    def dismiss_action(self, chat_id: str, action_id: str) -> dict[str, object] | None:
+        """Remove a card and remember its key, so detection does not raise it again."""
+        return self._remove_action(chat_id, action_id, remember=True)
+
+    def remove_action(self, chat_id: str, action_id: str) -> dict[str, object] | None:
+        """Remove a card without remembering its key (Continue, and a quota retry clearing)."""
+        return self._remove_action(chat_id, action_id, remember=False)
+
+    def _remove_action(self, chat_id: str, action_id: str, *, remember: bool) -> dict[str, object] | None:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        if found is None:
+            raise ChatActionConflictError(self.chat_action_payloads(chat_id))
+        index, action = found
+        del chat.actions[index]
+        if remember:
+            chat.dismissed_action_keys.add(action_key(action.kind, action.params))
+        self._publish_actions(chat)
+        return action_payload(action)
+
+    def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        return found[1] if found is not None else None
+
+    def chat_action_payloads(self, chat_id: str) -> list[dict[str, object]]:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return []
+        return [action_payload(a) for a in chat.actions]
+
+    @property
+    def chat_action_states(self) -> dict[str, list[dict[str, object]]]:
+        """The action list of every chat that has one, by chat id.
+
+        Sparse and complete, like the terminal-offer map: a chat missing from it has
+        no actions, and the map replaces the client's cache.
+        """
+        states: dict[str, list[dict[str, object]]] = {}
+        for cid, chat in self._chats.items():
+            if chat.actions:
+                states[cid] = [action_payload(a) for a in chat.actions]
+        return states
+
+    def _clear_chat_actions(self, chat: ChatInfo) -> bool:
+        """Drop every action and dismissed key, cancel what was dropped. True when there were actions."""
+        removed = list(chat.actions)
+        had = bool(removed)
+        chat.actions = []
+        chat.dismissed_action_keys = set()
+        if had:
+            self._publish_actions(chat)
+            self.actions_runtime.cancel_removed(chat.chat_id, removed)
+        return had
+
+    def _schedule_action_detection(self, chat_id: str) -> None:
+        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode chat."""
+        if self.actions_runtime.detection_provider(chat_id) is None:
+            return
+        self._spawn_detached(
+            self.actions_runtime.detect_mcp_auth(chat_id),
+            f"chat-actions-detect-{chat_id}",
+        )
+
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
@@ -4474,6 +4683,7 @@ class ProjectChatManager:
         self._save()
         # The offer belonged to the conversation that just ended.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         return chat
 
     def mark_handover_context_used(self, chat_id: str) -> None:
@@ -4854,6 +5064,7 @@ class ProjectChatManager:
         self._save()
         # The archived chat is read-only history: it carries no offer.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,
@@ -4980,6 +5191,7 @@ class ProjectChatManager:
         self._save()
         # The offer belonged to the session that just ended.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         return chat
 
     # ── Provider management ──────────────────────────────────────────────
