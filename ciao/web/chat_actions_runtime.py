@@ -181,8 +181,39 @@ class OpencodeMcpAuthFlow(ActionHandler):
 #: The flow for each provider. C2 adds "claude".
 MCP_AUTH_FLOWS: dict[str, ActionHandler] = {"opencode": OpencodeMcpAuthFlow()}
 
+COMMAND_WAKE_PROMPT = (
+    "The user ran the suggested command in the terminal (exit status unknown). "
+    "Check the result with your own tools: you cannot see the terminal's output."
+)
+
+
+class CommandActionHandler(ActionHandler):
+    """The `command` kind. The PWA types the text into the chat's terminal
+    through the terminal's own door. The engine only records the user's
+    progress. It never opens a terminal, writes to a PTY or runs anything."""
+
+    # "ran" may follow "typed"; a failed command card does not exist.
+    start_states = frozenset({"open", "working"})
+    # poll_states stays the base default ({"waiting"}): this kind never waits,
+    # so it is never polled and never times out.
+
+    async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        step = body.get("step")
+        if step not in ("typed", "ran") or set(body) - {"step"}:
+            raise ChatActionError("invalid_body")
+        ctx.pcm.update_action(
+            ctx.chat.chat_id, action.id, state="working" if step == "typed" else "done"
+        )
+
+    def wake_prompt(self, action: ChatAction) -> str:
+        return COMMAND_WAKE_PROMPT
+
+
 #: The handler for each kind. Kinds with a handler register here.
-ACTION_HANDLERS: dict[str, ActionHandler] = {"mcp_auth": McpAuthHandler()}
+ACTION_HANDLERS: dict[str, ActionHandler] = {
+    "mcp_auth": McpAuthHandler(),
+    "command": CommandActionHandler(),
+}
 
 
 class ChatActionsRuntime:
