@@ -45,10 +45,15 @@ test('switching to a chat with a pinned file slides the chat first, then the fil
   })
   await boot(page, '/chat/alpha-chat-1', COMPOSER)
   await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
-  const tile = page.locator('.chat-split-side--arriving')
-  await expect(tile).toHaveCount(1)
-  // Still hidden while the chat slides in.
-  expect(Number(await tile.evaluate(el => getComputedStyle(el).opacity))).toBeLessThan(0.5)
+  // Still hidden while the chat slides in. The arriving class lives only for the
+  // ~520 ms tile animation, so find it and read its opacity in the same frame:
+  // a separate count check and evaluate can straddle its removal on a loaded runner.
+  const arriving = await page.waitForFunction(() => {
+    const el = document.querySelector('.chat-split-side--arriving')
+    // Wrapped in an object: a bare opacity of 0 is falsy and would keep waiting.
+    return el ? { opacity: Number(getComputedStyle(el).opacity) } : null
+  }, undefined, { polling: 'raf' })
+  expect((await arriving.jsonValue())!.opacity).toBeLessThan(0.5)
   await expect(page.locator('.chat-split-side--arriving')).toHaveCount(0)
   await expect(page.locator('.chat-split-side')).toBeVisible()
 })
