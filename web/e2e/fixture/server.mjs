@@ -16,6 +16,7 @@
  *   POST /__fixture__/projects  { projects: [...] }  replace this session's project list
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
+*   POST /__fixture__/chat-action { chat_id, kind, params, state? }  put a needs-you action on a chat
  *   POST /__fixture__/terminal-repo  { chat_id }      link a repository to a chat's terminal
  *   POST /__fixture__/inbox     { reset?, chats?, removeChats?, tasks?, schedules?,
  *                                 removeSchedules?, actions?, events? }  move what the
@@ -319,7 +320,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
@@ -370,9 +371,49 @@ function offerFor(state, chatId) {
   return state.terminalOffers.get(chatId) || null
 }
 
-/** A chat row carrying this session's offer. */
+/** A chat row carrying this session's offer and needs-you actions. */
 function chatWithOffer(state, chat) {
-  return { ...chat, terminal_offer: offerFor(state, chat.chat_id) }
+  return { ...chat, terminal_offer: offerFor(state, chat.chat_id), actions: actionsFor(state, chat.chat_id) }
+}
+
+/** The needs-you actions this session holds for a chat. */
+function actionsFor(state, chatId) {
+  return state.chatActions.get(chatId) || []
+}
+
+/** Replace a chat's actions and tell every socket of the session. */
+function setChatActionList(state, chatId, list) {
+  state.chatActions.set(chatId, list)
+  for (const socket of state.sockets) socket.send({ type: 'chat_actions_changed', chat_id: chatId, actions: list })
+}
+
+/** The sign-in page an `mcp_auth` action opens. Not a live address. */
+const MCP_AUTH_FIXTURE_URL = 'https://auth.example.invalid/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A56446%2Fcallback&state=fixture'
+
+/**
+ * A needs-you action's start, dismiss or continue. An unknown id is a 409 with
+ * the chat's list, as the engine answers a stale card. A start moves the action
+ * on: `typed` runs it, `ran` finishes it, an `mcp_auth` waits on its sign-in
+ * page, and any other kind is done. Dismiss and continue remove it.
+ */
+function chatActionRoute(state, chatId, actionId, verb, body) {
+  if (!CHATS.some(c => c.chat_id === chatId)) return { status: 404, body: { error: 'not found' } }
+  const list = actionsFor(state, chatId)
+  const action = list.find(a => a.id === actionId)
+  if (!action) return { status: 409, body: { error: 'chat_action_conflict', actions: list } }
+  if (verb === 'start') {
+    let next
+    if (body?.step === 'typed') next = { ...action, state: 'working' }
+    else if (body?.step === 'ran') next = { ...action, state: 'done' }
+    else if (action.kind === 'mcp_auth') next = { ...action, state: 'waiting', params: { ...action.params, url: MCP_AUTH_FIXTURE_URL } }
+    else next = { ...action, state: 'done' }
+    setChatActionList(state, chatId, list.map(a => (a.id === actionId ? next : a)))
+    return { status: 200, body: { action: next } }
+  }
+  const remaining = list.filter(a => a.id !== actionId)
+  setChatActionList(state, chatId, remaining)
+  if (verb === 'continue') return { status: 200, body: { actions: remaining, delivery: 'started' } }
+  return { status: 200, body: { actions: remaining } }
 }
 
 /** The chats this session still has, with the inbox spec's patches merged in. */
@@ -1061,6 +1102,33 @@ const server = http.createServer(async (req, res) => {
       state.terminalOffers.set(chatId, offer)
       return sendJson(res, { ok: true, offer })
     }
+    if (pathname === '/__fixture__/chat-action') {
+      // Put a needs-you action on one chat, as the engine would raise it. One
+      // action per kind: a second of the same kind replaces the first.
+      const body = await readBody(req)
+      const chatId = typeof body?.chat_id === 'string' ? body.chat_id : ''
+      const kind = typeof body?.kind === 'string' ? body.kind : ''
+      const params = body?.params
+      const paramsOk = Boolean(params) && typeof params === 'object' && !Array.isArray(params)
+        && Object.values(params).every(v => typeof v === 'string')
+      if (!chatId || !kind || !paramsOk) {
+        return sendJson(res, { error: 'chat_id, kind and params are required' }, 400)
+      }
+      if (!CHATS.some(c => c.chat_id === chatId)) {
+        return sendJson(res, { error: 'unknown chat' }, 404)
+      }
+      const action = {
+        id: mintOfferId(),
+        kind,
+        origin: 'agent',
+        state: typeof body.state === 'string' ? body.state : 'open',
+        params,
+        error: '',
+        created_at: Date.now() / 1000,
+      }
+      setChatActionList(state, chatId, actionsFor(state, chatId).filter(a => a.kind !== kind).concat(action))
+      return sendJson(res, { ok: true, action })
+    }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
 
@@ -1087,6 +1155,20 @@ const server = http.createServer(async (req, res) => {
       writer.chatPatches.set(chatId, { ...writer.chatPatches.get(chatId), last_read_at: lastReadAt })
       for (const socket of writer.sockets) socket.send({ type: 'chat_read', chat_id: chatId, last_read_at: lastReadAt })
       return sendJson(res, { ok: true })
+    }
+    // A needs-you action's start, dismiss or continue.
+    const actionRoute = req.method === 'POST'
+      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue)$/.exec(pathname)
+      : null
+    if (actionRoute) {
+      const answer = chatActionRoute(
+        sessionOf(req),
+        decodeURIComponent(actionRoute[1]),
+        decodeURIComponent(actionRoute[2]),
+        actionRoute[3],
+        body,
+      )
+      return sendJson(res, answer.body, answer.status)
     }
     // The dismissal of a suggested command: exactly `{terminal_offer:{expected_id}}`,
     // and only a PATCH carries one. Every other write keeps the behaviour it
@@ -1256,6 +1338,8 @@ server.on('upgrade', (req, socket) => {
   // replaces the browser's copy, so it must carry every offer this session
   // holds — a chat it does not name holds none.
   frame.chat_terminal_offers = Object.fromEntries(state.terminalOffers)
+  // The needs-you map is complete too: a chat it does not name holds none.
+  frame.chat_actions = Object.fromEntries([...state.chatActions].filter(([, list]) => list.length))
   ws.send(frame)
 })
 

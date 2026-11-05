@@ -332,6 +332,8 @@ export interface ChatInfo {
   // keep compiling; an absent field is read as "no offer", never as "keep
   // what we had".
   terminal_offer?: TerminalOffer | null
+  // Needs-you actions the engine holds for this chat (an MCP sign-in, ...).
+  actions?: ChatAction[]
   // Server sends `{}` for no location; test `repo_location.path`, not the object.
   repo_location?: Partial<RepoLocation>
   // G1: always sent; optional for older payloads/test stubs.
@@ -368,6 +370,27 @@ export interface TerminalOffer {
   command: string
 }
 
+/** A needs-you kind the engine can raise on a chat. */
+export type ChatActionKind = 'mcp_auth' | 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+
+/** Where a needs-you action is in its life. */
+export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'
+
+/**
+ * A transient needs-you action on a chat. The engine owns it and sends it on
+ * the chat row, the snapshot and `chat_actions_changed`. `params` holds only
+ * strings; the PWA composes all card copy from kind and params.
+ */
+export interface ChatAction {
+  id: string
+  kind: ChatActionKind
+  origin: 'engine' | 'agent'
+  state: ChatActionState
+  params: Record<string, string>
+  error: string
+  created_at: number
+}
+
 /** The memory pass's step on an archived chat's postprocess record. */
 export interface ChatPostprocessStep {
   status: 'ok' | 'queued' | 'running' | 'attention'
@@ -391,7 +414,7 @@ export interface ChatRetryInfo {
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
-  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover'
+  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover' | 'chat_action'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -633,7 +656,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
@@ -641,6 +664,7 @@ export type EventsWsMessage =
   // dropped it. Global (it travels on `/ws/events`, not the per-chat socket),
   // because the engine can change a chat's offer from any session.
   | { type: 'chat_terminal_offer_changed'; chat_id: string; terminal_offer: TerminalOffer | null }
+  | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }

@@ -28,6 +28,7 @@ export type InjectedPrompt =
   | { kind: 'update_task' }
   | { kind: 'retry' }
   | { kind: 'restart_resume' }
+  | { kind: 'chat_action' }
   | { kind: 'error'; label: string; copy: string; text: string }
   | { kind: 'handover'; from: string; to: string; sent: string }
 
@@ -196,6 +197,7 @@ export function parseInjectedPrompt(
     case 'update_task': return { kind: 'update_task' }
     case 'retry': return { kind: 'retry' }
     case 'restart_resume': return { kind: 'restart_resume' }
+    case 'chat_action': return { kind: 'chat_action' }
     case 'handover': return parseHandover(content, sentContext)
     default: return null
   }
@@ -289,6 +291,8 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
     case 'restart_resume':
       return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
+    case 'chat_action':
+      return { label: 'Continue after your action', facts: 'You finished what this chat needed', tone: null }
     case 'error':
       return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
     case 'handover':
