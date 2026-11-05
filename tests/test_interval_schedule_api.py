@@ -25,6 +25,8 @@ class _Chat:
         self.title = title
         self.archived = archived
         self.project_id = project_id
+        # The engine's lifecycle metadata; a chat without it is an ordinary one.
+        self.helper: dict = {}
 
 
 class _NewChat:
@@ -38,6 +40,8 @@ class _Project:
         self.project_id = project_id
         self.name = name
         self.workspace = "personal"
+        # `kind` is how the app tells its own Memory project from a user one.
+        self.kind = ""
 
 
 class _ProjectChats:

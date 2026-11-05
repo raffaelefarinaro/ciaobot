@@ -1401,7 +1401,12 @@ fork or a continuation of a pass is placed in the workspace's General project
 instead, the create route refuses a client-supplied `memory_pass` helper, and
 the agent surface reports the refusal as `invalid_project`. Without that, a
 client could silence any chat it created by moving it into the Memory project
-or by labelling it a pass. A pass's own archive is
+or by labelling it a pass. A routine is a target like any other, so the same
+rule reaches the scheduler: `prepare_schedule_chat` skips a run whose target is
+the Memory project or a pass (it returns `None` rather than raising, because
+it runs inside the scheduler's tick and an exception there would take the
+other due schedules down with it), and the schedule routes refuse such a target
+with a 400 that names the reason. A pass's own archive is
 not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
 For **After this update** changes (Home's update-task group, or the Settings

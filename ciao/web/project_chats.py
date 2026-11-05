@@ -9969,6 +9969,15 @@ class ProjectChatManager:
                 "unresolvable, skipping", chat_id,
             )
             return None
+        if project.kind == MEMORY_PROJECT_KIND:
+            # The Memory project is app-owned: it holds the engine's own
+            # memory passes, so a routine cannot run in it.
+            logger.warning(
+                "Interval schedule %s resolves to the Memory project, which "
+                "holds the engine's own passes; skipping",
+                getattr(entry, "schedule_id", ""),
+            )
+            return None
         fresh = self.create_chat(
             project.project_id,
             title=title or f"Every run: {prompt[:30]}",

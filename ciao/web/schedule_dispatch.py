@@ -39,6 +39,11 @@ from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
 from ciao.web.chat_broker import ChatStream, EventsHub
+from ciao.web.memory_pass import (
+    MemoryProjectRefused,
+    is_memory_pass_chat,
+    is_memory_pass_project,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
@@ -483,6 +488,19 @@ class ScheduleDispatcher:
             if project is None:
                 logger.warning("Schedule target project %s not found, skipping", web_project_id)
                 return None
+            if is_memory_pass_project(project):
+                # The Memory project is app-owned: it holds the engine's own
+                # memory passes, and a routine run there would put an ordinary
+                # chat in a project where every chat is silenced. The run is
+                # skipped here rather than refused from here: this runs inside
+                # the scheduler's tick, and an exception would take the other
+                # due schedules down with it.
+                logger.warning(
+                    "Schedule %s targets the Memory project, which holds the "
+                    "engine's own passes; skipping the run",
+                    sched_id,
+                )
+                return None
             # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
@@ -495,19 +513,32 @@ class ScheduleDispatcher:
                     title_base = title_base[:37] + "..."
             date_str = datetime.now(UTC).strftime("%b %d")
             title = f"{title_base} - {date_str}"
-            chat = self._host.create_chat(
-                project.project_id,
-                title=title,
-                model=model,
-                mode=mode,
-                provider=provider or None,
-            )
+            try:
+                chat = self._host.create_chat(
+                    project.project_id,
+                    title=title,
+                    model=model,
+                    mode=mode,
+                    provider=provider or None,
+                )
+            except MemoryProjectRefused as exc:
+                logger.warning("Schedule %s cannot run in its target: %s", sched_id, exc)
+                return None
             _stamp(chat)
             self._supersede_earlier_runs(chat)
             self._host._save()
             return chat.chat_id
         if web_chat_id:
             target_chat = self._host._chats.get(web_chat_id)
+            if target_chat is not None and is_memory_pass_chat(
+                target_chat, self._host._projects.get(target_chat.project_id)
+            ):
+                # A pass is the app's own turn: a routine posted into it would
+                # run under the pass's restrictions and never reach the owner.
+                logger.warning(
+                    "Schedule %s targets a memory pass; skipping the run", sched_id
+                )
+                return None
             if target_chat is None or target_chat.archived:
                 replacement = self._host._rehome_interval_chat(entry, prompt)
                 if replacement is None:

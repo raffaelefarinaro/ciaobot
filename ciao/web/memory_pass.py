@@ -519,6 +519,16 @@ def is_memory_pass_chat(chat: ChatInfo, project: ProjectInfo | None) -> bool:
     )
 
 
+def is_memory_pass_project(project: ProjectInfo | None) -> bool:
+    """True for the app-owned Memory project, which holds the engine's passes.
+
+    The one place a project is judged by its kind rather than by its name: a
+    user project may legitimately be called "Memory", and only the kind is the
+    discriminator.
+    """
+    return project is not None and project.kind == MEMORY_PROJECT_KIND
+
+
 class MemoryPassCoordinator:
     """Own the Memory project and the one-at-a-time pass queue per workspace.
 

@@ -131,7 +131,11 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
-from ciao.web.memory_pass import MemoryProjectRefused, is_memory_pass_chat
+from ciao.web.memory_pass import (
+    MemoryProjectRefused,
+    is_memory_pass_chat,
+    is_memory_pass_project,
+)
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
@@ -5546,6 +5550,28 @@ async def list_schedules(request: Request) -> JSONResponse:
     return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
 
 
+def _schedule_target_refusal(
+    pcm, project_id: str | None, chat_id: str | None
+) -> str:
+    """Why a schedule cannot run in this target, or '' when it can.
+
+    The Memory project is app-owned: it holds the engine's own memory passes,
+    and a routine run there would put an ordinary chat in a project where
+    every chat is silenced. A memory pass is not a target either — its turn is
+    the app's own, and a run posted into it never reaches the owner.
+    """
+    if project_id:
+        if is_memory_pass_project(pcm.get_project(project_id)):
+            return "the Memory project holds the engine's own memory passes"
+    if chat_id:
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and is_memory_pass_chat(
+            chat, pcm.get_project(chat.project_id)
+        ):
+            return "a memory pass is not a target for a schedule"
+    return ""
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
@@ -5553,6 +5579,10 @@ async def create_schedule(request: Request) -> JSONResponse:
 
     web_chat_id = body.get("web_chat_id")
     web_project_id = body.get("web_project_id")
+
+    refusal = _schedule_target_refusal(pcm, web_project_id, web_chat_id)
+    if refusal:
+        return JSONResponse({"error": refusal}, status_code=400)
 
     # Persist only explicit overrides. Empty model/provider values mean
     # "inherit the selected workspace" and are resolved afresh at dispatch
@@ -5689,6 +5719,18 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     """Trigger a schedule immediately."""
     schedule_id = request.path_params["schedule_id"]
     sm = request.app.state.schedule_manager
+    # A routine whose target the app will not run in is refused here, with the
+    # reason, rather than silently doing nothing: the run would otherwise be
+    # skipped by the dispatch and the click would look like it worked.
+    entry = sm._store.get(schedule_id)
+    if entry is not None:
+        refusal = _schedule_target_refusal(
+            request.app.state.project_chat_manager,
+            entry.web_project_id,
+            entry.web_chat_id,
+        )
+        if refusal:
+            return JSONResponse({"error": refusal}, status_code=400)
     try:
         result = await sm.dispatch_now(schedule_id)
     except ValueError:
@@ -5749,6 +5791,16 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    # The target this update asks for, checked before anything is written: the
+    # app will not run a routine in the Memory project or inside a pass, and a
+    # half-applied update would leave the entry pointing somewhere else.
+    refusal = _schedule_target_refusal(
+        request.app.state.project_chat_manager,
+        body.get("web_project_id") if "web_project_id" in body else entry.web_project_id,
+        body.get("web_chat_id") if "web_chat_id" in body else entry.web_chat_id,
+    )
+    if refusal:
+        return JSONResponse({"error": refusal}, status_code=400)
     timing_fields: set[str] = set()
     if entry.scope == "system":
         try:
