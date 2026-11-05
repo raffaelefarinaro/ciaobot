@@ -49,9 +49,10 @@ CANCEL_TIMEOUT_S = 5.0
 TIMEOUT_ERROR = "Timed out waiting for sign-in"
 
 # Error copy. The engine composes these; the PWA shows them as they are.
-NOT_RUNNING_ERROR = "This chat's OpenCode server is not running. Send a message in the chat, then try again."
 NO_SIGN_IN_ERROR = "OpenCode does not offer a sign-in for this server. Sign in with `opencode mcp auth` instead."
 CODE_MODE_ERROR = "This server asks for a pasted sign-in code. Sign in with `opencode mcp auth` instead."
+OPENCODE_MISSING_ERROR = "OpenCode is not installed, so the sign-in cannot start. Install OpenCode, then try again."
+SERVER_START_FAILED_ERROR = "OpenCode could not start for this chat. Try again."
 START_FAILED_ERROR = "OpenCode could not start the sign-in. Try again."
 BAD_URL_ERROR = "OpenCode returned a sign-in address Ciao cannot open."
 STOPPED_ERROR = "This chat's OpenCode server stopped before the sign-in finished. Try again."
@@ -100,16 +101,23 @@ class OpencodeMcpAuthFlow(ActionHandler):
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
         cid = ctx.chat.chat_id
         ctx.pcm.update_action(cid, action.id, state="working")
-        provider = ctx.provider
-        if not isinstance(provider, OpencodeProvider) or not provider.has_live_server:
-            ctx.pcm.update_action(cid, action.id, state="failed", error=NOT_RUNNING_ERROR)
+        # The idle sweep may have stopped the server since the card was raised: start it.
+        try:
+            provider = await ctx.pcm.ensure_opencode_server(cid)
+        except FileNotFoundError:
+            ctx.pcm.update_action(cid, action.id, state="failed", error=OPENCODE_MISSING_ERROR)
+            return
+        except Exception as exc:  # noqa: BLE001 - any startup failure fails the card
+            # The message may carry server stderr; log only the class.
+            logger.warning("OpenCode server could not start for chat %s: %s", cid, type(exc).__name__)
+            ctx.pcm.update_action(cid, action.id, state="failed", error=SERVER_START_FAILED_ERROR)
             return
         try:
             attempt = await asyncio.wait_for(
                 provider.start_mcp_oauth(action.params["server"]), START_TIMEOUT_S
             )
         except McpOAuthUnavailable as exc:
-            error = NOT_RUNNING_ERROR if exc.reason == "not_running" else NO_SIGN_IN_ERROR
+            error = STOPPED_ERROR if exc.reason == "not_running" else NO_SIGN_IN_ERROR
             ctx.pcm.update_action(cid, action.id, state="failed", error=error)
             return
         except (httpx.HTTPError, ValueError, OSError, asyncio.TimeoutError) as exc:
