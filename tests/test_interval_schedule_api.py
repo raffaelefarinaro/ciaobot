@@ -25,6 +25,8 @@ class _Chat:
         self.title = title
         self.archived = archived
         self.project_id = project_id
+        # The engine's lifecycle metadata; a chat without it is an ordinary one.
+        self.helper: dict = {}
 
 
 class _NewChat:
@@ -38,6 +40,8 @@ class _Project:
         self.project_id = project_id
         self.name = name
         self.workspace = "personal"
+        # `kind` is how the app tells its own Memory project from a user one.
+        self.kind = ""
 
 
 class _ProjectChats:
@@ -62,6 +66,11 @@ class _ProjectChats:
 
     def find_project(self, name: str, workspace: str):
         return _Project() if name == "General" else None
+
+    def schedule_target_refusal(self, entry) -> str:
+        """The manager owns this rule; the stand-in refuses nothing."""
+        del entry
+        return ""
 
     def chat_stream_active(self, chat_id: str) -> bool:
         return chat_id == "chat-busy"

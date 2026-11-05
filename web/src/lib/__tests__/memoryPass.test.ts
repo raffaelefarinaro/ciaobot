@@ -34,6 +34,15 @@ describe('memoryPass', () => {
     expect(isMemoryPassChat(undefined)).toBe(false)
   })
 
+  it('falls back to the Memory project kind when the helper failed closed', () => {
+    // Mirror of the backend recursion guard: a hand-edited or older pass helper
+    // is still app housekeeping while its project is the app's Memory project.
+    expect(isMemoryPassChat({ helper: { kind: 'legacy-memory-pass' } } as unknown as ChatInfo, { kind: 'memory' })).toBe(true)
+    expect(isMemoryPassChat({} as ChatInfo, { kind: 'memory' })).toBe(true)
+    // An ordinary project named Memory is not the discriminator.
+    expect(isMemoryPassChat({ helper: {} } as unknown as ChatInfo, { name: 'Memory' } as ProjectInfo)).toBe(false)
+  })
+
   it('needs attention only for the unclean state', () => {
     expect(memoryPassNeedsAttention(pass('attention'))).toBe(true)
     // Queued and running are in flight, done auto-archives, and an ordinary

@@ -1383,9 +1383,38 @@ touch it, check the overlap case (an archive request still in flight while its
 pass is already running must stay ONE row), the fallback (no pass yet, so the row opens
 the archived transcript), the dead entry (no file and no pass, so the row is
 disabled), the counter rules (`chatIsAttentionItem` is what the Home nav badge
-and the lane status sentence both ask), and that the pass never reappears in
-`activeChatsAll`, `projectChats`, `totalUnread`, the sidebar or a schedule
-target. A pass's own archive is not a second row: `memoryInsights` skips any chat
+and the lane status sentence both ask, and it is false for every pass, blocked
+or not; the row's own blocking phase carries that signal), and that a declared
+pass never reappears in `activeChatsAll`, `projectChats`, `totalUnread`, the
+sidebar or a schedule target. A pass is silent on every notification surface
+too — toasts, the notification inbox, the bell and OS badge, and the menu bar —
+even when blocked; `isMemoryPassChat` takes the project as its fallback so a
+malformed helper in a Memory project cannot start notifying again. That
+malformed-helper pass is the exception in the display filters: because it has
+no memory-insight row, it must stay in `activeChatsAll` and `projectChats` so its
+pending question remains reachable, while `projectNeedsInput`, unread and every
+notification predicate still exclude it by project kind. The project kind is a
+signal the app owns, so the engine keeps it true: **the Memory project holds
+the engine's own passes and nothing else.** `create_chat` refuses an ordinary
+chat there (`MemoryProjectRefused`), `update_chat` refuses to move one in, a
+fork or a continuation of a pass is placed in the workspace's General project
+instead, the create route refuses a client-supplied `memory_pass` helper, and
+the agent surface reports the refusal as `invalid_project`. Without that, a
+client could silence any chat it created by moving it into the Memory project
+or by labelling it a pass. A routine is a target like any other, so the same
+rule reaches the scheduler: `prepare_schedule_chat` refuses a target the app
+will not run in, and the refusal is raised rather than swallowed — the caller
+has to record it, because a run that never happened is not a run and a
+one-shot entry that never ran must not be consumed. The scheduler's tick
+catches it, records the entry as failed and carries on with the other due
+schedules (one entry that cannot run must not take the rest of the tick down
+with it); the interval path disables the entry with the reason. The dispatch
+checks the target before a routine's command runs, and the schedule routes
+refuse such a target with a 400 that names the reason — while still letting
+an existing invalid routine be paused or retargeted. A user project called
+"Memory" is not the app's own: only the kind is the discriminator, and a
+schedule whose project id decayed recovers to the user's project. A pass's own archive is
+not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
 For **After this update** changes (Home's update-task group, or the Settings
 history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders

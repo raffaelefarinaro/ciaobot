@@ -1307,10 +1307,13 @@ export const useProjectStore = defineStore('projects', () => {
 
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
-    // Memory passes are hidden too: they are the app's own chats in a project
-    // the sidebar never lists, and the one place a person is meant to reach one
-    // from is the memory-insight rail (`memoryInsights`) or the archived
-    // conversation that spawned it.
+    // A declared memory pass is hidden too: it is the app's own chat in a
+    // project the sidebar never lists, and the one place a person is meant to
+    // reach one from is the memory-insight rail (`memoryInsights`) or the
+    // archived conversation that spawned it. A pass whose helper failed closed
+    // is NOT hidden here: it has no memory-insight row, so its ordinary chat
+    // row is the only way back to its pending question. Notification predicates
+    // still exclude it by project kind.
     return chats.value
       .filter(c => c.project_id === projectId && !c.archived && c.local !== false && !isMemoryPassChat(c))
       // Newest activity on top, same timestamp as chatActivity() and the
@@ -1337,11 +1340,13 @@ export const useProjectStore = defineStore('projects', () => {
   // home surface is a global hub, so unlike recentChats it isn't scoped to
   // the active workspace — each chat carries its own workspace/project tag.
   //
-  // Memory passes are the one exclusion. A pass is a real chat, so it used to
-  // land in these tiers as "Memory pass · <title>" under Working or Unread and
-  // then appear a second time, as the archived conversation it works on, in the
-  // memory-insight rail below. It now appears once, there — where the entry
-  // opens the pass itself, which is the chat with the live turn in it.
+  // Memory passes with a declared helper are the one exclusion. A pass is a
+  // real chat, so it used to land in these tiers as "Memory pass · <title>"
+  // under Working or Unread and then appear a second time, as the archived
+  // conversation it works on, in the memory-insight rail below. It now appears
+  // once, there — where the entry opens the pass itself. A project-fallback
+  // pass has no rail row, so it stays here as the non-notification way back to
+  // its pending input; the notification predicates exclude it by project kind.
   const activeChatsAll = computed<ChatInfo[]>(() => {
     return chats.value
       .filter(c => !c.archived && c.local !== false && !isMemoryPassChat(c))
@@ -1502,6 +1507,16 @@ export const useProjectStore = defineStore('projects', () => {
     return projects.value.find(p => p.project_id === chat.project_id) || null
   }
 
+  // The one notification-side pass question. Mirror of `is_memory_pass_chat`:
+  // the helper kind is the fast path and the Memory project kind is the
+  // fallback, so a hand-edited or older helper can never start notifying again.
+  function chatIsMemoryPass(chatId: string): boolean {
+    return isMemoryPassChat(
+      chats.value.find(c => c.chat_id === chatId),
+      projectFor(chatId),
+    )
+  }
+
   // ── Toasts ──────────────────────────────────────────────────────────
 
   function pushToast(toast: Omit<InAppToast, 'id'>): InAppToast {
@@ -1602,13 +1617,17 @@ export const useProjectStore = defineStore('projects', () => {
    * rule for every counter, because a pass that counts as unread mail and a
    * badge that does not is the disagreement this is here to prevent.
    *
-   * A memory pass is the exception: its own activity moves while it works, so
+   * A memory pass is never counted: its own activity moves while it works, so
    * counting it as unread made a busy archive light the bell and the document
-   * title. It counts only when it is genuinely blocked on the owner, which its
-   * memory-insight row already says out loud.
+   * title. A declared pass's blocked state is reported by its memory-insight
+   * row on Home; a malformed-helper fallback has no row and is still silent.
    */
   function chatIsAttentionItem(chat: ChatInfo): boolean {
-    if (isMemoryPassChat(chat)) return chatNeedsInput(chat.chat_id)
+    // A pass is never an attention item, blocked or not. A declared pass shows
+    // its lifecycle on the memory-insight row; a malformed-helper fallback has
+    // no row and stays only in the reachable chat list. Counts and badges are
+    // reserved for conversations the owner started.
+    if (isMemoryPassChat(chat, projectFor(chat.chat_id))) return false
     return chatNeedsYou(chat.chat_id) || chatUnread(chat.chat_id) > 0
   }
 
@@ -1832,6 +1851,10 @@ export const useProjectStore = defineStore('projects', () => {
   // if set it wins. The getter returns 0 or 1 — the bell dropdown surfaces
   // the list, so an exact per-chat count isn't needed.
   function chatUnread(chatId: string): number {
+    // A memory pass is app housekeeping, not mail: its own activity moves while
+    // it works. A declared pass's blocked state is on its memory-insight row; a
+    // malformed-helper fallback stays reachable but is never unread mail.
+    if (chatIsMemoryPass(chatId)) return 0
     const chat = chats.value.find(c => c.chat_id === chatId)
     // Invariant: the chat the user is actively looking at is, by definition,
     // read. Suppress the badge regardless of the server's last_read_at. This
@@ -1866,7 +1889,7 @@ export const useProjectStore = defineStore('projects', () => {
   function chatFailed(chatId: string): boolean {
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat || chat.archived || !chat.last_error) return false
-    if (isMemoryPassChat(chat)) return false
+    if (isMemoryPassChat(chat, projectFor(chat.chat_id))) return false
     if (chat.schedule_id && chats.value.some(c =>
       c.schedule_id === chat.schedule_id && !c.archived && c.created_at > chat.created_at,
     )) return false
@@ -1883,6 +1906,11 @@ export const useProjectStore = defineStore('projects', () => {
   // question/permission UI and notifications and must not light up for a task
   // with no card to answer.
   function chatNeedsYou(chatId: string): boolean {
+    // A memory pass never enters Home's needs-you tier or a notification path,
+    // blocked or not. A declared pass says so on its memory-insight row; a
+    // malformed-helper fallback stays reachable as a chat row but has no row to
+    // announce and is intentionally not counted here.
+    if (chatIsMemoryPass(chatId)) return false
     if (chatNeedsInput(chatId)) return true
     if (chatFailed(chatId)) return true
     // A needs-you card (an MCP sign-in, ...) is waiting on the user.
@@ -1934,8 +1962,12 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Same question Home asks: a delegated chat whose agent stopped for the
   // user counts beside the chats with a live question or permission card.
+  // A project-fallback pass stays in `projectChats` for access, but its blocked
+  // card is not a badge or notification: it is surfaced only by the pass chat.
   function projectNeedsInput(projectId: string): number {
-    return projectChats(projectId).filter(c => chatNeedsYou(c.chat_id)).length
+    return projectChats(projectId)
+      .filter(c => !chatIsMemoryPass(c.chat_id) && chatNeedsYou(c.chat_id))
+      .length
   }
 
   function projectUnread(projectId: string): number {
@@ -1955,11 +1987,12 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // Document title and OS badge. A memory pass's activity moves while it
-  // works, so including it made a routine archive pass show up as unread mail
-  // on the tab and the home screen. A pass blocked on the owner is still
-  // counted, by `chatIsAttentionItem` on every surface that asks the question.
+  // works, so `chatUnread` excludes it: including it made a routine archive
+  // pass show up as unread mail on the tab and the home screen. A declared
+  // pass's blocked state is on its memory-insight row; a malformed-helper
+  // fallback stays reachable without ever reaching this count.
   const totalUnread = computed(() =>
-    chats.value.reduce((sum, c) => sum + (c.archived || isMemoryPassChat(c) ? 0 : chatUnread(c.chat_id)), 0),
+    chats.value.reduce((sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)), 0),
   )
 
   // One chat can contribute at most one attention item. Keep this aggregate
@@ -5172,6 +5205,8 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_result_ready': {
         const resultChat = chats.value.find(c => c.chat_id === msg.chat_id)
+        const resultProject = projects.value.find(p => p.project_id === msg.project_id) || null
+        const resultIsPass = isMemoryPassChat(resultChat, resultProject)
         const isFocused = isViewedChat(msg.chat_id) &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
@@ -5179,7 +5214,7 @@ export const useProjectStore = defineStore('projects', () => {
           // so the delayed-push scheduler skips this chat and our other
           // devices clear their unread automatically.
           void markRead(msg.chat_id)
-        } else {
+        } else if (!resultIsPass) {
           // Optimistic local flag: binary, hydrated by the server fetch below.
           unread.value[msg.chat_id] = 1
           persistUnread()
@@ -5201,16 +5236,10 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           // In-app toast for the document-visible-but-different-chat case.
-          // A memory pass is the app updating its own memory, not a
-          // conversation the owner started, and the server already refuses its
-          // OS push (`_schedule_push`). Toasting here is what made archiving a
-          // chat pop a "Memory pass · <title>" notification. A pass reports
-          // itself on Home's memory-insight row and on the archived source's
-          // `postprocess` record; only `attention` — blocked on the owner —
-          // earns an interruption anywhere. Keyed on the helper, not the
-          // title: a user project may legitimately be called "Memory".
-          if (!isMemoryPassChat(resultChat)
-            && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          // A memory pass is app housekeeping, not a conversation the owner
+          // started: it never sets unread or toasts. Its lifecycle is reported
+          // by the memory-insight row on Home, including a blocked pass.
+          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
               project_id: msg.project_id,
@@ -6840,8 +6869,13 @@ export const useProjectStore = defineStore('projects', () => {
               liveQuestionClock[chatId] = nextTerminalOfferClock()
             }
             // Nudge the user when the tab is backgrounded so they don't
-            // miss a question that the model needs answered.
-            if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+            // miss a question that the model needs answered. A memory pass is
+            // housekeeping: its question stays on the chat and the Home
+            // memory-insight row, never in a toast.
+            if (
+              !chatIsMemoryPass(chatId)
+              && typeof document !== 'undefined' && document.visibilityState !== 'visible'
+            ) {
               const first = qs[0]
               pushToast({
                 chat_id: chatId,
@@ -7335,8 +7369,13 @@ export const useProjectStore = defineStore('projects', () => {
         ]
         // If the window is backgrounded, nudge the user via an in-app toast.
         // The server ships a push notification too (routed separately through
-        // the service-worker); this toast covers the tab-visible case.
-        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        // the service-worker); this toast covers the tab-visible case. A memory
+        // pass never nudges; its blocked card stays on the chat and the
+        // memory-insight row.
+        if (
+          !chatIsMemoryPass(chatId)
+          && typeof document !== 'undefined' && document.visibilityState !== 'visible'
+        ) {
           pushToast({
             chat_id: chatId,
             title: 'ciaobot needs approval',

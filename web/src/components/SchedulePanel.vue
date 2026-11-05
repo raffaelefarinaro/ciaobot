@@ -707,6 +707,7 @@ import ModelSelector from './ModelSelector.vue'
 import WebhookTriggers from './WebhookTriggers.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
+import { isMemoryProject } from '../lib/memoryPass'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
 import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
@@ -1018,7 +1019,7 @@ function selectScheduleModel(value: string | string[], sectionKey: string) {
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
   const workspace = editData.value.workspace || schedule.value?.workspace || projectStore.activeWorkspace
-  const projects = projectStore.projects.filter(p => p.workspace === workspace)
+  const projects = projectStore.projects.filter(p => p.workspace === workspace && !isMemoryProject(p))
   const projItems = projects.map(p => ({
     key: `proj:${p.project_id}`,
     label: p.name,

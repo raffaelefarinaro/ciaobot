@@ -43,6 +43,36 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def _pass(pcm: ProjectChatManager, title: str):
+    """A memory pass chat in this workspace's Memory project.
+
+    The engine only opens a chat there for a pass, so this is the only way to
+    get one: an ordinary chat in that project would be refused.
+    """
+    memory_project = pcm._memory_pass.ensure_project("personal")
+    return pcm.create_chat(
+        memory_project.project_id,
+        title=title,
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
+    )
+
+
+def _failed_closed_pass(pcm: ProjectChatManager, title: str):
+    """A pass whose helper no longer identifies it.
+
+    The registry loader normalises every stored helper, so a malformed one
+    comes back empty: the chat is a pass only by the project it lives in,
+    which is what the project-kind fallback of the pass predicate is for.
+    """
+    chat = _pass(pcm, title)
+    chat.helper = {}
+    return chat
+
+
 def test_notify_permission_invokes_callback(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
@@ -168,3 +198,80 @@ async def test_delayed_push_fires_for_active_unread_chat(tmp_path: Path) -> None
 
     await pcm._delayed_push(chat.chat_id, "Live chat", "reply")
     assert calls == [(chat.chat_id, "Live chat", "reply")]
+
+
+async def test_delayed_push_suppressed_for_memory_pass_and_project_fallback(
+    tmp_path: Path,
+) -> None:
+    """A push already in the delay window is still silent for a pass."""
+    pcm = _make_manager(tmp_path)
+    pcm._push_delay_seconds = 0
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
+    for chat in (declared, fallback):
+        chat.last_activity_at = "2026-07-14T09:00:00Z"
+        chat.last_read_at = ""
+        chat.archived = False
+
+    calls: list[tuple[str, str, str]] = []
+    pcm.notify_result_cb = lambda cid, title, snippet: calls.append((cid, title, snippet))
+
+    await pcm._delayed_push(declared.chat_id, "t", "s")
+    await pcm._delayed_push(fallback.chat_id, "t", "s")
+
+    assert calls == []
+
+
+def test_notify_permission_silent_for_memory_pass_but_persists_state(
+    tmp_path: Path,
+) -> None:
+    """A blocked pass keeps the pending card and lifecycle, but never pushes."""
+    pcm = _make_manager(tmp_path)
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
+    ordinary_project = pcm.create_project("General", workspace="personal")
+    ordinary = pcm.create_chat(ordinary_project.project_id, title="Live chat")
+
+    calls: list[tuple[str, str, str, str]] = []
+    pcm.notify_permission_cb = (
+        lambda cid, tool, message, request: calls.append((cid, tool, message, request))
+    )
+    event = PermissionRequestEvent(
+        type="permission_request",
+        tool_name="Bash",
+        tool_input='{"command": "rm -rf /"}',
+        message="Approve use of Bash?",
+        request_id="req-42",
+    )
+
+    pcm._notify_permission(declared.chat_id, event)
+    pcm._notify_permission(fallback.chat_id, event)
+
+    assert calls == []
+    # The pass stays blocked on the owner: the card and its state are still there.
+    assert json.loads(declared.pending_permission)["request_id"] == "req-42"
+    assert json.loads(fallback.pending_permission)["request_id"] == "req-42"
+
+    pcm._notify_permission(ordinary.chat_id, event)
+    assert calls == [(ordinary.chat_id, "Bash", "Approve use of Bash?", "req-42")]
+
+
+def test_notify_question_silent_for_memory_pass(tmp_path: Path) -> None:
+    """A pass asking a question is still visible in its memory-insight row, not a push."""
+    pcm = _make_manager(tmp_path)
+    declared = _pass(pcm, "Memory pass · Pricing rework")
+    fallback = _failed_closed_pass(pcm, "Memory pass · Deck figures")
+    ordinary_project = pcm.create_project("General", workspace="personal")
+    ordinary = pcm.create_chat(ordinary_project.project_id, title="Live chat")
+
+    calls: list[tuple[str, str]] = []
+    pcm.notify_question_cb = lambda cid, body: calls.append((cid, body))
+    payload = json.dumps({"questions": [{"question": "Which project?"}]})
+
+    pcm._notify_question(declared.chat_id, payload)
+    pcm._notify_question(fallback.chat_id, payload)
+
+    assert calls == []
+
+    pcm._notify_question(ordinary.chat_id, payload)
+    assert calls == [(ordinary.chat_id, "Which project?")]

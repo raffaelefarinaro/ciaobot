@@ -87,6 +87,14 @@ def test_run_schedule_now_missing_schedule_returns_404(tmp_path: Path) -> None:
 
 def test_run_schedule_now_paused_instance_returns_409() -> None:
     class _PausedScheduleManager:
+        # The route reads the entry's target before it dispatches, so the
+        # stand-in carries the store the real manager has.
+        class _Store:
+            def get(self, schedule_id: str):
+                return None
+
+        _store = _Store()
+
         async def dispatch_now(self, schedule_id: str) -> dict:
             raise RuntimeError("Instance is paused; cannot run schedule now.")
 
