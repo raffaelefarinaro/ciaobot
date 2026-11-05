@@ -62,4 +62,39 @@ describe('RestartBody', () => {
     expect(post).not.toHaveBeenCalled()
     expect(startChatAction).not.toHaveBeenCalled()
   })
+
+  it('opens General Updates for an update and never calls the engine', async () => {
+    const post = vi.spyOn(api, 'post')
+    const startChatAction = vi.spyOn(useProjectStore(), 'startChatAction')
+
+    wrapper = mount(RestartBody, {
+      props: {
+        chatId: 'c1',
+        action: restartAction({ params: { reason: 'update' } }),
+      },
+      global: { plugins: [router] },
+    })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.fullPath).toBe('/settings#updates')
+    expect(post).not.toHaveBeenCalled()
+    expect(startChatAction).not.toHaveBeenCalled()
+  })
+
+  it('shows the agent note with its label, and no label without a note', () => {
+    wrapper = mount(RestartBody, {
+      props: { chatId: 'c1', action: restartAction() },
+      global: { plugins: [router] },
+    })
+    expect(wrapper.text()).toContain("Agent's reason:")
+    expect(wrapper.text()).toContain('Network access changed')
+    wrapper.unmount()
+
+    wrapper = mount(RestartBody, {
+      props: { chatId: 'c1', action: restartAction({ params: { reason: 'config' } }) },
+      global: { plugins: [router] },
+    })
+    expect(wrapper.text()).not.toContain("Agent's reason:")
+  })
 })

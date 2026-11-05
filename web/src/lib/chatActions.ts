@@ -87,7 +87,7 @@ function restartCopy(action: ChatAction): ActionCopy {
     case 'config':
       return {
         title: 'Restart Ciaobot to apply a setting',
-        why: `A setting you changed takes effect after Ciaobot restarts.${RESTART_COST}`,
+        why: `Ciao changed a setting that takes effect after Ciaobot restarts.${RESTART_COST}`,
         primaryLabel: 'Open Settings',
         meta,
       }

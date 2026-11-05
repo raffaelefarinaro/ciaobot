@@ -100,6 +100,12 @@ describe('restart copy', () => {
     expect(restartTarget('mcp')).toBe('/settings/advanced#restart-host')
   })
 
+  it('words the config why as the app speaking, not the user', () => {
+    const copy = actionCopy(action({ kind: 'restart', params: { reason: 'config' } }))
+    expect(copy?.why).toContain('Ciao changed a setting')
+    expect(copy?.why).not.toContain('you changed')
+  })
+
   it('says every reason waits for running chats', () => {
     for (const reason of ['config', 'update']) {
       const copy = actionCopy(action({ kind: 'restart', params: { reason } }))
