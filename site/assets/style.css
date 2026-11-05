@@ -321,6 +321,17 @@ th { color: var(--muted); font-weight: 600; }
   margin: 0 auto 24px;
   text-align: left;
 }
+/* The Mac app is the primary mac path: one button above the Terminal line. */
+.install-primary {
+  text-align: center;
+  margin: 0 0 18px;
+}
+.install-primary .btn {
+  min-height: 48px;
+  padding: 12px 24px;
+}
+/* Keep the Mac setup step clear of the sticky header when linked directly. */
+#mac-app { scroll-margin-top: 80px; }
 .install-label { color: var(--muted); font-size: 14px; margin: 0 0 6px; text-align: center; }
 .install-head {
   display: flex;

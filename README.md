@@ -12,7 +12,11 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 
 ## Install
 
-**macOS 13+ on Apple Silicon (M1 or newer):**
+**macOS 13+ on Apple silicon (M1 or newer): [download Ciaobot for Mac](https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest).**
+
+The app is the recommended way to run Ciaobot on a Mac. It can install the engine on this Mac and keep it running in the background, and it gives you a native window and menu bar instead of a browser tab. It can also connect as a client to a Ciaobot already running on this Mac, another Mac or a server. Open the `.dmg`, drag **Ciaobot** into **Applications**, and launch it from there so it can update itself. It is a preview release; the engine and web app work without it.
+
+**Or install the engine from the Terminal (macOS, Linux, or a headless Mac):**
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
@@ -47,7 +51,7 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors runnin
 
 ### Existing installs
 
-- **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
+- **Upgrading from the retired macOS app:** the old bundled `Ciaobot.app` is retired and its installer is gone; follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules. The current [Ciaobot for Mac](https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest) is a separate client that runs this engine, not a successor to that bundle.
 - **Updates:** use **Settings → General** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app) or [Windows update guide](docs/WINDOWS.md#update-and-rollback).
 - **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept. [Windows service details](docs/WINDOWS.md#how-the-engine-runs).
 - **Uninstall on Windows:** follow the [uninstall guide](docs/WINDOWS.md#uninstall). For a leftover legacy macOS app, see the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app).

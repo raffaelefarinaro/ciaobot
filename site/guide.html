@@ -21,7 +21,7 @@
   <meta name="twitter:description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/style.css?v=20261105">
 </head>
 <body>
   <header class="site-header">
@@ -44,7 +44,7 @@
     <section>
       <p class="eyebrow">Getting started</p>
       <h1>From install to your first archived chat</h1>
-      <p class="lead">About 15 minutes. You don't need to be technical, but you'll paste a command into the Terminal app.</p>
+      <p class="lead">About 15 minutes. On a Mac, the app does the Terminal work for you; on Windows or a server you'll paste one command into a terminal.</p>
     </section>
 
     <section id="before-you-start">
@@ -85,8 +85,15 @@ opencode auth login</code></pre>
           </div>
           <p>You can set up both and switch per workspace or per chat. <a href="models.html">How the two work with Ciaobot →</a></p>
         </li>
+        <li id="mac-app" data-mac-app>
+          <h3>On a Mac, use the app</h3>
+          <p>Ciaobot for Mac is the recommended way to use Ciaobot on a Mac. Download it (Apple silicon, macOS 13 or later), drag <strong>Ciaobot</strong> into <strong>Applications</strong>, and open it from there — not from the download folder, or it cannot update itself.</p>
+          <p><a class="btn btn-primary" href="https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest">Download Ciaobot for Mac</a></p>
+          <p>The app connects to a Ciaobot that already runs on this Mac, another Mac or a server. If there is none, it installs one for you and walks you through setup in its own window. It can start at login, updates itself, and keeps the engine running after you close the window.</p>
+        </li>
         <li>
-          <h3>Install Ciaobot</h3>
+          <h3>Or install from the Terminal</h3>
+          <p>Use this on Windows, on a Linux server, or on a Mac without the app.</p>
           <div class="install" data-install>
             <div class="install-head">
               <p class="install-label" data-install-label>On a Mac with Apple Silicon (M1 or newer, macOS 13 or later), open the <strong>Terminal</strong> app and paste:</p>
@@ -110,7 +117,7 @@ opencode auth login</code></pre>
         </li>
         <li id="first-run">
           <h3>Open Ciaobot</h3>
-          <p>When the install finishes, Ciaobot opens in your browser and you are already signed in. The Terminal also shows a one-time sign-in link: it works once, so don't share it. Later, open <a href="http://localhost:8443">http://localhost:8443</a> on this computer.</p>
+          <p>When the install finishes, Ciaobot opens — in the app if you used it, otherwise in your browser — and you are already signed in. A Terminal install also shows a one-time sign-in link: it works once, so don't share it. Later, open <a href="http://localhost:8443">http://localhost:8443</a> on this computer, or open the app.</p>
           <p>The installer chose three things for you, so there is nothing to fill in:</p>
           <ul>
             <li><strong>Your folder</strong>: <code>~/Ciaobot</code> (<code>%USERPROFILE%\Ciaobot</code> on Windows), unless you picked another one. Your notes and memory live there as plain files.</li>
@@ -242,6 +249,6 @@ opencode auth login</code></pre>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
-  <script src="assets/site.js" defer></script>
+  <script src="assets/site.js?v=20261105" defer></script>
 </body>
 </html>

@@ -14,6 +14,11 @@
       code.textContent = option.dataset.cmd;
       if (label) label.textContent = option.dataset.label;
       if (note) note.hidden = option.value !== 'windows';
+      // The Mac app belongs to the macOS route: show its download only while
+      // macOS is selected, wherever the page carries it.
+      document.querySelectorAll('[data-mac-app]').forEach(function (el) {
+        el.hidden = option.value !== 'mac';
+      });
     }
     var ua = navigator.userAgentData;
     var platform = (ua && ua.platform) || navigator.platform || navigator.userAgent || '';

@@ -21,7 +21,7 @@
   <meta name="twitter:description" content="Run Ciaobot on one computer and use it from your phone, tablet or another computer over Tailscale.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/style.css?v=20261105">
 </head>
 <body>
   <header class="site-header">
@@ -70,7 +70,7 @@
       </svg>
       <p>A good host is a computer that is usually on: a Mac mini at home, a desktop, or a <a href="#vps">small Linux server in the cloud</a>. Scheduled tasks run on the host, so it needs to be awake for them to fire on time.</p>
       <div class="grid">
-        <div class="card"><h3>💻 A Mac at home</h3><p>The one-line install, and a browser or installed PWA to use it. Needs to stay awake for schedules.</p></div>
+        <div class="card"><h3>💻 A Mac at home</h3><p>Use <a href="https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest">Ciaobot for Mac</a>: the app installs the engine and stays in the menu bar. It needs to stay awake for schedules.</p></div>
         <div class="card"><h3>☁️ A VPS in the cloud</h3><p>Always on and reachable from anywhere, for a few euros a month. <a href="#vps">How →</a></p></div>
       </div>
     </section>
@@ -101,7 +101,7 @@
     <section id="browser">
       <h2>Step 2: use it from a phone, tablet or any browser</h2>
       <p>Nothing to install besides Tailscale. Open the host's address in the browser (or scan the QR code), log in with your Ciaobot password, and you're in, with all your workspaces, chats and memory.</p>
-      <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu.</p>
+      <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu. On a Mac, use <a href="https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest">Ciaobot for Mac</a> instead: it connects to the host, adds native notifications and a menu bar, and can host Ciaobot itself.</p>
       <div class="note">
         <p><strong>Optional: a secure https address.</strong> Browsers enable some app features (installing to the home screen, notifications) only over <code>https</code>. Tailscale can provide one. On the host, run:</p>
         <pre><code>tailscale serve --bg 8443</code></pre>
@@ -154,6 +154,6 @@
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
-  <script src="assets/site.js" defer></script>
+  <script src="assets/site.js?v=20261105" defer></script>
 </body>
 </html>

@@ -41,6 +41,11 @@ that are the same one-liner again, or **Settings → General** in the PWA, which
 stages and applies the engine package update in the background; there is no
 in-app app updater.
 
+This retired bundle is not the current [Ciaobot for
+Mac](https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest). That app is
+a separate client for the engine installed above: it can install and run the
+engine itself, or connect to an engine you already run.
+
 ## CLI Tools
 
 ### The `ciao` command
