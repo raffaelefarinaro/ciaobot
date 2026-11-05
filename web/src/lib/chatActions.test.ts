@@ -84,6 +84,32 @@ describe('actionCopy', () => {
     expect(actionCopy(action({ state: 'failed', error: '' }))?.why).toBe('The sign-in did not finish.')
   })
 
+  it('gives the command copy for open, with the default why', () => {
+    const copy = actionCopy(action({ kind: 'command', params: { command: 'ls' } }))
+    expect(copy).toEqual({
+      title: 'Suggested command — review before running',
+      why: "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+      primaryLabel: 'Type it in a terminal',
+      meta: 'Suggested command',
+    })
+  })
+
+  it('shows the note as the why of an open command', () => {
+    const copy = actionCopy(action({ kind: 'command', params: { command: 'bq ls', note: 'Signs you in to BigQuery' } }))
+    expect(copy?.why).toBe('Signs you in to BigQuery')
+  })
+
+  it('gives the command copy for working and done', () => {
+    const working = actionCopy(action({ kind: 'command', state: 'working', params: { command: 'ls' } }))
+    expect(working).toEqual({
+      title: 'Review it, then press Enter in the terminal',
+      why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+      primaryLabel: 'I ran it',
+      meta: 'Suggested command',
+    })
+    expect(actionCopy(action({ kind: 'command', state: 'done', params: { command: 'ls' } }))?.primaryLabel).toBe('Continue')
+  })
+
   it('is null for a kind with no copy yet', () => {
     expect(actionCopy(action({ kind: 'restart' }))).toBeNull()
   })
