@@ -888,6 +888,11 @@
       :offer="terminalOffer"
     />
 
+    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
+         sign-in, ...). Above the queue and the composer, like the suggested
+         command. Keyed by id: a replaced action is a new card. -->
+    <NeedsYouCard v-for="action in needsYouActions" :key="action.id" :chat-id="chat.chat_id" :action="action" />
+
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <div v-if="steerAllIds.length >= 2" class="queued-head">
@@ -1479,6 +1484,8 @@ import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import TerminalOfferCard from './TerminalOfferCard.vue'
+import NeedsYouCard from './NeedsYouCard.vue'
+import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1893,6 +1900,29 @@ const terminalOffer = computed(() => {
   const offer = store.terminalOffers[current.chat_id]
   return offer ? offer : null
 })
+
+// The needs-you actions this chat holds that have a card. A kind with no copy
+// yet has no card, so a half card never renders.
+const needsYouActions = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return []
+  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
+})
+
+// A needs-you card that holds the focus and goes away hands it to the
+// composer, like the offer card above.
+watch(
+  () => needsYouActions.value.map(a => a.id),
+  (ids) => {
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')
+    if (!held || ids.includes(held.dataset.actionId ?? '')) return
+    void nextTick(() => {
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
+  },
+  { flush: 'pre' },
+)
 
 // When the card that holds the focus goes away — dismissed by the user, or
 // dropped by the engine over the socket — it unmounts and the focus would

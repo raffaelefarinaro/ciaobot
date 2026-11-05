@@ -182,6 +182,15 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
   })
 
+  it('draws a chat_action wake as a notice', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'chat_action' }, raw: '[Ciaobot] The user signed in…' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--chat_action')
+    expect(card.attributes('aria-label')).toBe('Continue after your action')
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toContain('You finished what this chat was waiting for')
+  })
+
   it('draws a retry as a collapsed notice with the request behind a disclosure', async () => {
     const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: 'Check the video' })
     const card = wrapper.get('.injected-card')

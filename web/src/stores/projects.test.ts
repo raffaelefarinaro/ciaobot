@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, test, vi, type Mock } from 'vitest'
 import { createPinia as newPinia, getActivePinia, setActivePinia } from 'pinia'
-import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
+import type { ProjectInfo, ChatInfo, ChatAction, ChatMessage } from '../lib/types'
 import type { ServerRow } from '../lib/chatHistory'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
@@ -3166,6 +3166,196 @@ describe('transient terminal offers', () => {
     await store.dismissTerminalOffer('c-1', 'a')
 
     expect(Object.values(localStorageData).join('\n')).not.toContain('npm login')
+  })
+})
+
+describe('needs-you chat actions', () => {
+  // A transient needs-you action on a chat (an MCP sign-in, ...). The engine
+  // owns it and sends it on the chat row, the snapshot and the event; the
+  // client holds a copy under the same read-start watermark as the offers.
+
+  function chatInfo(chatId: string, over: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      ...over,
+    }
+  }
+
+  const action = (id: string, over: Partial<ChatAction> = {}): ChatAction => ({
+    id,
+    kind: 'mcp_auth',
+    origin: 'engine',
+    state: 'open',
+    params: { server: 'linear', provider: 'opencode' },
+    error: '',
+    created_at: 1,
+    ...over,
+  })
+
+  function events(store: ReturnType<typeof useProjectStore>) {
+    store.connectEventsWs()
+    return fakeSockets[fakeSockets.length - 1]
+  }
+
+  const frame = (payload: unknown) => ({ data: JSON.stringify(payload) })
+
+  const snapshotFrame = (over: Record<string, unknown> = {}) => ({
+    type: 'snapshot',
+    active_streams: [],
+    chat_pins: {},
+    chat_terminal_offers: {},
+    chat_actions: {},
+    ...over,
+  })
+
+  const actionsChanged = (chatId: string, actions: unknown[]) => ({
+    type: 'chat_actions_changed',
+    chat_id: chatId,
+    actions,
+  })
+
+  test('a fresh client holds no actions', () => {
+    const store = useProjectStore()
+    expect(store.chatActions).toEqual({})
+  })
+
+  test('the snapshot replaces the action map wholesale', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('a1')] } })))
+    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
+
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-2': [action('a2')] } })))
+    expect(store.chatActions['c-1']).toBeUndefined()
+    expect(store.chatActions['c-2']?.[0]?.id).toBe('a2')
+  })
+
+  test('chat_actions_changed sets the list and an empty list removes the key', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
+
+    sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('an archived chat is not given actions by a late event', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', { archived: true })]
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('a read that started before an event cannot roll it back', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    store.reconcileChatList([chatInfo('c-1', { actions: [] })], readStartedAt)
+    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
+  })
+
+  test('a later-started read heals a missed event', () => {
+    const store = useProjectStore()
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { actions: [action('healed')] })], readStartedAt)
+    expect(store.chatActions['c-1']?.[0]?.id).toBe('healed')
+  })
+
+  test('chatNeedsYou is true while a chat holds an action', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    expect(store.chatNeedsYou('c-1')).toBe(true)
+
+    sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+  })
+
+  test('a deleted chat drops its actions', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    sock.onmessage?.(frame({ type: 'chat_deleted', chat_id: 'c-1', project_id: 'p1' }))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('startChatAction posts to the start route and adopts the returned action', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize' } }) })
+    const result = await store.startChatAction('c-1', 'a1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/start', {})
+    expect(result?.state).toBe('waiting')
+    expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
+  })
+
+  test('startChatAction sends the given body and posts {} without one', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValue({ action: action('a1') })
+    await store.startChatAction('c-1', 'a1', { step: 'typed' })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c-1/actions/a1/start', { step: 'typed' })
+    await store.startChatAction('c-1', 'a1')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c-1/actions/a1/start', {})
+  })
+
+  test('a 400 start adopts the current action and rethrows', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), {
+      status: 400,
+      payload: { error: 'invalid_state', action: action('a1', { state: 'waiting' }) },
+    }))
+    await expect(store.startChatAction('c-1', 'a1')).rejects.toThrow('invalid_state')
+    expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
+  })
+
+  test('dismissChatAction applies the remaining list', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
+    apiPost.mockResolvedValueOnce({ actions: [action('a2')] })
+    await expect(store.dismissChatAction('c-1', 'a1')).resolves.toBe('dismissed')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/dismiss', {})
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
+  })
+
+  test('a dismissal conflict adopts the engine list and reports the conflict', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('chat_action_conflict'), {
+      status: 409,
+      payload: { error: 'chat_action_conflict', actions: [action('a9')] },
+    }))
+    await expect(store.dismissChatAction('c-1', 'a1')).resolves.toBe('conflict')
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
+  })
+
+  test('continueChatAction posts to the continue route', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
+    await expect(store.continueChatAction('c-1', 'a1')).resolves.toBe('continued')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/continue', {})
+  })
+
+  test('a chat id with a slash is encoded in the action path', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ action: action('a1') })
+    await store.startChatAction('a/b', 'a1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/a%2Fb/actions/a1/start', {})
   })
 })
 
