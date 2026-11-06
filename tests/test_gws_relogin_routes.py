@@ -8,6 +8,7 @@ exercised end to end without touching the network.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -193,7 +194,6 @@ def _wait(predicate, timeout: float = 5.0) -> bool:
 
 
 def test_status_completed_does_not_wait_for_health_refresh(tmp_path: Path) -> None:
-    gws_routes._gws_refresh_tasks.clear()
     monitor = _BlockingMonitor()
     client = _completed_client(tmp_path, monitor)
     try:
@@ -211,7 +211,6 @@ def test_status_completed_does_not_wait_for_health_refresh(tmp_path: Path) -> No
 
 
 def test_second_completed_poll_does_not_start_second_refresh(tmp_path: Path) -> None:
-    gws_routes._gws_refresh_tasks.clear()
     monitor = _BlockingMonitor()
     client = _completed_client(tmp_path, monitor)
     try:
@@ -225,7 +224,6 @@ def test_second_completed_poll_does_not_start_second_refresh(tmp_path: Path) -> 
 
 
 def test_background_refresh_error_is_logged_not_raised(tmp_path: Path, caplog) -> None:
-    gws_routes._gws_refresh_tasks.clear()
     monitor = _BlockingMonitor(fail=True)
     monitor.release.set()
     client = _completed_client(tmp_path, monitor)
@@ -233,5 +231,45 @@ def test_background_refresh_error_is_logged_not_raised(tmp_path: Path, caplog) -
         resp = client.get("/api/integrations/gws/relogin/status?profile=personal")
         assert resp.status_code == 200
         assert resp.json()["status"] == "completed"
-        assert _wait(lambda: "Post-relogin health refresh failed" in caplog.text)
-    client.__exit__(None, None, None)
+        try:
+            assert _wait(lambda: "Post-relogin health refresh failed" in caplog.text)
+        finally:
+            client.__exit__(None, None, None)
+
+
+def _stale_health_client(tmp_path: Path, *, creds_mtime: float, checked_at: float):
+    client, config = _client(tmp_path)
+    gws_auth.save_profile_registry(config, [{"name": "personal", "label": "Personal"}])
+    config_dir = gws_auth.profile_config_dir(config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    creds = config_dir / "credentials.json"
+    creds.write_text(json.dumps({"email": "a@b.c"}), encoding="utf-8")
+    os.utime(creds, (creds_mtime, creds_mtime))
+    runtime = Path(config.state_path).parent
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / gws_auth.HEALTH_CACHE_NAME).write_text(
+        json.dumps(
+            {"profiles": {"personal": {"token_valid": False, "checked_at": checked_at}}}
+        ),
+        encoding="utf-8",
+    )
+    return client
+
+
+def _personal(client) -> dict:
+    data = client.get("/api/integrations/gws").json()
+    return next(p for p in data["profiles"] if p["name"] == "personal")
+
+
+def test_health_older_than_credentials_is_unknown(tmp_path: Path) -> None:
+    client = _stale_health_client(tmp_path, creds_mtime=2_000_000.0, checked_at=1_000_000.0)
+    profile = _personal(client)
+    assert profile["needs_relogin"] is False
+    assert profile["token_valid"] is None
+
+
+def test_health_newer_than_credentials_still_needs_relogin(tmp_path: Path) -> None:
+    client = _stale_health_client(tmp_path, creds_mtime=1_000_000.0, checked_at=2_000_000.0)
+    profile = _personal(client)
+    assert profile["needs_relogin"] is True
+    assert profile["token_valid"] is False

@@ -1245,7 +1245,23 @@ def _gws_profile_payload(
     token_valid: bool | None = None
     token_error = ""
     needs_relogin = False
-    if credentials_present and isinstance(health, dict) and "token_valid" in health:
+    # A snapshot taken before the credentials were last rewritten describes the
+    # old token (a re-login just finished and the refresh is still running), so
+    # it is treated as unknown rather than reported as expired.
+    health_is_stale = False
+    if config_dir and isinstance(health, dict):
+        try:
+            health_is_stale = float(health.get("checked_at") or 0) < (
+                (config_dir / "credentials.json").stat().st_mtime
+            )
+        except (OSError, TypeError, ValueError):
+            health_is_stale = False
+    if (
+        credentials_present
+        and isinstance(health, dict)
+        and "token_valid" in health
+        and not health_is_stale
+    ):
         token_valid = bool(health.get("token_valid"))
         token_error = str(health.get("token_error") or "")
         needs_relogin = not token_valid
@@ -1686,15 +1702,16 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
-_gws_refresh_tasks: "dict[str, asyncio.Task[None]]" = {}
-
-
 def _schedule_gws_health_refresh(app: Any, profile: str) -> None:
     """Run ``check_once`` off the request path, one refresh per profile at a time."""
     monitor = getattr(app.state, "gws_health_monitor", None)
     if monitor is None:
         return
-    running = _gws_refresh_tasks.get(profile)
+    tasks: dict[str, asyncio.Task[None]] | None = getattr(app.state, "gws_refresh_tasks", None)
+    if tasks is None:
+        tasks = {}
+        app.state.gws_refresh_tasks = tasks
+    running = tasks.get(profile)
     if running is not None and not running.done():
         return
 
@@ -1704,7 +1721,7 @@ def _schedule_gws_health_refresh(app: Any, profile: str) -> None:
         except Exception:
             logger.exception("Post-relogin health refresh failed")
 
-    _gws_refresh_tasks[profile] = asyncio.get_running_loop().create_task(_refresh())
+    tasks[profile] = asyncio.get_running_loop().create_task(_refresh())
 
 
 async def gws_relogin_status(request: Request) -> JSONResponse:
