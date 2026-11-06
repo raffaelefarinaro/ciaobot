@@ -193,7 +193,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, and restored ones are pinned to the workspace. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
 | GET | `/api/settings/providers` | Read each provider CLI's connection status |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`), verify, or log out through the Claude Code or opencode CLI |
-| GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
+| GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status; `install_problem` is non-empty when the npm package is present but its binary is missing |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
 | POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
