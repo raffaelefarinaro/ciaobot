@@ -5366,3 +5366,46 @@ def test_native_subagent_run_verdicts():
         {"source": "subagent", "childID": "c", "state": "completed"},
     )
     assert sub is not None and sub["run_id"] == "c"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeypatch):
+    """A turn and a sign-in card can both start a chat's server; one process only."""
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
+        agent_read_only: tuple = ()
+
+    request = Request()
+    starts: list[int] = []
+
+    async def fake_start(self, request, binary):
+        starts.append(1)
+        await asyncio.sleep(0.05)
+        self._client = object()  # type: ignore[assignment]
+        self._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+        self._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+        self._fs_scope_key = ("machine", (), (), ())
+        self._read_only_snapshot = ()
+        self._linked_repo = ""
+        return self._client
+
+    monkeypatch.setattr(OpencodeProvider, "_start_server_once", fake_start)
+
+    await asyncio.gather(
+        provider.ensure_server(request),  # type: ignore[arg-type]
+        provider.ensure_server(request),  # type: ignore[arg-type]
+    )
+
+    assert len(starts) == 1

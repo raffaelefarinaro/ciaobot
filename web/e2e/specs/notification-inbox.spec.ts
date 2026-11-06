@@ -28,9 +28,10 @@ import {
  * between the projection and the click. jsdom has no shell, no socket and no
  * layout, so it can say none of that.
  *
- * Alpha is not empty by default (alpha-chat-7's memory pass is blocking;
- * memory suggestions and notes to revisit are not inbox content), so alpha assertions are relative to a baseline or name a
- * row by its key. Gamma has no default rows and hosts the zero-state tests.
+ * Alpha has no default chat rows now: its memory pass, blocked or not, is not
+ * inbox content, and memory suggestions and notes to revisit are not either, so
+ * alpha assertions either seed the row they name or use a baseline. Gamma has no
+ * default rows and hosts the zero-state tests.
  */
 test.use({ viewport: { width: 1440, height: 900 } })
 

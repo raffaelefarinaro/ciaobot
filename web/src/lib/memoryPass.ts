@@ -11,13 +11,15 @@
 //
 //   - *is this a pass* — keyed on `kind`, never on `is_system` or a project
 //     name. A user project may legitimately be called "Memory"; only the kind
-//     is the discriminator.
+//     is the discriminator. The project kind is the fallback: a pass whose
+//     helper failed closed is still a pass, exactly as the backend's recursion
+//     guard treats it.
 //   - *where is it in its lifecycle* — the normalised `state`, so the pass's
 //     own queue position is read from one field rather than re-derived from
 //     the same state a second time elsewhere.
 //   - *does it need the owner* — `state === 'attention'`. A pass that ends
 //     cleanly auto-archives and never reaches Home, so this one state is the
-//     only thing worth interrupting anyone about.
+//     only thing the memory-insight row has to say out loud.
 //   - *which chat is the pass for an archived source* — the id recorded on the
 //     source's own `postprocess` record. It is written directly (not folded in
 //     from the archive job) because the pass outlives the job by as long as the
@@ -49,8 +51,17 @@ function passHelper(chat: { helper?: ChatInfo['helper'] } | null | undefined): M
   return helper
 }
 
-export function isMemoryPassChat(chat: { helper?: ChatInfo['helper'] } | null | undefined): boolean {
-  return passHelper(chat) !== null
+/**
+ * A pass, or anything in the app-owned Memory project when its helper failed
+ * closed. Display filters call this with the chat alone so a malformed-helper
+ * pass remains reachable through its ordinary chat row; notification, unread
+ * and attention predicates also pass the project so it stays silent.
+ */
+export function isMemoryPassChat(
+  chat: { helper?: ChatInfo['helper'] } | null | undefined,
+  project?: { kind?: string } | null,
+): boolean {
+  return isMemoryProject(project) || passHelper(chat) !== null
 }
 
 /**

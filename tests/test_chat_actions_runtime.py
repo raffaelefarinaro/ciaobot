@@ -20,9 +20,11 @@ from typing import Any, cast
 import httpx
 import pytest
 
+from ciao.agent_surface import AGENT_TOKEN_ENV
 from ciao.chat_actions import ChatAction, ChatActionError, _VALIDATORS
 from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
+from ciao.provider_service import ProviderService
 from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
@@ -35,7 +37,9 @@ from ciao.web.chat_actions_runtime import (
     EXPIRED_ERROR,
     NO_SIGN_IN_ERROR,
     MCP_AUTH_FLOWS,
-    NOT_RUNNING_ERROR,
+    OPENCODE_MISSING_ERROR,
+    POLL_DEADLINE_S,
+    SERVER_START_FAILED_ERROR,
     START_FAILED_ERROR,
     STOPPED_ERROR,
     TIMEOUT_ERROR,
@@ -45,10 +49,12 @@ from ciao.web.chat_actions_runtime import (
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost
 from ciao.web.project_chats import (
+    _PROVIDER_IDLE_TIMEOUT_SECONDS,
     ChatActionConflictError,
     ChatInfo,
     ProjectChatManager,
 )
+from tests.conftest import attach_stub_mcp
 from tests.test_chat_streaming_boundary import _DriveHost
 
 
@@ -268,10 +274,108 @@ async def test_start_asks_opencode_for_a_sign_in_and_waits(tmp_path: Path) -> No
     runtime._polls[action_id].cancel()
 
 
+def fake_server_start(monkeypatch: pytest.MonkeyPatch, client: FakeClient) -> list[Any]:
+    """Patch the server start to make the provider live on ``client``; returns the requests it saw."""
+    seen: list[Any] = []
+
+    async def ensure(self: OpencodeProvider, request: Any) -> Any:
+        seen.append(request)
+        self._client = cast(Any, client)
+        self._process = cast(Any, SimpleNamespace(returncode=None))
+        return client
+
+    monkeypatch.setattr(OpencodeProvider, "_ensure_server", ensure)
+    return seen
+
+
+def bare_opencode_chat(tmp_path: Path) -> tuple[ProjectChatManager, ChatInfo]:
+    """An OpenCode chat with no provider service: the idle sweep's state."""
+    manager = attach_stub_mcp(make_manager(tmp_path))
+    project = manager.create_project("Actions", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Sign in", provider="opencode")
+    return manager, chat
+
+
 @pytest.mark.asyncio
-async def test_start_without_a_live_server_fails_with_engine_copy(tmp_path: Path) -> None:
-    manager = make_manager(tmp_path)
-    chat = opencode_chat(manager, None)
+async def test_sign_in_after_the_idle_sweep_starts_the_chat_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = FakeClient(sign_in_routes())
+    started = fake_server_start(monkeypatch, client)
+    manager, chat = bare_opencode_chat(tmp_path)
+    assert chat.chat_id not in manager._providers  # the idle sweep removed it
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+
+    payload = await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    assert (payload["state"], payload.get("error", "")) == ("waiting", "")
+    assert cast(dict, payload["params"])["url"] == AUTH_URL
+    assert len(started) == 1
+    assert started[0].extra_env[AGENT_TOKEN_ENV] == "tok-test"
+    provider = manager._providers[chat.chat_id].provider
+    assert isinstance(provider, OpencodeProvider) and provider.has_live_server
+    assert chat.chat_id in manager._provider_last_used
+    runtime._polls[action_id].cancel()
+
+
+@pytest.mark.asyncio
+async def test_sign_in_restarts_a_server_that_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = FakeClient(sign_in_routes())
+    started = fake_server_start(monkeypatch, client)
+    manager, chat = bare_opencode_chat(tmp_path)
+    service = ProviderService(manager._config, provider="opencode", agent_root=tmp_path)
+    dead = cast(OpencodeProvider, service.provider)
+    dead._client = cast(Any, FakeClient())
+    dead._process = cast(Any, SimpleNamespace(returncode=1))
+    manager._providers[chat.chat_id] = service
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+
+    payload = await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    assert payload["state"] == "waiting"
+    assert len(started) == 1
+    assert manager._providers[chat.chat_id] is service
+    runtime._polls[action_id].cancel()
+
+
+@pytest.mark.asyncio
+async def test_sign_in_on_a_live_server_refreshes_the_idle_stamp(tmp_path: Path) -> None:
+    client = FakeClient(sign_in_routes())
+    manager = attach_stub_mcp(make_manager(tmp_path))
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    manager._provider_last_used[chat.chat_id] = time.monotonic() - 10_000
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+    action_id = raise_sign_in(manager, chat)
+
+    async def no_start(self: OpencodeProvider, request: Any) -> Any:
+        raise AssertionError("a live server must not be started again")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(OpencodeProvider, "_ensure_server", no_start)
+        payload = await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    assert payload["state"] == "waiting"
+    assert time.monotonic() - manager._provider_last_used[chat.chat_id] < 5
+    runtime._polls[action_id].cancel()
+
+
+def test_the_sign_in_wait_ends_before_the_idle_sweep() -> None:
+    # The wait stops stamping; the sweep must not reap a server during the wait.
+    assert POLL_DEADLINE_S < _PROVIDER_IDLE_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_start_without_opencode_installed_fails_with_engine_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None
+    )
+    manager, chat = bare_opencode_chat(tmp_path)
     runtime = make_runtime(manager)
     action_id = raise_sign_in(manager, chat)
 
@@ -280,7 +384,64 @@ async def test_start_without_a_live_server_fails_with_engine_copy(tmp_path: Path
     action = manager.get_action(chat.chat_id, action_id)
     assert action is not None
     assert action.state == "failed"
-    assert action.error == NOT_RUNNING_ERROR
+    assert action.error == OPENCODE_MISSING_ERROR
+    assert action_id not in runtime._polls
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_fails_to_start_fails_the_card_without_its_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+
+    async def broken(self: OpencodeProvider, request: Any) -> Any:
+        raise RuntimeError("OpenCode serve exited with code 1: secret-detail")
+
+    monkeypatch.setattr(OpencodeProvider, "_ensure_server", broken)
+    manager, chat = bare_opencode_chat(tmp_path)
+    runtime = make_runtime(manager)
+    action_id = raise_sign_in(manager, chat)
+
+    await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
+
+    action = manager.get_action(chat.chat_id, action_id)
+    assert action is not None
+    assert action.state == "failed"
+    assert action.error == SERVER_START_FAILED_ERROR
+    assert "secret-detail" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_server_started_into_a_dropped_provider_is_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = bare_opencode_chat(tmp_path)
+    cid = chat.chat_id
+    disconnects: list[bool] = []
+
+    async def recorder(self: ProviderService) -> None:
+        disconnects.append(True)
+
+    async def start_then_drop(self: OpencodeProvider, request: Any) -> Any:
+        self._client = cast(Any, FakeClient(sign_in_routes()))
+        self._process = cast(Any, SimpleNamespace(returncode=None))
+        manager._pop_provider(cid)  # a concurrent new session drops the service
+        return self._client
+
+    monkeypatch.setattr(OpencodeProvider, "_ensure_server", start_then_drop)
+    monkeypatch.setattr(ProviderService, "disconnect", recorder)
+    runtime = make_runtime(manager)
+    action_id = raise_sign_in(manager, chat)
+
+    await runtime.start(cid, action_id, {}, is_loopback=True)
+
+    action = manager.get_action(cid, action_id)
+    assert action is not None
+    assert action.state == "failed"
+    assert action.error == SERVER_START_FAILED_ERROR
+    assert len(disconnects) == 1
+    assert cid not in manager._providers
 
 
 @pytest.mark.asyncio

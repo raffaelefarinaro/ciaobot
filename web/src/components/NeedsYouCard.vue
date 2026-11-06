@@ -8,18 +8,20 @@
  * owns the generic controls, Not now and Continue the chat / Done, and the
  * copy. The kind's body owns the primary control and its steps.
  */
-import { computed, nextTick, onBeforeUnmount, ref, useId, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch, type Component } from 'vue'
+import ActivityGlyph from './ActivityGlyph.vue'
 import AppIcon from './AppIcon.vue'
 import type { AppIconName } from './AppIcon.vue'
 import McpAuthBody from './needs-you/McpAuthBody.vue'
+import PermissionModeBody from './needs-you/PermissionModeBody.vue'
 import { actionCopy } from '../lib/chatActions'
 import { shouldRestoreFocus } from '../lib/moveToBackground'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction, ChatActionKind } from '../lib/types'
 
 /** One body per kind; each later child registers its own here. */
-const BODIES: Partial<Record<ChatActionKind, Component>> = { mcp_auth: McpAuthBody }
-const ICONS: Partial<Record<ChatActionKind, AppIconName>> = { mcp_auth: 'shield' }
+const BODIES: Partial<Record<ChatActionKind, Component>> = { mcp_auth: McpAuthBody, permission_mode: PermissionModeBody }
+const ICONS: Partial<Record<ChatActionKind, AppIconName>> = { mcp_auth: 'shield', permission_mode: 'shield' }
 /** Kinds whose card has no Not now: the body owns the way out. */
 const HIDE_DISMISS: Partial<Record<ChatActionKind, true>> = {}
 
@@ -44,6 +46,13 @@ let disposed = false
 const copy = computed(() => actionCopy(props.action))
 const body = computed(() => BODIES[props.action.kind] ?? null)
 const busy = computed(() => props.action.state === 'working' || props.action.state === 'waiting')
+/** Empty on mount, so the first render is not announced; then the new title and reason. */
+const liveText = ref('')
+
+watch(() => props.action.state, () => {
+  const c = copy.value
+  liveText.value = c ? `${c.title}. ${c.why}` : ''
+})
 
 // The focus belongs to the card while a request is out, because a disabled
 // button drops it onto the page. Moving it to the card keeps it in place.
@@ -115,6 +124,7 @@ onBeforeUnmount(() => {
     <div class="needs-you-card-head">
       <span class="needs-you-card-glyph" aria-hidden="true">
         <span v-if="busy" class="needs-you-card-spinner" />
+        <ActivityGlyph v-else-if="action.state === 'failed'" kind="alert" />
         <AppIcon
           v-else
           :name="action.state === 'done' ? 'check' : (ICONS[action.kind] ?? 'activity')"
@@ -127,36 +137,40 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <component
-      :is="body"
-      v-if="body"
-      :chat-id="chatId"
-      :action="action"
-      @error="(m: string) => (errorMessage = m)"
-      @notice="(m: string) => (notice = m)"
-    />
+    <div class="needs-you-card-controls">
+      <component
+        :is="body"
+        v-if="body"
+        :chat-id="chatId"
+        :action="action"
+        @error="(m: string) => (errorMessage = m)"
+        @notice="(m: string) => (notice = m)"
+      />
+
+      <div class="needs-you-card-actions">
+        <button
+          v-if="action.state === 'done'"
+          type="button"
+          class="needs-you-btn needs-you-btn--primary"
+          :disabled="pending"
+          @click="continueChat"
+        >{{ copy.primaryLabel }}</button>
+        <button
+          v-if="!HIDE_DISMISS[action.kind]"
+          ref="dismissEl"
+          type="button"
+          class="needs-you-btn needs-you-btn--quiet"
+          :disabled="pending"
+          @click="dismiss"
+        >{{ action.state === 'done' ? 'Done' : 'Not now' }}</button>
+        <span class="needs-you-card-meta">{{ copy.meta }}</span>
+      </div>
+    </div>
 
     <p v-if="notice" class="needs-you-card-notice" role="status">{{ notice }}</p>
     <p v-if="errorMessage" class="needs-you-card-error" role="alert">{{ errorMessage }}</p>
 
-    <div class="needs-you-card-actions">
-      <button
-        v-if="action.state === 'done'"
-        type="button"
-        class="needs-you-btn needs-you-btn--primary"
-        :disabled="pending"
-        @click="continueChat"
-      >{{ copy.primaryLabel }}</button>
-      <button
-        v-if="!HIDE_DISMISS[action.kind]"
-        ref="dismissEl"
-        type="button"
-        class="needs-you-btn needs-you-btn--quiet"
-        :disabled="pending"
-        @click="dismiss"
-      >{{ action.state === 'done' ? 'Done' : 'Not now' }}</button>
-      <span class="needs-you-card-meta">{{ copy.meta }}</span>
-    </div>
+    <span class="needs-you-card-live sr-only" aria-live="polite">{{ liveText }}</span>
   </section>
 </template>
 
@@ -207,8 +221,6 @@ onBeforeUnmount(() => {
   margin: 2px 0 0;
   line-height: 1.5;
 }
-/* The state is in the text as well as the colour: a failed card says so. */
-.needs-you-card[data-state="failed"] .needs-you-card-why { color: var(--error); }
 .needs-you-card-spinner {
   display: block;
   width: 14px;
@@ -230,13 +242,15 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 .needs-you-card-notice { color: var(--fg2); }
-.needs-you-card-error { color: var(--error); }
-.needs-you-card-actions {
+.needs-you-card-error { color: var(--fg); }
+.needs-you-card-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
+  min-width: 0;
 }
+.needs-you-card-actions { display: contents; }
 .needs-you-card-meta {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -272,6 +286,9 @@ onBeforeUnmount(() => {
 .needs-you-card :deep(.needs-you-btn--quiet) {
   border-color: transparent;
   color: var(--fg2);
+}
+.needs-you-card :deep(.needs-you-btn--quiet:hover:not(:disabled)) {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 .needs-you-card :deep(.needs-you-btn:disabled) {
   opacity: 0.5;

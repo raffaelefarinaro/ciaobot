@@ -23,8 +23,8 @@ def test_menubar_chats_endpoint_without_manager_returns_empty() -> None:
 
 
 def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
-    personal = SimpleNamespace(workspace="personal")
-    work = SimpleNamespace(workspace="work")
+    personal = SimpleNamespace(workspace="personal", kind="")
+    work = SimpleNamespace(workspace="work", kind="")
     chats = [
         SimpleNamespace(
             chat_id="old",
@@ -34,6 +34,7 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
             last_activity_at="2026-07-01T00:00:00Z",
             last_read_at="2026-07-01T00:00:00Z",
             pending_question="",
+            helper={},
         ),
         SimpleNamespace(
             chat_id="working",
@@ -43,6 +44,7 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
             last_activity_at="2026-07-27T12:00:00Z",
             last_read_at="2026-07-27T11:00:00Z",
             pending_question="",
+            helper={},
         ),
         SimpleNamespace(
             chat_id="blocked",
@@ -52,6 +54,7 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
             last_activity_at="2026-07-27T11:00:00Z",
             last_read_at="2026-07-27T11:30:00Z",
             pending_question=json.dumps({"questions": [{"id": "q1"}]}),
+            helper={},
         ),
         SimpleNamespace(
             chat_id="archived",
@@ -61,6 +64,7 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
             last_activity_at="2026-07-28T00:00:00Z",
             last_read_at="",
             pending_question="",
+            helper={},
         ),
         SimpleNamespace(
             chat_id="orphan",
@@ -70,6 +74,7 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
             last_activity_at="2026-07-29T00:00:00Z",
             last_read_at="",
             pending_question="",
+            helper={},
         ),
     ]
     pcm = SimpleNamespace(
@@ -102,7 +107,7 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
     # attention_count is counted over every non-archived chat while the list is
     # capped at `limit`. If a stale chat needing attention fell outside the cap,
     # the menu bar badge would show a count with no row explaining it.
-    work = SimpleNamespace(workspace="work")
+    work = SimpleNamespace(workspace="work", kind="")
     chats = [
         SimpleNamespace(
             chat_id="stale-but-unread",
@@ -112,6 +117,7 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
             last_activity_at="2026-01-01T00:00:00Z",
             last_read_at="2025-12-31T00:00:00Z",
             pending_question="",
+            helper={},
         )
     ] + [
         SimpleNamespace(
@@ -122,6 +128,7 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
             last_activity_at=f"2026-07-{index + 10:02d}T00:00:00Z",
             last_read_at=f"2026-07-{index + 10:02d}T00:00:00Z",
             pending_question="",
+            helper={},
         )
         for index in range(12)
     ]
@@ -143,7 +150,7 @@ def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
 
 
 def test_a_pending_permission_flags_needs_input() -> None:
-    work = SimpleNamespace(workspace="work")
+    work = SimpleNamespace(workspace="work", kind="")
     chats = [
         SimpleNamespace(
             chat_id="blocked-on-approval",
@@ -156,6 +163,7 @@ def test_a_pending_permission_flags_needs_input() -> None:
             pending_permission=json.dumps({
                 "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?",
             }),
+            helper={},
         ),
     ]
     pcm = SimpleNamespace(
@@ -167,3 +175,97 @@ def test_a_pending_permission_flags_needs_input() -> None:
 
     assert payload["attention_count"] == 1
     assert payload["chats"][0]["needs_input"] is True
+
+
+def test_memory_passes_are_excluded_before_count_and_limit() -> None:
+    """The menu bar is a notification surface, so no pass is counted or listed.
+
+    That includes a pass blocked on a question or approval, and a pass whose
+    helper failed closed in a Memory project. The filter must run before the
+    limit, or a newer pass would push an ordinary unread chat out of the rows
+    while the bare count still pointed at something the list cannot show.
+    """
+    ordinary_project = SimpleNamespace(workspace="personal", kind="")
+    memory_project = SimpleNamespace(workspace="personal", kind="memory")
+    chats = [
+        SimpleNamespace(
+            chat_id="pass-declared",
+            project_id="p-mem",
+            title="Memory pass · Pricing rework",
+            archived=False,
+            last_activity_at="2026-07-29T00:00:00Z",
+            last_read_at="",
+            pending_question="",
+            helper={"kind": "memory_pass"},
+        ),
+        SimpleNamespace(
+            chat_id="pass-fallback",
+            project_id="p-mem",
+            title="Memory pass · Deck figures",
+            archived=False,
+            last_activity_at="2026-07-28T00:00:00Z",
+            last_read_at="",
+            pending_question="",
+            helper={"kind": "legacy-memory-pass"},
+        ),
+        SimpleNamespace(
+            chat_id="pass-blocked",
+            project_id="p-mem",
+            title="Memory pass · Needs approval",
+            archived=False,
+            last_activity_at="2026-07-27T00:00:00Z",
+            last_read_at="",
+            pending_question=json.dumps({"questions": [{"id": "q1"}]}),
+            pending_permission=json.dumps({"request_id": "req-1"}),
+            helper={"kind": "memory_pass"},
+        ),
+        SimpleNamespace(
+            chat_id="ordinary",
+            project_id="p-personal",
+            title="Pricing rework",
+            archived=False,
+            last_activity_at="2026-07-26T00:00:00Z",
+            last_read_at="",
+            pending_question="",
+            helper={},
+        ),
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: {
+            "p-personal": ordinary_project,
+            "p-mem": memory_project,
+        }.get(project_id),
+    )
+
+    payload = _client(pcm=pcm).get("/api/menubar-chats?limit=1").json()
+
+    assert payload["attention_count"] == 1
+    assert [row["chat_id"] for row in payload["chats"]] == ["ordinary"]
+    assert payload["chats"][0]["unread"] is True
+
+
+def test_an_ordinary_chat_named_memory_is_still_listed() -> None:
+    """A user project may be called Memory; only its kind marks a pass."""
+    ordinary_project = SimpleNamespace(workspace="personal", kind="")
+    chats = [
+        SimpleNamespace(
+            chat_id="c-mem",
+            project_id="p-user-memory",
+            title="Memory pass · my own notes",
+            archived=False,
+            last_activity_at="2026-07-27T11:00:00Z",
+            last_read_at="",
+            pending_question="",
+            helper={},
+        ),
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: ordinary_project if project_id == "p-user-memory" else None,
+    )
+
+    payload = _client(pcm=pcm).get("/api/menubar-chats").json()
+
+    assert payload["attention_count"] == 1
+    assert [row["chat_id"] for row in payload["chats"]] == ["c-mem"]
