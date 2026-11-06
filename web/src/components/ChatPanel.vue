@@ -6236,6 +6236,21 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
+  /* The strip scrolls sideways when the pane cannot hold the facts, but the
+     bar is never drawn: a scrollbar under a reply reads as a rule across the
+     transcript rather than as an affordance. The app-wide rule in `App.vue`
+     hides every bar, but it is a `*` rule, so any host that re-enables
+     scrollbars per element (the macOS client did exactly that) outranks it on
+     source order. Restating the opt-out here at the strip's own specificity —
+     as the title rail does — keeps the rule true wherever the page is hosted,
+     and `scrollbar-width` covers engines that only take the standard property. */
+  scrollbar-width: none;
+}
+.message-actions .message-meta::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
 }
 .message-actions .message-meta > :first-child { margin-left: auto; }
 .message-actions > span.message-meta { justify-content: flex-end; }
