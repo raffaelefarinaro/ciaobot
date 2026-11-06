@@ -102,9 +102,16 @@ def test_ps_quote_doubles_every_powershell_quote_character() -> None:
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:
+    assert host_terminal.GWS_INSTALL_COMMAND == (
+        "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
+    )
+    text = (REPO_ROOT / "web/src/lib/gwsInstall.ts").read_text(encoding="utf-8")
+    assert f"'{host_terminal.GWS_INSTALL_COMMAND}'" in text
+    # The dialog and the chat prompt read the one constant, never a literal.
     for rel in ("web/src/components/settings/GoogleConnectDialog.vue", "web/src/composables/useGwsAccounts.ts"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert host_terminal.GWS_INSTALL_COMMAND in text, rel
+        assert "GWS_INSTALL_COMMAND" in text, rel
+        assert "npm install -g @googleworkspace/cli" not in text, rel
 
 
 def test_macos_opens_terminal_at_a_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

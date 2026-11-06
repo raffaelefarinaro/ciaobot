@@ -207,6 +207,19 @@ describe('Connect Google account dialog', () => {
     }
   })
 
+  it('shows the exact install command and, for a package without its binary, says so', async () => {
+    const message = 'The gws package is installed but its binary is missing: re-run the install command above (x).'
+    state.gws = { ...integration([]), installed: false, cli_available: false, install_problem: message }
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      expect(dialog.text()).toContain('npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli')
+      expect(dialog.get('[role="alert"]').text()).toBe(message)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('nothing is registered until an action needs the profile', async () => {
     const wrapper = await mountOverview()
     try {
