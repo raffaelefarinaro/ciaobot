@@ -589,7 +589,9 @@ async def ws_events(websocket: WebSocket) -> None:
     Event payloads (JSON):
     - `chat_streaming_started`  {chat_id, project_id, background?}  (background: a wake)
     - `chat_streaming_done`     {chat_id, project_id, is_error, last_error}
-    - `chat_result_ready`       {chat_id, project_id, title, snippet}
+    - `chat_result_ready`       {chat_id, project_id, title, snippet, workspace?}
+      (workspace: the chat's workspace name, sent only when the server serves
+      more than one workspace, so a notification can say where it came from)
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)

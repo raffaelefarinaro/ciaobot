@@ -8758,14 +8758,28 @@ class ProjectChatManager:
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> None:
         """Publish ``chat_result_ready`` and queue a delayed result push."""
-        self._events.publish({
+        event: dict[str, object] = {
             "type": "chat_result_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "title": title,
             "snippet": snippet,
-        })
+        }
+        workspace = self._announceable_workspace(project_id)
+        if workspace:
+            # Only a server with more than one workspace sends the name: on a
+            # single-workspace install a notification that says "personal"
+            # tells the owner nothing they did not already know.
+            event["workspace"] = workspace
+        self._events.publish(event)
         self._schedule_push(chat_id, title, snippet)
+
+    def _announceable_workspace(self, project_id: str) -> str:
+        """The chat's workspace name, when this server serves several."""
+        if len(self._config.workspace_names()) < 2:
+            return ""
+        project = self.get_project(project_id)
+        return (project.workspace if project is not None else "") or ""
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending
