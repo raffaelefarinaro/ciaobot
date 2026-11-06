@@ -164,6 +164,9 @@ Required by `gws-*` and `recipe-*` skills (Gmail, Drive, Docs, Sheets, Slides, C
 
 ```bash
 # Install: https://github.com/googleworkspace/cli
+# npm 12 blocks install scripts by default and the postinstall is what downloads
+# the gws binary, so allow it for this package:
+npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli
 # Authenticate (two profiles):
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws-personal gws auth login   # personal
 gws auth login                                                           # work

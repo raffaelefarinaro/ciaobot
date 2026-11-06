@@ -1095,6 +1095,8 @@ export interface GwsIntegrationSettings {
   installed: boolean
   binary_path: string
   cli_available: boolean
+  /** Set when the npm package is present but its binary is not; empty otherwise. */
+  install_problem?: string
   profiles: GwsIntegrationProfile[]
 }
 

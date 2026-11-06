@@ -1275,6 +1275,28 @@ def _gws_profile_payload(
     }
 
 
+def _gws_package_binary_missing(command: list[str]) -> bool:
+    """True when ``command`` is the npm package's launcher and its binary is absent.
+
+    The package's postinstall downloads the real ``gws`` into ``bin/`` next to
+    ``run.js``. When install scripts were blocked (npm 12 default) the launcher is
+    on PATH but that file is not, so the tool looks installed and cannot run.
+    """
+    if not command:
+        return False
+    launcher = Path(os.path.realpath(command[-1]))
+    if launcher.name != "run.js" or launcher.parent.name == "bin":
+        return False
+    binary = "gws.exe" if sys.platform == "win32" else "gws"
+    return not (launcher.parent / "bin" / binary).is_file()
+
+
+GWS_BINARY_MISSING_MESSAGE = (
+    "The gws package is installed but its binary is missing: "
+    f"re-run the install command above ({host_terminal.GWS_INSTALL_COMMAND})."
+)
+
+
 def _gws_integration_payload(config) -> dict:
     from ciao import gws_auth
 
@@ -1285,6 +1307,7 @@ def _gws_integration_payload(config) -> dict:
         gws_command = []  # on PATH but unusable: report it as not installed
     # The tool itself: its executable, or the script node runs for it.
     binary_path = gws_command[-1] if gws_command else ""
+    binary_missing = _gws_package_binary_missing(gws_command)
     try:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
@@ -1296,9 +1319,10 @@ def _gws_integration_payload(config) -> dict:
     }
     names = _gws_profile_names(config)
     return {
-        "installed": bool(binary_path),
+        "installed": bool(binary_path) and not binary_missing,
         "binary_path": binary_path,
-        "cli_available": bool(binary_path),
+        "cli_available": bool(binary_path) and not binary_missing,
+        "install_problem": GWS_BINARY_MISSING_MESSAGE if binary_missing else "",
         "profiles": [
             _gws_profile_payload(config, profile, usage, health.get(profile), labels)
             for profile in names
