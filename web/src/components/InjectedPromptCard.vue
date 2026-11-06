@@ -236,6 +236,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
   font-size: var(--text-sm);
   text-align: left;
 }
+.injected-card--error { border-color: color-mix(in srgb, var(--error) 40%, var(--border)); }
 .injected-card-head {
   display: flex;
   align-items: center;
@@ -323,17 +324,16 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
 .injected-card-hint {
-  margin: 0 0 8px;
-  color: var(--error);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  margin: 0 0 var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.injected-card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+.injected-card-actions { display: flex; flex-direction: column; gap: var(--space-2); padding: 0 0 var(--space-2); }
 .injected-card-actions :slotted(.retry-btn) { margin-top: 0; }
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }

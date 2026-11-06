@@ -52,6 +52,18 @@ const FORWARD_TRACK = [
 const ROLLBACK_TRACK = ['rolling_back', 'rolled_back', 'rollback_failed']
 const TRACK = [...FORWARD_TRACK, ...ROLLBACK_TRACK]
 
+describe('progress bar', () => {
+  // The bar is a fraction of its container, never a run of characters with an
+  // intrinsic width: that width pushed the panel past its column under the
+  // settings rail.
+  it('fills the percentage the label states and carries no text', () => {
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'swapping', inline: true } })
+    const fill = wrapper.get('.update-progress-fill')
+    expect((fill.element as HTMLElement).style.width).toBe(`${percent(wrapper)}%`)
+    expect(wrapper.get('.update-progress-track').text()).toBe('')
+  })
+})
+
 describe('with a real phase', () => {
   it('drives the rows off the record instead of a timer', async () => {
     vi.useFakeTimers()

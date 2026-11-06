@@ -25,9 +25,9 @@
            path, which is an animation and has no record behind it. -->
       <p v-if="phaseName" class="update-progress-phase">{{ phaseName }}</p>
 
-      <!-- Mono progress bar: filled █, empty ░ -->
+      <!-- Progress bar: a filled fraction of the available width -->
       <div class="update-progress" :aria-label="progressLabel">
-        <span class="update-progress-track">{{ progressTrack }}</span>
+        <span class="update-progress-track" aria-hidden="true"><span class="update-progress-fill" :style="{ width: `${progressPercent}%` }"></span></span>
         <span class="update-progress-pct">{{ progressPercent.toString().padStart(3, ' ') }}%</span>
       </div>
 
@@ -146,7 +146,6 @@ const ROLLBACK_ROWS: readonly string[] = ['rolling_back', 'rolled_back', 'rollba
 /** The phase of a run that stopped, naming no phase it stopped at. */
 const FAILED_PHASE = 'failed'
 
-const PROGRESS_WIDTH = 28
 const DOTS_TARGET = 28
 
 interface Row {
@@ -245,11 +244,6 @@ const progressPercent = computed(() => {
   const total = PHASE_ROWS.length - 1
   const steps = Math.min(Math.max(rowsBehind.value, 0), total)
   return Math.round((steps / total) * 100)
-})
-
-const progressTrack = computed(() => {
-  const filled = Math.round((progressPercent.value / 100) * PROGRESS_WIDTH)
-  return '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled)
 })
 
 /**
@@ -370,6 +364,8 @@ onUnmounted(() => {
    full-window layer is undone — the record's rows, bar, phase line and footer
    are the same ones, so a staged run reads the same either way. */
 .update-progress-overlay--inline {
+  display: block;
+  min-width: 0;
   position: static;
   inset: auto;
   z-index: auto;
@@ -389,7 +385,9 @@ onUnmounted(() => {
 }
 
 .update-progress-content {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   max-width: 560px;
   display: flex;
   flex-direction: column;
@@ -442,10 +440,23 @@ onUnmounted(() => {
   font-size: 14px;
   line-height: 1;
 }
+/* A bar that is a fraction of its container, not a fixed run of characters:
+   text has an intrinsic width, which is what pushed the panel past its
+   column and under the page rail. min-width: 0 lets the flex item shrink. */
 .update-progress-track {
-  color: var(--accent);
-  letter-spacing: -1px;
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  height: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  overflow: hidden;
+}
+.update-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms var(--ease);
 }
 .update-progress-pct {
   color: var(--fg2);
