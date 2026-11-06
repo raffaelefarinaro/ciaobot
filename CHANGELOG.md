@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.10.0 - 2026-11-06
+
+### New features
+- **Needs-you cards:** when a chat needs a decision from you, a card appears above the composer — approve a wider permission mode for that chat, or finish signing in to an MCP server — instead of the agent stalling or describing what to do.
+- **Side-by-side chats:** open a second chat in the right-hand tile and keep both live, with ⌘\ (Ctrl+\ on Windows and Linux) to open or close the split.
+- **A swipeable title rail:** the chat header is a strip of the workspace's chats. Swipe or use the arrow keys to move between them, and pull the title down to close the chat and go Home.
+- **Attachment chips with an upload bar:** files you add show as chips, each with *Loading … N%* then *Processing …*, and Send waits until they are done.
+- **Edit a queued message** in the composer before it is sent.
+- **New chat shortcuts:** ⌥[ and ⌥] step to the previous or next chat, and a chat can be split, swapped and focused from the keyboard. Option shortcuts now work while you are typing.
+
+### Improvements
+- Home lists unread replies before chats that are still working, and the "Continue where you left off" heading is gone.
+- The title rail is centred on the chat column with a state track for each chat, and it no longer flashes the previous title after a mouse swipe.
+- Chats rise into place when opened, archiving moves you to the next chat, and the sidebar slides out instead of snapping.
+- On a phone, a pinned file opens as a compact opener under the chat header, and the header no longer jumps.
+- Chat details shows **Compacting** while the provider compacts a long conversation, then refreshes itself.
+- Background work no longer raises notification popups outside its own workspace, and automatic memory passes stay silent.
+- Each workspace keeps its own `Logs/`, which its agents can read but not write; existing logs are moved into place once, automatically.
+- The Memory Map opens without the one-second stalls, and vault review scans links much faster on a large vault.
+- A provider that rejects a turn because your credits are exhausted now says so, instead of a generic failure.
+- Links in the terminal output open in a new tab.
+
+### Bug fixes
+- An open chat keeps its last reply when the engine starts the next turn ([#2557](https://github.com/raffaelefarinaro/ciaobot/issues/2557)).
+- A file whose image fails to load now says why, instead of showing a blank box ([#2600](https://github.com/raffaelefarinaro/ciaobot/issues/2600)).
+- The HTML Preview no longer says "refused to connect" when the page failed to render; it shows the error ([#2599](https://github.com/raffaelefarinaro/ciaobot/issues/2599)).
+- Explicit-only slash skills are invoked again in Claude chats ([#2527](https://github.com/raffaelefarinaro/ciaobot/issues/2527)).
+- Notification popups appear only in the workspace they belong to ([#2540](https://github.com/raffaelefarinaro/ciaobot/issues/2540)).
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.9.0...v1.10.0)
+
 ## v1.9.0 - 2026-11-02
 
 **Heads up:** Macs set up by the Ciaobot Mac app's native installer on 1.8.x cannot update from Settings → Update (the updater cannot find uv). Run **Repair** in the Mac app once it offers it; Repair re-provisions uv and the update path works from then on. Installs made with the one-line `install.sh` are not affected.
