@@ -6434,8 +6434,18 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
         limit = 10
 
     pcm = getattr(request.app.state, "project_chat_manager", None)
+    config = getattr(request.app.state, "config", None)
+    # The registry, not the page: the tray must be able to head rows that all
+    # came from one workspace, and a truncated page cannot say how many
+    # workspaces this server serves. Enabled workspaces only — an archived
+    # workspace is not a workspace the rows can come from.
+    multiple_workspaces = len(getattr(config, "workspaces", None) or {}) > 1
     if pcm is None:
-        return JSONResponse({"chats": [], "attention_count": 0})
+        return JSONResponse({
+            "chats": [],
+            "attention_count": 0,
+            "multiple_workspaces": multiple_workspaces,
+        })
     chats = pcm.list_chats()
     rows: list[dict[str, object]] = []
     attention_count = 0
@@ -6474,7 +6484,11 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     # it. Float those chats to the front (stable, so recency order survives
     # within each group) — the badge then always has something to point at.
     rows.sort(key=lambda row: not (row["unread"] or row["needs_input"]))
-    return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
+    return JSONResponse({
+        "chats": rows[:limit],
+        "attention_count": attention_count,
+        "multiple_workspaces": multiple_workspaces,
+    })
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:

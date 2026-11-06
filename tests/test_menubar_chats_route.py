@@ -10,16 +10,56 @@ from starlette.testclient import TestClient
 from ciao.web.routes_api import menubar_chats_endpoint
 
 
-def _client(pcm=None) -> TestClient:
+def _client(pcm=None, config=None) -> TestClient:
     app = Starlette(routes=[Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"])])
     app.state.project_chat_manager = pcm
+    if config is not None:
+        app.state.config = config
     return TestClient(app)
 
 
 def test_menubar_chats_endpoint_without_manager_returns_empty() -> None:
     resp = _client(pcm=None).get("/api/menubar-chats")
     assert resp.status_code == 200
-    assert resp.json() == {"chats": [], "attention_count": 0}
+    assert resp.json() == {
+        "chats": [],
+        "attention_count": 0,
+        "multiple_workspaces": False,
+    }
+
+
+def test_the_workspace_fact_comes_from_the_registry_not_the_page() -> None:
+    # The tray heads its rows with the workspace they came from whenever this
+    # server serves more than one workspace. A page whose rows all belong to
+    # one workspace cannot state that, so the fact is read from the registry.
+    work = SimpleNamespace(workspace="work", kind="")
+    chats = [
+        SimpleNamespace(
+            chat_id="only-work",
+            project_id="p-work",
+            title="Only work",
+            archived=False,
+            last_activity_at="2026-07-27T12:00:00Z",
+            last_read_at="",
+            pending_question="",
+            helper={},
+        ),
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: work if project_id == "p-work" else None,
+    )
+    two_workspaces = SimpleNamespace(
+        workspaces={"personal": object(), "work": object()},
+    )
+    one_workspace = SimpleNamespace(workspaces={"work": object()})
+
+    payload = _client(pcm=pcm, config=two_workspaces).get("/api/menubar-chats").json()
+    assert payload["multiple_workspaces"] is True
+    assert [row["workspace"] for row in payload["chats"]] == ["work"]
+
+    payload = _client(pcm=pcm, config=one_workspace).get("/api/menubar-chats").json()
+    assert payload["multiple_workspaces"] is False
 
 
 def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
