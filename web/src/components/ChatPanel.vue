@@ -355,15 +355,20 @@
             :known-paths="knownFilePaths"
           >
             <template v-if="errorHasActions(i, item.msg.content)" #actions>
-              <ChatRetryState
-                v-if="retryOwnerIdx === i && chat.retry"
-                :retry="chat.retry"
-                :provider="chat.provider"
-                :streaming="view.isStreaming"
-                @continue="openRecoveryPicker(null)"
-                @try-now="tryRetryNow"
-                @stop="stopRetry"
-              />
+              <template v-if="retryOwnerIdx === i && chat.retry">
+                <ChatRetryState
+                  :retry="chat.retry"
+                  :provider="chat.provider"
+                  :streaming="view.isStreaming"
+                  @continue="openRecoveryPicker(null)"
+                  @try-now="tryRetryNow"
+                  @stop="stopRetry"
+                />
+                <!-- The retry state does not replace the diagnosis chat. -->
+                <div v-if="errorBubbleAction(i, item.msg.content) === 'fix'" class="error-actions">
+                  <button class="retry-btn fix-btn" @click="openFixChat(i)">Fix this error</button>
+                </div>
+              </template>
               <template v-else>
               <div class="error-actions">
                 <button
@@ -4902,6 +4907,15 @@ function hasLaterItem(errorIdx: number): boolean {
 }
 // A pending retry shows on the transcript's last row when that row is the
 // failure (a trace after it does not count); -1 when no error row owns it.
+// last_error is the engine's own text for the failure; the row's text may carry
+// an `Error:` prefix. A retry armed by hand ('manual') belongs to the last row.
+function sameFailure(rowText: string, lastError: string | undefined): boolean {
+  if (!lastError || lastError === 'manual') return true
+  const norm = (t: string) => t.replace(/^\s*Error:\s*/, '').trim().toLowerCase()
+  const a = norm(rowText)
+  const b = norm(lastError)
+  return a.includes(b) || b.includes(a)
+}
 const retryPending = computed(() => chat.value?.retry?.status === 'pending' && !view.isStreaming)
 const retryOwnerIdx = computed(() => {
   if (!retryPending.value) return -1
@@ -4911,7 +4925,7 @@ const retryOwnerIdx = computed(() => {
     if (it.kind === 'trace') continue
     const isError = (it.kind === 'assistant' && it.msg.is_error)
       || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return isError ? k : -1
+    return isError && sameFailure(it.msg.content, chat.value?.retry?.last_error) ? k : -1
   }
   return -1
 })

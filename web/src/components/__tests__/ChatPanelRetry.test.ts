@@ -446,6 +446,46 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
+  it('keeps Fix this error beside the retry state while a retry is pending', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: strange failure 42', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-11T23:00:00Z',
+      last_error: 'strange failure 42',
+      attempts: 1,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+    expect(wrapper.find('.retry-state-title').exists()).toBe(true)
+    expect(wrapper.findAll('.fix-btn').map(b => b.text())).toEqual(['Fix this error'])
+    wrapper.unmount()
+  })
+
+  it('does not attach a retry to a different failure than the row', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: strange failure 42', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-11T23:00:00Z',
+      last_error: 'connection reset by peer',
+      attempts: 1,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+    const cards = wrapper.findAll('.injected-card')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
+    expect(cards[1].find('.retry-state-title').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('keeps the Retry started row when the retry has not failed', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [

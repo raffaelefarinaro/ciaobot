@@ -324,16 +324,26 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
 .injected-card-hint {
-  margin: 0 0 var(--space-2);
-  color: var(--fg);
-  font-size: var(--text-sm);
+  margin: 0 0 8px;
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.injected-card-actions { display: flex; flex-direction: column; gap: var(--space-2); padding: 0 0 var(--space-2); }
+.injected-card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+/* An error card reads as a notice: its failure line is body text, and its
+   actions stack under the retry state. Other card kinds keep the rules above. */
+.injected-card--error .injected-card-hint {
+  margin-bottom: var(--space-2);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+.injected-card--error .injected-card-actions { flex-direction: column; gap: var(--space-2); padding-bottom: var(--space-2); }
 .injected-card-actions :slotted(.retry-btn) { margin-top: 0; }
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }

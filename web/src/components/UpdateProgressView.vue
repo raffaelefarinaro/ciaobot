@@ -26,7 +26,16 @@
       <p v-if="phaseName" class="update-progress-phase">{{ phaseName }}</p>
 
       <!-- Progress bar: a filled fraction of the available width -->
-      <div class="update-progress" :aria-label="progressLabel">
+      <!-- A running bar is a progressbar with a value. A failed run is not
+           progress: it is a status naming the failure, with no value to claim. -->
+      <div
+        class="update-progress"
+        :role="failureText ? 'status' : 'progressbar'"
+        :aria-valuemin="failureText ? undefined : 0"
+        :aria-valuemax="failureText ? undefined : 100"
+        :aria-valuenow="failureText ? undefined : progressPercent"
+        :aria-label="progressLabel"
+      >
         <span class="update-progress-track" aria-hidden="true"><span class="update-progress-fill" :style="{ width: `${progressPercent}%` }"></span></span>
         <span class="update-progress-pct">{{ progressPercent.toString().padStart(3, ' ') }}%</span>
       </div>

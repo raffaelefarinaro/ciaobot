@@ -62,6 +62,21 @@ describe('progress bar', () => {
     expect((fill.element as HTMLElement).style.width).toBe(`${percent(wrapper)}%`)
     expect(wrapper.get('.update-progress-track').text()).toBe('')
   })
+
+  it('is a progressbar with a value while running and a valueless status once failed', () => {
+    const running = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'swapping' } })
+    const bar = running.get('.update-progress')
+    expect(bar.attributes('role')).toBe('progressbar')
+    expect(bar.attributes('aria-valuemin')).toBe('0')
+    expect(bar.attributes('aria-valuemax')).toBe('100')
+    expect(bar.attributes('aria-valuenow')).toBe(String(percent(running)))
+    expect(bar.attributes('aria-label')).toBeTruthy()
+
+    const failed = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'rolled_back', error: 'boom' } })
+    const status = failed.get('.update-progress')
+    expect(status.attributes('role')).toBe('status')
+    expect(status.attributes('aria-valuenow')).toBeUndefined()
+  })
 })
 
 describe('with a real phase', () => {
