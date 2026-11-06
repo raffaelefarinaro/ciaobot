@@ -18,6 +18,10 @@ import type {
 } from '../lib/types'
 
 const REFRESH_INTERVAL_MS = 60_000
+/** How long Home waits for the first load before painting what it has. `api`
+ *  has no fetch timeout, so one stalled read must not hide blocking and error
+ *  rows (and their Fix button); rows still arrive when the reads land. */
+export const INITIAL_LOAD_GATE_MS = 3000
 
 /** What a start/dismiss/reopen call reports back, whichever way it went.
  *
@@ -448,8 +452,10 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     if (initialized) return
     initialized = true
     initialLoadPending.value = true
-    void Promise.allSettled([refresh(), refreshUpdateTasks(), refreshHealth()])
-      .then(() => { initialLoadPending.value = false })
+    void Promise.race([
+      Promise.allSettled([refresh(), refreshUpdateTasks(), refreshHealth()]),
+      new Promise<void>(resolve => setTimeout(resolve, INITIAL_LOAD_GATE_MS)),
+    ]).then(() => { initialLoadPending.value = false })
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', () => {
         void refresh()

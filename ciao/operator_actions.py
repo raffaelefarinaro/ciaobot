@@ -761,7 +761,7 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     # The first line is what Home shows (one line per row), so it carries the
     # decision data itself: which reminders, and when each was due.
     summary_names = [
-        f"{_schedule_display_name(e)}"
+        " ".join(_schedule_display_name(e).split())
         + (f" (due {e.run_at_date})" if getattr(e, "run_at_date", "") else "")
         for e in preview[:2]
     ]

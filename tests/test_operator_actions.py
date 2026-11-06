@@ -444,7 +444,7 @@ def test_missed_schedules_first_line_names_the_reminders(tmp_path: Path) -> None
     now = datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
     entries = [
         _Entry(frequency="once", run_at_date=f"2026-11-0{i}", title=name, schedule_id=f"s{i}")
-        for i, name in ((1, "Call Anna"), (2, "Renew licence"), (3, "Book flights"), (4, "Pay rent"))
+        for i, name in ((1, "Call Anna"), (2, "Renew\nlicence"), (3, "Book flights"), (4, "Pay rent"))
     ]
     context = DetectionContext(
         config=_FakeConfig(tmp_path, workspaces=("personal",)),
@@ -455,6 +455,8 @@ def test_missed_schedules_first_line_names_the_reminders(tmp_path: Path) -> None
     tile = next(a for a in detect_actions(context) if a.kind == "missed-schedules")
     first = tile.detail.splitlines()[0]
     assert first == "4 missed: Call Anna (due 2026-11-01), Renew licence (due 2026-11-02) and 2 more"
+    # A newline in a title cannot split the first line.
+    assert len(tile.detail.split("\n\n")[0].splitlines()) == 1
     # The linked list stays below for the chat and any full view.
     assert "- [Call Anna](/schedules/s1)" in tile.detail
 

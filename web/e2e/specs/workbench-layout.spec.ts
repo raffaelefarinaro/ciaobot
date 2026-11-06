@@ -370,13 +370,19 @@ test.describe('workbench layout', () => {
     await boot(page, '/', '.needs-you')
     const form = page.locator('.home-intake-form')
     const settled = (await form.boundingBox())!
+    // Poll the composer's y over a short window: it must never leave `settled`.
+    const expectComposerStill = async (windowMs: number) => {
+      const until = Date.now() + windowMs
+      do {
+        expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+        await page.waitForTimeout(50)
+      } while (Date.now() < until)
+    }
     // The list is already in place; nothing arrives later to push the composer.
-    await page.waitForTimeout(1500)
-    expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+    await expectComposerStill(1500)
     // Re-reading the data (the 60s poll, a focus) does not move it either.
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-    await page.waitForTimeout(500)
-    expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+    await expectComposerStill(500)
 
     // Top-aligned: the content starts at the top of the pane, not centred in it.
     const pane = (await page.locator('.empty-state').boundingBox())!
