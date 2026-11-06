@@ -134,7 +134,8 @@ async function checkAgain(): Promise<void> {
 }
 
 function selectProvider(id: string): void {
-  if (saving.value || (id !== 'claude' && id !== 'opencode')) return
+  // Re-clicking the current runtime keeps the model choice.
+  if (saving.value || id === provider.value || (id !== 'claude' && id !== 'opencode')) return
   provider.value = id
   saveError.value = ''
   selection.value = ''

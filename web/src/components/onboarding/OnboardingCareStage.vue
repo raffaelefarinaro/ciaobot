@@ -78,6 +78,8 @@ async function save(): Promise<boolean> {
 }
 
 function chooseAvailability(value: string): void {
+  // Re-clicking the current answer is not an edit.
+  if (value === availability.value) return
   availability.value = value
   edited.value = true
   error.value = ''

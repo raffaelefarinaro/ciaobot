@@ -90,6 +90,21 @@ describe('OnboardingRuntimeStage', () => {
     expect(api.patch).not.toHaveBeenCalled()
   })
 
+  it('keeps the model choice and requests nothing when the checked runtime is clicked again', async () => {
+    vi.mocked(api.patch).mockResolvedValue({})
+    const wrapper = mountStage({})
+    await vi.waitFor(() => expect(wrapper.find('input[name="model"]').exists()).toBe(true))
+    await wrapper.findAll('input[name="model"]')[0].setValue()
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, pending: false }))
+    const modelReads = () => vi.mocked(api.get).mock.calls.filter(([url]) => String(url).startsWith('/api/models')).length
+    const before = modelReads()
+    await wrapper.get('input[name="runtime"][value="claude"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+    expect((wrapper.get('input[name="model"]').element as HTMLInputElement).checked).toBe(true)
+    expect(modelReads()).toBe(before)
+  })
+
   it('does not write settings when the choice is deliberately deferred', async () => {
     const wrapper = mountStage({ status: missing })
     await vi.waitFor(() => expect(wrapper.find('button.defer').exists()).toBe(true))
