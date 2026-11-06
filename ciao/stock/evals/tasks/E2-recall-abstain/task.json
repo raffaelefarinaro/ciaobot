@@ -8,7 +8,7 @@
   "requires": [],
   "timeout_s": 600,
   "checks": [
-    {"kind": "abstains"},
+    {"kind": "abstains", "forbid_values": ["phone"]},
     {"kind": "new_files", "glob": "memory-vault/**/*", "max": 0}
   ]
 }
