@@ -31,7 +31,11 @@ PLATFORM_MACOS, PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_OTHER = (
     "other",
 )
 
-GWS_INSTALL_COMMAND = "npm install -g @googleworkspace/cli"
+# npm 12 blocks install scripts by default, and the package's postinstall is what
+# downloads the `gws` binary, so a bare install "succeeds" with no binary. npm 11.x
+# also accepts the flag (documented under `allow-scripts`); an npm that predates it
+# only warns about an unknown config key and runs the scripts anyway.
+GWS_INSTALL_COMMAND = "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
 
 

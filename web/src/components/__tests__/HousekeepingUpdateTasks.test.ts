@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
-// Home → "After this update": one card per lifecycle, and the copy each state is
-// allowed to use.
+// Home → "Needs you": one update row per lifecycle, and the copy each state is
+// allowed to use. A row has one lead control; everything else is in its menu.
 //
 // The claims pinned here are the ones a card silently breaks:
 //
@@ -32,6 +32,7 @@ import { nextTick } from 'vue'
 import HousekeepingStrip from '../HousekeepingStrip.vue'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useProjectStore } from '../../stores/projects'
+import { leadLabels, menuLabels, pick, rows, titles } from './needsYouHelpers'
 import type { UpdateTaskRow } from '../../lib/types'
 
 // The router is imported lazily inside the click handlers, so it is stubbed as
@@ -103,13 +104,23 @@ async function mountGroup(rows: UpdateTaskRow[]) {
   return { wrapper, store }
 }
 
-function buttons(wrapper: Awaited<ReturnType<typeof mountGroup>>['wrapper']) {
-  return wrapper.findAll('.update-task .housekeeping-actions button').map((b) => b.text())
+type Wrapped = Awaited<ReturnType<typeof mountGroup>>['wrapper']
+
+/** Every control the first update row offers: its lead, then its menu. */
+async function buttons(wrapper: Wrapped): Promise<string[]> {
+  const row = rows(wrapper)[0]
+  return [...leadLabels(row), ...(await menuLabels(row))]
 }
 
-function cards(wrapper: Awaited<ReturnType<typeof mountGroup>>['wrapper']) {
-  return wrapper.findAll('.update-task')
+/** Press a control by its label, wherever the row keeps it. */
+async function press(wrapper: Wrapped, label: string): Promise<void> {
+  const row = rows(wrapper)[0]
+  const lead = row.findAll('.needs-you-primary button').find(b => b.text() === label)
+  if (lead) await lead.trigger('click')
+  else await pick(row, label)
 }
+
+const cards = rows
 
 describe('the group itself', () => {
   it('is absent entirely with zero tasks', async () => {
@@ -117,8 +128,8 @@ describe('the group itself', () => {
     // worse than no box, and the group has no all-clear state to render, so its
     // absence never reads as "you are done".
     const { wrapper } = await mountGroup([])
-    expect(wrapper.find('.update-tasks').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('After this update')
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Needs you')
     wrapper.unmount()
   })
 
@@ -129,7 +140,7 @@ describe('the group itself', () => {
       task({ status: 'dismissed', suppressed: true }),
       task({ id: 'other', status: 'completed', suppressed: true }),
     ])
-    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -141,8 +152,8 @@ describe('the group itself', () => {
       task({ applicability: 'not_applicable', offered: false, status: 'offered' }),
       task({ id: 'other', applicability: 'not_applicable', offered: false, status: 'offered' }),
     ])
-    expect(wrapper.find('.update-tasks').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('After this update')
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Needs you')
     wrapper.unmount()
   })
 
@@ -163,19 +174,19 @@ describe('the group itself', () => {
     // restating the active workspace was the sentence this issue removed, and
     // re-adding one under the heading would put it back on Home.
     const { wrapper } = await mountGroup([task()])
-    expect(wrapper.find('#update-tasks-heading').text()).toBe('After this update')
+    expect(wrapper.find('#needs-you-heading').text()).toBe('Needs you')
     expect(cards(wrapper)).toHaveLength(1)
     expect(cards(wrapper)[0].text()).toContain('Rows retired into a folder no surface reads any more.')
-    expect(buttons(wrapper)).toContain('Start in chat')
+    expect(await buttons(wrapper)).toContain('Start in chat')
     expect(wrapper.find('.update-tasks-lede').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Work this version of Ciaobot left behind for')
     wrapper.unmount()
   })
 
-  it('leaves ordinary housekeeping tiles and a blocking one alone', async () => {
-    // The blocking tile is a precondition the install cannot get past on its
-    // own: it has to stay prominent and non-dismissible, and adding the group
-    // must not have given it a "Hide it" button.
+  it('leaves a blocking action alone: filled lead, no Hide it, listed first', async () => {
+    // The blocking row is a precondition the install cannot get past on its
+    // own: it has to stay prominent and non-dismissible, and adding update rows
+    // must not have given it a "Hide it" item.
     const store = useHousekeepingStore()
     store.actions = [{
       id: 'gate',
@@ -197,41 +208,17 @@ describe('the group itself', () => {
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    const blocking = wrapper.find('.housekeeping-tile--blocking')
-    expect(blocking.exists()).toBe(true)
-    expect(blocking.text()).toContain('Separate them now')
-    expect(blocking.text()).not.toContain('Hide it')
-    // And the ordinary strip's own controls are unchanged.
-    expect(blocking.findAll('.housekeeping-actions button').map((b) => b.text())).toEqual(['Separate them now'])
-    expect(cards(wrapper as never)).toHaveLength(1)
-    wrapper.unmount()
-  })
-
-  it('puts the group after the tiles, so a blocker is seen first', async () => {
-    // An optional "start this task" card sorting above an unmissable
-    // precondition would be the wrong reading order.
-    const store = useHousekeepingStore()
-    store.actions = [{
-      id: 'gate', kind: 'gate', severity: 1, title: 'Blocker', detail: 'Fix.',
-      glyph: '▲', workspace: 'personal', view_label: '', view_route: '',
-      run_label: 'Fix now', chat_label: '', chat_prompt: '', blocking: true,
-    }]
-    store.updateTasks = [task()]
-    store.updateTasksWorkspace = 'personal'
-    const wrapper = mount(HousekeepingStrip)
-    await nextTick()
-
-    const html = wrapper.html()
-    expect(html.indexOf('housekeeping-tile--blocking')).toBeLessThan(html.indexOf('update-tasks'))
-    wrapper.unmount()
-  })
-})
-
-describe('the version a card dates from', () => {
-  it('omits the Since text when the release is unknown, never 0.0.0', async () => {
-    const { wrapper } = await mountGroup([task({ since_version: '' })])
-    expect(cards(wrapper)[0].text()).not.toContain('Since Ciaobot')
-    expect(cards(wrapper)[0].text()).not.toContain('0.0.0')
+    expect(titles(wrapper)).toEqual([
+      'Workspaces still share one vault',
+      'Review the rows your old notes left behind',
+    ])
+    const [blocking, update] = rows(wrapper)
+    expect(blocking.classes()).toContain('needs-you-row--blocking')
+    expect(leadLabels(blocking)).toEqual(['Separate them now'])
+    expect(await menuLabels(blocking)).not.toContain('Hide it')
+    // The update row is one more row of the same list, not a second section.
+    expect(wrapper.findAll('section')).toHaveLength(1)
+    expect(leadLabels(update)).toEqual(['Start in chat'])
     wrapper.unmount()
   })
 })
@@ -241,18 +228,17 @@ describe('one card per lifecycle', () => {
     const { wrapper } = await mountGroup([task()])
     expect(cards(wrapper)[0].text()).toContain('Review the rows your old notes left behind')
     expect(cards(wrapper)[0].text()).toContain('Rows retired into a folder no surface reads any more.')
-    expect(cards(wrapper)[0].text()).toContain('Since Ciaobot 2.1.0')
-    expect(buttons(wrapper)).toContain('Start in chat')
-    expect(buttons(wrapper)).toContain('Hide it')
-    expect(buttons(wrapper)).not.toContain('Check again')
+    expect(await buttons(wrapper)).toContain('Start in chat')
+    expect(await buttons(wrapper)).toContain('Hide it')
+    expect(await buttons(wrapper)).not.toContain('Check again')
     wrapper.unmount()
   })
 
   it('offers Resume and the chat for one already under way', async () => {
     const { wrapper } = await mountGroup([task({ status: 'in_progress', chat_id: 'chat-9', chat_live: true })])
-    expect(buttons(wrapper)).toContain('Resume chat')
-    expect(buttons(wrapper)).toContain('Open its chat')
-    expect(buttons(wrapper)).not.toContain('Start in chat')
+    expect(await buttons(wrapper)).toContain('Resume chat')
+    expect(await buttons(wrapper)).toContain('Open its chat')
+    expect(await buttons(wrapper)).not.toContain('Start in chat')
     expect(cards(wrapper)[0].text()).toContain('Started')
     wrapper.unmount()
   })
@@ -267,10 +253,10 @@ describe('one card per lifecycle', () => {
     expect(cards(wrapper)[0].text()).not.toContain('Its chat is open')
     expect(cards(wrapper)[0].text()).toContain('archived or deleted')
     expect(cards(wrapper)[0].text()).toContain('Starting opens a new one')
-    expect(buttons(wrapper)).not.toContain('Open its chat')
+    expect(await buttons(wrapper)).not.toContain('Open its chat')
     // The lead action is the same start that will mint a chat, so it says so.
-    expect(buttons(wrapper)).not.toContain('Resume chat')
-    expect(buttons(wrapper)).toContain('Start a new chat')
+    expect(await buttons(wrapper)).not.toContain('Resume chat')
+    expect(await buttons(wrapper)).toContain('Start a new chat')
     wrapper.unmount()
   })
 
@@ -281,11 +267,11 @@ describe('one card per lifecycle', () => {
     const { wrapper, store } = await mountGroup([
       task({ status: 'waiting_review', chat_id: 'chat-9', chat_live: true }),
     ])
-    expect(buttons(wrapper)).toContain('Review proposals')
-    expect(buttons(wrapper)).toContain('Resume chat')
+    expect(await buttons(wrapper)).toContain('Review proposals')
+    expect(await buttons(wrapper)).toContain('Resume chat')
     expect(cards(wrapper)[0].text()).toContain('waiting for you to decide')
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Review proposals')!.trigger('click')
+    await press(wrapper, 'Review proposals')
     expect(store.updateTasks).toHaveLength(1)
     wrapper.unmount()
   })
@@ -294,10 +280,10 @@ describe('one card per lifecycle', () => {
     const { wrapper } = await mountGroup([
       task({ status: 'failed', chat_id: 'chat-9', chat_live: true, updated_at: '2026-09-05T18:30:00+00:00' }),
     ])
-    expect(buttons(wrapper)).toContain('Try again')
+    expect(await buttons(wrapper)).toContain('Try again')
     expect(cards(wrapper)[0].text()).toContain('did not get going')
     expect(cards(wrapper)[0].text()).toContain('reuses the same chat')
-    expect(buttons(wrapper)).toContain('Open its chat')
+    expect(await buttons(wrapper)).toContain('Open its chat')
     wrapper.unmount()
   })
 
@@ -309,7 +295,7 @@ describe('one card per lifecycle', () => {
     const { wrapper } = await mountGroup([
       task({ applicability: 'unknown', offered: false, status: 'offered' }),
     ])
-    expect(buttons(wrapper)).toEqual(['Check again', 'Hide it'])
+    expect(await buttons(wrapper)).toEqual(['Check again', 'Hide it', 'Hide for now'])
     expect(cards(wrapper)[0].text()).toContain('Checking whether this applies here')
     expect(cards(wrapper)[0].text()).not.toContain('New since this update')
     wrapper.unmount()
@@ -324,7 +310,7 @@ describe('one card per lifecycle', () => {
       task({ applicability: 'not_applicable', offered: false, status: 'offered' }),
     ])
     expect(cards(wrapper)).toHaveLength(0)
-    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('no longer applies')
     wrapper.unmount()
   })
@@ -343,9 +329,9 @@ describe('one card per lifecycle', () => {
         chat_id: 'chat-9', chat_live: true,
       }),
     ])
-    expect(buttons(wrapper)).toContain('Resume chat')
-    expect(buttons(wrapper)).toContain('Open its chat')
-    expect(buttons(wrapper)).not.toContain('Check again')
+    expect(await buttons(wrapper)).toContain('Resume chat')
+    expect(await buttons(wrapper)).toContain('Open its chat')
+    expect(await buttons(wrapper)).not.toContain('Check again')
     wrapper.unmount()
   })
 
@@ -357,8 +343,8 @@ describe('one card per lifecycle', () => {
     const { wrapper } = await mountGroup([
       task({ status: 'failed', applicability: 'unknown', offered: false, chat_id: 'chat-9', chat_live: true }),
     ])
-    expect(buttons(wrapper)).toContain('Try again')
-    expect(buttons(wrapper)).not.toContain('Check again')
+    expect(await buttons(wrapper)).toContain('Try again')
+    expect(await buttons(wrapper)).not.toContain('Check again')
     wrapper.unmount()
   })
 
@@ -390,6 +376,31 @@ describe('one card per lifecycle', () => {
   })
 })
 
+describe('which control leads each lifecycle', () => {
+  it.each([
+    ['an offer that applies', {}, 'Start in chat', ['Hide it', 'Hide for now']],
+    ['an attempt under way', { status: 'in_progress', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
+    ['a failed attempt', { status: 'failed', chat_id: 'c', chat_live: true }, 'Try again', ['Open its chat', 'Hide it', 'Hide for now']],
+    ['proposals waiting for review', { status: 'waiting_review', chat_id: 'c', chat_live: true }, 'Review proposals', ['Resume chat', 'Open its chat', 'Hide it', 'Hide for now']],
+    ['an offer nobody can say applies', { applicability: 'unknown', offered: false }, 'Check again', ['Hide it', 'Hide for now']],
+  ] as const)('%s', async (_name, overrides, lead, menu) => {
+    const { wrapper } = await mountGroup([task(overrides as Partial<UpdateTaskRow>)])
+    expect(leadLabels(rows(wrapper)[0])).toEqual([lead])
+    expect(await menuLabels(rows(wrapper)[0])).toEqual(menu)
+    wrapper.unmount()
+  })
+
+  it('shows a refusal on the line, as an alert', async () => {
+    const { wrapper, store } = await mountGroup([task()])
+    store.taskErrors = { 'review-legacy-rows@1': 'The engine declined to start this task, so nothing was changed.' }
+    await nextTick()
+    const line = rows(wrapper)[0].get('.needs-you-line')
+    expect(line.attributes('role')).toBe('alert')
+    expect(line.text()).toContain('nothing was changed')
+    wrapper.unmount()
+  })
+})
+
 describe('a transition that did not happen', () => {
   it('keeps the card and shows the reason', async () => {
     // The refusal is stated on the card rather than swallowed: a card that
@@ -404,7 +415,7 @@ describe('a transition that did not happen', () => {
       ),
     )
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Start in chat')!.trigger('click')
+    await press(wrapper, 'Start in chat')
     await flushPromises()
     await nextTick()
 
@@ -427,7 +438,7 @@ describe('a transition that did not happen', () => {
       ),
     )
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Start in chat')!.trigger('click')
+    await press(wrapper, 'Start in chat')
     await flushPromises()
 
     expect(cards(wrapper)).toHaveLength(1)
@@ -442,13 +453,13 @@ describe('a transition that did not happen', () => {
     })
     vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
     await nextTick()
 
     expect(store.dismissUpdateTask).toHaveBeenCalled()
-    expect(wrapper.find('.update-tasks-status').attributes('role')).toBe('status')
-    expect(wrapper.find('.update-tasks-status').text()).toContain('Hidden')
+    expect(wrapper.find('.needs-you-status').attributes('role')).toBe('status')
+    expect(wrapper.find('.needs-you-status').text()).toContain('Hidden')
     wrapper.unmount()
   })
 
@@ -457,7 +468,7 @@ describe('a transition that did not happen', () => {
     const dismiss = vi.spyOn(store, 'dismissUpdateTask')
     vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(false)
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
 
     expect(dismiss).not.toHaveBeenCalled()
@@ -475,7 +486,7 @@ describe('what the hide confirmation says', () => {
     const confirm = vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
     vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({ ok: true, chatId: '', resumed: false, error: '' })
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
 
     const message = confirm.mock.calls[0][0] as string
@@ -489,7 +500,7 @@ describe('what the hide confirmation says', () => {
     const { wrapper } = await mountGroup([task()])
     const confirm = vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(false)
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
 
     const message = confirm.mock.calls[0][0] as string
@@ -501,7 +512,7 @@ describe('what the hide confirmation says', () => {
   it('labels the press as hiding, not completing', async () => {
     const { wrapper } = await mountGroup([task()])
     const confirm = vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(false)
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
     expect(confirm.mock.calls[0][1]).toMatchObject({ confirmLabel: 'Hide it' })
     wrapper.unmount()
@@ -524,36 +535,37 @@ describe('keyboard focus', () => {
       tasks: [task({ status: 'dismissed', suppressed: true })],
     })
 
-    const hide = wrapper.findAll('button').find((b) => b.text() === 'Hide it')!
-    hide.element.focus()
-    expect(document.activeElement).toBe(hide.element)
+    const trigger = wrapper.get('.needs-you-more')
+    ;(trigger.element as HTMLElement).focus()
+    expect(document.activeElement).toBe(trigger.element)
 
-    await hide.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
     await nextTick()
 
     expect(cards(wrapper)).toHaveLength(0)
     // The group outlives its last card so the outcome has somewhere to be said
     // and focus has somewhere to land.
-    const group = wrapper.find('.update-tasks')
+    const group = wrapper.find('.needs-you')
     expect(group.exists()).toBe(true)
     expect(group.text()).toContain('Hidden')
     expect(document.activeElement).toBe(group.element)
     wrapper.unmount()
   })
 
-  it('keeps focus on the button when the card stays', async () => {
+  it('keeps focus on the row menu button when the row stays', async () => {
     const { wrapper, store } = await mountGroup([task()])
     vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
     vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({ ok: true, chatId: '', resumed: false, error: '' })
 
-    const hide = wrapper.findAll('button').find((b) => b.text() === 'Hide it')!
-    hide.element.focus()
-    await hide.trigger('click')
+    const trigger = wrapper.get('.needs-you-more')
+    ;(trigger.element as HTMLElement).focus()
+    await press(wrapper, 'Hide it')
     await flushPromises()
     await nextTick()
 
-    expect(document.activeElement).toBe(hide.element)
+    expect(cards(wrapper)).toHaveLength(1)
+    expect(document.activeElement).toBe(wrapper.get('.needs-you-more').element)
     wrapper.unmount()
   })
 
@@ -561,33 +573,37 @@ describe('keyboard focus', () => {
     // Focus restoration needs a target, and a <section> is not focusable by
     // default. tabindex="-1" is exactly that: reachable by script, not by Tab.
     const { wrapper } = await mountGroup([task()])
-    const group = wrapper.find('.update-tasks')
+    const group = wrapper.find('.needs-you')
     expect(group.attributes('tabindex')).toBe('-1')
     // Named by its own heading rather than a second copy of the string, so the
     // region name and the visible heading cannot drift apart.
     const labelledBy = group.attributes('aria-labelledby')
     expect(labelledBy).toBeTruthy()
-    expect(wrapper.find(`#${labelledBy}`).text()).toBe('After this update')
+    expect(wrapper.find(`#${labelledBy}`).text()).toBe('Needs you')
     wrapper.unmount()
   })
 })
 
 describe('mobile and touch', () => {
-  it('uses the same button classes as the strip, so touch sizing is shared', async () => {
+  it('uses the shared button and icon-button classes, so touch sizing is shared', async () => {
     // 44px touch targets come from the global button tokens; a bespoke class
-    // here would quietly opt the group's buttons out of them.
+    // here would quietly opt the row's controls out of them.
     const { wrapper } = await mountGroup([task()])
-    const start = wrapper.findAll('button').find((b) => b.text() === 'Start in chat')!
+    const start = wrapper.get('.needs-you-primary button')
     expect(start.classes()).toContain('btn-small')
-    expect(start.classes()).toContain('btn-primary')
-    const hide = wrapper.findAll('button').find((b) => b.text() === 'Hide it')!
-    expect(hide.classes()).toContain('btn-chip')
+    expect(wrapper.get('.needs-you-more').classes()).toContain('btn-icon')
+    await pick(rows(wrapper)[0], 'Hide it')
     wrapper.unmount()
   })
 
-  it('puts the group in the same measure as the strip above it', async () => {
-    const { wrapper } = await mountGroup([task()])
-    expect(wrapper.find('.update-tasks').classes()).toContain('update-tasks')
+  it('has one lead control per row, never a stack of buttons', async () => {
+    const { wrapper } = await mountGroup([
+      task({ status: 'in_progress', chat_id: 'chat-9', chat_live: true }),
+      task({ id: 'second', status: 'failed', chat_id: 'chat-8', chat_live: true }),
+    ])
+    for (const row of rows(wrapper)) {
+      expect(row.findAll('.needs-you-primary button')).toHaveLength(1)
+    }
     wrapper.unmount()
   })
 })
@@ -612,19 +628,19 @@ describe('the group after its last card goes', () => {
         tasks: [task({ status: 'dismissed', suppressed: true })],
       })
 
-      await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+      await press(wrapper, 'Hide it')
       await vi.advanceTimersByTimeAsync(0)
       await nextTick()
 
       expect(cards(wrapper)).toHaveLength(0)
-      expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+      expect(wrapper.find('.needs-you').text()).toContain('Hidden')
 
       // Ten seconds later it is gone, and Home is empty again.
       await vi.advanceTimersByTimeAsync(11_000)
       await nextTick()
-      expect(wrapper.find('.update-tasks').exists()).toBe(false)
+      expect(wrapper.find('.needs-you').exists()).toBe(false)
       expect(wrapper.text()).not.toContain('Hidden')
-      expect(wrapper.text()).not.toContain('After this update')
+      expect(wrapper.text()).not.toContain('Needs you')
       wrapper.unmount()
     } finally {
       vi.useRealTimers()
@@ -640,9 +656,9 @@ describe('the group after its last card goes', () => {
     vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({
       ok: true, chatId: '', resumed: false, error: '',
     })
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
-    expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+    expect(wrapper.find('.needs-you').text()).toContain('Hidden')
 
     wrapper.unmount()
     vi.useFakeTimers()
@@ -685,16 +701,16 @@ describe('the workspace switch', () => {
     })
     apiGet.mockResolvedValue({ tasks: [] })
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
     await nextTick()
-    expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+    expect(wrapper.find('.needs-you').text()).toContain('Hidden')
 
     useProjectStore().activeWorkspace = 'work'
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Hidden')
     wrapper.unmount()
   })
@@ -715,7 +731,7 @@ describe('the workspace switch', () => {
     }))
     apiGet.mockResolvedValue({ tasks: [] })
 
-    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await press(wrapper, 'Hide it')
     await flushPromises()
     useProjectStore().activeWorkspace = 'work'
     await flushPromises()
