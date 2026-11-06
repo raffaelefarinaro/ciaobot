@@ -61,18 +61,17 @@ describe('OnboardingCareStage', () => {
 })
 
 describe('OnboardingCareStage safety', () => {
-  it('blocks Continue after a failed save and recovers on the next successful one', async () => {
+  it('shows a failed save inline, keeps Continue available, and clears the error on the next edit', async () => {
     vi.mocked(api.get).mockResolvedValue([routine])
-    vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({})
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline'))
     const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
     await loaded(wrapper)
     await wrapper.get('input[type="time"]').setValue('09:15')
     expect(await save(wrapper)).toBe(false)
-    expect(wrapper.text()).toContain('offline')
-    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
-    expect(await save(wrapper)).toBe(true)
-    expect(api.patch).toHaveBeenCalledTimes(2)
-    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, error: null })
+    expect(wrapper.get('[role="alert"]').text()).toContain('offline')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, error: 'offline' })
+    await wrapper.get('input[type="time"]').setValue('09:30')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   })
 
   it('keeps the browser timezone as the editable suggestion without counting it as an edit', async () => {

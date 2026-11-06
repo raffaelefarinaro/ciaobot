@@ -47,8 +47,8 @@ describe('OnboardingChoiceGroup', () => {
   const Host = defineComponent({
     components: { OnboardingChoiceGroup, OnboardingChoice },
     props: { disabled: Boolean },
-    setup() { return { value: ref('a') } },
-    template: `<OnboardingChoiceGroup v-model="value" label="Pick" name="pick" layout="cards" :disabled="disabled">
+    setup() { return { value: ref('a'), heard: ref(0) } },
+    template: `<OnboardingChoiceGroup v-model="value" @update:model-value="heard++" label="Pick" name="pick" layout="cards" :disabled="disabled">
       <OnboardingChoice value="a">A<template #description>About A</template></OnboardingChoice>
       <OnboardingChoice value="b">B</OnboardingChoice>
     </OnboardingChoiceGroup><output>{{ value }}</output>`,
@@ -65,6 +65,12 @@ describe('OnboardingChoiceGroup', () => {
     await radios[1].setValue()
     expect(wrapper.get('output').text()).toBe('b')
     expect(wrapper.findAll('label')[1].attributes('data-checked')).toBe('true')
+  })
+
+  it('hears a click on the already checked choice, which fires no change event', async () => {
+    const wrapper = mount(Host)
+    await wrapper.findAll('input')[0].trigger('click')
+    expect((wrapper.vm as unknown as { heard: number }).heard).toBe(1)
   })
 
   it('disables every choice with the group', () => {

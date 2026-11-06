@@ -100,12 +100,15 @@ async function save(next: { scope?: string; approval?: string }): Promise<void> 
 }
 
 function chooseScope(value: string): void {
-  if (pending.value || value === savedScope.value) return
+  if (pending.value) return
+  // Tapping what is already stored is the way out of a stale error.
+  if (value === savedScope.value) { error.value = ''; return }
   scope.value = value
   void save({ scope: value })
 }
 function chooseApproval(value: string): void {
-  if (pending.value || value === savedApproval.value) return
+  if (pending.value) return
+  if (value === savedApproval.value) { error.value = ''; return }
   approval.value = value
   void save({ approval: value })
 }

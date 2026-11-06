@@ -28,11 +28,12 @@ const dirty = computed(() =>
 )
 const pendingWrite = computed(() => edited.value && dirty.value)
 // Continue is never a dead end: with nothing edited it writes nothing, and an
-// edit is committed by `save`, so only a pending write or an error blocks it.
+// edit is committed by `save`, so only a pending write blocks it. A failed save
+// shows its error inline and Continue retries it.
 const state = computed<StageState>(() => ({
   dirty: pendingWrite.value,
   pending: saving.value,
-  canContinue: !saving.value && !error.value,
+  canContinue: !saving.value,
   error: error.value || null,
 }))
 watch([state, () => props.busy], () => emit('state', state.value), { immediate: true, deep: true })
@@ -79,6 +80,7 @@ async function save(): Promise<boolean> {
 function chooseAvailability(value: string): void {
   availability.value = value
   edited.value = true
+  error.value = ''
   if (!touchedTime.value) time.value = suggestedTime()
 }
 onMounted(() => { void load() })
@@ -102,12 +104,12 @@ defineExpose({ refresh: load, save })
       <div class="fields">
         <OnboardingField id="care-time" label="Local time">
           <template #default="{ describedby }">
-            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true; edited = true">
+            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true; edited = true; error = ''">
           </template>
         </OnboardingField>
         <OnboardingField id="care-timezone" label="Timezone">
           <template #default="{ describedby }">
-            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby" @input="edited = true">
+            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby" @input="edited = true; error = ''">
           </template>
         </OnboardingField>
       </div>

@@ -36,8 +36,9 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
 
   async function saveMemoryHandover(): Promise<boolean> {
     if (!loaded.value || pending.value) return false
+    error.value = null
     if (!dirty.value) return true
-    pending.value = true; error.value = null
+    pending.value = true
     const value = draft.memoryHandover
     try {
       await store.updateWorkspace(workspace, { memory_handover: value })

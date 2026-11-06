@@ -16,12 +16,15 @@ async function pick(event: Event): Promise<void> {
   input.closest('[role="radiogroup"]')?.querySelectorAll<HTMLInputElement>('input[type="radio"]')
     .forEach(radio => { radio.checked = radio.value === group!.modelValue.value })
 }
+// Clicking the radio that is already checked fires no change event, but the
+// group still needs to hear it: it is how a stale error is dismissed.
+function repeat(): void { if (checked.value) group!.select(props.value) }
 const off = computed(() => group.disabled.value || !!props.disabled)
 </script>
 
 <template>
   <label class="ob-choice" :data-checked="checked" :data-disabled="off">
-    <input type="radio" :name="group.name" :value="value" :checked="checked" :disabled="off" @change="pick">
+    <input type="radio" :name="group.name" :value="value" :checked="checked" :disabled="off" @change="pick" @click="repeat">
     <span class="ob-choice-text">
       <span class="ob-choice-title"><slot /></span>
       <span v-if="$slots.description" class="ob-choice-desc"><slot name="description" /></span>

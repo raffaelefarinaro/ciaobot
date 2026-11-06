@@ -22,10 +22,16 @@ onMounted(() => { void prefs.load() })
 async function select(value: string): Promise<void> {
   if (prefs.pending.value) return
   prefs.draft.memoryHandover = value as MemoryHandover
-  // A failed save puts the group back on what is stored (or the proposal).
-  if (!await prefs.saveMemoryHandover()) prefs.draft.memoryHandover = prefs.savedHandover.value
+  await commit()
 }
-const save = () => prefs.saveMemoryHandover()
+// A failed save puts the group back on what is stored, so tapping the option
+// again (including the suggested one) is a change and retries.
+async function commit(): Promise<boolean> {
+  if (await prefs.saveMemoryHandover()) return true
+  prefs.draft.memoryHandover = prefs.savedHandover.value
+  return false
+}
+const save = commit
 defineExpose({ save })
 </script>
 

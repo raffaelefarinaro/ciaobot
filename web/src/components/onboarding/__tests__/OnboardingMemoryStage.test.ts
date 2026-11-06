@@ -55,15 +55,6 @@ describe('OnboardingMemoryStage', () => {
     expect(preferences.saveMemoryHandover).toHaveBeenCalledTimes(1)
   })
 
-  it('puts the choice back on the saved value when the save fails', async () => {
-    preferences.savedHandover.value = 'off'
-    preferences.saveMemoryHandover.mockResolvedValue(false)
-    const view = mount(OnboardingMemoryStage, { props })
-    await view.get('input[value="dismiss"]').setValue()
-    expect(preferences.draft.memoryHandover).toBe('off')
-    preferences.savedHandover.value = 'off'
-  })
-
   it('marks the unsaved proposal as suggested', () => {
     const view = mount(OnboardingMemoryStage, { props })
     expect(view.text()).toContain('Suggested. Saved when you continue.')

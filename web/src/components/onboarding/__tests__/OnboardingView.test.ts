@@ -193,3 +193,36 @@ describe('OnboardingView failed save', () => {
     expect(wrapper.text()).not.toContain('When should workspace care run?')
   })
 })
+
+describe('OnboardingView care step failed save', () => {
+  it('keeps Continue enabled after a failed commit and the retry succeeds', async () => {
+    const routine = { schedule_id: 'system-memory-curation@personal', title: 'Workspace care', prompt: 'p', frequency: 'weekly', enabled: true, timezone_name: 'Europe/Zurich', daily_time_utc: '08:00', scope: 'system' }
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'care' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      if (url === '/api/schedules') return Promise.resolve([routine]) as never
+      return Promise.resolve({}) as never
+    })
+    vi.mocked(api.patch).mockImplementation((url: string) => {
+      if (url === '/api/schedules/system-memory-curation@personal') {
+        return (vi.mocked(api.patch).mock.calls.filter(([u]) => u === url).length === 1
+          ? Promise.reject(new Error('offline'))
+          : Promise.resolve({ ...routine, daily_time_utc: '09:15' })) as never
+      }
+      return Promise.resolve({ schema: 1, revision: 3, installation: { status: 'in_progress', step: 'finish' }, workspaces: {} }) as never
+    })
+    const wrapper = mount(OnboardingView)
+    await vi.waitFor(() => expect(wrapper.find('input[type="time"]').exists()).toBe(true))
+    await wrapper.get('input[type="time"]').setValue('09:15')
+    const continueButton = () => wrapper.get('footer button.continue')
+    await continueButton().trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
+    expect(api.patch).not.toHaveBeenCalledWith('/api/onboarding', expect.anything())
+    expect(continueButton().attributes('disabled')).toBeUndefined()
+
+    await continueButton().trigger('click')
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'finish' })))
+    expect(vi.mocked(api.patch).mock.calls.filter(([u]) => u === '/api/schedules/system-memory-curation@personal')).toHaveLength(2)
+  })
+})

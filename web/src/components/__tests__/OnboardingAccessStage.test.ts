@@ -125,12 +125,21 @@ describe('OnboardingAccessStage', () => {
     expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).checked).toBe(true)
   })
 
-  it('blocks Continue after a failed save and puts the choice back', async () => {
+  it('blocks Continue after a failed save, puts the choice back, and recovers by tapping the saved value', async () => {
     const wrapper = await mounted()
-    vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({})
     await wrapper.find('input[value="machine"]').setValue()
     await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
     expect((wrapper.find('input[value="workspace"]').element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.find('input[value="workspace"]').trigger('click')
+    expect(wrapper.text()).not.toContain('offline')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, error: null })
+    expect(api.patch).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('input[value="machine"]').setValue()
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, pending: false }))
   })
 })

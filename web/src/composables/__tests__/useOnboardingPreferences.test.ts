@@ -177,4 +177,21 @@ describe('onboarding memory preferences retry', () => {
     expect(prefs.error.value).toBeNull()
     expect(prefs.savedHandover.value).toBe('dismiss')
   })
+
+  it('clears a stale error when the draft matches what is saved', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'dismiss', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    vi.spyOn(useProjectStore(), 'updateWorkspace').mockRejectedValueOnce(new Error('offline'))
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    prefs.draft.memoryHandover = 'all'
+    expect(await prefs.saveMemoryHandover()).toBe(false)
+    expect(prefs.error.value).toContain('offline')
+    prefs.draft.memoryHandover = 'dismiss'
+    expect(await prefs.saveMemoryHandover()).toBe(true)
+    expect(prefs.error.value).toBeNull()
+  })
 })
