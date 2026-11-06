@@ -34,6 +34,7 @@ def _events_app() -> Starlette:
         background_agent_counts={},
         chat_pin_states={},
         chat_terminal_offer_states={},
+        chat_action_states={},
         events=SimpleNamespace(attach=_IdleSubscription),
     )
     return app
@@ -141,6 +142,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         background_agent_counts={},
         chat_pin_states={},
         chat_terminal_offer_states={},
+        chat_action_states={},
         events=hub,
     )
     with _signed_client(app).websocket_connect(
@@ -165,6 +167,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
         background_agent_counts={},
         chat_pin_states={},
         chat_terminal_offer_states={},
+        chat_action_states={},
         events=hub,
     )
     with pytest.raises(KeyError):

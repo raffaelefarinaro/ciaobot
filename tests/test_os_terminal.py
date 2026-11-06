@@ -139,7 +139,7 @@ def test_the_facade_calls_this_platform_s_adapter_and_no_other(
     result = terminal.spawn_terminal(cwd=tmp_path, cols=100, rows=40)
 
     assert result is native_sentinel
-    assert native_sentinel.calls == [{"cwd": tmp_path, "cols": 100, "rows": 40}]
+    assert native_sentinel.calls == [{"cwd": tmp_path, "cols": 100, "rows": 40, "argv": None}]
     assert other_sentinel.calls == []
 
 
@@ -164,7 +164,7 @@ def test_the_windows_branch_resolves_the_windows_adapter(
     result = terminal.spawn_terminal(cwd=tmp_path)
 
     assert result is windows_sentinel
-    assert windows_sentinel.calls == [{"cwd": tmp_path, "cols": 80, "rows": 24}]
+    assert windows_sentinel.calls == [{"cwd": tmp_path, "cols": 80, "rows": 24, "argv": None}]
     assert posix_sentinel.calls == []
 
 
@@ -185,7 +185,7 @@ def test_the_posix_branch_resolves_the_posix_adapter(
     result = terminal.spawn_terminal(cwd=tmp_path)
 
     assert result is posix_sentinel
-    assert posix_sentinel.calls == [{"cwd": tmp_path, "cols": 80, "rows": 24}]
+    assert posix_sentinel.calls == [{"cwd": tmp_path, "cols": 80, "rows": 24, "argv": None}]
     assert windows_sentinel.calls == []
 
 

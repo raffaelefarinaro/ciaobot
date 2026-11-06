@@ -16,22 +16,29 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useFontScale } from '../../composables/useFontScale'
+import { applyKeyboardSettings } from '../../composables/useKeyboardSettings'
 import { homeNewChatProjectId, pendingNewChat } from '../../lib/newChat'
 import { terminalPanelWanted } from '../../lib/terminalPanel'
 
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
 const archiveActiveChat = vi.fn()
+const selectAdjacentChat = vi.fn(() => true)
+const handleQuestionShortcut = vi.fn(() => false)
+const handlePermissionShortcut = vi.fn(() => false)
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
-  emits: ['close'],
-  setup(_, { emit, expose }) {
-    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat })
-    return () => h('button', {
-      'data-testid': 'close-chat',
-      onClick: () => emit('close'),
-    }, 'Close chat')
+  emits: ['close', 'pull', 'pull-end'],
+  setup(_, { emit, expose, slots }) {
+    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat, selectAdjacentChat, handleQuestionShortcut, handlePermissionShortcut })
+    return () => h('div', [
+      h('button', {
+        'data-testid': 'close-chat',
+        onClick: () => emit('close'),
+      }, 'Close chat'),
+      slots['below-header']?.(),
+    ])
   },
 })
 
@@ -72,6 +79,10 @@ describe('ChatLayout', () => {
     handleSendShortcut.mockReset()
     handleSendShortcut.mockReturnValue(true)
     archiveActiveChat.mockReset()
+    selectAdjacentChat.mockReset()
+    selectAdjacentChat.mockReturnValue(true)
+    handleQuestionShortcut.mockReset().mockReturnValue(false)
+    handlePermissionShortcut.mockReset().mockReturnValue(false)
     vi.restoreAllMocks()
   })
 
@@ -943,8 +954,7 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // Option+Backspace is the macOS delete-previous-word command while editing.
-  it('leaves Option+Backspace to the focused text field', async () => {
+  it('archives with Option+Backspace from a focused text field', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1000,14 +1010,355 @@ describe('ChatLayout', () => {
       key: 'Backspace',
       code: 'Backspace',
       altKey: true,
+      bubbles: true,
       cancelable: true,
     })
     textarea.dispatchEvent(event)
 
-    expect(archiveActiveChat).not.toHaveBeenCalled()
-    expect(event.defaultPrevented).toBe(false)
+    expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
     textarea.remove()
     wrapper.unmount()
+  })
+
+  // Option+arrows step through the header rail's chats. Only the main
+  // pane's ChatPanel is asked: a second chat beside it has no rail of its own.
+  async function mountOpenChat() {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it.each([['ArrowLeft', -1], ['ArrowRight', 1]] as const)(
+    'Option+%s navigates chats from a focused composer and consumes the chord',
+    async (key, direction) => {
+      const wrapper = await mountOpenChat()
+      const textarea = document.createElement('textarea')
+      textarea.value = 'draft text'
+      document.body.appendChild(textarea)
+      try {
+        textarea.focus()
+        const event = new KeyboardEvent('keydown', { key, code: key, altKey: true, bubbles: true, cancelable: true })
+        textarea.dispatchEvent(event)
+        expect(selectAdjacentChat).toHaveBeenCalledWith(direction)
+        expect(event.defaultPrevented).toBe(true)
+        expect(textarea.value).toBe('draft text')
+      } finally {
+        textarea.remove()
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('consumes Option+Right at the end of the chat rail', async () => {
+    selectAdjacentChat.mockReturnValue(false)
+    const wrapper = await mountOpenChat()
+    try {
+      const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('honors custom and disabled chat bindings in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { previousChat: 'Alt+BracketLeft', nextChat: 'disabled' } })
+      const previous = new KeyboardEvent('keydown', { key: '“', code: 'BracketLeft', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(previous)
+      expect(selectAdjacentChat).toHaveBeenCalledOnce()
+      expect(selectAdjacentChat).toHaveBeenCalledWith(-1)
+      expect(previous.defaultPrevented).toBe(true)
+      const disabled = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(disabled)
+      expect(selectAdjacentChat).toHaveBeenCalledOnce()
+      expect(disabled.defaultPrevented).toBe(false)
+    } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('does not apply a non-Alt custom binding or bare workspace digit in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { nextChat: 'Mod+KeyK' } })
+      const custom = new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true, cancelable: true })
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      input.dispatchEvent(custom)
+      input.dispatchEvent(digit)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(custom.defaultPrevented).toBe(false)
+      expect(digit.defaultPrevented).toBe(false)
+    } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('allows a custom Alt workspace binding in an editor but not bare or non-Alt bindings', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+KeyW' } })
+      const custom = new KeyboardEvent('keydown', { key: '∑', code: 'KeyW', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(custom)
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+      expect(custom.defaultPrevented).toBe(true)
+      switchWorkspace.mockClear()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Mod+KeyW' } })
+      const nonAlt = new KeyboardEvent('keydown', { key: 'w', code: 'KeyW', ctrlKey: true, bubbles: true, cancelable: true })
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      input.dispatchEvent(nonAlt)
+      input.dispatchEvent(digit)
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(nonAlt.defaultPrevented).toBe(false)
+      expect(digit.defaultPrevented).toBe(false)
+    } finally {
+      applyKeyboardSettings({ keyboard_shortcuts: {} })
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('does not offer a modified workspace digit to question or permission cards', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    handleQuestionShortcut.mockReturnValue(false)
+    handlePermissionShortcut.mockReturnValue(true)
+    try {
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+Digit2' } })
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(handleQuestionShortcut).not.toHaveBeenCalled()
+      expect(handlePermissionShortcut).not.toHaveBeenCalled()
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+      expect(event.defaultPrevented).toBe(true)
+    } finally { applyKeyboardSettings({ keyboard_shortcuts: {} }); wrapper.unmount() }
+  })
+
+  it('does not dispatch a workspace shortcut behind a dismissable layer', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const layer = document.createElement('div')
+    layer.setAttribute('data-dismissable-layer', '')
+    document.body.appendChild(layer)
+    try {
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      layer.dispatchEvent(event)
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(handleQuestionShortcut).not.toHaveBeenCalled()
+      expect(handlePermissionShortcut).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    } finally { layer.remove(); wrapper.unmount() }
+  })
+
+  it.each(['question', 'permission'])('gives a bare digit to a pending %s card before switching workspaces', async (owner) => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    if (owner === 'question') handleQuestionShortcut.mockReturnValue(true)
+    else handlePermissionShortcut.mockReturnValue(true)
+    try {
+      const event = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(owner === 'question' ? handleQuestionShortcut : handlePermissionShortcut).toHaveBeenCalledOnce()
+      expect(switchWorkspace).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it('invokes a configured Option shortcut for a dead key in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyN', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(pendingNewChat.value).not.toBeNull()
+    } finally { pendingNewChat.value?.resolve(null); input.remove(); wrapper.unmount() }
+  })
+
+  it('leaves an unbound dead key to native text entry', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyE', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(pendingNewChat.value).toBeNull()
+    } finally { input.remove(); wrapper.unmount() }
+  })
+
+  it('invokes a custom Option workspace binding for a dead key in an editor', async () => {
+    const wrapper = await mountOpenChat()
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      applyKeyboardSettings({ keyboard_shortcuts: { workspace2: 'Alt+KeyE' } })
+      const event = new KeyboardEvent('keydown', { key: 'Dead', code: 'KeyE', altKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: true })
+    } finally { applyKeyboardSettings({ keyboard_shortcuts: {} }); input.remove(); wrapper.unmount() }
+  })
+
+  it('leaves legacy IME keyCode 229 events alone in both shortcut handlers', async () => {
+    const wrapper = await mountOpenChat()
+    try {
+      const store = useProjectStore()
+      store.workspaces = [
+        { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+        { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      ]
+      const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+      const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', keyCode: 229, bubbles: true, cancelable: true })
+      const model = new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', keyCode: 229, altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(digit)
+      window.dispatchEvent(model)
+      expect(digit.defaultPrevented).toBe(false)
+      expect(model.defaultPrevented).toBe(false)
+      expect(toggleModelPicker).not.toHaveBeenCalled()
+      expect(switchWorkspace).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it('leaves IME, AltGr, and already-consumed chords to their owner', async () => {
+    const wrapper = await mountOpenChat()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const composing = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, isComposing: true, bubbles: true, cancelable: true })
+      const altGr = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, ctrlKey: true, bubbles: true, cancelable: true })
+      vi.spyOn(altGr, 'getModifierState').mockImplementation(key => key === 'AltGraph')
+      const claimed = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      claimed.preventDefault()
+      input.dispatchEvent(composing)
+      input.dispatchEvent(altGr)
+      input.dispatchEvent(claimed)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(composing.defaultPrevented).toBe(false)
+      expect(altGr.defaultPrevented).toBe(false)
+    } finally {
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
+  it('consumes repeats without stepping twice', async () => {
+    const wrapper = await mountOpenChat()
+    try {
+      const repeat = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, repeat: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(repeat)
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(repeat.defaultPrevented).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it('leaves Option+[ to a focused text field', async () => {
+    const wrapper = await mountOpenChat()
+    // Focus sits in a text field, as it would mid-compose.
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    try {
+      textarea.focus()
+      const event = new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', altKey: true, bubbles: true, cancelable: true })
+      textarea.dispatchEvent(event)
+
+      expect(selectAdjacentChat).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    } finally {
+      textarea.remove()
+      wrapper.unmount()
+    }
   })
 
   // No open chat: nothing to archive, so the chord keeps its default meaning
@@ -1666,6 +2017,137 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     fromHome.wrapper.unmount()
   })
 
+  // Pull to close: the chat title dragged down far enough (or flicked) closes the
+  // chat once the pane has dropped away; a short pull springs back.
+  it('closes the chat after a long pull on the title, and springs back from a short one', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    const panel = wrapper.findComponent({ name: 'ChatPanel' })
+
+    panel.vm.$emit('pull', 60)
+    await nextTick()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(true)
+    expect((panel.element as HTMLElement).style.transform).toContain('translateY(60px)')
+    panel.vm.$emit('pull-end', 60, 0.1)
+    await new Promise(r => setTimeout(r, 320))
+    await nextTick()
+    expect(closeChat).not.toHaveBeenCalled()
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(false)
+
+    panel.vm.$emit('pull', 150)
+    panel.vm.$emit('pull-end', 150, 0.2)
+    expect(closeChat).not.toHaveBeenCalled()
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('treats a short downward flick as a close', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    wrapper.findComponent({ name: 'ChatPanel' }).vm.$emit('pull-end', 50, 1.2)
+    await new Promise(r => setTimeout(r, 320))
+    expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('does not close a newly selected chat when a shortcut completes during the pull-away animation', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockImplementation(() => {
+      setTimeout(() => { store.activeChatId = 'chat-2' }, 220)
+      return true
+    })
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      await vi.advanceTimersByTimeAsync(220)
+      expect(store.activeChatId).toBe('chat-2')
+      await vi.advanceTimersByTimeAsync(60)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(store.activeChatId).toBe('chat-2')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('cancels a pending pull-close as soon as a late rail shortcut starts', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockImplementation(() => {
+      setTimeout(() => { store.activeChatId = 'chat-2' }, 220)
+      return true
+    })
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      expect(selectAdjacentChat).toHaveBeenCalledWith(1)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(store.activeChatId).toBe('chat-1')
+      await vi.advanceTimersByTimeAsync(40)
+      expect(store.activeChatId).toBe('chat-2')
+      expect(closeChat).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('keeps the pending pull-close when the rail declines a boundary shortcut', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    selectAdjacentChat.mockReturnValue(false)
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      const shortcut = new KeyboardEvent('keydown', { key: 'ArrowLeft', code: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(shortcut)
+      expect(shortcut.defaultPrevented).toBe(true)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).toHaveBeenCalledOnce()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      selectAdjacentChat.mockReset().mockReturnValue(true)
+    }
+  })
+
+  it('cancels an earlier close timer when a new pull starts', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    vi.useFakeTimers()
+    try {
+      const panel = wrapper.findComponent({ name: 'ChatPanel' })
+      panel.vm.$emit('pull', 150)
+      panel.vm.$emit('pull-end', 150, 0.2)
+      await vi.advanceTimersByTimeAsync(100)
+      panel.vm.$emit('pull', 40)
+      await vi.advanceTimersByTimeAsync(180)
+      expect(closeChat).not.toHaveBeenCalled()
+      await nextTick()
+      expect((panel.element as HTMLElement).style.transform).toContain('translateY(40px)')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
   it('Home navigation does not delete an empty draft or its staged content', async () => {
     const { wrapper, router, store } = await mountWithSelection()
     const draftId = 'chat-draft'
@@ -2275,58 +2757,13 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('switches sections with Option+Arrow', async () => {
-    const wrapper = await mountHome()
-    expect(router.currentRoute.value.path).toBe('/')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+  it.each(['/', '/memory', '/tasks', '/schedules'])('does not switch sections or roam the home grid with Option+Arrow from %s', async (path) => {
+    const wrapper = await mountHome(path)
+    const before = document.activeElement
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, bubbles: true }))
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-    wrapper.unmount()
-  })
-
-  it('option_arrow_sections_skip_notifications', async () => {
-    const wrapper = await mountHome('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/settings')
-    wrapper.unmount()
-  })
-
-  // `/tasks` has no `viewMode` arm of its own in the index arithmetic, so it fell
-  // through to Settings: Option+Right off the board jumped to Home and
-  // Option+Left jumped to Memory, neither of them the neighbouring section.
-  it('walks to and from the task board rather than over it', async () => {
-    const wrapper = await mountHome('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/tasks')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
+    expect(router.currentRoute.value.path).toBe(path)
+    expect(document.activeElement).toBe(before)
     wrapper.unmount()
   })
 
@@ -2582,6 +3019,21 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
+  it('opens the model picker with Option+M in a focused editable', async () => {
+    const wrapper = await mountWebLayout()
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    try {
+      input.focus()
+      const event = press({ key: 'µ', code: 'KeyM' }, input)
+      expect(toggleModelPicker).toHaveBeenCalledOnce()
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      input.remove()
+      wrapper.unmount()
+    }
+  })
+
   it.each(platforms)('%s+N opens the new-chat picker', async (_label, keys) => {
     const wrapper = await mountWebLayout()
     const event = press({ key: keys.n, code: 'KeyN' })
@@ -2621,9 +3073,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  // In a text field Option+S types ß and Option+= types ≠ on a Mac; matching
-  // by physical key must not start stealing them.
-  it.each(platforms)('%s+S and %s+= stay inert while a text field is focused', async (_label, keys) => {
+  it.each(platforms)('%s+S and +equals work while a text field is focused', async (_label, keys) => {
     useFontScale().set(1.2)
     const wrapper = await mountWebLayout()
     const input = document.createElement('input')
@@ -2634,36 +3084,12 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     const zoom = press({ key: keys.eq, code: 'Equal' }, input)
     await nextTick()
 
-    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
-    expect(sidebar.defaultPrevented).toBe(false)
-    expect(zoom.defaultPrevented).toBe(false)
-    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+    expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
+    expect(sidebar.defaultPrevented).toBe(true)
+    expect(zoom.defaultPrevented).toBe(true)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.25')
 
     input.remove()
-    wrapper.unmount()
-  })
-
-  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ), so
-  // inside a text field a Mac Option press must reach the field
-  // untouched. The same events outside a text field are shortcuts.
-  it.each([
-    ['⌥N', { key: 'Dead', code: 'KeyN' }],
-    ['⌥M', { key: 'µ', code: 'KeyM' }],
-  ] as const)('Mac %s in a focused textarea types the character instead of firing', async (_label, init) => {
-    const wrapper = await mountWebLayout()
-    const textarea = document.createElement('textarea')
-    document.body.appendChild(textarea)
-    textarea.focus()
-    homeNewChatProjectId.value = ''
-
-    const event = press(init, textarea)
-    await flushPromises()
-
-    expect(event.defaultPrevented).toBe(false)
-    expect(toggleModelPicker).not.toHaveBeenCalled()
-    expect(pendingNewChat.value).toBeNull()
-
-    textarea.remove()
     wrapper.unmount()
   })
 
@@ -2680,7 +3106,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  it('leaves Alt+N alone while a textarea is focused', async () => {
+  it('opens the new chat picker with Alt+N while a textarea is focused', async () => {
     const wrapper = await mountWebLayout()
     const textarea = document.createElement('textarea')
     document.body.appendChild(textarea)
@@ -2689,8 +3115,8 @@ describe('ChatLayout PWA Option/Alt chords', () => {
 
     const event = press({ key: 'n', code: 'KeyN' }, textarea)
 
-    expect(event.defaultPrevented).toBe(false)
-    expect(pendingNewChat.value).toBeNull()
+    expect(event.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
     expect(archiveActiveChat).not.toHaveBeenCalled()
 
     textarea.remove()
@@ -3297,6 +3723,480 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(wrapper.find('.chat-split-resizer').exists()).toBe(false)
       expect(wrapper.find('.chat-split-side--closed').exists()).toBe(true)
       wrapper.unmount()
+    })
+  })
+
+  describe('side-by-side chats', () => {
+    const originalObserver = globalThis.ResizeObserver
+
+    const PinnedFilePanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      setup: () => () => h('div', { 'data-testid': 'pinned-file-panel' }),
+    })
+
+    /** Calls the pane stubs received through their exposed methods, in order. */
+    const panelCalls: string[] = []
+    const SplitChatPanelStub = defineComponent({
+      name: 'ChatPanel',
+      props: { chatId: String, beside: Boolean, inactive: Boolean, split: Boolean, filePinned: Boolean },
+      emits: ['close', 'pull', 'pull-end'],
+      setup(props, { emit, expose }) {
+        expose({
+          toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
+          focusComposer: () => panelCalls.push(`focus:${props.chatId}`),
+          selectAdjacentChat: (direction: -1 | 1) => {
+            panelCalls.push(`step:${props.chatId}:${direction}`)
+            return true
+          },
+          handleSendShortcut: () => {
+            panelCalls.push(`send:${props.chatId}`)
+            return true
+          },
+          archiveActiveChat: vi.fn(),
+        })
+        return () => h('section', {
+          'data-testid': 'chat-panel',
+          'data-chat-id': props.chatId,
+          'data-beside': String(props.beside),
+          'data-inactive': String(props.inactive),
+        }, [h('button', { 'data-testid': `close-${props.chatId}`, onClick: () => emit('close') }, 'x')])
+      },
+    })
+    const SidebarStub = defineComponent({
+      name: 'ProjectSidebar',
+      props: { canOpenBeside: Boolean },
+      emits: ['open-beside'],
+      setup(props, { emit }) {
+        return () => h('button', {
+          'data-testid': 'open-beside',
+          'data-can': String(props.canOpenBeside),
+          onClick: () => emit('open-beside', 'chat-2'),
+        })
+      },
+    })
+
+    let observers: Array<(width: number) => void> = []
+    let reportedWidth = 0
+
+    afterEach(() => {
+      globalThis.ResizeObserver = originalObserver
+      terminalPanelWanted.value = false
+      observers = []
+      panelCalls.length = 0
+    })
+
+    async function mountSplit(
+      paneWidth: number,
+      options: { beside?: string; pinned?: boolean; terminal?: boolean; terminalVisible?: boolean } = {},
+    ) {
+      observers = []
+      reportedWidth = paneWidth
+      globalThis.ResizeObserver = class {
+        constructor(private readonly cb: ResizeObserverCallback) {}
+        observe() {
+          const report = (width: number) => this.cb(
+            [{ contentRect: { width } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          )
+          observers.push(report)
+          report(reportedWidth)
+        }
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/chat/:chatId?', component: EmptyStub }],
+      })
+      await router.push('/chat/chat-1')
+      await router.isReady()
+
+      const store = useProjectStore()
+      store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+      store.chats = [
+        { chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' },
+        { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two', last_activity_at: '2026-11-01T10:00:00Z' },
+      ] as unknown as typeof store.chats
+      store.activeChatId = 'chat-1'
+      store.bootstrapped = true
+      store.workspaces = [{ name: 'personal' }] as unknown as typeof store.workspaces
+      store.activeWorkspace = 'personal'
+      if (options.pinned) {
+        store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'test' })
+      }
+      if (options.beside) {
+        localStorage.setItem('ciao:beside-chat', JSON.stringify({ personal: options.beside }))
+      }
+      vi.spyOn(store, 'fetchAll').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+      vi.spyOn(store, 'attachBesideChat').mockResolvedValue()
+
+      if (options.terminal) {
+        terminalPanelWanted.value = true
+        const terminal = useTerminalStore()
+        terminal.visible = options.terminalVisible ?? true
+        if (terminal.visible) terminal.target = { chatId: 'chat-1' }
+      }
+
+      const { default: ChatLayout } = await import('../ChatLayout.vue')
+      const wrapper = mount(ChatLayout, {
+        global: {
+          plugins: [router],
+          stubs: {
+            ChatPanel: SplitChatPanelStub, ProjectSidebar: SidebarStub, ProjectView: EmptyStub,
+            SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+            PinnedFilePanel: PinnedFilePanelStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+          },
+        },
+      })
+      await flushPromises()
+      if (options.terminal) {
+        await vi.waitFor(() => {
+          expect(wrapper.find('.terminal-pane').exists()).toBe(true)
+        })
+      }
+      await flushPromises()
+      return wrapper
+    }
+
+    /** A resize: the layout's observers report the new width. */
+    function resizePane(width: number) {
+      reportedWidth = width
+      for (const notify of observers) notify(width)
+    }
+
+    const storedBeside = () => JSON.parse(localStorage.getItem('ciao:beside-chat') || 'null')
+
+    it('shows the remembered chat beside the open one, behind the same divider', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const tile = wrapper.find('.chat-split-side--chat')
+      expect(tile.find('[data-chat-id="chat-2"][data-beside="true"]').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-resizer[role="separator"]').exists()).toBe(true)
+      // The open chat stays in the main column, not in the tile.
+      expect(tile.find('[data-chat-id="chat-1"]').exists()).toBe(false)
+      expect(wrapper.find('[data-chat-id="chat-1"]').exists()).toBe(true)
+      expect(useProjectStore().attachBesideChat).toHaveBeenLastCalledWith('chat-2')
+      wrapper.unmount()
+    })
+
+    // With a second chat beside, the main pane's rail is replaced by a plain
+    // header, so Option+Right must not step the main chat behind the user's back.
+    it('leaves Option+Right alone while a second chat is beside the open one', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      try {
+        const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, cancelable: true })
+        window.dispatchEvent(event)
+        expect(panelCalls.filter(call => call.startsWith('step:'))).toEqual([])
+        expect(event.defaultPrevented).toBe(false)
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('shows no second chat on a pane narrower than 940px, and brings it back when there is room', async () => {
+      const wrapper = await mountSplit(900, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(useProjectStore().attachBesideChat).toHaveBeenLastCalledWith(null)
+
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('offers Open beside only when a split can be shown', async () => {
+      const wide = await mountSplit(1200)
+      expect(wide.get('[data-testid="open-beside"]').attributes('data-can')).toBe('true')
+      wide.unmount()
+
+      const narrow = await mountSplit(900)
+      expect(narrow.get('[data-testid="open-beside"]').attributes('data-can')).toBe('false')
+      narrow.unmount()
+    })
+
+    it('opens a chat beside and remembers it for the workspace', async () => {
+      const wrapper = await mountSplit(1200)
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      expect(storedBeside()).toEqual({ personal: 'chat-2' })
+      expect(wrapper.get('.chat-split-side--chat [data-chat-id="chat-2"]').attributes('data-inactive')).toBe('false')
+      expect(wrapper.get('.chat-body [data-chat-id="chat-1"]').attributes('data-inactive')).toBe('true')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('invalidates a pending pull-to-close when the split view opens', async () => {
+      const wrapper = await mountSplit(1200)
+      const store = useProjectStore()
+      const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+      vi.useFakeTimers()
+      try {
+        const panel = wrapper.findComponent({ name: 'ChatPanel' })
+        panel.vm.$emit('pull', 150)
+        panel.vm.$emit('pull-end', 150, 0.2)
+        await wrapper.get('[data-testid="open-beside"]').trigger('click')
+        await nextTick()
+        expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+        await vi.advanceTimersByTimeAsync(280)
+        expect(closeChat).not.toHaveBeenCalled()
+      } finally { wrapper.unmount(); vi.useRealTimers() }
+    })
+
+    it('opening a chat beside hides the pinned file but keeps the pin', async () => {
+      const wrapper = await mountSplit(1200, { pinned: true })
+      const store = useProjectStore()
+      const unpin = vi.spyOn(store, 'unpinFile')
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(false)
+      expect(unpin).not.toHaveBeenCalled()
+      expect(store.pinnedFileFor('chat-1')).toBe('src/pinned-file.ts')
+
+      await wrapper.get('[data-testid="close-chat-2"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a new pin on the open chat takes the tile back', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useProjectStore().applyChatPinState('chat-1', { path: 'docs/new.md', dismissed_paths: [], revision: 2 }, { source: 'test' })
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="pinned-file-panel"]').exists()).toBe(true)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('opening a chat beside hides an open terminal', async () => {
+      const wrapper = await mountSplit(1200, { terminal: true })
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+
+      await wrapper.get('[data-testid="open-beside"]').trigger('click')
+      await flushPromises()
+      expect(useTerminalStore().visible).toBe(false)
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('opening the terminal takes the tile from the second chat', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2', terminal: true, terminalVisible: false })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useTerminalStore().visible = true
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('clicking a pane gives it the keyboard', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(false)
+
+      await wrapper.get('.chat-body').trigger('pointerdown')
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('routes the model picker chord to the focused pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(panelCalls).toContain('model:chat-2')
+      expect(panelCalls).not.toContain('model:chat-1')
+      wrapper.unmount()
+    })
+
+    it('Esc in the second pane closes only that pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const closeChat = vi.spyOn(useProjectStore(), 'closeChat').mockResolvedValue()
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(closeChat).not.toHaveBeenCalled()
+      expect(panelCalls).toContain('focus:chat-1')
+      wrapper.unmount()
+    })
+
+    it('closing the main chat moves the second chat into the main pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      vi.spyOn(store, 'closeChat').mockResolvedValue()
+      const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue()
+
+      await wrapper.get('[data-testid="close-chat-1"]').trigger('click')
+      await flushPromises()
+      expect(switchChat).toHaveBeenCalledWith('chat-2')
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a switch to another workspace shows that workspace\'s own choice', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      useProjectStore().activeWorkspace = 'work'
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it is archived', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      store.chats.find(c => c.chat_id === 'chat-2')!.archived = true
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      expect(store.attachBesideChat).toHaveBeenLastCalledWith(null)
+      wrapper.unmount()
+    })
+
+    it('forgets the remembered chat once it becomes the main one', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+
+      await wrapper.vm.$router.push('/chat/chat-2')
+      store.activeChatId = 'chat-2'
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('a split that collapses hands the keyboard back to the main pane', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      await wrapper.get('.chat-split-side').trigger('pointerdown')
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+
+      // The pane narrows: the second chat goes, and so does its keyboard.
+      resizePane(900)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', metaKey: true, bubbles: true }))
+      await flushPromises()
+      expect(panelCalls).toContain('send:chat-1')
+      expect(panelCalls).not.toContain('send:chat-2')
+
+      // The pane widens again: the chat comes back, but the main pane has the keyboard.
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('the split chord opens the most recent other chat beside, even from a composer, and closes it again', async () => {
+      const wrapper = await mountSplit(1200)
+      const composer = document.createElement('textarea')
+      document.body.appendChild(composer)
+      composer.focus()
+      try {
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-2"]').exists()).toBe(true)
+
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      } finally {
+        composer.remove()
+      }
+      wrapper.unmount()
+    })
+
+    it('the focus chords move the keyboard between panes', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', ctrlKey: true, altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      expect(panelCalls).toContain('focus:chat-2')
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '[', code: 'BracketLeft', ctrlKey: true, altKey: true, bubbles: true }))
+      await flushPromises()
+      expect(wrapper.find('.chat-body--pane-focused').exists()).toBe(true)
+      expect(panelCalls).toContain('focus:chat-1')
+      wrapper.unmount()
+    })
+
+    it('the split chord is inert on a narrow pane', async () => {
+      const wrapper = await mountSplit(900)
+      const chord = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(chord)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(localStorage.getItem('ciao:beside-chat')).toBeNull()
+      // It does nothing, so it does not take the key away from the page either.
+      expect(chord.defaultPrevented).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('the split chord is not taken when there is no other chat to open', async () => {
+      const wrapper = await mountSplit(1200)
+      const store = useProjectStore()
+      store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }] as unknown as typeof store.chats
+      await flushPromises()
+      const chord = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true, cancelable: true })
+      window.dispatchEvent(chord)
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+      expect(chord.defaultPrevented).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('an AltGr chord is left to the composer, so the layout can type [ and ]', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const composer = document.createElement('textarea')
+      document.body.appendChild(composer)
+      composer.focus()
+      try {
+        const chord = new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', ctrlKey: true, altKey: true, bubbles: true, cancelable: true })
+        // Windows reports AltGr as Ctrl+Alt; the browser also says AltGraph is held.
+        Object.defineProperty(chord, 'getModifierState', { value: (key: string) => key === 'AltGraph' })
+        composer.dispatchEvent(chord)
+        await flushPromises()
+        expect(chord.defaultPrevented).toBe(false)
+        expect(wrapper.find('.chat-split-side--focused').exists()).toBe(false)
+        expect(panelCalls).not.toContain('focus:chat-2')
+      } finally {
+        composer.remove()
+      }
+      wrapper.unmount()
+    })
+
+    it('a turned-off split chord does nothing', async () => {
+      applyKeyboardSettings({ keyboard_shortcuts: { splitChat: 'disabled' } })
+      try {
+        const wrapper = await mountSplit(1200)
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: true, bubbles: true }))
+        await flushPromises()
+        expect(wrapper.find('.chat-split-side--chat').exists()).toBe(false)
+        wrapper.unmount()
+      } finally {
+        applyKeyboardSettings({ keyboard_shortcuts: {} })
+      }
     })
   })
 

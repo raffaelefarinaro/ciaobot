@@ -11,11 +11,13 @@ import os
 import re
 import shutil
 import tempfile
+import dataclasses
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -90,6 +92,19 @@ class TerminalOfferConflictError(Exception):
         self.terminal_offer = terminal_offer
 
 
+class ChatActionConflictError(Exception):
+    """An action call quoted an action id that is no longer on the chat.
+
+    The id the client quoted is no longer current, so the write conflicts instead
+    of silently acting on a card the user did not see. Carries the chat's current
+    list so the caller can re-apply against it.
+    """
+
+    def __init__(self, actions: list[dict[str, object]]) -> None:
+        super().__init__("Chat action conflict")
+        self.actions = actions
+
+
 def _restored_pin_paths(raw: Any) -> list[str]:
     """Canonical dismissed-pin paths out of a registry record.
 
@@ -156,6 +171,19 @@ from ciao.schedules import (
     settle_retrying_runs,
     settle_runs_for_archived_chat,
 )
+from ciao.chat_actions import (
+    ActionKind,
+    ActionOrigin,
+    ActionState,
+    ChatAction,
+    ChatActionError,
+    action_key,
+    action_payload,
+    check_agent_params,
+    new_action_id,
+    normalize_error,
+    validate_params,
+)
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
 from ciao.terminal_offer import (
@@ -163,6 +191,7 @@ from ciao.terminal_offer import (
     new_terminal_offer,
     terminal_offer_payload,
 )
+from ciao.web.chat_actions_runtime import ChatActionsRuntime
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
@@ -183,6 +212,7 @@ from ciao.web.chat_broker import (
     EventsHub,
     edit_pending_list,
     remove_pending_list,
+    take_pending_list,
     reorder_pending_list,
     shared_origin,
 )
@@ -191,7 +221,10 @@ from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
 from ciao.web.memory_pass import (
     CLOSURE_FENCE_CLOSE,
+    MEMORY_PASS_KIND,
+    MEMORY_PROJECT_KIND,
     MemoryPassCoordinator,
+    MemoryProjectRefused,
     is_memory_pass_chat,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher
@@ -526,6 +559,10 @@ class ProjectOrderError(ValueError):
         self.current = current
 
 
+_MAX_TAKEN_EDITS = 100
+_TAKEN_EDIT_TTL_S = 3600
+
+
 @dataclass(slots=True)
 class ProjectInfo:
     project_id: str
@@ -726,6 +763,14 @@ class ChatInfo:
     # the conversation it was made in (archive, new session, handover) or
     # with an explicit dismissal, and a restart ends it with everything else.
     terminal_offer: TerminalOffer | None = None
+    # Needs-you action cards. Transient and memory only, like the offer above:
+    # an action can name a sign-in URL or a helper session, so it never reaches
+    # the chat registry. It ends with the conversation it was raised in (archive,
+    # new session, handover) or with a dismissal, and a restart ends it.
+    actions: list[ChatAction] = field(default_factory=list)
+    # Keys the user said "Not now" to. Detection skips them until the provider
+    # session restarts.
+    dismissed_action_keys: set[str] = field(default_factory=set)
     # Deferred retry state for provider quota/session-limit failures. Pending
     # retries are replayed on their kind's schedule (see _arm_retry) until they
     # succeed, hit the kind's cap, the user stops them, or the chat is
@@ -796,6 +841,7 @@ class ChatInfo:
     # `to_dict` copies the list so a reload can show the chips; callers must
     # not receive the live list.
     pending_queue: list[dict] = field(default_factory=list)
+    taken_edits: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
     # to the source conversation and stable root-relative title numbering.
@@ -856,6 +902,8 @@ class ChatInfo:
     grants_data_root: bool = False
 
     def to_dict(self, *, local: bool | None = None) -> dict:
+        self.taken_edits = [entry for entry in self.taken_edits
+                            if time.monotonic() - entry["taken_at"] < _TAKEN_EDIT_TTL_S][-_MAX_TAKEN_EDITS:]
         d = {
             "chat_id": self.chat_id,
             "project_id": self.project_id,
@@ -873,6 +921,7 @@ class ChatInfo:
             "last_error": self.last_error,
             "title_status": self.title_status,
             "terminal_offer": terminal_offer_payload(self.terminal_offer),
+            "actions": [action_payload(a) for a in self.actions],
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
             "pending_queue": [
@@ -882,6 +931,10 @@ class ChatInfo:
                     "images": [str(ref) for ref in (entry.get("images") or [])],
                 }
                 for entry in self.pending_queue
+            ],
+            "pending_takes": [
+                {"entry_id": e["entry_id"], "text": e["text"], "images": list(e["images"])}
+                for e in self.taken_edits
             ],
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
@@ -1197,6 +1250,7 @@ class ProjectChatManager:
         # mid-flight, and any exception it raised is reported as "Task
         # exception was never retrieved" at GC time instead of being logged.
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self.actions_runtime = ChatActionsRuntime(self)
         self._repo_location_locks: dict[str, asyncio.Lock] = {}
         # Chats with a native-title poll in flight. Both the first-message and
         # the end-of-turn trigger want to title the same chat, and each poll
@@ -1927,7 +1981,7 @@ class ProjectChatManager:
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
                 f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable. {known_state}\n"
-                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
+                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
@@ -1954,7 +2008,7 @@ class ProjectChatManager:
                 f"`{vault_root}`\n\n"
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to bootstrap the current vault structure and core documentation:\n"
-                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
+                f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Known state first**: {known_state}\n"
                 f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
@@ -2456,82 +2510,118 @@ class ProjectChatManager:
         return general
 
     def _discover_archived_chats(self) -> None:
-        """Scan the vault's archived transcripts and import missing chats."""
-        chats_root = self._config.logs_root / "Chats"
-        if not chats_root.is_dir():
+        """Scan every chats root's archived transcripts and import missing chats.
+
+        An archived chat whose file moved between roots is repointed, not pruned.
+        It is pruned only when no root holds the file.
+        """
+        chats_roots = [root for root in self._config.chats_roots() if root.is_dir()]
+        if not chats_roots:
             return
 
         new_chats_discovered = False
         pruned_chats = False
+        repointed_chats = False
 
-        # 1. Prune archived chats whose transcript files no longer exist
+        # 1. Repoint the archives that moved, then prune archived chats whose
+        #    transcript files exist nowhere.
+        for chat in self._chats.values():
+            helper = chat.helper
+            if not isinstance(helper, dict) or helper.get("kind") != "memory_pass":
+                continue
+            archive_path = str(helper.get("archive_path") or "")
+            source_chat_id = str(helper.get("source_chat_id") or "")
+            if not archive_path or not source_chat_id:
+                continue
+            stored = Path(archive_path)
+            if not stored.is_absolute():
+                stored = self._config.workspace_root / stored
+            if stored.is_file():
+                continue
+            found = self._locate_archive(source_chat_id, archive_path)
+            if found is not None:
+                helper["archive_path"] = str(found)
+                repointed_chats = True
         for cid, chat in list(self._chats.items()):
             if chat.archived and chat.archive_path:
                 full_path = self._config.workspace_root / chat.archive_path
                 if not full_path.exists():
+                    found = self._locate_archive(cid, chat.archive_path)
+                    if found is not None:
+                        try:
+                            chat.archive_path = found.relative_to(
+                                self._config.workspace_root
+                            ).as_posix()
+                        except ValueError:
+                            chat.archive_path = str(found)
+                        repointed_chats = True
+                        logger.info("Repointed archived chat %s to %s", cid, found)
+                        continue
                     self._chats.pop(cid)
                     pruned_chats = True
                     logger.info("Pruned archived chat %s (transcript file no longer exists)", cid)
 
-        # 2. Discover new archived chats from transcripts
-        for chat_dir in chats_root.iterdir():
-            if not chat_dir.is_dir() or not chat_dir.name.startswith("chat-"):
-                continue
-            chat_id = chat_dir.name
+        # 2. Discover new archived chats from transcripts, in every root. The
+        #    first root holding a chat wins: `chat_id in self._chats` skips the rest.
+        for chats_root in chats_roots:
+            for chat_dir in chats_root.iterdir():
+                if not chat_dir.is_dir() or not chat_dir.name.startswith("chat-"):
+                    continue
+                chat_id = chat_dir.name
 
-            # Skip if already in database
-            if chat_id in self._chats:
-                continue
+                # Skip if already in database
+                if chat_id in self._chats:
+                    continue
 
-            # Find all markdown transcripts in provider subdirectories
-            transcripts: list[Path] = []
-            for sub in chat_dir.iterdir():
-                if sub.is_dir():
-                    transcripts.extend(sub.glob("*.md"))
+                # Find all markdown transcripts in provider subdirectories
+                transcripts: list[Path] = []
+                for sub in chat_dir.iterdir():
+                    if sub.is_dir():
+                        transcripts.extend(sub.glob("*.md"))
 
-            if not transcripts:
-                continue
+                if not transcripts:
+                    continue
 
-            # Use the latest transcript file (sorted by name/timestamp)
-            transcripts.sort()
-            transcript_path = transcripts[-1]
+                # Use the latest transcript file (sorted by name/timestamp)
+                transcripts.sort()
+                transcript_path = transcripts[-1]
 
-            metadata = self._parse_transcript_file(transcript_path)
-            if not metadata:
-                continue
+                metadata = self._parse_transcript_file(transcript_path)
+                if not metadata:
+                    continue
 
-            ws = metadata["workspace"]
-            proj_name = metadata["project_name"]
-            proj_id = self._resolve_project_reference(ws, proj_name)
+                ws = metadata["workspace"]
+                proj_name = metadata["project_name"]
+                proj_id = self._resolve_project_reference(ws, proj_name)
 
-            if not proj_id:
-                # If no project ID could be resolved, skip
-                continue
+                if not proj_id:
+                    # If no project ID could be resolved, skip
+                    continue
 
-            # Reconstruct archive path relative to workspace root
-            try:
-                rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
-            except ValueError:
-                rel_archive_path = str(transcript_path)
+                # Reconstruct archive path relative to workspace root
+                try:
+                    rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
+                except ValueError:
+                    rel_archive_path = str(transcript_path)
 
-            chat_info = ChatInfo(
-                chat_id=chat_id,
-                project_id=proj_id,
-                title=metadata["title"],
-                model=metadata["model"],
-                provider=metadata["provider"],
-                session_id=metadata["session_id"],
-                created_at=metadata["created_at"],
-                archived=True,
-                last_activity_at=metadata["ended_at"],
-                last_read_at=metadata["ended_at"],
-                archive_path=rel_archive_path,
-            )
-            self._chats[chat_id] = chat_info
-            new_chats_discovered = True
-            logger.info("Imported archived chat %s under project %s", chat_id, proj_id)
+                chat_info = ChatInfo(
+                    chat_id=chat_id,
+                    project_id=proj_id,
+                    title=metadata["title"],
+                    model=metadata["model"],
+                    provider=metadata["provider"],
+                    session_id=metadata["session_id"],
+                    created_at=metadata["created_at"],
+                    archived=True,
+                    last_activity_at=metadata["ended_at"],
+                    last_read_at=metadata["ended_at"],
+                    archive_path=rel_archive_path,
+                )
+                self._chats[chat_id] = chat_info
+                new_chats_discovered = True
+                logger.info("Imported archived chat %s under project %s", chat_id, proj_id)
 
-        if new_chats_discovered or pruned_chats:
+        if new_chats_discovered or pruned_chats or repointed_chats:
             self._save(reason="archived_transcript_discovery")
 
     def _claude_session_exists(
@@ -2690,8 +2780,16 @@ class ProjectChatManager:
             ctx = ChatContext.for_web(chat_id)
             if self._transcripts.current_path(ctx, chat.provider).exists():
                 continue  # live transcript -> genuinely active, leave alone
-            archive_dir = self._transcripts.archive_dir(ctx, chat.provider)
-            if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
+            # The chat's own write folder, then every chats root: its archive may
+            # sit in another root after a move.
+            archive_dirs = list(dict.fromkeys([
+                self._transcripts.archive_dir(ctx, chat.provider),
+                *(root / chat_id / chat.provider for root in self._config.chats_roots()),
+            ]))
+            archived_files = [
+                md for folder in archive_dirs if folder.is_dir() for md in folder.glob("*.md")
+            ]
+            if not archived_files:
                 continue  # never archived -> not the corrupt state
             if chat.provider == "claude" and self._claude_session_exists(
                 chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
@@ -2699,9 +2797,7 @@ class ProjectChatManager:
                 continue  # session blob still present -> not archived
             chat.archived = True
             if not chat.archive_path:
-                latest = max(
-                    archive_dir.glob("*.md"), key=lambda p: p.name, default=None
-                )
+                latest = max(archived_files, key=lambda p: p.name, default=None)
                 if latest is not None:
                     try:
                         chat.archive_path = latest.relative_to(
@@ -2723,6 +2819,26 @@ class ProjectChatManager:
             if project.workspace == workspace and project.name == "General":
                 return project
         return None
+
+    def _ordinary_project_for(self, chat: ChatInfo) -> str:
+        """The project an ordinary chat derived from *chat* belongs in.
+
+        A fork or a continuation of a memory pass is the owner's own
+        conversation, not a pass. It must live outside the app-owned Memory
+        project, or the project-kind half of the pass predicate would silence
+        a chat the app itself has just created. The workspace's General
+        project is where every other ad-hoc conversation lives.
+        """
+        project = self._projects.get(chat.project_id)
+        if project is None or project.kind != MEMORY_PROJECT_KIND:
+            return chat.project_id
+        general = self._general_project_for(project.workspace)
+        if general is None:
+            raise ValueError(
+                f"The {project.workspace} workspace has no General project "
+                "to host this chat."
+            )
+        return general.project_id
 
     def _rehome_orphaned_chats(self) -> None:
         """Re-parent chats whose project no longer exists onto a valid General.
@@ -3619,6 +3735,16 @@ class ProjectChatManager:
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
         project = self._projects.get(project_id)
+        # The Memory project is app-owned: it holds the engine's own passes and
+        # nothing else. The pass predicate falls back on the project kind (a
+        # pass whose helper failed closed must stay silent), so an ordinary
+        # chat created here would be silenced without being one. Only a pass
+        # helper opens a chat in this project.
+        if project is not None and project.kind == MEMORY_PROJECT_KIND:
+            if chat_service._normalize_chat_helper(helper).get("kind") != MEMORY_PASS_KIND:
+                raise MemoryProjectRefused(
+                    "The Memory project holds memory passes only."
+                )
         workspace = project.workspace if project else None
         chat_provider = provider
         if not chat_provider:
@@ -3789,6 +3915,14 @@ class ProjectChatManager:
             target = self._projects.get(project_id)
             if target is None:
                 raise ValueError(f"Project '{project_id}' not found")
+            if target.kind == MEMORY_PROJECT_KIND:
+                # The Memory project holds the engine's own passes. A chat
+                # moved in there is silenced by the project-kind half of the
+                # pass predicate without being a pass, so the move is refused
+                # rather than the chat quietly losing its notifications.
+                raise MemoryProjectRefused(
+                    "Cannot move a chat into the Memory project."
+                )
             current = self._projects.get(chat.project_id)
             if current is not None and target.workspace != current.workspace:
                 raise ValueError(
@@ -4105,6 +4239,178 @@ class ProjectChatManager:
         })
         return True
 
+    # ── Chat actions (transient needs-you cards) ─────────────────────────
+
+    def _publish_actions(self, chat: ChatInfo) -> None:
+        self._events.publish({
+            "type": "chat_actions_changed",
+            "chat_id": chat.chat_id,
+            "actions": [action_payload(a) for a in chat.actions],
+        })
+
+    def _find_action(self, chat: ChatInfo, action_id: str) -> tuple[int, ChatAction] | None:
+        for index, action in enumerate(chat.actions):
+            if action.id == action_id:
+                return index, action
+        return None
+
+    def raise_action(
+        self,
+        chat_id: str,
+        kind: ActionKind,
+        params: dict[str, object],
+        *,
+        origin: ActionOrigin,
+    ) -> dict[str, object] | None:
+        """Put a card on the chat, or return the card already there.
+
+        Same key and every incoming param equal to the card's: the existing card is
+        returned and nothing is published. Otherwise the card is replaced in place by
+        a new one with a new id, or a new card is appended.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if chat.archived:
+            raise ValueError("Cannot raise an action in an archived chat")
+        if origin == "agent":
+            check_agent_params(kind, params)
+        validated = validate_params(kind, params)
+        key = action_key(kind, validated)
+        for index, current in enumerate(chat.actions):
+            if action_key(current.kind, current.params) != key:
+                continue
+            if all(current.params.get(name) == value for name, value in validated.items()):
+                return action_payload(current)
+            new = ChatAction(
+                id=new_action_id(),
+                kind=kind,
+                origin=origin,
+                state="open",
+                params=MappingProxyType(validated),
+                error="",
+                created_at=time.time(),
+            )
+            # The replaced card's attempt, if any, must not outlive it.
+            self.actions_runtime.cancel_removed(chat_id, [current])
+            chat.actions[index] = new
+            self._publish_actions(chat)
+            return action_payload(new)
+        new = ChatAction(
+            id=new_action_id(),
+            kind=kind,
+            origin=origin,
+            state="open",
+            params=MappingProxyType(validated),
+            error="",
+            created_at=time.time(),
+        )
+        chat.actions.append(new)
+        self._publish_actions(chat)
+        return action_payload(new)
+
+    def update_action(
+        self,
+        chat_id: str,
+        action_id: str,
+        *,
+        state: ActionState,
+        params_update: dict[str, object] | None = None,
+        error: str = "",
+    ) -> dict[str, object] | None:
+        """Move a card to ``state``, keeping its id. Unchanged input publishes nothing."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        if found is None:
+            return None
+        index, action = found
+        if params_update:
+            params = validate_params(action.kind, {**action.params, **params_update})
+        else:
+            params = dict(action.params)
+        error_text = normalize_error(error) if error else ""
+        if state == action.state and params == dict(action.params) and error_text == action.error:
+            return action_payload(action)
+        updated = dataclasses.replace(
+            action,
+            state=state,
+            params=MappingProxyType(params),
+            error=error_text,
+        )
+        chat.actions[index] = updated
+        self._publish_actions(chat)
+        return action_payload(updated)
+
+    def dismiss_action(self, chat_id: str, action_id: str) -> dict[str, object] | None:
+        """Remove a card and remember its key, so detection does not raise it again."""
+        return self._remove_action(chat_id, action_id, remember=True)
+
+    def remove_action(self, chat_id: str, action_id: str) -> dict[str, object] | None:
+        """Remove a card without remembering its key (Continue, and a quota retry clearing)."""
+        return self._remove_action(chat_id, action_id, remember=False)
+
+    def _remove_action(self, chat_id: str, action_id: str, *, remember: bool) -> dict[str, object] | None:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        if found is None:
+            raise ChatActionConflictError(self.chat_action_payloads(chat_id))
+        index, action = found
+        del chat.actions[index]
+        if remember:
+            chat.dismissed_action_keys.add(action_key(action.kind, action.params))
+        self._publish_actions(chat)
+        return action_payload(action)
+
+    def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        found = self._find_action(chat, action_id)
+        return found[1] if found is not None else None
+
+    def chat_action_payloads(self, chat_id: str) -> list[dict[str, object]]:
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return []
+        return [action_payload(a) for a in chat.actions]
+
+    @property
+    def chat_action_states(self) -> dict[str, list[dict[str, object]]]:
+        """The action list of every chat that has one, by chat id.
+
+        Sparse and complete, like the terminal-offer map: a chat missing from it has
+        no actions, and the map replaces the client's cache.
+        """
+        states: dict[str, list[dict[str, object]]] = {}
+        for cid, chat in self._chats.items():
+            if chat.actions:
+                states[cid] = [action_payload(a) for a in chat.actions]
+        return states
+
+    def _clear_chat_actions(self, chat: ChatInfo) -> bool:
+        """Drop every action and dismissed key, cancel what was dropped. True when there were actions."""
+        removed = list(chat.actions)
+        had = bool(removed)
+        chat.actions = []
+        chat.dismissed_action_keys = set()
+        if had:
+            self._publish_actions(chat)
+            self.actions_runtime.cancel_removed(chat.chat_id, removed)
+        return had
+
+    def _schedule_action_detection(self, chat_id: str) -> None:
+        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode server or a connected Claude session."""
+        if self.actions_runtime.detection_provider(chat_id) is None:
+            return
+        self._spawn_detached(
+            self.actions_runtime.detect_mcp_auth(chat_id),
+            f"chat-actions-detect-{chat_id}",
+        )
+
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
@@ -4197,7 +4503,7 @@ class ProjectChatManager:
             
         # Create a new active chat in the same project, title, model, and provider
         new_chat = self.create_chat(
-            project_id=chat.project_id,
+            project_id=self._ordinary_project_for(chat),
             title=chat.title,
             model=chat.model,
             mode=chat.mode,
@@ -4292,7 +4598,7 @@ class ProjectChatManager:
 
         fork = ChatInfo(
             chat_id=f"chat-{chat_service._uuid8()}",
-            project_id=source.project_id,
+            project_id=self._ordinary_project_for(source),
             title=f"{base_title} · Fork {next_index}",
             model=source.model,
             mode=source.mode,
@@ -4420,6 +4726,7 @@ class ProjectChatManager:
         self._save()
         # The offer belonged to the conversation that just ended.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         return chat
 
     def mark_handover_context_used(self, chat_id: str) -> None:
@@ -4800,6 +5107,7 @@ class ProjectChatManager:
         self._save()
         # The archived chat is read-only history: it carries no offer.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,
@@ -4926,6 +5234,7 @@ class ProjectChatManager:
         self._save()
         # The offer belonged to the session that just ended.
         self._clear_terminal_offer(chat)
+        self._clear_chat_actions(chat)
         return chat
 
     # ── Provider management ──────────────────────────────────────────────
@@ -4965,6 +5274,41 @@ class ProjectChatManager:
         self._provider_kind.pop(chat_id, None)
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
+
+    async def ensure_opencode_server(self, chat_id: str) -> OpencodeProvider:
+        """Start an OpenCode chat's server without a turn, or return the live one.
+
+        The MCP sign-in card needs the server a turn would start; the idle sweep
+        may have stopped it (``_PROVIDER_IDLE_TIMEOUT_SECONDS``). The request is
+        built exactly as a turn builds it, so the next turn reuses this server.
+        ``compact=True`` only skips the capsule and prefix, whose builder mutates
+        chat state. The provider is registered and freshly stamped, so the sweep
+        keeps it for the whole sign-in wait (``POLL_DEADLINE_S`` < the timeout).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived or chat.provider != "opencode":
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        existing = self._providers.get(chat_id)
+        live = existing.provider if existing is not None else None
+        if isinstance(live, OpencodeProvider) and live.has_live_server:
+            self._provider_last_used[chat_id] = time.monotonic()
+            return live
+        service = self._get_provider(chat_id)
+        provider = service.ensure_provider(chat.provider)
+        if not isinstance(provider, OpencodeProvider):
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        await self.warm_gh_token(chat)
+        request = self.build_agent_request(
+            chat, prompt="", resume_session=chat.session_id or None, compact=True
+        )
+        await provider.ensure_server(request)
+        if self._providers.get(chat_id) is not service:
+            # Archive, new session, handover or reload dropped this service while
+            # the server started; nothing else holds it, so stop it here.
+            await service.disconnect()
+            raise RuntimeError(f"chat {chat_id} changed while its OpenCode server started")
+        self._provider_last_used[chat_id] = time.monotonic()
+        return provider
 
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.
@@ -5324,6 +5668,50 @@ class ProjectChatManager:
                 connections.append(connection)
         return result
 
+    def chat_archive_root(self, chat_key: str) -> Path:
+        """The chats root a chat archives into: its workspace's ``Logs/Chats``.
+
+        A key the registry does not know (not a chat id) archives to the shared
+        root, as before.
+        """
+        if chat_key not in self._chats:
+            return self._config.logs_root / "Chats"
+        return self._config.chats_root(self._workspace_for_chat(chat_key))
+
+    def _locate_archive(self, chat_id: str, archive_path: str) -> Path | None:
+        """The archive file a stored ``archive_path`` names, wherever it now lives.
+
+        The stored path when it is still a file. Otherwise the first chats root
+        holding ``<chat_id>/<provider>/<name>``, where ``<provider>/<name>`` is the
+        last two components of the stored path. None when no root holds it.
+
+        A file counts only when it resolves under some chats root, so a stored
+        path pointing outside the archives, or a symlink escaping them, is treated
+        as missing.
+        """
+        roots = self._config.chats_roots()
+
+        def under_a_root(path: Path) -> bool:
+            try:
+                resolved = path.resolve()
+                return any(resolved.is_relative_to(root.resolve()) for root in roots)
+            except OSError:
+                return False
+
+        stored = Path(archive_path)
+        if not stored.is_absolute():
+            stored = self._config.workspace_root / stored
+        if stored.is_file() and under_a_root(stored):
+            return stored
+        if len(stored.parts) < 2:
+            return None
+        tail = Path(*stored.parts[-2:])
+        for root in roots:
+            candidate = root / chat_id / tail
+            if candidate.is_file() and under_a_root(candidate):
+                return candidate
+        return None
+
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
 
@@ -5405,6 +5793,7 @@ class ProjectChatManager:
         and ``credentials.json`` pinned here so they stay write-denied: an
         agent cannot plant a client secret with a hostile ``token_uri``.
         A memory pass also gets its one source archive (``_memory_pass_archive_grant``).
+        The workspace's own `Logs/` (derived transcripts) is readable but never writable.
         """
         if fs_scope != "workspace":
             return ()
@@ -5415,6 +5804,9 @@ class ProjectChatManager:
         runtime = self._config.state_path.parent
         gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
         granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        own_logs = self._config.chats_root(self._workspace_for_chat(chat.chat_id)).parent
+        if own_logs != self._config.logs_root:
+            granted.append(str(own_logs))
         gws_dir = self._granted_gws_dir(chat)
         if gws_dir is not None:
             for name in ("client_secret.json", "credentials.json"):
@@ -5451,8 +5843,8 @@ class ProjectChatManager:
         read the chat it distils without a folder of other transcripts. The
         helper lives in the hand-editable registry, so it is validated here and
         every failure grants nothing: the chat is a memory pass with a
-        ``memory_pass`` helper, the source chat id is one folder name under
-        ``Logs/Chats`` (never a symlink), and the archive, resolved, is a regular
+        ``memory_pass`` helper, the source chat id is one folder name under one of
+        the chats roots (never a symlink), and the archive, resolved, is a regular
         file with one link inside that folder. A symlinked leaf is refused before
         it is resolved.
         """
@@ -5466,12 +5858,16 @@ class ProjectChatManager:
             return None
         workspace_root = Path(self._config.workspace_root)
         try:
-            chats_root = (self._config.logs_root / "Chats").resolve()
-            source_link = chats_root / source_chat_id
-            if source_link.is_symlink():
-                return None
-            source_dir = source_link.resolve()
-            if source_dir.parent != chats_root:
+            source_dirs: list[Path] = []
+            for root in self._config.chats_roots():
+                chats_root = root.resolve()
+                source_link = chats_root / source_chat_id
+                if source_link.is_symlink() or not source_link.is_dir():
+                    continue
+                source_dir = source_link.resolve()
+                if source_dir.parent == chats_root:
+                    source_dirs.append(source_dir)
+            if not source_dirs:
                 return None
             candidate = Path(archive_path)
             if not candidate.is_absolute():
@@ -5484,7 +5880,9 @@ class ProjectChatManager:
                 return None
         except (OSError, ValueError, RuntimeError):
             return None
-        if not resolved.is_relative_to(source_dir) or not resolved.is_file():
+        if not resolved.is_file() or not any(
+            resolved.is_relative_to(source_dir) for source_dir in source_dirs
+        ):
             return None
         return resolved
 
@@ -5932,23 +6330,6 @@ class ProjectChatManager:
                 primary,
             )
         return primary
-
-    def chat_workspaces(self) -> dict[str, str]:
-        """Every known chat id mapped to its project's workspace.
-
-        Archives live under one shared ``Logs/Chats/<chat-id>/`` tree — the
-        re-rooting promotes Logs out of the vault but does not split it per
-        workspace — so an archive's path says which CHAT wrote it and nothing
-        about where that chat ran. Anything filtering archives by workspace has
-        to come back through the registry, which is here and not in
-        ``ciao.insights``; the insights backfill that used to live there
-        compared the chat-id path segment to a workspace name directly, which
-        can never match, so a workspace-scoped run silently found nothing.
-        """
-        return {
-            chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""
-            for chat_id, chat in self._chats.items()
-        }
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
@@ -6473,6 +6854,10 @@ class ProjectChatManager:
             context_session_id=context_session_id,
             context_primed=context_primed,
             stable_context_prefix="" if compact else self._stable_context_prefix(chat),
+            # Exactly the capsule prepended above ("" for compact): providers
+            # can tell engine context from capsule-shaped user text without
+            # parsing delimiters.
+            injected_context_prefix=prefix,
             compact=compact,
         )
 
@@ -7257,6 +7642,39 @@ class ProjectChatManager:
         if live is not None:
             live.publish_pending()
         return True
+
+    def take_queue_for_edit(self, chat_id: str, entry_id: str) -> dict | None:
+        """Atomically take a queued entry and retain a receipt until acknowledged."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        stream = self._broker.get(chat_id)
+        live = stream if stream is not None and not stream.background else None
+        if live is not None and live._is_steering(entry_id):
+            return None
+        entry = live.take_pending(entry_id) if live is not None else None
+        if entry is None:
+            entry = take_pending_list(chat.pending_queue, entry_id)
+            if entry is None:
+                return None
+            self._save()
+        payload = {"entry_id": entry_id, "text": str(entry.get("text", "")),
+                   "images": list(entry.get("images") or [])}
+        now = time.monotonic()
+        chat.taken_edits = [e for e in chat.taken_edits if now - e["taken_at"] < _TAKEN_EDIT_TTL_S]
+        chat.taken_edits = [*chat.taken_edits, {**payload, "taken_at": now}][-_MAX_TAKEN_EDITS:]
+        if live is not None:
+            live.publish_pending()
+        elif stream is not None:
+            stream.publish_queue_state(chat.pending_queue)
+        return payload
+
+    def queue_take_ack(self, chat_id: str, entry_id: str) -> None:
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            now = time.monotonic()
+            chat.taken_edits = [e for e in chat.taken_edits
+                                if e["entry_id"] != entry_id and now - e["taken_at"] < _TAKEN_EDIT_TTL_S]
 
     def remove_queue(self, chat_id: str, entry_id: str) -> bool:
         """Remove a queued message (live stream, else parked queue)."""
@@ -8327,6 +8745,10 @@ class ProjectChatManager:
 
     # ── Delayed push scheduler ───────────────────────────────────────────
 
+    def _is_memory_pass(self, chat: ChatInfo) -> bool:
+        """True for this app-owned pass, including the project-kind fallback."""
+        return is_memory_pass_chat(chat, self.get_project(chat.project_id))
+
     def _cancel_pending_push(self, chat_id: str) -> None:
         task = self._pending_push.pop(chat_id, None)
         if task is not None and not task.done():
@@ -8351,15 +8773,11 @@ class ProjectChatManager:
         single push fired after the last reply settles.
         """
         chat = self._chats.get(chat_id)
-        if (
-            chat is not None
-            and chat_service._normalize_chat_helper(chat.helper).get("kind")
-            == "memory_pass"
-        ):
+        if chat is not None and self._is_memory_pass(chat):
             # The pass is the app updating its own memory, not a conversation
-            # the owner started: a normal result there is not worth waking them
-            # for. Permission and question pushes travel their own paths and are
-            # still delivered — that is exactly when a pass needs the owner.
+            # the owner started. No result, question or permission push may
+            # reach them; the pass and its pending input stay inspectable from
+            # its memory-insight row and the chat itself.
             return
         if (
             chat is not None
@@ -8382,6 +8800,11 @@ class ProjectChatManager:
             chat = self._chats.get(chat_id)
             # Chat deleted during the window, or already read on some device.
             if chat is None:
+                return
+            if self._is_memory_pass(chat):
+                # The classification is re-checked at fire time: a pass queued
+                # before this guard existed, or one whose helper/project the
+                # registry has since rewritten, must still never wake the owner.
                 return
             if chat.archived:
                 # The chat was archived during the delay window — e.g. an
@@ -8755,6 +9178,11 @@ class ProjectChatManager:
             if chat.pending_permission != payload:
                 chat.pending_permission = payload
                 self._save()
+        if chat is not None and self._is_memory_pass(chat):
+            # Keep the persisted card and the turn's lifecycle state; only the
+            # external notification is silent. The owner reaches the pass from
+            # its memory-insight row, where a blocked pass says "needs you".
+            return
         cb = self.notify_permission_cb
         if cb is None:
             return
@@ -8850,8 +9278,12 @@ class ProjectChatManager:
 
         Called when the model uses AskUserQuestion. The headless CLI
         auto-cancels with empty answers, so the user may not notice the
-        question unless we nudge them.
+        question unless we nudge them. A memory pass never nudges: its question
+        stays on the chat and on its memory-insight row.
         """
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._is_memory_pass(chat):
+            return
         cb = self.notify_question_cb
         if cb is None:
             return
@@ -9786,6 +10218,15 @@ class ProjectChatManager:
                 "unresolvable, skipping", chat_id,
             )
             return None
+        if project.kind == MEMORY_PROJECT_KIND:
+            # The Memory project is app-owned: it holds the engine's own
+            # memory passes, so a routine cannot run in it. Refused rather
+            # than skipped: the caller has to record that the run never
+            # happened, and a one-shot entry that never ran must not be
+            # consumed.
+            raise MemoryProjectRefused(
+                "the Memory project holds the engine's own memory passes"
+            )
         fresh = self.create_chat(
             project.project_id,
             title=title or f"Every run: {prompt[:30]}",
@@ -9808,23 +10249,67 @@ class ProjectChatManager:
             entry, prompt, model, mode, provider, target_chat_id=target_chat_id
         )
 
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is the app's memory machinery, or ''.
+
+        The Memory project is app-owned: it holds the engine's own memory
+        passes, and a routine run there would put an ordinary chat in a
+        project where every chat is silenced. A pass is the app's own turn: a
+        routine posted into it runs under the pass's restrictions and never
+        reaches the owner.
+
+        The re-home of a deleted target counts too: that project is where the
+        run's chat would be opened.
+        """
+        project_id = getattr(entry, "web_project_id", "") or ""
+        if project_id:
+            project = self._projects.get(project_id)
+            if project is None:
+                # A stale id: the recorded name is what survives it. Looked up
+                # without repairing the entry — a quiet command must not
+                # resolve or repair a target.
+                project = self.find_project(
+                    getattr(entry, "web_project_name", "") or "",
+                    getattr(entry, "workspace", "") or "",
+                )
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if chat_id:
+            chat = self._chats.get(chat_id)
+            if chat is not None and is_memory_pass_chat(
+                chat, self._projects.get(chat.project_id)
+            ):
+                return "a memory pass is not a target for a schedule"
+        fallback_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_id:
+            project = self._projects.get(fallback_id)
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        return ""
+
     def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
         """The project with this name in this workspace, or None.
 
         Names are unique per workspace, which is what lets a schedule survive
         the per-instance id regeneration that strands ``web_project_id``.
+
+        The app-owned Memory project shares its name with any user project
+        called "Memory", and a routine means the user's project: the app's own
+        is only returned when it is the only one with that name.
         """
         wanted = (name or "").strip()
         if not wanted:
             return None
-        return next(
-            (
-                project
-                for project in self._projects.values()
-                if project.workspace == workspace and project.name == wanted
-            ),
-            None,
-        )
+        matches = [
+            project
+            for project in self._projects.values()
+            if project.workspace == workspace and project.name == wanted
+        ]
+        for project in matches:
+            if project.kind != MEMORY_PROJECT_KIND:
+                return project
+        return matches[0] if matches else None
 
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
@@ -9915,7 +10400,10 @@ class ProjectChatManager:
                 if p.workspace == workspace and p.name == "General":
                     return p
             for p in self._projects.values():
-                if p.workspace == workspace:
+                # The app's own Memory project is never a re-home target: a
+                # run there would open an ordinary chat in a project where
+                # every chat is silenced.
+                if p.workspace == workspace and p.kind != MEMORY_PROJECT_KIND:
                     return p
         return None
 

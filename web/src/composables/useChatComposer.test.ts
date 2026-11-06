@@ -9,14 +9,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { useChatComposer, type ComposerAttachmentStore } from './useChatComposer'
 import { recordSentPrompt, readChatDraft, writeChatDraft } from '../lib/chatDrafts'
+import type { FormPoster, UploadProgressHandler } from '../lib/chatAttachments'
 
 const CHAT_ID = 'chat-1'
 
 function makeStore() {
   return {
-    uploadImages: vi.fn(async () => []),
+    uploadImages: vi.fn(async (_chatId: string, _files: File[], _onProgress?: UploadProgressHandler) => [] as string[]),
     addPendingImageRefs: vi.fn(),
     removePendingImage: vi.fn(),
+    addPendingFiles: vi.fn(),
+    removePendingFile: vi.fn(),
     pushErrorToast: vi.fn(),
   } satisfies ComposerAttachmentStore & Record<string, unknown>
 }
@@ -252,6 +255,18 @@ describe('useChatComposer attachments', () => {
     return { ok, status: ok ? 200 : 500, json: async () => body } as Response
   }
 
+  /** A stub for the XHR poster: resolves 200 with the given body. */
+  function fakePostForm(body: unknown) {
+    return vi.fn<FormPoster>(async () => ({ status: 200, body }))
+  }
+
+  function pickerInput(files: File[]): HTMLInputElement {
+    const input = document.createElement('input')
+    input.type = 'file'
+    Object.defineProperty(input, 'files', { value: files, configurable: true })
+    return input
+  }
+
   it('uploads pasted images and stops the browser inserting them itself', async () => {
     const { composer, store } = makeComposer()
     const file = imageFile()
@@ -263,7 +278,7 @@ describe('useChatComposer attachments', () => {
     await composer.handlePaste(event)
 
     expect(event.preventDefault).toHaveBeenCalled()
-    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file])
+    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file], expect.any(Function))
   })
 
   it('ignores a paste that carries no image', async () => {
@@ -286,39 +301,40 @@ describe('useChatComposer attachments', () => {
 
     await composer.handleDrop(dropEvent([file]))
 
-    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file])
+    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file], expect.any(Function))
     expect(composer.draft.value).toBe('')
     expect(composer.dragOver.value).toBe(false)
   })
 
-  it('uploads a dropped file and inserts only an opaque reference on the host', async () => {
+  it('uploads a dropped file and stages it as a file chip', async () => {
     const ref = `drop_${'a'.repeat(32)}`
-    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'notes.md' }] })) as unknown as typeof fetch
-    const { composer } = makeComposer({ fetchImpl })
+    const postForm = fakePostForm({ file_refs: [{ ref, name: 'notes.md' }] })
+    const { composer, store } = makeComposer({ postForm })
     attachTextarea(composer, '')
 
     await composer.handleDrop(dropEvent([textFile('notes.md', '/Users/me/notes.md')]))
 
-    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain(`/api/chats/${CHAT_ID}/attachments?opaque=1`)
-    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'a'.repeat(32) + '` ')
+    expect(postForm.mock.calls[0][0]).toContain(`/api/chats/${CHAT_ID}/attachments`)
+    expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'notes.md' }])
+    expect(composer.draft.value).toBe('')
   })
 
   it('uploads a dropped file instead of exposing a browser path', async () => {
     const ref = `drop_${'b'.repeat(32)}`
-    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'notes.md' }] })) as unknown as typeof fetch
-    const { composer } = makeComposer({ fetchImpl })
+    const postForm = fakePostForm({ file_refs: [{ ref, name: 'notes.md' }] })
+    const { composer, store } = makeComposer({ postForm })
     attachTextarea(composer, '')
 
     await composer.handleDrop(dropEvent([textFile('notes.md', '/Users/me/notes.md')]))
 
-    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain(`/api/chats/${CHAT_ID}/attachments?opaque=1`)
-    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'b'.repeat(32) + '` ')
+    expect(postForm.mock.calls[0][0]).toContain(`/api/chats/${CHAT_ID}/attachments`)
     expect(composer.draft.value).not.toContain('/Users/me')
+    expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'notes.md' }])
   })
 
   it('reports an upload the project has no folder for', async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [] })) as unknown as typeof fetch
-    const { composer, store } = makeComposer({ fetchImpl, vaultFolder: undefined })
+    const postForm = fakePostForm({ file_refs: [] })
+    const { composer, store } = makeComposer({ postForm, vaultFolder: undefined })
     attachTextarea(composer, '')
 
     await composer.handleDrop(dropEvent([textFile('notes.md')]))
@@ -327,10 +343,12 @@ describe('useChatComposer attachments', () => {
       'Could not attach file',
       'This project has no folder for uploaded files.',
     )
+    expect(postForm).not.toHaveBeenCalled()
+    expect(composer.uploads.value).toEqual([])
     expect(composer.draft.value).toBe('')
   })
 
-  it('imports a native desktop drop as an opaque reference plus pending image refs', async () => {
+  it('imports a native desktop drop as staged files plus pending image refs', async () => {
     const ref = `drop_${'c'.repeat(32)}`
     const fetchImpl = vi.fn(async () => jsonResponse({
       file_refs: [{ ref, name: 'a.pdf' }],
@@ -347,7 +365,8 @@ describe('useChatComposer attachments', () => {
     }))
     await vi.waitFor(() => expect(store.addPendingImageRefs).toHaveBeenCalled())
 
-    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'c'.repeat(32) + '` ')
+    expect(composer.draft.value).toBe('')
+    expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.pdf' }])
     expect(store.addPendingImageRefs).toHaveBeenCalledWith(CHAT_ID, ['img-1'])
     expect(composer.dragOver.value).toBe(false)
   })
@@ -380,13 +399,73 @@ describe('useChatComposer attachments', () => {
 
     await composer.handleFileSelect({ target: input } as unknown as Event)
 
-    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file])
+    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [file], expect.any(Function))
     expect(input.value).toBe('')
   })
 
   it('forwards a pending-image removal to the store', () => {
     const { composer, store } = makeComposer()
     composer.removePendingImage(2)
-    expect(store.removePendingImage).toHaveBeenCalledWith(2)
+    expect(store.removePendingImage).toHaveBeenCalledWith(CHAT_ID, 2)
+  })
+
+  it('forwards a pending-file removal to the store', () => {
+    const { composer, store } = makeComposer()
+    composer.removePendingFile(1)
+    expect(store.removePendingFile).toHaveBeenCalledWith(CHAT_ID, 1)
+  })
+
+  it('tracks an upload\'s progress until it settles', async () => {
+    const { composer, store } = makeComposer()
+    let finish: (refs: string[]) => void = () => {}
+    store.uploadImages.mockImplementation((_chatId, _files, onProgress) => {
+      onProgress?.(50, 100)
+      return new Promise<string[]>((resolve) => { finish = resolve })
+    })
+    const input = pickerInput([imageFile('shot.png')])
+
+    const pending = composer.handleFileSelect({ target: input } as unknown as Event)
+    expect(composer.uploads.value).toEqual([{ id: expect.any(Number), label: 'shot.png', loaded: 50, total: 100 }])
+
+    finish([])
+    await pending
+    expect(composer.uploads.value).toEqual([])
+  })
+
+  it('reports a failed image upload and clears the bar', async () => {
+    const { composer, store } = makeComposer()
+    store.uploadImages.mockRejectedValueOnce(new Error('boom'))
+
+    await composer.handleFileSelect({ target: pickerInput([imageFile()]) } as unknown as Event)
+
+    expect(store.pushErrorToast).toHaveBeenCalledWith('Could not attach images', 'boom')
+    expect(composer.uploads.value).toEqual([])
+  })
+
+  it('a picked document stages as a file chip and a picked image as a thumbnail', async () => {
+    const ref = `drop_${'d'.repeat(32)}`
+    const postForm = fakePostForm({ file_refs: [{ ref, name: 'a.md' }] })
+    const { composer, store } = makeComposer({ postForm })
+    const image = imageFile()
+
+    await composer.handleFileSelect({ target: pickerInput([textFile('a.md'), image]) } as unknown as Event)
+
+    expect(postForm).toHaveBeenCalledTimes(1)
+    expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.md' }])
+    expect(store.uploadImages).toHaveBeenCalledTimes(1)
+    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [image], expect.any(Function))
+  })
+
+  it('labels a multi-file upload by count', async () => {
+    const { composer } = makeComposer({
+      postForm: vi.fn<FormPoster>((_url, _form, onProgress) => {
+        onProgress?.(1, 2)
+        return new Promise(() => {})
+      }),
+    })
+
+    void composer.handleFileSelect({ target: pickerInput([textFile('a.md'), textFile('b.md')]) } as unknown as Event)
+
+    expect(composer.uploads.value[0].label).toBe('2 files')
   })
 })

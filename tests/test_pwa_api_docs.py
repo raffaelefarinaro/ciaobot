@@ -38,6 +38,18 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Processes Stop button for a running native shell or Monitor; the agent that "
         "started the task stops it from its own session"
     ),
+    "/api/chats/{chat_id}/actions/{action_id}/start": (
+        "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
+        "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
+    ),
+    "/api/chats/{chat_id}/actions/{action_id}/dismiss": (
+        "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
+        "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
+    ),
+    "/api/chats/{chat_id}/actions/{action_id}/continue": (
+        "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
+        "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
+    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",

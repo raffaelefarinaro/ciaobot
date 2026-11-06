@@ -115,6 +115,7 @@ async function mountPanel(
   })
 
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     attachTo: document.body,
     global: {
       plugins: [pinia],
@@ -134,19 +135,21 @@ async function mountPanel(
 
 
 const send = vi.fn()
+let socket: FakeSocket
 
 function queue(store: ReturnType<typeof useProjectStore>, entries: Array<Record<string, unknown>>) {
   store.queuedMessages['chat-1'] = entries.map(e => ({ delivery: 'queue', steering: false, ...e })) as never
 }
 
 class FakeSocket {
+  constructor() { socket = this }
   static CONNECTING = 0
   static OPEN = 1
   static CLOSING = 2
   static CLOSED = 3
   readyState = 1
   onopen: (() => void) | null = null
-  onmessage: unknown = null
+  onmessage: ((event: { data: string }) => void) | null = null
   onclose: unknown = null
   onerror: unknown = null
   send = send
@@ -164,6 +167,96 @@ describe('ChatPanel queued messages', () => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   })
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+  it('moves a queued message and its images into the empty composer', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'a', text: 'edit me', images: ['shot.png'] }])
+    })
+    openSocket(store)
+    await wrapper.get('[aria-label="Edit queued message"]').trigger('click')
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.find('.queued-chip').exists()).toBe(true)
+    const request = JSON.parse(send.mock.calls[0][0])
+    expect(request).toMatchObject({ type: 'queue_take', entry_id: 'a' })
+    socket.onmessage?.({ data: JSON.stringify({ type: 'queue_take_result', request_id: request.request_id, entry_id: 'a', ok: true, text: 'edit me', images: ['shot.png'] }) })
+    await flushPromises()
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('edit me')
+    expect(store.pendingImagesFor('chat-1')).toEqual(['shot.png'])
+    expect(JSON.parse(send.mock.calls[1][0])).toEqual({ type: 'queue_take_ack', entry_id: 'a' })
+    expect(wrapper.find('.queued-chip').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the chip when the server refuses the take', async () => {
+    const { wrapper, store } = await mountPanel(s => queue(s, [{ id: 'a', text: 'queued' }]))
+    openSocket(store)
+    await wrapper.get('[aria-label="Edit queued message"]').trigger('click')
+    const request = JSON.parse(send.mock.calls[0][0])
+    socket.onmessage?.({ data: JSON.stringify({ type: 'queue_take_result', request_id: request.request_id, entry_id: 'a', ok: false, text: '', images: [] }) })
+    await flushPromises()
+    expect(wrapper.get('.queued-chip').text()).toContain('queued')
+    expect(wrapper.get('.queue-edit-notice').text()).toContain('Could not')
+    wrapper.unmount()
+  })
+
+  it('does not overwrite a draft typed while a take is pending, and applies it once the draft clears', async () => {
+    const { wrapper, store } = await mountPanel(s => queue(s, [{ id: 'a', text: 'queued' }]))
+    openSocket(store)
+    await wrapper.get('[aria-label="Edit queued message"]').trigger('click')
+    const request = JSON.parse(send.mock.calls[0][0])
+    await wrapper.get('.chat-input').setValue('new draft')
+    socket.onmessage?.({ data: JSON.stringify({ type: 'queue_take_result', request_id: request.request_id, entry_id: 'a', ok: true, text: 'queued', images: [] }) })
+    await flushPromises()
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('new draft')
+    expect(wrapper.get('.queue-edit-notice').text()).toContain('was taken out of the queue')
+    // The text is still only in the receipt, so nothing is acknowledged yet and
+    // it cannot be lost: clearing the draft puts it in the composer.
+    expect(send.mock.calls.map(c => JSON.parse(c[0]))).not.toContainEqual(expect.objectContaining({ type: 'queue_take_ack' }))
+    await wrapper.get('.chat-input').setValue('')
+    await flushPromises()
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('queued')
+    expect(send.mock.calls.map(c => JSON.parse(c[0]))).toContainEqual({ type: 'queue_take_ack', entry_id: 'a' })
+    wrapper.unmount()
+  })
+
+  it('restores a pending take before the socket opens and acknowledges on connect', async () => {
+    const { wrapper, store } = await mountPanel(s => {
+      s.pendingQueueTakes['chat-1'] = [{ entry_id: 'a', text: 'recovered', images: ['shot.png'] }]
+    })
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('recovered')
+    expect(store.pendingImagesFor('chat-1')).toEqual(['shot.png'])
+    openSocket(store)
+    socket.onopen?.()
+    expect(send.mock.calls.map(call => JSON.parse(call[0]))).toContainEqual({ type: 'queue_take_ack', entry_id: 'a' })
+    wrapper.unmount()
+  })
+
+  it('keeps the draft and queued message when the composer contains text', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'a', text: 'queued' }])
+    })
+    openSocket(store)
+    await wrapper.get('.chat-input').setValue('existing draft')
+    await wrapper.get('[aria-label="Edit queued message"]').trigger('click')
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('existing draft')
+    expect(wrapper.get('.queued-chip').text()).toContain('queued')
+    expect(wrapper.get('[role="status"].queue-edit-notice').text()).toContain('delete')
+    expect(send).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('leaves the message queued if the chat is disconnected', async () => {
+    const { wrapper } = await mountPanel((s) => {
+      queue(s, [{ id: 'a', text: 'queued' }])
+    })
+    await wrapper.get('[aria-label="Edit queued message"]').trigger('click')
+    expect((wrapper.get('.chat-input').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.get('.queued-chip').text()).toContain('queued')
+    expect(wrapper.get('.queue-edit-notice').text()).toContain('connection')
+    wrapper.unmount()
+  })
 
   it('renders a Queue/Steer button group with aria-pressed and a labelled excerpt', async () => {
     const { wrapper } = await mountPanel((store) => {

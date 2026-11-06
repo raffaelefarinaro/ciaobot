@@ -876,6 +876,25 @@ async def _run_server_locked(
         tracker.fail("reroot_workspaces", "re-root check failed")
         logger.exception("Workspace re-root check failed")
 
+    # Move each registered chat's archive from the shared Logs/Chats into its
+    # workspace's own Logs/Chats, once (ciao/logs_split.py). After the re-root,
+    # whose receipt gates it, and before the transcript store and the project
+    # manager read the archive. Never raises: a split that cannot finish is
+    # retried on the next boot.
+    tracker.start("split_chat_logs")
+    try:
+        from ciao.logs_split import migrate_if_needed as split_chat_logs
+
+        split = await asyncio.to_thread(split_chat_logs, config)
+        split_status = str(split.get("status", ""))
+        if split_status == "error":
+            tracker.fail("split_chat_logs", "chat log split failed")
+        else:
+            tracker.done("split_chat_logs", split_status)
+    except Exception:
+        tracker.fail("split_chat_logs", "chat log split failed")
+        logger.exception("Chat log split failed")
+
     # Refresh vault index so INDEX.md reflects the current tree
     tracker.start("refresh_vault_index")
     try:
@@ -1017,6 +1036,8 @@ async def _run_server_locked(
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
+    # Each chat archives under its own workspace's agent root (config.chats_root).
+    transcripts.set_archive_root_resolver(pcm.chat_archive_root)
     # Dispatch failures stamp last_status on the stored schedule row so the
     # Automations sidebar flags them for attention instead of leaving an
     # endless string of invisible `stream error` job records (issue #407).
@@ -1101,6 +1122,7 @@ async def _run_server_locked(
         is_node_active=lambda: legacy_writers_armed,
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
+        target_refusal=pcm.schedule_target_refusal,
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;
@@ -1186,6 +1208,8 @@ async def _run_server_locked(
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+    # Needs-you handlers reach app singletons (terminal sessions, the gws re-login manager) through this.
+    pcm.actions_runtime.bind_app_state(app.state)
 
     from ciao.web.connection_tracker import ConnectionTracker
 

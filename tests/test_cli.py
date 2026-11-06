@@ -3572,6 +3572,53 @@ def test_cli_vault_search_logs_never_returns_a_sibling_agent_roots_chat(
     assert "Alba" not in capsys.readouterr().out
 
 
+def test_cli_vault_search_logs_reads_own_workspace_and_shared_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """On a re-rooted install `--logs` answers from the vault's own workspace
+    archive and the shared archive, and never from a sibling workspace's."""
+    from ciao.config import reset_reroot_cache
+    from ciao.workspace_reroot import mark_born_per_root, registry_file
+
+    install = tmp_path / "install"
+    work_vault = install / "work" / "memory-vault"
+    work_vault.mkdir(parents=True)
+    runtime = install / ".runtime"
+    mark_born_per_root(install, runtime, ["personal", "work"])
+    # The registry names the workspace roots; a re-rooted install always has one.
+    registry_file(runtime).write_text(
+        json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
+    )
+    reset_reroot_cache()
+    transcripts = {
+        "ownchat": install / "work" / "Logs" / "Chats" / "ownchat" / "claude" / "a.md",
+        "siblingchat": install / "personal" / "Logs" / "Chats" / "siblingchat" / "claude" / "b.md",
+        "rootchat": install / "Logs" / "Chats" / "rootchat" / "claude" / "c.md",
+    }
+    for path in transcripts.values():
+        path.parent.mkdir(parents=True)
+        path.write_text("# Chat\n\nWe talked about kiteboarding.\n", encoding="utf-8")
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    assert (
+        cli.main(
+            ["vault-search", "kiteboarding", "--logs", "--vault-root", str(work_vault)]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "ownchat" in out
+    assert "rootchat" in out
+    assert "siblingchat" not in out
+
+
 def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

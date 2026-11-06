@@ -328,6 +328,8 @@ class ChatStreamingHost(Protocol):
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None: ...
 
+    def _schedule_action_detection(self, chat_id: str) -> None: ...
+
     async def _drain_between_turns(self, chat_id: str, project_id: str) -> None: ...
 
 
@@ -1410,6 +1412,9 @@ class ChatStreaming:
                 self._host._memory_pass_turn_finished(chat_id),
                 f"memory-pass-{chat_id}",
             )
+            # Needs-you cards: an MCP server that wants a sign-in becomes a card.
+            if chat_meta is not None:
+                self._host._schedule_action_detection(chat_id)
             if refresh_cancelled:
                 raise asyncio.CancelledError
 

@@ -22,6 +22,7 @@ const copied = ref(false)
 const infoOpen = ref(false)
 const branchOpen = ref(false)
 const branchBodyId = useId()
+const repoLabelId = useId()
 let copyTimer: ReturnType<typeof setTimeout> | undefined
 const switchId = useId()
 const hintId = useId()
@@ -60,9 +61,9 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 </script>
 
 <template>
-  <section class="rail-section chat-repo-section" aria-labelledby="chat-rail-repo-label">
+  <section class="rail-section chat-repo-section" :aria-labelledby="repoLabelId">
     <div class="chat-repo-heading">
-      <p id="chat-rail-repo-label" class="rail-label">Repository</p>
+      <p :id="repoLabelId" class="rail-label">Repository</p>
       <div class="chat-repo-head">
         <p class="chat-repo-name" :title="chip.path">{{ chip.name }}</p>
         <button

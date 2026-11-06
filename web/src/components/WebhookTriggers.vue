@@ -387,6 +387,7 @@ import { useWebhookStore } from '../stores/webhooks'
 import { writeClipboard } from '../lib/codeCopy'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/time'
+import { isMemoryProject } from '../lib/memoryPass'
 import { webhookRecipe } from '../lib/webhooks'
 import type { WebhookReceipt, WebhookReceiptStatus, WebhookTrigger } from '../lib/types'
 
@@ -395,7 +396,9 @@ const projectStore = useProjectStore()
 
 const workspace = computed(() => projectStore.activeWorkspace)
 const workspaceProjects = computed(() =>
-  projectStore.projects.filter(p => p.workspace === workspace.value),
+  // The Memory project is app-owned: it holds the engine's own memory passes
+  // and cannot host a webhook's chat.
+  projectStore.projects.filter(p => p.workspace === workspace.value && !isMemoryProject(p)),
 )
 
 /** A first load that failed has no rows to keep and no honest list to sit under. */

@@ -832,6 +832,14 @@
                       :hue="colorForChat(chat)"
                     />
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
+                    <button
+                      v-if="canOpenChatBeside(chat)"
+                      type="button"
+                      class="chat-beside-btn"
+                      aria-label="Open beside"
+                      title="Open beside the open chat"
+                      @click.stop="emit('open-beside', chat.chat_id)"
+                    ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/></svg></button>
                     <DropdownMenuTrigger as-child>
                       <button
                         class="chat-actions-btn"
@@ -861,6 +869,9 @@
                       </DropdownMenuItem>
                       <DropdownMenuItem as-child>
                         <button @click="startRenameChat(chatMenu!)">Rename</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem v-if="chatMenuChat && canOpenChatBeside(chatMenuChat)" as-child>
+                        <button @click="emit('open-beside', chatMenu!)">Open beside</button>
                       </DropdownMenuItem>
                       <DropdownMenuSub
                         v-if="moveTargets.length"
@@ -1017,8 +1028,19 @@ import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' }>()
-const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
+const props = defineProps<{
+  collapsed: boolean
+  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'
+  /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
+  canOpenBeside?: boolean
+}>()
+const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'open-beside': [chatId: string] }>()
+
+/** "Open beside" is offered only where the layout can show it, and never for the chat already on screen. */
+function canOpenChatBeside(chat: { chat_id: string; local?: boolean }): boolean {
+  return !!props.canOpenBeside && chat.local !== false
+    && chat.chat_id !== store.activeChatId && chat.chat_id !== store.besideChatId
+}
 
 const store = useProjectStore()
 const { archiveChatWithTaskCheck } = useArchiveChat()
@@ -1153,9 +1175,10 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 // what each page shows. They replace the per-workspace badge in the scope
 // menu: the number sits next to the place that resolves it.
 //
-// The one rule is the store's: a memory pass is not ordinary attention (its
-// activity moves while it works), so it counts only when it is blocked on the
-// owner — and then its row on Home says the same thing out loud.
+// The one rule is the store's: a memory pass is never ordinary attention (its
+// activity moves while it works). A declared pass reports a blocked state on
+// its Home memory-insight row; a malformed-helper fallback stays reachable but
+// never counts here or on any badge.
 const todayCount = computed(() => store.chats.reduce((sum, chat) => {
   if (chat.archived) return sum
   if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum
@@ -2478,11 +2501,13 @@ async function confirmDeleteChat(chatId: string) {
 
   /* Idle project names may use the slots reserved for hover actions. Keep the
      buttons in the tab order at zero width; focusing or hovering restores the
-     full target before it is activated. */
+     full target before it is activated. Clip the collapsed button's icon and
+     padding, or they spill past the row and the sidebar scrolls sideways. */
   .project-header .project-actions-btn,
   .project-header .add-chat-btn {
     width: 0;
     min-width: 0;
+    overflow: hidden;
   }
 
   .project-header:hover .project-actions-btn,
@@ -2975,6 +3000,11 @@ async function confirmDeleteChat(chatId: string) {
 @media (hover: none) {
   .chat-actions-btn { opacity: 0.6; }
 }
+/* Open beside: a hover action on a fine pointer only (the menu item reaches every
+   other pointer). Hidden here; the fine-pointer block below shows it on row hover. */
+.chat-beside-btn {
+  display: none;
+}
 
 /* With a mouse the actions button reserves no width: it overlays the row's
    end while the row is hovered, focused or open, over a fade in the row's own
@@ -3012,6 +3042,38 @@ async function confirmDeleteChat(chatId: string) {
   .chat-actions-btn:hover {
     color: var(--fg);
     background: linear-gradient(to right, transparent, var(--chat-row-fill) 10px);
+  }
+  .chat-beside-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 50%;
+    right: 46px;
+    width: 32px;
+    height: 32px;
+    transform: translateY(-50%);
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: var(--chat-row-fill);
+    color: var(--fg2);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 100ms var(--ease);
+  }
+  .chat-item:hover .chat-beside-btn,
+  .chat-item:focus-within .chat-beside-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .chat-beside-btn:hover {
+    color: var(--fg);
+  }
+  .chat-beside-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
@@ -3194,7 +3256,8 @@ async function confirmDeleteChat(chatId: string) {
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
     transform: translateX(0);
   }
-  .sidebar.collapsed {
+  .sidebar.collapsed,
+  .sidebar.sidebar--closing {
     transform: translateX(-100%);
     box-shadow: none;
     pointer-events: none;

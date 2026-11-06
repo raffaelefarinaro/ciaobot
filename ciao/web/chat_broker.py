@@ -83,14 +83,23 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
     return False
 
 
+def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
+    """Remove and return a pending entry by id."""
+    for i, item in enumerate(items):
+        if item.get("id") == entry_id:
+            return items.pop(i)
+    return None
+
+
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
 #: An engine-injected turn's source, or ``retry`` for a user-requested retry.
 #: Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
 #: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
 #: user bubble. Empty string = typed by the person. ``restart_resume`` is the
 #: one turn the engine sends into a chat whose turn a restart cut off (#2128).
+#: ``chat_action`` is the wake a Needs-you card's Continue sends.
 TURN_ORIGINS = frozenset({
-    "background_run", "cli_task_wake", "retry", "restart_resume", "schedule",
+    "background_run", "chat_action", "cli_task_wake", "retry", "restart_resume", "schedule",
     "task_delegation", "task_resume", "webhook", "update_task",
 })
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
@@ -878,6 +887,12 @@ class ChatStream:
         if self._is_steering(entry_id):
             return False
         return remove_pending_list(self._pending, entry_id)
+
+    def take_pending(self, entry_id: str) -> dict | None:
+        """Take an entry only if it has not been handed to a provider."""
+        if self._is_steering(entry_id):
+            return None
+        return take_pending_list(self._pending, entry_id)
 
     def _is_steering(self, entry_id: str) -> bool:
         return any(p.get("id") == entry_id and p.get("steer_id") for p in self._pending)

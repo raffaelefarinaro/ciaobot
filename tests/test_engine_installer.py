@@ -9,6 +9,7 @@ refused before that same call.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import io
 import json
@@ -7101,6 +7102,13 @@ def _run_publish(
     for stale in ("cat", "chmod", "stat"):
         (fakebin / stale).unlink(missing_ok=True)
     trace = tmp_path / "trace.log"
+    # One line per double invocation, so a test can count how often each double
+    # ran. A double that re-enters itself shows up as a huge count, not a timeout.
+    calls = tmp_path / "doubles.log"
+    calls.unlink(missing_ok=True)
+
+    def _record(name: str) -> str:
+        return f'printf "%s\\n" {name} >> {shlex.quote(str(calls))}\n'
 
     target_dir = home / "existing-dir"
     target_dir.mkdir(exist_ok=True)
@@ -7141,10 +7149,12 @@ def _run_publish(
         'rm -f "$PUBLISH_DEST"\n'
         'ln -s "$HOME/existing-target" "$PUBLISH_DEST"\n'
     )
+    # The real chmod by absolute path: inside the `chmod` double a bare `chmod`
+    # resolves to the double itself and recurses until fork fails (#2472).
     plant_file = (
         'rm -f "$PUBLISH_DEST"\n'
         'printf "foreign\\n" > "$PUBLISH_DEST"\n'
-        f'chmod {PUBLISH_VICTIM_MODE:o} "$PUBLISH_DEST"\n'
+        f'{real_chmod} {PUBLISH_VICTIM_MODE:o} "$PUBLISH_DEST"\n'
     )
     # The destination is still empty when `cat` runs: the publish has just
     # created it and holds its descriptor. A double there acts inside the window
@@ -7153,17 +7163,20 @@ def _run_publish(
     if race == "symlink-before-copy":
         _write_exec(
             fakebin / "cat",
-            "#!/bin/sh\n" + plant_symlink + f"exec {real_cat} \"$@\"\n",
+            "#!/bin/sh\n" + _record("cat") + plant_symlink + f"exec {real_cat} \"$@\"\n",
         )
     elif race == "file-before-copy":
         _write_exec(
             fakebin / "cat",
-            "#!/bin/sh\n" + plant_file + f"exec {real_cat} \"$@\"\n",
+            "#!/bin/sh\n" + _record("cat") + plant_file + f"exec {real_cat} \"$@\"\n",
         )
     elif race == "file-before-copy-fail":
         # The write fails after a stranger's file has taken the path, so the
         # cleanup has to prove ownership before it removes anything.
-        _write_exec(fakebin / "cat", "#!/bin/sh\n" + plant_file + "exit 1\n")
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n" + _record("cat") + plant_file + "exit 1\n",
+        )
     elif race == "file-before-identity":
         # The substitution happens before the identity is sampled at all: the
         # `stat` that reads it plants the stranger's file first, then reports the
@@ -7171,7 +7184,7 @@ def _run_publish(
         # stranger; a descriptor-bound one still reports the created file.
         _write_exec(
             fakebin / "stat",
-            "#!/bin/sh\n" + plant_file + f'exec {real_stat} "$@"\n',
+            "#!/bin/sh\n" + _record("stat") + plant_file + f'exec {real_stat} "$@"\n',
         )
     elif race == "identity-unreadable":
         # Only the descriptor read fails; every other `stat` this publish could
@@ -7180,11 +7193,15 @@ def _run_publish(
         _write_exec(
             fakebin / "stat",
             "#!/bin/sh\n"
-            'for arg in "$@"; do [ "$arg" = /dev/fd/3 ] && exit 1; done\n'
-            f'exec {real_stat} "$@"\n',
+            + _record("stat")
+            + 'for arg in "$@"; do [ "$arg" = /dev/fd/3 ] && exit 1; done\n'
+            + f'exec {real_stat} "$@"\n',
         )
     elif fail_write:
-        _write_exec(fakebin / "cat", "#!/bin/sh\nprintf 'partial\\n'\nexit 1\n")
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n" + _record("cat") + "printf 'partial\\n'\nexit 1\n",
+        )
     if chmod_fails or race in ("symlink-before-chmod", "file-before-chmod"):
         plant = ""
         if race == "symlink-before-chmod":
@@ -7192,7 +7209,10 @@ def _run_publish(
         elif race == "file-before-chmod":
             plant = plant_file
         tail = "exit 1\n" if chmod_fails else f'exec {real_chmod} "$@"\n'
-        _write_exec(fakebin / "chmod", "#!/bin/sh\n" + plant + tail)
+        _write_exec(
+            fakebin / "chmod",
+            "#!/bin/sh\n" + _record("chmod") + plant + tail,
+        )
 
     # Only the two identity-race knobs need a `stat` double; every other run
     # uses the real command the shipped script would use.
@@ -7234,6 +7254,9 @@ def _run_publish(
         ["sh", "-c", body], env=env, capture_output=True, text=True, check=False
     )
     return result, {
+        "double_calls": collections.Counter(
+            calls.read_text().split() if calls.exists() else []
+        ),
         "home": home,
         "bin_dir": bin_dir,
         "dest": dest,
@@ -7601,6 +7624,7 @@ def test_publish_keeps_a_substituted_file_when_its_own_write_fails(
 ) -> None:
     """Cleanup never unlinks a path that is no longer the created inode."""
     result, paths = _run_publish(tmp_path, race="file-before-copy-fail")
+    assert paths["double_calls"]["cat"] == 1
 
     assert result.returncode != 0
     assert "could not publish" in result.stderr
@@ -7624,6 +7648,7 @@ def test_publish_refuses_a_regular_file_substituted_while_writing(
     descriptor the create returned can say the write went somewhere else.
     """
     result, paths = _run_publish(tmp_path, race="file-before-copy")
+    assert paths["double_calls"]["cat"] == 1
 
     assert result.returncode != 0
     assert "changed while it was being published" in result.stderr
@@ -7786,6 +7811,7 @@ def test_publish_takes_back_only_its_own_file_when_chmod_fails(tmp_path: Path) -
 def test_publish_refuses_a_symlink_substituted_before_the_copy(tmp_path: Path) -> None:
     """A link planted right after the create is refused, and nothing is deleted."""
     result, paths = _run_publish(tmp_path, race="symlink-before-copy")
+    assert paths["double_calls"]["cat"] == 1
 
     assert result.returncode != 0
     assert "changed while it was being published" in result.stderr
@@ -7802,6 +7828,7 @@ def test_publish_refuses_a_symlink_substituted_before_the_copy(tmp_path: Path) -
 def test_publish_refuses_a_symlink_substituted_before_the_chmod(tmp_path: Path) -> None:
     """A link that appears before the chmod is detected, and its victim keeps its mode."""
     result, paths = _run_publish(tmp_path, race="symlink-before-chmod")
+    assert paths["double_calls"]["chmod"] == 1
 
     assert result.returncode != 0
     assert "changed while it was being published" in result.stderr
@@ -7818,6 +7845,7 @@ def test_publish_refuses_a_symlink_substituted_before_the_chmod(tmp_path: Path) 
 def test_publish_refuses_a_file_substituted_before_the_chmod(tmp_path: Path) -> None:
     """A foreign file swapped in before the chmod is refused, bytes and mode intact."""
     result, paths = _run_publish(tmp_path, race="file-before-chmod")
+    assert paths["double_calls"]["chmod"] == 1
 
     assert result.returncode != 0
     assert "changed while it was being published" in result.stderr

@@ -42,6 +42,8 @@ Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 existing response path. Conditional and ranged asset requests retain their
 identity representation.
 
+The chat rail uses Option/Alt+Left and Right to move through the current workspace's chats, including from the composer. Matching chords are consumed at the ends; the title's unmodified arrow-key navigation remains available. Configured Option shortcuts work in editable fields, including keys reported as dead keys; unbound dead keys, IME composition, AltGr, unmodified workspace digits and controls that claim their keys retain precedence. Explicit custom and disabled bindings are preserved.
+
 ## Dev workflow
 
 ```bash
@@ -102,6 +104,7 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
+    components/ChatTitleRail.vue  the chat header's swipeable title rail (ChatPanel's `plainHeader` prop turns it off)
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
@@ -119,7 +122,7 @@ web/
                            bumps when the project order changes outside the store's own reorder so an open sidebar
                            drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
-                          out of oversized panes (useHoverPinPopover, useChatComposer,
+                          out of oversized panes (useHoverPinPopover, useChatComposer, useChatRail (sidebar-ordered, workspace-scoped rail items with an order frozen across rail switches),
                           useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
@@ -133,10 +136,11 @@ web/
                           replay its neighbours in either lane; it persists nothing and calls `onCommit`;
                           useMenuFocusReturn keeps a menu action's trigger focus without stealing it back after
                           the user has focused or pressed elsewhere)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, notificationInbox, sourceHealth,
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, chatActions, permissionModes, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
-                          (drop-slot geometry, settled order, auto-scroll step, announcement wording)
+                          (drop-slot geometry, settled order, auto-scroll step, announcement wording);
+                          `chatRail.ts` (rail order, neighbours, settle index, labels)
 ```
 
 ## iOS PWA gotchas
@@ -311,7 +315,7 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   hides on a chat change and is not restored.
 - **A suggested command is a card above the composer, not a second *Terminal*
   section.** When the assistant suggests a command in a chat, a transient card
-  appears above the composer (`components/TerminalOfferCard.vue`): the fixed
+  appears above the composer (`components/TerminalOfferCard.vue`; the needs-you cards are `components/NeedsYouCard.vue`): the fixed
   title *Suggested command — review before running*, the command as literal
   text (never markup, never markdown, never a link), and three actions —
   **Copy** (the exact text on screen, claiming *Copied* only when the
@@ -326,6 +330,29 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   *Terminal* section stays the persistent, manual way into the terminal;
   the card is the contextual one, and it is shown only for the chat on
   screen.
+
+### Side-by-side chats
+
+A second chat can sit in the same right-hand tile the terminal and a pinned
+file use. The tile has one occupant; the newest takes it.
+
+- **Persistence:** `lib/chatSplit.ts` keeps one chat per workspace in
+  `localStorage` under `ciao:beside-chat`. It is per browser on purpose: a
+  phone cannot show the split, and the pinned file stays server-owned.
+- **Precedence:** in `ChatLayout.vue`, `besideInTile` (a remembered chat, shown
+  beside a chat route, on a pane at least 940px wide) gives the tile to the
+  second chat; `fileInTile` is the pinned file unless that holds; the terminal
+  takes the tile only when neither does.
+- **Sockets:** `store.attachBesideChat` keeps the second chat live while it is
+  on screen. `isViewedChat` treats both panes as viewed, so unread marks, read
+  receipts and notifications are suppressed for both.
+- **Panes:** `ChatPanel` takes `chatId`, `beside`, `inactive` and `split` props.
+  The second pane's element ids carry a `beside-` prefix so the two never clash.
+- **Keyboard:** `focusedPanel` routes the chat chords (question and permission
+  digits, Enter, ⌘Enter, archive, the model picker) to the pane with the focus.
+  Esc in the second pane closes only that pane.
+- **File viewer:** `stores/fileViewer.ts` docks a file only into the chat that
+  owns the tile. A file opened from the second pane opens the viewer.
 
 ### Layout traps
 
@@ -365,7 +392,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - Store reads are computed state, not setup-store functions: Pinia exposes returned functions as actions, and invoking one activates that store's Pinia. A scroll or render path that only reads state must use a computed value (for example, per-chat pagination maps), while operations that mutate state or perform I/O remain actions.
 - **A review row's available actions come from the payload, not from a re-derivation.** `VaultReviewPanel.vue` draws **Complete** in place of **Retire** when the candidate carries `completable: true`, and never draws both: a project that finished and a project that is wrong are different findings, and the user has to be able to tell them apart. The flag is computed in `ciao/vault_review.py` from the same helpers `complete_project_note` gates on, so the button that renders is a click the engine will honour. The PWA has no alias table and no view of the `projects/` layouts, so a client-side `evidence.type === 'project'` test is a second definition free to disagree with the first — and the disagreement is a refusal on a row that still looks actionable. The lede and the Discuss seed follow the same flag, so a project row is never asked whether it should be thrown away.
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on the Today surface, sits in the `.home-workbench` side rail beside the request column (stacking below it at a 980px container width); `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
-- **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
+- **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters a declared pass out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind, with the Memory project kind as the fallback for a helper that failed closed. The fallback is deliberately visible in `activeChatsAll` and `projectChats`: it has no memory-insight row, so its ordinary chat row is the only way back to its pending question. It is silent on every notification surface — toasts, the notification inbox, the bell and OS badge, the menu bar, `projectNeedsInput` and unread — even when blocked. The project kind is the app's own signal, so the engine keeps it to passes only: the Memory project holds the engine's own passes and nothing else, the create route refuses a client-supplied `memory_pass` helper, and the schedule and webhook pickers do not offer it as a target. A routine bound to it (or to a pass) is refused with a message that names the reason, and an existing one can still be paused or retargeted.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`. A message that names a conversation the reader knows links to it under its human title (`lib/chatLinks.ts`): a bare id or the app's own `@chat/<id>` mention is linked, only for an id in the reader's own openable chat list, the raw id stays in the tooltip and in `data-chat-id`, and the label is built as text, so a title can never become markup.
 - **After sanitization an anchor has a target or it is not an anchor.** The sanitizer drops a `file:`, `javascript:` or `data:` href, and the anchor used to survive it: still painted with the accent colour and an underline, still swallowing the click, pointing nowhere. `lib/safeMarkdown.ts` now renders such a link as inert text — a `<span class="markdown-dead-link">`, never an `<a>` — with the label and its inline formatting intact, and a file path kept visible as copyable text (a network path keeps its authority: `file://server/share` reads `//server/share`). The sanitizer's own URI policy decides (`DOMPurify.isValidAttribute`), so the two cannot drift apart, and the policy is not widened. One exception to the inert text: a local file path, in a surface that opted in and on the engine's own machine. A pane opts in by passing `{ openLocal: true }` to `renderMarkdown`/`renderUserMarkdown` (the chat bubbles in `ChatPanel`) or `renderVaultMarkdown(..., true)` (the file viewer and the pinned-file panel), and it may only ever opt in if its click chain acts on the button — the delegated `handleOpenLocalFileClick` handler. There the dead link becomes a real `<button class="markdown-dead-link--openable" data-local-path="...">` (the label and the visible, copyable path), and the handler asks the engine to open that path with the OS default application through `POST /api/workspace-open` (`lib/openWorkspaceFile.ts`). Every other markdown surface (`TaskNoteFeed`, `TaskWorkspaceSurface`, `SubagentChatView`, `HousekeepingStrip`, …) renders the dead local link as inert copyable text, because a clickable-looking control whose click goes nowhere is the very defect this bullet fixes. Off the engine's own machine — a phone or another computer on the LAN — the button is not rendered either, and the link stays inert text, because `/api/workspace-open` is loopback-gated on the TCP peer. `file://` navigation still never happens: there is no anchor left, and the engine request carries only the path. The neutralising pass runs last, after `linkifyHtml`, because that pass skips the content of an anchor and a dead link's label must not be turned into a workspace file link; it walks anchors only, so the openable button is left alone. This holds for `renderMarkdown`, `renderUserMarkdown` and `renderFileMarkdown` alike.
@@ -378,11 +405,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `composables/useChatComposer.ts` owns the composer — the draft and its
   synchronous persistence, prompt-history recall, textarea auto-sizing, caret
   insertion, and every attachment path (paste, drop, the native desktop drop
-  grant, the image picker). It deliberately imports no store and registers no
+  grant, the file picker). It deliberately imports no store and registers no
   lifecycle hook: ids arrive as getters, the store arrives as the
   `ComposerAttachmentStore` interface, and `fetch` is injectable, so
   `composables/useChatComposer.test.ts` exercises all of it without mounting
-  anything. `ChatTurnActivity.vue` owns the rendering of one completed turn's
+  anything. Uploads go through `lib/chatAttachments.ts::postFormWithProgress` (XHR, for upload progress), injectable as `postForm`; `uploads` is the in-flight list `ComposerUploadProgress.vue` renders, and Send is disabled while it is non-empty. `ChatTurnActivity.vue` owns the rendering of one completed turn's
   `Activity` disclosure and owns no state — open/closed, the thinking
   preference and the markdown renderer are props, and every action is an emit.
   `ChatPanel` keeps the send path, the slash-command and @-mention pickers,
@@ -416,10 +443,10 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `stores/chatAnnotations.ts` owns everything the user stages against the *next*
   message plus the notes and pins anchored to a file: the per-chat pending-image,
   pending-file-comment and pending-chat-comment buckets, the durable per-file
-  comment store, and the six `localStorage`
-  keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
+  comment store, and the seven `localStorage`
+  keys behind them (`ciao-pending-images`, `ciao-pending-files`, `ciao-pending-comments`,
   `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
-  `ciao-dismissed-auto-pins`). **Chat pins are server-owned** (#1119): a chat's
+  `ciao-dismissed-auto-pins`). Staged files go out as a trailing `Attached files:` block (`composeAttachmentBlock`); user bubbles split it back into chips with `splitAttachmentBlock`, which reads both the `ciao-drop:` token form and the engine-expanded path form. **Chat pins are server-owned** (#1119): a chat's
   pinned file lives on the engine (`ChatInfo.pinned_file_path` /
   `dismissed_pin_paths` / `pin_revision`), is hydrated from chat payloads, the
   `chat_pin_changed` event and the `/ws/events` snapshot's `chat_pins`, and is
@@ -459,6 +486,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   no shell, asks for no grant and asks the engine to run nothing. It must
   never be keyed by the offer id: a replacement patches it in place, so the
   notice that explains the swap survives.
+
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the offers; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
   grouping, metadata merge, superseded live-tail pruning, tool icons),
@@ -588,9 +618,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.
-- **The embedded terminal screen** (`lib/terminalRenderer.ts`) is a Vue-free primitive that owns one physical xterm bound to one session. The rules it keeps, and why: the session id is fixed at construction and there is no way to rebind it, because a screen that showed two sessions would be two histories at once; xterm's options object never leaves the module, so input is switched only by `setInputEnabled(boolean)` and starts off — a screen nobody has claimed sends nothing; a write is acknowledged only from xterm's own write callback, and the number it carries is the absolute end offset of the bytes just parsed, so a resume can use it and nothing else; a write that is still queued or in flight when the screen is disposed is **rejected, never resolved**, so a disposal never advances an acknowledged offset and the bytes come back on the next replay; the theme is read from the app's own tokens and resolved to the `rgb()`/`rgba()` values xterm can parse, and a `color-mix()` token is refused rather than passed on; one ResizeObserver, owned by the renderer, measures the screen and is disconnected on dispose. xterm and its fit addon are imported dynamically, so neither enters the bundle of a page that shows no terminal — Home's payload is unchanged by the primitive existing. The pane that shows a screen is not in this repository yet.
+- **The embedded terminal screen** (`lib/terminalRenderer.ts`) is a Vue-free primitive that owns one physical xterm bound to one session. The rules it keeps, and why: the session id is fixed at construction and there is no way to rebind it, because a screen that showed two sessions would be two histories at once; xterm's options object never leaves the module, so input is switched only by `setInputEnabled(boolean)` and starts off — a screen nobody has claimed sends nothing; a write is acknowledged only from xterm's own write callback, and the number it carries is the absolute end offset of the bytes just parsed, so a resume can use it and nothing else; a write that is still queued or in flight when the screen is disposed is **rejected, never resolved**, so a disposal never advances an acknowledged offset and the bytes come back on the next replay; the theme is read from the app's own tokens and resolved to the `rgb()`/`rgba()` values xterm can parse, and a `color-mix()` token is refused rather than passed on; one ResizeObserver, owned by the renderer, measures the screen and is disconnected on dispose. A link in the output (an OSC 8 hyperlink, or a plain `http(s)://` URL found by `@xterm/addon-web-links`) opens in a new tab with `noopener,noreferrer`, in the browser the user is on. Every other scheme is refused, and hovering a link names its host in the screen's tooltip (`Open <host>`). xterm and its fit and web-links addons are imported dynamically, so none of them enters the bundle of a page that shows no terminal — Home's payload is unchanged by the primitive existing. The pane that shows a screen is not in this repository yet.
 
-- **The notification inbox is a derived view, not a source of truth.** The inbox, opened from the bell in `components/NotificationBell.vue` (body in `components/NotificationInboxList.vue`), projects four sources, keyed `chats`, `operator`, `automations` and `updateTasks`. `chats` is the `projects` chat predicates plus `taskSignals` board review, and carries board-result and memory-insight rows; `operator` is `housekeeping.actions`, package and provider updates included, with `github-star` excluded; `automations` is `tasks.schedules` through `scheduleInWorkspace` and `scheduleNeedsAttention`; `updateTasks` is `housekeeping.updateTasks` through the shared `lib/updateTasks.ts` predicate that Home's strip also uses. `stores/notificationInbox.ts` only adapts those owners and tracks health, and `lib/notificationInbox.ts` is the pure projection. The count is distinct rows, not messages: a chat that needs the user and is unread is one *Needs you* row with an unread marker, a board result owns its review row, and an automation incident suppresses its linked failed chat. `99+` is visual only; the accessible name carries the full number. Reading is not resolving: opening the inbox marks nothing read, opening a chat clears unread through the existing `chat_read` lifecycle, and a pending question or permission stays a row. There is no dismiss, snooze or mark-all-read; resolve at the source. Exact links go to `/chat/<id>`, `/tasks/<id>`, `/schedules/<id>`, `/settings` or `/settings/providers`, and to `/?notice=<key>` for other operator notices and update tasks. A chat, task or automation whose target has gone re-reads, shows *That item is no longer available* and navigates nowhere. Freshness is per source (`checking`, `ready`, `stale`, `unavailable`); the worst one is the overall status, and an empty list is all clear only when every source is `ready`. Retry calls the owners' read methods only. `init()` runs from `ChatLayout` after bootstrap and `dispose()` on unmount; it installs one focus/visibility listener with a 5-second throttle and a scoped set of watchers, has no timer, and rejects late work with a generation token after a workspace switch. A new source gets a key in `INBOX_SOURCES` and a builder in the store's snapshot table, is seeded in every all-clear test fixture, and never gets a mutation path.
+- **The notification inbox is a derived view, not a source of truth.** The inbox, opened from the bell in `components/NotificationBell.vue` (body in `components/NotificationInboxList.vue`), projects four sources, keyed `chats`, `operator`, `automations` and `updateTasks`. `chats` is the `projects` chat predicates plus `taskSignals` board review, and carries board-result rows; a memory pass never contributes a row, blocked or not, because its lifecycle stays on Home's memory-insight rows; `operator` is `housekeeping.actions`, package and provider updates included, with `github-star` excluded; `automations` is `tasks.schedules` through `scheduleInWorkspace` and `scheduleNeedsAttention`; `updateTasks` is `housekeeping.updateTasks` through the shared `lib/updateTasks.ts` predicate that Home's strip also uses. `stores/notificationInbox.ts` only adapts those owners and tracks health, and `lib/notificationInbox.ts` is the pure projection. The count is distinct rows, not messages: a chat that needs the user and is unread is one *Needs you* row with an unread marker, a board result owns its review row, and an automation incident suppresses its linked failed chat. `99+` is visual only; the accessible name carries the full number. Reading is not resolving: opening the inbox marks nothing read, opening a chat clears unread through the existing `chat_read` lifecycle, and a pending question or permission stays a row. There is no dismiss, snooze or mark-all-read; resolve at the source. Exact links go to `/chat/<id>`, `/tasks/<id>`, `/schedules/<id>`, `/settings` or `/settings/providers`, and to `/?notice=<key>` for other operator notices and update tasks. A chat, task or automation whose target has gone re-reads, shows *That item is no longer available* and navigates nowhere. Freshness is per source (`checking`, `ready`, `stale`, `unavailable`); the worst one is the overall status, and an empty list is all clear only when every source is `ready`. Retry calls the owners' read methods only. `init()` runs from `ChatLayout` after bootstrap and `dispose()` on unmount; it installs one focus/visibility listener with a 5-second throttle and a scoped set of watchers, has no timer, and rejects late work with a generation token after a workspace switch. A new source gets a key in `INBOX_SOURCES` and a builder in the store's snapshot table, is seeded in every all-clear test fixture, and never gets a mutation path.
 
 ## Testing
 
@@ -606,6 +636,9 @@ establish:
 | Spec | What only a real browser can decide |
 | --- | --- |
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
+| `chat-title-rail.spec.ts` | That the header's rail centres the title with the neighbours off-screen and the state track on the header's bottom edge, snaps and settles to a neighbour, slides and switches on the arrow key, keeps the 61px header and close on the title block's centre, and that the body never scrolls sideways.; and that dragging the title down closes the chat to Home, a short pull springs back, and a mouse drag sideways switches |
+| `chat-motion.spec.ts` | That a chat opened from Home rises into place, archiving opens the next chat in the rail order rather than Home, and the phone drawer slides out on close with its rows still in it.; Chat details stays closed in the next chat once closed; and a pinned file slides in after the chat |
+| `sidebar-overflow.spec.ts` | That the sidebar's chat list never scrolls sideways, with project rows idle or hovered. |
 | `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `task-board-lanes.spec.ts` | That every board lane is 310px wide at 1440, 1100, 900 and iPhone widths (computed flex included), that a review card's state word and action share one line, and that Done sits collapsed behind a 44px tab that expands, hides, persists across a reload, scrolls the Done lane into view and focuses its Hide button when the tab opens it, and accepts a dropped card (opening the completion sheet). The status filter still lists done tasks at full width. Widths and line boxes only exist in a real layout engine. |

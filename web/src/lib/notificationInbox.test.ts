@@ -9,7 +9,6 @@ import {
   parseHomeNoticeKey,
   scheduleDisplayName,
   type ChatCandidate,
-  type MemoryInsightCandidate,
   type TaskReviewCandidate,
   type UpdateTaskCandidate,
   type OperatorCandidate,
@@ -462,7 +461,6 @@ describe('notificationInbox operator and automation sources', () => {
 function inboxWith(o: {
   chats?: ChatCandidate[]
   reviewTasks?: TaskReviewCandidate[]
-  memoryInsights?: MemoryInsightCandidate[]
   sources?: SourceSnapshot[]
   workspace?: string
 }) {
@@ -470,19 +468,11 @@ function inboxWith(o: {
     workspace: o.workspace ?? 'personal',
     chats: o.chats ?? [],
     reviewTasks: o.reviewTasks,
-    memoryInsights: o.memoryInsights,
     sources: o.sources ?? READY,
   })
 }
 
-function insight(o: Partial<MemoryInsightCandidate> & { sourceChatId: string }): MemoryInsightCandidate {
-  return {
-    passChatId: `pass-${o.sourceChatId}`, title: 'Source', phase: 'needsYou', question: '',
-    timestamp: '', ...o,
-  }
-}
-
-describe('notificationInbox review, queue and memory rows', () => {
+describe('notificationInbox review and queue rows', () => {
   it('task_review_row', () => {
     const inbox = inboxWith({ reviewTasks: [{ taskId: 'a b', title: 'Ship it' }] })
     expect(inbox.rows).toHaveLength(1)
@@ -510,36 +500,13 @@ describe('notificationInbox review, queue and memory rows', () => {
     expect(chatKeys(chat({ chatId: 'x', ...base, reviewTaskId: 'other' }))).toEqual(['chat:x'])
   })
 
-  it('memory_insight_rows', () => {
-    const inbox = inboxWith({
-      memoryInsights: [
-        insight({ sourceChatId: 's1', title: 'Plan', question: 'Keep this?', timestamp: '2026-10-01T09:00:00+00:00' }),
-        insight({ sourceChatId: 's2', title: 'Notes', phase: 'attention' }),
-        insight({ sourceChatId: 's3', title: 'Bare' }),
-      ],
-      chats: [chat({ chatId: 'pass-s1', needsInput: true, needsYou: true })],
-    })
-    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
-    expect(by('memory:s1').urgency).toBe('input')
-    expect(by('memory:s1').title).toBe('Memory update: Plan')
-    expect(by('memory:s1').reason).toBe('Keep this?')
-    expect(by('memory:s1').timestamp).toBe('2026-10-01T09:00:00+00:00')
-    expect(by('memory:s1').destination).toEqual({ kind: 'chat', chatId: 'pass-s1' })
-    expect(by('memory:s2').urgency).toBe('failure')
-    expect(by('memory:s2').reason).toBe('The memory update needs attention')
-    expect(by('memory:s3').reason).toBe('The memory update is waiting for your answer or approval')
-    expect(inbox.sections[0].rows.map((r) => r.key)).toEqual(['memory:s3', 'memory:s1', 'memory:s2'])
-    expect(inbox.rows.some((r) => r.key === 'chat:pass-s1')).toBe(false)
-  })
-
   it('count_is_distinct_rows_with_new_sources', () => {
     const inbox = inboxWith({
       reviewTasks: [{ taskId: 't', title: 'T' }],
-      memoryInsights: [insight({ sourceChatId: 's' })],
       chats: [chat({ chatId: 'u', unread: true })],
     })
-    expect(inbox.count).toBe(3)
-    expect(inbox.rows).toHaveLength(3)
+    expect(inbox.count).toBe(2)
+    expect(inbox.rows).toHaveLength(2)
   })
 
   it('keys_use_shared_for_empty_workspace', () => {

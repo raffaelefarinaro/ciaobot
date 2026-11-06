@@ -92,6 +92,7 @@ function makeQuestion() {
 
 async function mountPanel() {
   const wrapper = mount(ChatPanel, {
+      props: { chatId: CHAT_ID },
     global: {
       stubs: { Teleport: true },
     },

@@ -7,6 +7,7 @@ import contextlib
 import errno
 import functools
 import hashlib
+import html
 import json
 import logging
 import math
@@ -131,6 +132,11 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
+from ciao.web.memory_pass import (
+    MemoryProjectRefused,
+    is_memory_pass_chat,
+    is_memory_pass_project,
+)
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
@@ -789,6 +795,14 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 # primary workspace.
                 logger.exception("Could not archive every chat of workspace %s", name)
                 return _roll_back(f"its chats could not be archived ({exc})")
+        # The chats above are archived after the folder moved, so an archive
+        # chat that wrote a transcript recreated ``<install>/<name>/Logs``.
+        # Those files go into the archive before anything else can fail.
+        try:
+            workspace_archive.carry_late_transcripts(config, target, archived)
+        except OSError:
+            logger.exception("Could not move the late transcripts of %s into its archive", name)
+            return _roll_back("its transcripts could not be moved into the archive")
         # Archiving destroys the workspace's webhook verifiers: a revoked
         # trigger cannot be re-enabled until it is rotated, so a restored
         # workspace name reactivates no old credential. Revoked before the
@@ -2338,6 +2352,16 @@ async def create_project_chat(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     body = await request.json()
+    helper = body.get("helper")
+    if isinstance(helper, dict) and helper.get("kind") == "memory_pass":
+        # A pass helper marks the chat as the engine's own housekeeping, and
+        # that is what silences its notifications. The helper is the engine's
+        # to write: a client that could set it could silence any chat it
+        # created. Read on the raw kind, so a malformed forgery is refused
+        # as well.
+        return JSONResponse(
+            {"error": "a memory pass helper is the engine's own"}, status_code=400
+        )
     try:
         chat = pcm.create_chat(
             project_id,
@@ -2345,8 +2369,13 @@ async def create_project_chat(request: Request) -> JSONResponse:
             model=body.get("model"),
             mode=body.get("mode"),
             provider=body.get("provider"),
-            helper=body.get("helper"),
+            helper=helper,
         )
+    except MemoryProjectRefused as exc:
+        # The Memory project is app-owned: it holds the engine's own memory
+        # passes, and an ordinary chat there would be silenced by the
+        # project-kind half of the pass predicate without being one.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(chat.to_dict(local=True), status_code=201)
@@ -3855,6 +3884,48 @@ _EMBEDDED_PREVIEW_CSP = "; ".join(
     ]
 )
 
+# Error responses from workspace_html are rendered inside the same Preview
+# iframe as the artifact, so they must be frameable, and must carry no script.
+# This is a separate constant from _ARTIFACT_CSP on purpose.
+_ARTIFACT_ERROR_CSP = "; ".join(
+    [
+        "default-src 'none'",
+        "style-src 'unsafe-inline'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self'",
+        "sandbox",
+    ]
+)
+
+_ARTIFACT_ERROR_MESSAGES: dict[int, str] = {
+    400: "No file path was given.",
+    403: "This file is outside the folders Ciaobot can show.",
+    404: "File not found.",
+    415: "Only .html and .htm files can be previewed.",
+}
+
+
+def _artifact_error_page(status_code: int, message: str) -> Response:
+    """Frameable HTML error for the artifact Preview iframe (same status)."""
+    body = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        "<title>Preview unavailable</title>"
+        "<style>body{font-family:system-ui,sans-serif;font-size:14px;"
+        "color:#9aa0c0;background:transparent;padding:16px;margin:0}</style>"
+        f"</head><body><p>{html.escape(message)}</p></body></html>"
+    )
+    return Response(
+        content=body,
+        status_code=status_code,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": _ARTIFACT_ERROR_CSP,
+            "X-Frame-Options": "SAMEORIGIN",
+            "Cache-Control": "no-cache",
+        },
+    )
+
 
 async def workspace_html(request: Request) -> Response:
     """Serve a workspace ``.html`` file as a renderable page, not as source.
@@ -3872,9 +3943,10 @@ async def workspace_html(request: Request) -> Response:
 
     The size cap is deliberately the same 2 MB as the text viewer and the
     snapshot store, so there is no state where a file renders but has no
-    history, or has history but refuses to render. Over the cap the panel
-    shows a 413 and the user opens the file in a real browser instead
-    (``/api/workspace-open``).
+    history, or has history but refuses to render. Over the cap, and on every
+    other error, the response is a small frameable HTML page
+    (``_artifact_error_page``) with the same status, so the Preview frame shows
+    why instead of the browser's blocked-frame page.
 
     Fuzzy resolution is kept for parity with the Code view, so the same path
     string that shows the source also renders the page. Note that this means
@@ -3886,13 +3958,23 @@ async def workspace_html(request: Request) -> Response:
     roots = _allowed_roots(config)
     result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
-        return result
+        return _artifact_error_page(
+            result.status_code,
+            _ARTIFACT_ERROR_MESSAGES.get(
+                result.status_code, f"Preview failed (HTTP {result.status_code})."
+            ),
+        )
     resolved = result
 
     if resolved.suffix.lower() not in _WORKSPACE_HTML_EXTS:
-        return JSONResponse({"error": "unsupported type"}, status_code=415)
-    if resolved.stat().st_size > _WORKSPACE_FILE_MAX_BYTES:
-        return JSONResponse({"error": "file too large"}, status_code=413)
+        return _artifact_error_page(415, _ARTIFACT_ERROR_MESSAGES[415])
+    size = resolved.stat().st_size
+    if size > _WORKSPACE_FILE_MAX_BYTES:
+        return _artifact_error_page(
+            413,
+            f"This page is {size / (1024 * 1024):.1f} MB, over the 2 MB preview limit. "
+            "Use the ⋯ menu → Download to open it in your browser.",
+        )
 
     # The bridge script is what makes the rendered page commentable: it watches
     # selections inside the sandboxed frame and posts anchors to the panel via
@@ -4217,23 +4299,8 @@ async def vault_backlinks(request: Request) -> JSONResponse:
 _MAP_ENTRY_FINDINGS = 3
 
 
-async def vault_graph(request: Request) -> JSONResponse:
-    """Return the vault as a note graph for the Memory Map page.
-
-    Nodes are notes with frontmatter (or an inferred type); edges come from
-    both frontmatter ``related:``/``relatedTo:`` and body markdown links,
-    already merged and resolved to real paths by ``vault_index.scan_vault``.
-    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
-    edges are dropped rather than left dangling.
-
-    Each node also carries ``entry_coverage``: what
-    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
-    from the node's own age. A note is not the unit a person keeps current, and
-    a map that could only say "this note is current" would show a re-stamped
-    person note as clean while it held an address from 2019.
-    """
-    config = request.app.state.config
-    workspace = request.query_params.get("workspace", "").strip() or None
+def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
+    """Everything vault_graph returns, built off the event loop."""
     # Every vault in the install, which is ONE shared vault before the
     # re-rooting and one per agent root after it. Scanning `config.vault_root`
     # returned zero notes on a migrated install, so the whole map went blank.
@@ -4246,10 +4313,10 @@ async def vault_graph(request: Request) -> JSONResponse:
     # is why the `filter_entries` scoping stays where it is either way.
     in_scope = [t for t in targets if workspace and t[1] == workspace]
     scan_list = in_scope or targets
-    # Reads and parses every markdown file, so run it off the event loop or a
-    # large vault stalls other requests, including the 5s chat-socket keepalives
-    # (see chat_messages above for the same fix).
-    entries, absolute = await asyncio.to_thread(scan_targets, scan_list)
+    # Reads and parses every markdown file. The caller threads the whole
+    # payload, so this scan runs off the event loop with the rest of it (a
+    # large vault otherwise stalls the 5s chat-socket keepalives too).
+    entries, absolute = scan_targets(scan_list)
     if in_scope:
         # The picker lists every workspace, and this scan only saw one. Taken
         # from the targets whose vault exists, which is the same set the full
@@ -4265,21 +4332,27 @@ async def vault_graph(request: Request) -> JSONResponse:
     # most recently, which is a far more useful entry point than "whatever the
     # biggest hub is". Entry carries no timestamp, so stat the files here; it is
     # one stat per note against files scan_vault has just read anyway.
+    mtimes: dict[str, float] = {}
+
     def _mtime(rel: str) -> float:
         # Resolved through the scan's own map. Rendered paths are no longer a
         # fixed offset from one vault root, so stripping a `memory-vault/`
         # prefix and joining resolved to nothing on a migrated install and every
         # note reported mtime 0 — which silently broke the map's "most recently
         # touched note" entry point rather than failing loudly.
+        if rel in mtimes:
+            return mtimes[rel]
         target = absolute.get(rel)
         if target is None:
+            mtimes[rel] = 0.0
             return 0.0
         try:
-            return target.stat().st_mtime
+            mtimes[rel] = target.stat().st_mtime
         except OSError:
             # A note indexed but unreadable (race with a delete, broken
             # symlink) must not fail the whole graph request.
-            return 0.0
+            mtimes[rel] = 0.0
+        return mtimes[rel]
 
     # Aging uses the one predicate the audit and the review queue's
     # `unverified` signal also use, so the map's "unchecked" count cannot
@@ -4379,6 +4452,9 @@ async def vault_graph(request: Request) -> JSONResponse:
         """
         from ciao.memory_audit import note_entry_coverage
 
+        # The queue never lists this note, so its entries are not worth parsing.
+        if never_queued(e.path_key):
+            return None
         target = absolute.get(e.path_key)
         if target is None:
             return None
@@ -4403,8 +4479,6 @@ async def vault_graph(request: Request) -> JSONResponse:
             workspace=str(e.workspace or ""),
             today=current_date,
         )
-        if never_queued(e.path_key):
-            return None
         return {
             "entries": coverage.entries,
             "checked": coverage.checked,
@@ -4550,12 +4624,35 @@ async def vault_graph(request: Request) -> JSONResponse:
                 continue
             seen.add(key)
             edges.append({"source": key[0], "target": key[1]})
-    return JSONResponse({
+    return {
         "workspace": workspace or "all",
         "workspaces": workspaces,
         "nodes": nodes,
         "edges": edges,
-    })
+    }
+
+
+async def vault_graph(request: Request) -> JSONResponse:
+    """Return the vault as a note graph for the Memory Map page.
+
+    Nodes are notes with frontmatter (or an inferred type); edges come from
+    both frontmatter ``related:``/``relatedTo:`` and body markdown links,
+    already merged and resolved to real paths by ``vault_index.scan_vault``.
+    Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
+    edges are dropped rather than left dangling.
+
+    Each node also carries ``entry_coverage``: what
+    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
+    from the node's own age. A note is not the unit a person keeps current, and
+    a map that could only say "this note is current" would show a re-stamped
+    person note as clean while it held an address from 2019.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip() or None
+    # Scanning, parsing every note body for entry coverage and reading the
+    # check state are all synchronous file and CPU work; on the loop they
+    # stalled every other request for over a second on a real vault.
+    return JSONResponse(await asyncio.to_thread(_vault_graph_payload, config, workspace))
 
 
 async def vault_review(request: Request) -> JSONResponse:
@@ -5522,6 +5619,28 @@ async def list_schedules(request: Request) -> JSONResponse:
     return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
 
 
+def _schedule_target_refusal(
+    pcm, project_id: str | None, chat_id: str | None
+) -> str:
+    """Why a schedule cannot run in this target, or '' when it can.
+
+    The Memory project is app-owned: it holds the engine's own memory passes,
+    and a routine run there would put an ordinary chat in a project where
+    every chat is silenced. A memory pass is not a target either — its turn is
+    the app's own, and a run posted into it never reaches the owner.
+    """
+    if project_id:
+        if is_memory_pass_project(pcm.get_project(project_id)):
+            return "the Memory project holds the engine's own memory passes"
+    if chat_id:
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and is_memory_pass_chat(
+            chat, pcm.get_project(chat.project_id)
+        ):
+            return "a memory pass is not a target for a schedule"
+    return ""
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
@@ -5529,6 +5648,10 @@ async def create_schedule(request: Request) -> JSONResponse:
 
     web_chat_id = body.get("web_chat_id")
     web_project_id = body.get("web_project_id")
+
+    refusal = _schedule_target_refusal(pcm, web_project_id, web_chat_id)
+    if refusal:
+        return JSONResponse({"error": refusal}, status_code=400)
 
     # Persist only explicit overrides. Empty model/provider values mean
     # "inherit the selected workspace" and are resolved afresh at dispatch
@@ -5665,14 +5788,32 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     """Trigger a schedule immediately."""
     schedule_id = request.path_params["schedule_id"]
     sm = request.app.state.schedule_manager
+    # A routine whose target the app will not run in is refused here, with the
+    # reason, rather than silently doing nothing: the run would otherwise be
+    # skipped by the dispatch and the click would look like it worked.
+    entry = sm._store.get(schedule_id)
+    if entry is not None:
+        refusal = request.app.state.project_chat_manager.schedule_target_refusal(entry)
+        if refusal:
+            return JSONResponse({"error": refusal}, status_code=400)
     try:
         result = await sm.dispatch_now(schedule_id)
+    except MemoryProjectRefused as exc:
+        # The target resolved to the app's own memory machinery, which the
+        # app will not run a routine in. The schedule exists: say why.
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except ValueError:
         return JSONResponse({"error": "not found"}, status_code=404)
     except RuntimeError as exc:
         if "paused" in str(exc).lower():
             return JSONResponse({"error": str(exc)}, status_code=409)
         raise
+    if result.get("status") == "refused":
+        # The scheduler asked the engine and the engine refused the target.
+        return JSONResponse(
+            {"error": result.get("error") or "the app will not run this routine here"},
+            status_code=400,
+        )
     # Interval entries refuse rather than queue: a manual run into a chat that
     # is already streaming would stack a second prompt behind the live turn.
     if result.get("status") == "busy":
@@ -5725,6 +5866,19 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    # The target this update asks for, checked before anything is written: the
+    # app will not run a routine in the Memory project or inside a pass, and a
+    # half-applied update would leave the entry pointing somewhere else. An
+    # update that does not touch the target is always allowed, so an existing
+    # invalid routine can still be paused, renamed or disabled.
+    if "web_project_id" in body or "web_chat_id" in body:
+        refusal = _schedule_target_refusal(
+            request.app.state.project_chat_manager,
+            body.get("web_project_id") if "web_project_id" in body else entry.web_project_id,
+            body.get("web_chat_id") if "web_chat_id" in body else entry.web_chat_id,
+        )
+        if refusal:
+            return JSONResponse({"error": refusal}, status_code=400)
     timing_fields: set[str] = set()
     if entry.scope == "system":
         try:
@@ -6290,6 +6444,10 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             continue
         project = pcm.get_project(chat.project_id)
         if project is None:
+            continue
+        if is_memory_pass_chat(chat, project):
+            # The menu bar is a notification surface: a memory pass is app
+            # housekeeping and must not reach its count or rows, blocked or not.
             continue
         activity = chat.last_activity_at or ""
         read = chat.last_read_at or ""
@@ -8604,7 +8762,8 @@ def _attach_note_edit_detail(
         }
 
 
-# The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
+# The archive tree is `<chats root>/<chat-id>/<provider>/<stem>.md` for every root
+# in `config.chats_roots()`, and a
 # proposal's `source` is that stem. Resolving it means listing that fixed depth,
 # which is why the result is cached: a History page asks for up to 1000 rows and
 # would otherwise re-list the tree for each one.
@@ -8614,24 +8773,26 @@ _SOURCE_INDEX_TTL_S = 60.0
 
 def _source_index(config: Any) -> dict[str, str]:
     """Archive stem → absolute transcript path, cached briefly."""
-    root = Path(config.logs_root) / "Chats"
-    key = str(root)
+    roots = [Path(r) for r in config.chats_roots()]
+    key = "|".join(str(r) for r in roots)
     cached = _SOURCE_INDEX.get(key)
     now = time.monotonic()
     if cached is not None and now - cached[0] < _SOURCE_INDEX_TTL_S:
         return cached[1]
     index: dict[str, str] = {}
-    try:
-        for chat_dir in root.iterdir():
-            if not chat_dir.is_dir():
-                continue
-            for provider_dir in chat_dir.iterdir():
-                if not provider_dir.is_dir():
+    for root in roots:
+        # A missing root must not wipe the others, so each root is walked alone.
+        try:
+            for chat_dir in root.iterdir():
+                if not chat_dir.is_dir():
                     continue
-                for transcript in provider_dir.glob("*.md"):
-                    index.setdefault(transcript.stem, str(transcript))
-    except OSError:
-        index = {}
+                for provider_dir in chat_dir.iterdir():
+                    if not provider_dir.is_dir():
+                        continue
+                    for transcript in provider_dir.glob("*.md"):
+                        index.setdefault(transcript.stem, str(transcript))
+        except OSError:
+            continue
     _SOURCE_INDEX[key] = (now, index)
     return index
 

@@ -201,6 +201,20 @@ describe('permission card keyboard shortcuts', () => {
     wrapper.unmount()
   })
 
+  test('typing 2 in the focused composer never approves a permission', async () => {
+    const { wrapper, store } = await mountLayout({ permissions: [makePermission()] })
+    const respondPermission = vi.spyOn(store, 'respondPermission')
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
+    const composer = wrapper.get('textarea.chat-input')
+    ;(composer.element as HTMLTextAreaElement).focus()
+    const event = pressKey('2', composer.element)
+    await nextTick()
+    expect(event.defaultPrevented).toBe(false)
+    expect(respondPermission).not.toHaveBeenCalled()
+    expect(switchWorkspace).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   test('deny and approve report the right verdict through respondPermission', async () => {
     const respondPermission = vi.spyOn(useProjectStore(), 'respondPermission')
     const { wrapper } = await mountLayout({ permissions: [makePermission()] })
@@ -217,7 +231,9 @@ describe('permission card keyboard shortcuts', () => {
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace')
 
     expect(wrapper.find('.permission-card').exists()).toBe(false)
-    const event = pressKey('2')
+    expect(document.activeElement?.tagName).toBe('TEXTAREA')
+    ;(document.activeElement as HTMLElement).blur()
+    const event = pressKey('2', document.body)
     await flushPromises()
 
     expect(event.defaultPrevented).toBe(true)
@@ -227,15 +243,25 @@ describe('permission card keyboard shortcuts', () => {
   })
 
   test('a question card keeps first refusal on 1-9 over a permission card', async () => {
-    // Not exercised here: the question shortcut path is covered by
-    // ChatPanelQuestion.test.ts. This guard just documents the precedence —
-    // both cards open at once, the question wins the digits.
-    const respondPermission = vi.spyOn(useProjectStore(), 'respondPermission')
-    const { wrapper } = await mountLayout({ permissions: [makePermission()] })
-
-    pressKey('1')
+    const { wrapper, store } = await mountLayout({ permissions: [makePermission()] })
+    const respondPermission = vi.spyOn(store, 'respondPermission')
+    store.activeQuestions = { [CHAT_ID]: [{
+      id: 'q0', question: 'Choose?', header: 'Choice', multiSelect: false,
+      allowOther: false, isSecret: false, requestId: '', options: [{ label: 'First' }],
+    }] }
     await nextTick()
-    // With no question open the permission card handles it.
+    await wrapper.get('.dock-strip').trigger('click')
+    expect(wrapper.find('.question-card').exists()).toBe(true)
+    ;(document.activeElement as HTMLElement).blur()
+    pressKey('1', document.body)
+    await nextTick()
+    expect(wrapper.get('.question-option').classes()).toContain('selected')
+    expect(respondPermission).not.toHaveBeenCalled()
+
+    store.activeQuestions = {}
+    await nextTick()
+    pressKey('1', document.body)
+    await nextTick()
     expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied', '')
 
     wrapper.unmount()

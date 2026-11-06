@@ -411,30 +411,20 @@ html.keyboard-open {
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Keep scroll affordances visible. Quiet by default, stronger at the edges of
-   bounded data regions, but never mistaken for disabled content. */
+/* Scrollbars are hidden everywhere for a clean surface; every region still
+   scrolls by wheel, trackpad, touch and keyboard. */
 * {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
-  -ms-overflow-style: scrollbar;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+/* WebKit (Safari, the macOS app's web view) can keep drawing a classic scrollbar
+   when only `display: none` is set; a zero-size, transparent bar is hidden in
+   every engine. */
 *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-*::-webkit-scrollbar-track {
+  display: none;
+  width: 0;
+  height: 0;
   background: transparent;
-}
-*::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border: 2px solid transparent;
-  border-radius: var(--radius-pill);
-  background-clip: padding-box;
-}
-*::-webkit-scrollbar-thumb:hover {
-  background: var(--fg3);
-  border: 2px solid transparent;
-  background-clip: padding-box;
 }
 
 html, body {

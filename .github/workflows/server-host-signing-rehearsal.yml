@@ -99,7 +99,7 @@ jobs:
           node-version: "22"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Build PWA assets
         working-directory: web

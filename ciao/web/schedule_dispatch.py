@@ -39,6 +39,11 @@ from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
 from ciao.web.chat_broker import ChatStream, EventsHub
+from ciao.web.memory_pass import (
+    MemoryProjectRefused,
+    is_memory_pass_chat,
+    is_memory_pass_project,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
@@ -133,6 +138,8 @@ class ScheduleDispatchHost(Protocol):
     ) -> ChatInfo: ...
 
     def schedule_default_provider(self, project_id: str | None) -> str: ...
+
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str: ...
 
     def prepare_schedule_chat(
         self,
@@ -483,6 +490,15 @@ class ScheduleDispatcher:
             if project is None:
                 logger.warning("Schedule target project %s not found, skipping", web_project_id)
                 return None
+            if is_memory_pass_project(project):
+                # The Memory project is app-owned: it holds the engine's own
+                # memory passes, and a routine run there would put an ordinary
+                # chat in a project where every chat is silenced. Refused
+                # rather than skipped: the caller has to record the refusal
+                # (a run that never happened is not a run).
+                raise MemoryProjectRefused(
+                    "the Memory project holds the engine's own memory passes"
+                )
             # Prefer the routine's own name ("Workspace care") over a
             # truncated prompt sentence, so schedule chats read cleanly instead
             # of "Run a structural hygiene pass on the... - Jul 15".
@@ -508,6 +524,12 @@ class ScheduleDispatcher:
             return chat.chat_id
         if web_chat_id:
             target_chat = self._host._chats.get(web_chat_id)
+            if target_chat is not None and is_memory_pass_chat(
+                target_chat, self._host._projects.get(target_chat.project_id)
+            ):
+                # A pass is the app's own turn: a routine posted into it would
+                # run under the pass's restrictions and never reach the owner.
+                raise MemoryProjectRefused("a memory pass is not a target for a schedule")
             if target_chat is None or target_chat.archived:
                 replacement = self._host._rehome_interval_chat(entry, prompt)
                 if replacement is None:
@@ -565,6 +587,14 @@ class ScheduleDispatcher:
         logger.warning("Schedule has no web target, skipping")
         return None
 
+    def _target_refusal(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is the app's memory machinery, or ''.
+
+        The manager owns the rule: it knows the projects and the chats, and it
+        is the same answer the scheduler gets before it dispatches.
+        """
+        return self._host.schedule_target_refusal(entry)
+
     def _supersede_earlier_runs(self, chat: ChatInfo) -> None:
         """Retire the earlier runs' retries and errors when a routine runs again.
 
@@ -618,6 +648,16 @@ class ScheduleDispatcher:
         command_workspace = ""
         command_extra: dict[str, object] = {}
         command_printed = False
+        # The target is checked before the command runs: a routine the app will
+        # not dispatch into must not run its command either, and a quiet command
+        # would otherwise report success for work that never happened.
+        refusal = self._target_refusal(entry)
+        if refusal:
+            logger.warning(
+                "Schedule %s cannot run in its target: %s", _sched_schedule_id, refusal
+            )
+            self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, "error")
+            return {"status": "error"}
         if command_requested:
             command_cwd, command_env = self._host.schedule_command_env(entry)
             command_workspace = command_env.get("CIAO_ACTIVE_WORKSPACE", "")

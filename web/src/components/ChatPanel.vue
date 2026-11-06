@@ -14,13 +14,13 @@
          shortcut available on every other view. -->
     <PaneHeader
       :brand="false"
-      :active-bg-agents="store.activeBackgroundAgents"
+      :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
     >
       <template #title>
         <div class="header-left">
           <div class="header-breadcrumb">
-            <div class="chat-title-row">
+            <div class="chat-title-row" :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }">
               <!-- Same 18px stroke icon in the same 30px box as the trailing header
                    actions, so the close control reads as one of them. It used to be
                    a `&times;` character at 20px, which is a different size from
@@ -30,7 +30,7 @@
                    project on a second line under the title, a close button outside
                    the row centred itself against both lines and drifted below the
                    title it belongs to. -->
-              <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
+              <button class="btn-icon close-btn" @click="$emit('close')" :title="beside ? 'Close side chat' : 'Close chat'" :aria-label="beside ? 'Close side chat' : 'Close chat'">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <line x1="18" y1="6" x2="6" y2="18"/>
                   <line x1="6" y1="6" x2="18" y2="18"/>
@@ -45,6 +45,18 @@
                 @blur="saveTitle"
                 @click.stop
                 autofocus
+              />
+              <ChatTitleRail
+                v-else-if="titleRailOn"
+                ref="titleRailRef"
+                class="title-rail"
+                :items="titleRail.items.value"
+                :current-id="chat.chat_id"
+                @select="titleRail.select"
+                @rename="startEditTitle"
+                @lean="railLean = $event"
+                @pull="emit('pull', $event)"
+                @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
               />
               <!-- While the engine names a brand new chat there is no title to
                    show yet, and the placeholder the engine hands over ("New
@@ -65,14 +77,7 @@
                 @dblclick.stop="startEditTitle"
                 @click.stop
               >{{ chat.title }}</span>
-              <button
-                v-if="codeModeOn && !chat.archived && !editingTitle"
-                type="button"
-                class="chat-code-badge"
-                aria-label="Code mode is on. Show repository details"
-                title="Code mode is on"
-                @click.stop="showDetails('repo')"
-              ><span class="chat-code-badge-tag" aria-hidden="true">›_</span></button>
+              <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
             </div>
           </div>
         </div>
@@ -87,7 +92,7 @@
           type="button"
           class="btn-icon work-inspector-trigger work-inspector-trigger--header"
           :aria-expanded="inspectorOpen"
-          aria-controls="chat-work-rail"
+          :aria-controls="domId('chat-work-rail')"
           aria-label="Show chat details"
           title="Show chat details"
           @click="toggleWorkDetails"
@@ -110,6 +115,9 @@
         </button>
       </template>
     </PaneHeader>
+    <!-- Narrow panes put the shared-pin opener here, under the header, so a pinned
+         file never moves the header (it used to sit above it, under the status bar). -->
+    <slot name="below-header" />
 
     <!-- Body: one page grid. The left column holds everything that belongs to
          the conversation (context bar, transcript, dock, composer) so they all
@@ -124,14 +132,19 @@
       type="button"
       class="btn-icon work-inspector-trigger"
       :aria-expanded="false"
-      aria-controls="chat-work-rail"
+      :aria-controls="domId('chat-work-rail')"
       aria-label="Show chat details"
       title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
-    <div class="chat-column">
+    <div
+      class="chat-column"
+      :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
+      :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
+      @animationend="railArrival = 0"
+    >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
          as a conversation that began mid-thought; this names the conversation
@@ -144,7 +157,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && transcriptEmpty && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && transcriptEmpty && !inputText.trim() }" ref="messagesEl" :aria-busy="view.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <!-- Selecting a message (click or Enter) outlines it and shows its
          actions, leaving the rest of the transcript readable; clicking the
          message again or pressing Esc puts it back. -->
@@ -188,9 +201,9 @@
       <section
         v-if="!blockingHistoryLoad && transcriptEmpty && !inputText.trim()"
         class="chat-empty-state"
-        aria-labelledby="chat-empty-title"
+        :aria-labelledby="domId('chat-empty-title')"
       >
-        <h2 id="chat-empty-title">Start with a request</h2>
+        <h2 :id="domId('chat-empty-title')">Start with a request</h2>
         <p class="chat-empty-context">
           This chat gets {{ project?.name ? `${project.name}'s` : "the project's" }} context.
           <button
@@ -220,7 +233,7 @@
           :subs="item.subs"
           :outputs="item.outputs"
           :outputs-open="Boolean(openOutputs[i])"
-          :outputs-id="`outputs-${i}`"
+          :outputs-id="domId(`outputs-${i}`)"
           :open="Boolean(openTraces[i])"
           :chat-id="chat.chat_id"
           :thinking-expanded="thinkingExpanded"
@@ -276,7 +289,13 @@
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
                   </a>
                 </div>
-                <div v-html="renderUserMessage(item.msg.content)"></div>
+                <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
+                  <li v-for="(f, fi) in userAttachments(item.msg.content)" :key="fi" class="message-file" :title="f.path || f.name">
+                    <AppIcon class="message-file-icon" name="doc" :size="14" />
+                    <span class="message-file-name">{{ f.name }}</span>
+                  </li>
+                </ul>
+                <div v-html="renderUserMessage(userText(item.msg.content))"></div>
               </div>
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
@@ -349,7 +368,7 @@
                 <button
                   v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
                   class="retry-btn fix-btn"
-                  :disabled="store.isStreaming"
+                  :disabled="view.isStreaming"
                   @click="openRecoveryPicker(i)"
                 >Switch model</button>
                 <button
@@ -362,7 +381,7 @@
                 v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
                 :provider="chat.provider"
                 action-label="Retry"
-                :action-disabled="store.isStreaming"
+                :action-disabled="view.isStreaming"
                 @action="retryFromError(i)"
               />
             </template>
@@ -388,7 +407,7 @@
                   type="button"
                   class="outputs-summary"
                   :aria-expanded="Boolean(openOutputs[i])"
-                  :aria-controls="`outputs-${i}`"
+                  :aria-controls="domId(`outputs-${i}`)"
                   @click.stop="toggleOutputs(i)"
                 >
                   <span class="outputs-chevron" aria-hidden="true">{{ openOutputs[i] ? '▾' : '▸' }}</span>
@@ -396,7 +415,7 @@
                   <span class="outputs-count">&middot; {{ item.outputs.length }} {{ item.outputs.length === 1 ? 'file' : 'files' }}</span>
                   <span class="sr-only">, {{ openOutputs[i] ? 'expanded' : 'collapsed' }}</span>
                 </button>
-                <ul v-if="openOutputs[i]" :id="`outputs-${i}`" class="outputs-list">
+                <ul v-if="openOutputs[i]" :id="domId(`outputs-${i}`)" class="outputs-list">
                   <li v-for="(f, fi) in item.outputs" :key="fi" class="outputs-row">
                     <button
                       type="button"
@@ -475,7 +494,7 @@
       </template>
       </template>
 
-      <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
+      <div v-if="chat.retry?.status === 'pending' && !view.isStreaming" class="retry-card">
         <div class="retry-card-main">
           <AppIcon class="retry-card-icon" name="clock" :size="18" />
           <div>
@@ -487,8 +506,8 @@
           </div>
         </div>
         <div class="retry-card-actions">
-          <button class="btn-small" :disabled="store.isStreaming" @click="openRecoveryPicker(null)">Continue with...</button>
-          <button class="btn-small" :disabled="store.isStreaming" @click="tryRetryNow">Try now</button>
+          <button class="btn-small" :disabled="view.isStreaming" @click="openRecoveryPicker(null)">Continue with...</button>
+          <button class="btn-small" :disabled="view.isStreaming" @click="tryRetryNow">Try now</button>
           <button class="btn-small" @click="stopRetry">Stop trying</button>
         </div>
         <ProviderSignInHint
@@ -496,7 +515,7 @@
           class="retry-card-hint"
           :provider="chat.provider"
           action-label="Try now"
-          :action-disabled="store.isStreaming"
+          :action-disabled="view.isStreaming"
           @action="tryRetryNow"
         />
       </div>
@@ -507,7 +526,7 @@
            only appears after the result event. -->
       <!-- The live turn starts as one expandable activity line. Full steps stay
            in its timeline; the answer bubble appears only after the result. -->
-      <div v-if="store.isStreaming" class="trace-block live" :class="{ open: liveTraceOpen }">
+      <div v-if="view.isStreaming" class="trace-block live" :class="{ open: liveTraceOpen }">
         <button
           type="button"
           class="trace-summary"
@@ -535,13 +554,13 @@
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
-          v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
+          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking || liveSubagents.length)"
           ref="liveTraceBodyEl"
           class="trace-body"
           @click="onLiveTraceBodyClick"
           @scroll.passive="onLiveBodyScroll"
         >
-          <template v-for="(entry, j) in store.currentTimeline" :key="j">
+          <template v-for="(entry, j) in view.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-step trace-step--tool">
               <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M11 16h8" /></svg></span>
               <div class="trace-tools">
@@ -597,7 +616,7 @@
               <div class="trace-text" v-html="renderMarkdown(entry.content)"></div>
             </div>
           </template>
-          <div v-if="store.currentStreamingThinking" class="trace-step trace-step--thought trace-step--now">
+          <div v-if="view.currentStreamingThinking" class="trace-step trace-step--thought trace-step--now">
             <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z" /></svg></span>
             <div class="thinking-block">
               <button
@@ -608,12 +627,12 @@
               >
                 <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
               </button>
-              <div v-if="thinkingExpanded" class="trace-text trace-thinking trace-streaming" v-html="renderMarkdown(store.currentStreamingThinking)"></div>
+              <div v-if="thinkingExpanded" class="trace-text trace-thinking trace-streaming" v-html="renderMarkdown(view.currentStreamingThinking)"></div>
             </div>
           </div>
-          <div v-if="store.currentStreamingText" class="trace-step trace-step--note trace-step--now">
+          <div v-if="view.currentStreamingText" class="trace-step trace-step--note trace-step--now">
             <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg></span>
-            <div class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
+            <div class="trace-text trace-streaming" v-html="renderMarkdown(view.currentStreamingText)"></div>
           </div>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <div v-if="liveSubagents.length" class="trace-step trace-step--subagent">
@@ -669,7 +688,7 @@
            a highlight doesn't re-render the transcript; see the component. -->
       <ChatCommentPopover
         ref="commentPopover"
-        :comments="store.pendingChatComments"
+        :comments="view.pendingChatComments"
         :draft-id="DRAFT_COMMENT_ID"
         @edit="openEditFromChatPopover"
         @delete="deleteChatComment"
@@ -869,19 +888,24 @@
       :offer="terminalOffer"
     />
 
+    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
+         sign-in, ...). Above the queue and the composer, like the suggested
+         command. Keyed by id: a replaced action is a new card. -->
+    <NeedsYouCard v-for="action in needsYouActions" :key="action.id" :chat-id="chat.chat_id" :action="action" />
+
     <!-- Queued messages (sent while a response was already streaming). -->
-    <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
+    <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <div v-if="steerAllIds.length >= 2" class="queued-head">
-        <span class="queued-count">{{ store.currentQueued.length }} queued</span>
+        <span class="queued-count">{{ view.currentQueued.length }} queued</span>
         <button
           type="button"
           class="queued-steer-all"
-          :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
+          :title="view.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
           @click="steerQueued($event, steerAllIds, 'steer')"
-        >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+        >{{ view.isStreaming ? 'Steer all' : 'Send all now' }}</button>
       </div>
       <div
-        v-for="(q, i) in store.currentQueued"
+        v-for="(q, i) in view.currentQueued"
         :key="q.id || i"
         class="queued-chip"
         tabindex="-1"
@@ -894,20 +918,11 @@
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
-          <template v-if="editingQueueId === q.id">
-            <textarea
-              v-model="editingQueueText"
-              class="queued-edit-input"
-              rows="2"
-              @keydown.enter.prevent="saveEditQueue(chat.chat_id, q.id)"
-              @keydown.esc="cancelEditQueue"
-            />
-          </template>
-          <span v-else class="queued-text">{{ q.text }}</span>
+          <span class="queued-text">{{ queuedDisplayText(q.text) }}</span>
         </div>
         <div v-if="!q.steering" class="queued-controls">
           <div
-            v-if="store.isStreaming && !q.waiting"
+            v-if="view.isStreaming && !q.waiting"
             class="queued-mode"
             role="group"
             :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
@@ -930,12 +945,12 @@
           <span v-else class="queued-label">Waiting</span>
           <div class="queued-actions">
             <button
-              v-if="q.waiting || !store.isStreaming"
+              v-if="q.waiting || !view.isStreaming"
               type="button"
               class="queued-send-now"
-              :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
+              :title="view.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
               @click="steerQueued($event, [q.id], 'steer')"
-            >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
+            >{{ view.isStreaming ? 'Steer' : 'Send now' }}</button>
             <button
               class="queued-action"
               :disabled="i === 0"
@@ -945,22 +960,17 @@
             ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
             <button
               class="queued-action"
-              :disabled="i === store.currentQueued.length - 1"
+              :disabled="i === view.currentQueued.length - 1"
               title="Move down"
               aria-label="Move down"
               @click="store.reorderQueued(chat.chat_id, i, i + 1)"
             ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
             <button
-              v-if="editingQueueId !== q.id"
               class="queued-action"
               title="Edit"
               aria-label="Edit queued message"
               @click="startEditQueue(q)"
             ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
-            <template v-else>
-              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
-              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-            </template>
             <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           </div>
         </div>
@@ -970,6 +980,7 @@
          appears already in the Steering state is announced by this text
          changing, not by a new element. -->
     <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
+    <p v-if="queueEditNotice" class="queue-edit-notice steer-notice" role="status">{{ queueEditNotice }}</p>
     <!-- Outside the queue block: the fallback reply usually empties it, and a
          collapsed dock hides it, but the notice must still be read. -->
     <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
@@ -1074,17 +1085,23 @@
                lifecycle (staged here, sent with the next message, cleared on send),
                so they share one row above the input. A chip is a summary; clicking a
                chat-comment chip opens an edit popover anchored to it. -->
+          <ComposerUploadProgress :uploads="uploads" />
           <div
-            v-if="store.pendingImages.length || store.pendingChatComments.length || store.pendingComments.length"
+            v-if="view.pendingImages.length || view.pendingFiles.length || view.pendingChatComments.length || view.pendingComments.length"
             class="pending-attachments"
           >
-            <span v-for="(ref, i) in store.pendingImages" :key="`img-${ref}`" class="image-preview">
+            <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="image-preview">
               <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
               <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
               <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
             </span>
+            <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip">
+              <AppIcon class="comment-chip-icon" name="doc" :size="14" />
+              <span class="file-chip-name" :title="f.name">{{ f.name }}</span>
+              <button type="button" class="comment-chip-remove" :aria-label="`Remove ${f.name}`" title="Remove" @click="removePendingFile(i)">&times;</button>
+            </span>
             <span
-              v-for="c in store.pendingChatComments"
+              v-for="c in view.pendingChatComments"
               :key="`cc-${c.id}`"
               class="comment-chip"
               :class="{ 'is-editing': editingChatCommentId === c.id }"
@@ -1101,7 +1118,7 @@
               </button>
               <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
             </span>
-            <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
+            <span v-for="c in view.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
               <AppIcon class="comment-chip-icon" name="doc" :size="14" />
               <button
                 type="button"
@@ -1162,8 +1179,8 @@
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
-                :labelled-by="isRecoveryPicker ? 'model-picker-recovery-title' : ''"
-                :described-by="isRecoveryPicker ? 'model-picker-recovery-note' : ''"
+                :labelled-by="isRecoveryPicker ? domId('model-picker-recovery-title') : ''"
+                :described-by="isRecoveryPicker ? domId('model-picker-recovery-note') : ''"
                 @select="selectModel"
                 @close="showModelPicker = false"
               >
@@ -1177,8 +1194,8 @@
                      offer is dropped when the pick is applied. -->
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
-                    <p id="model-picker-recovery-title" class="model-picker-recovery__title">Choose a model to retry immediately</p>
-                    <p id="model-picker-recovery-note" class="model-picker-recovery__note">
+                    <p :id="domId('model-picker-recovery-title')" class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p :id="domId('model-picker-recovery-note')" class="model-picker-recovery__note">
                       Choosing a model retries the failed request and may incur usage charges. A Thinking level you pick here applies to that retry, within the levels the current model offers.
                     </p>
                   </div>
@@ -1188,8 +1205,8 @@
                     v-if="showThinkingLevels"
                     class="thinking-levels"
                   >
-                    <span id="thinking-levels-label" class="thinking-levels__label">Thinking</span>
-                    <div class="thinking-levels__chips" role="group" aria-labelledby="thinking-levels-label">
+                    <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
+                    <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
                       <button
                         v-for="level in ['', ...filteredThinkingLevels]"
                         :key="level"
@@ -1206,8 +1223,8 @@
                 </template>
               </ModelSelector>
             </div>
-            <label class="image-btn" title="Upload images" aria-label="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
+            <label class="image-btn" title="Attach files" aria-label="Attach files">
+              <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
             <!-- Background work the turn left running: agents and shells, right
@@ -1260,22 +1277,22 @@
          scrolling, with one close button. -->
     <aside
       v-if="railShown || drawerShown"
-      id="chat-work-rail"
+      :id="domId('chat-work-rail')"
       ref="railEl"
       class="chat-rail"
       :class="{ 'chat-rail--drawer': drawerShown }"
       :role="drawerShown ? 'dialog' : undefined"
       :aria-modal="drawerShown ? 'true' : undefined"
-      aria-labelledby="chat-work-rail-title"
+      :aria-labelledby="domId('chat-work-rail-title')"
     >
       <div class="chat-rail-head">
-        <h2 id="chat-work-rail-title" class="rail-title">Chat details</h2>
+        <h2 :id="domId('chat-work-rail-title')" class="rail-title">Chat details</h2>
         <button
           ref="railHideButton"
           type="button"
           class="btn-icon chat-rail-hide"
           aria-expanded="true"
-          aria-controls="chat-work-rail"
+          :aria-controls="domId('chat-work-rail')"
           aria-label="Hide chat details"
           title="Close chat details"
           @click="closeDetails"
@@ -1320,6 +1337,7 @@
           :project="project"
           :code-mode="codeModeOn"
           :context-pct="contextPct"
+          :compacted="contextUsage.compacted"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
           :reveal-key="contextRevealKey"
@@ -1331,10 +1349,10 @@
         v-if="runningRows.length"
         ref="railRunningEl"
         class="rail-section chat-rail-running"
-        aria-labelledby="chat-rail-running"
+        :aria-labelledby="domId('chat-rail-running')"
         tabindex="-1"
       >
-        <p id="chat-rail-running" class="rail-label">Running</p>
+        <p :id="domId('chat-rail-running')" class="rail-label">Running</p>
         <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
         <template v-if="runningSubagents.length">
           <p class="chat-rail-subhead">Agents</p>
@@ -1364,8 +1382,8 @@
           />
         </template>
       </section>
-      <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
-        <p id="chat-rail-tools" class="rail-label">Skills and MCP used</p>
+      <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" :aria-labelledby="domId('chat-rail-tools')">
+        <p :id="domId('chat-rail-tools')" class="rail-label">Skills and MCP used</p>
         <div class="rail-kvs">
           <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="rail-kv">
             <span class="chat-rail-tool" :title="tool.tools?.join(', ')"><small>{{ tool.kind === 'skill' ? 'Skill' : 'MCP' }}</small> {{ tool.name }}</span>
@@ -1380,8 +1398,8 @@
           @click="railShowAll.tools = !railShowAll.tools"
         >{{ railShowAll.tools ? 'Show fewer' : `Show all ${railTools.length}` }}</button>
       </section>
-      <section class="rail-section" aria-labelledby="chat-rail-files">
-        <p id="chat-rail-files" class="rail-label">Files</p>
+      <section class="rail-section" :aria-labelledby="domId('chat-rail-files')">
+        <p :id="domId('chat-rail-files')" class="rail-label">Files</p>
         <div v-if="inspectorOutputs.length" class="rail-list">
           <button
             v-for="output in shownOutputs"
@@ -1447,18 +1465,27 @@ import { useTerminalStore } from '../stores/terminal'
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
 import AgentContextSection from './AgentContextSection.vue'
+import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
+import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
+import ChatTitleRail from './ChatTitleRail.vue'
+import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
+import { useChatView } from '../composables/useChatView'
+import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import TerminalOfferCard from './TerminalOfferCard.vue'
+import NeedsYouCard from './NeedsYouCard.vue'
+import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1483,6 +1510,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
+import ComposerUploadProgress from './ComposerUploadProgress.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
   activityLines,
@@ -1599,14 +1627,28 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 }
 
 
+// `chatId`: the chat this pane shows; ChatLayout keys the pane by it.
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
-const props = defineProps<{ filePinned?: boolean }>()
-const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
+// `beside`: this is the second pane of a split.
+// `inactive`: the other pane has the keyboard.
+// `split`: two chats are on screen.
+const props = defineProps<{ chatId: string; filePinned?: boolean; plainHeader?: boolean; beside?: boolean; inactive?: boolean; split?: boolean }>()
+const emit = defineEmits<{
+  close: []
+  'open-sidebar': []
+  // The title is being pulled down (px), and the pull ended (px, px per ms):
+  // the layout moves the pane and decides whether to close.
+  pull: [dy: number]
+  'pull-end': [dy: number, velocity: number]
+}>()
 
 const store = useProjectStore()
+const view = useChatView(() => props.chatId)
+/** Element ids are per pane: the second pane prefixes its own so aria references stay unique. */
+const domId = (name: string) => (props.beside ? `beside-${name}` : name)
 const fileViewer = useFileViewerStore()
 const { thinkingExpanded, toggleThinking } = useThinkingPreference()
-const draftChatId = store.activeChatId
+const draftChatId = props.chatId
 // The composer, its persisted draft, prompt-history recall and every
 // attachment path (paste, drop, native desktop drop, the image picker) live
 // in useChatComposer. ChatPanel keeps the send path, the pickers and the
@@ -1622,6 +1664,7 @@ const composer = useChatComposer({
 const inputText = composer.draft
 const inputEl = composer.input
 const dragOver = composer.dragOver
+const uploads = composer.uploads
 const starterPrompts = [
   'Review the latest project notes and flag what needs a decision',
   'Turn the current research into a concise briefing',
@@ -1645,6 +1688,7 @@ const {
   handlePromptHistoryKey,
   insertImageRef,
   removePendingImage,
+  removePendingFile,
 } = composer
 const isContinuing = ref(false)
 
@@ -1654,20 +1698,25 @@ const isContinuing = ref(false)
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 
-const canSend = computed(() =>
+const hasComposerContent = computed(() =>
   !!(inputText.value.trim()
-    || store.pendingImages.length
-    || store.pendingComments.length
-    || store.pendingChatComments.length),
+    || view.pendingImages.length
+    || view.pendingFiles.length
+    || view.pendingComments.length
+    || view.pendingChatComments.length),
 )
+// Send waits for every upload in flight to settle, so a file is never sent
+// before the server has it.
+const uploadsInFlight = computed(() => uploads.value.length > 0)
+const canSend = computed(() => hasComposerContent.value && !uploadsInFlight.value)
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => store.isStreaming && !canSend.value)
+const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value && !uploadsInFlight.value)
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
 const showMoveToBackground = computed(() =>
-  store.isStreaming && canOfferMoveToBackground(store.activeBackgroundableCalls, nowTs.value),
+  view.isStreaming && canOfferMoveToBackground(view.activeBackgroundableCalls, nowTs.value),
 )
 async function moveToBackground() {
   if (movingToBackground.value || !chat.value) return
@@ -1700,12 +1749,14 @@ async function moveToBackground() {
 }
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
-  if (store.isStreaming) return 'Queue message (sends when current turn finishes)'
+  if (uploadsInFlight.value) return 'Wait for the upload to finish'
+  if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
-  if (store.isStreaming) return 'Queue message'
+  if (uploadsInFlight.value) return 'Wait for the upload to finish'
+  if (view.isStreaming) return 'Queue message'
   return 'Send message'
 })
 function primaryAction() {
@@ -1819,7 +1870,20 @@ const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
-const chat = computed(() => store.activeChat!)
+const chat = computed(() => view.chat!)
+
+const titleRail = useChatRail(() => chat.value.chat_id)
+const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
+// Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
+// travel, fading); a panel opened from the rail slides its transcript in from that side.
+const railLean = ref(0)
+const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeRailArrival())
+const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
+// The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
+function selectAdjacentChat(direction: -1 | 1): boolean {
+  if (!titleRailOn.value) return false
+  return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
+}
 
 /**
  * The command the assistant suggested for this chat, if it holds one.
@@ -1836,6 +1900,29 @@ const terminalOffer = computed(() => {
   const offer = store.terminalOffers[current.chat_id]
   return offer ? offer : null
 })
+
+// The needs-you actions this chat holds that have a card. A kind with no copy
+// yet has no card, so a half card never renders.
+const needsYouActions = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return []
+  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
+})
+
+// A needs-you card that holds the focus and goes away hands it to the
+// composer, like the offer card above.
+watch(
+  () => needsYouActions.value.map(a => a.id),
+  (ids) => {
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')
+    if (!held || ids.includes(held.dataset.actionId ?? '')) return
+    void nextTick(() => {
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
+  },
+  { flush: 'pre' },
+)
 
 // When the card that holds the focus goes away — dismissed by the user, or
 // dropped by the engine over the socket — it unmounts and the focus would
@@ -1896,7 +1983,7 @@ const memoryPassOrigin = computed<{ chatId: string; title: string } | null>(() =
  */
 const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | null>(() => {
   if (chat.value.helper?.kind !== 'task_delegation') return null
-  const msg = store.activeMessages.find(m => m.role === 'user')
+  const msg = view.activeMessages.find(m => m.role === 'user')
   if (!msg) return null
   const handover = parseTaskHandover(msg.content)
   return handover ? { msg, handover } : null
@@ -1906,7 +1993,7 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
  *  tasks) and a retried request, keyed by message identity like taskHandover. */
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
-  for (const m of store.activeMessages) {
+  for (const m of view.activeMessages) {
     // A user turn the engine wrote, or the system row the backend draws for a
     // background shell the provider ran itself.
     if (m.role !== 'user' && !(m.role === 'system' && (m.origin === 'background_run' || m.origin === 'compaction' || m.origin === 'handover'))) continue
@@ -1927,28 +2014,23 @@ watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
 
-// Inline editing state for queued messages. Keyed by queue entry id.
-const editingQueueId = ref<string | null>(null)
-const editingQueueText = ref('')
-// The edit UI only edits text, so hold the entry's images and re-send them on
-// save — otherwise the backend clears attachments it resolves from an empty list.
-const editingQueueImages = ref<string[] | undefined>(undefined)
+const queueEditNotice = ref('')
 
 // Entries that "Steer all" combines: queue-mode ones not already handed over,
 // in list order.
 const steerAllIds = computed(() =>
-  store.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
+  view.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
 )
 
 const steeringAnnouncement = computed(() => {
-  const n = store.currentQueued.filter(q => q.steering).length
+  const n = view.currentQueued.filter(q => q.steering).length
   return n ? `Steering ${n} ${n === 1 ? 'message' : 'messages'}` : ''
 })
 
 // When the chip that holds focus leaves the queue (it was steered, sent or
 // removed), focus would fall to <body>. Hand it to the composer instead.
 watch(
-  () => store.currentQueued.map(q => q.id),
+  () => view.currentQueued.map(q => q.id),
   (ids) => {
     const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.queued-chip')
     const id = held?.dataset.queueId
@@ -1960,6 +2042,13 @@ watch(
   },
   { flush: 'pre' },
 )
+
+function queuedDisplayText(text: string): string {
+  const { text: body, attachments } = splitAttachmentBlock(text)
+  if (!attachments.length) return text
+  const files = attachments.length === 1 ? attachments[0].name : `${attachments.length} files`
+  return body ? `${body} · ${files}` : files
+}
 
 function queuedExcerpt(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim()
@@ -1980,30 +2069,64 @@ function steerQueued(event: Event, ids: string[], delivery: 'queue' | 'steer') {
 
 function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
   if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
-  if (!store.isStreaming) return 'Held until you send it, edit it or remove it'
+  if (!view.isStreaming) return 'Held until you send it, edit it or remove it'
   return q.delivery === 'steer'
     ? 'Will be sent into the running reply'
     : 'Will be sent when current response finishes'
 }
 
 function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
-  editingQueueId.value = entry.id
-  editingQueueText.value = entry.text
-  editingQueueImages.value = entry.images ? [...entry.images] : undefined
+  if (inputText.value || view.pendingImages.length || view.pendingFiles.length || view.pendingComments.length || view.pendingChatComments.length) {
+    queueEditNotice.value = 'Please delete the current draft and remove its attachments before editing a queued message.'
+    return
+  }
+  if (!store.requestQueuedEdit(chat.value.chat_id, entry.id)) {
+    queueEditNotice.value = 'Could not move the queued message. Check the connection and try again.'
+    return
+  }
+  queueEditNotice.value = ''
 }
 
-function cancelEditQueue() {
-  editingQueueId.value = null
-  editingQueueText.value = ''
-  editingQueueImages.value = undefined
-}
-
-function saveEditQueue(chatId: string, entryId: string) {
-  const text = editingQueueText.value.trim()
-  if (!text) return
-  store.editQueued(chatId, entryId, text, editingQueueImages.value)
-  cancelEditQueue()
-}
+watch(() => store.queueTakeFailures[chat.value.chat_id], () => {
+  queueEditNotice.value = 'Could not move the queued message. It may already have been sent.'
+})
+// The engine has already taken the entry out of the queue when it answers, so
+// its text lives only in the take receipt until this applies it. A draft that
+// appeared while the take was in flight is never overwritten: the receipt is
+// kept unacknowledged and the message lands as soon as the composer is empty
+// again, which is what the notice asks for.
+watch(
+  () => [chat.value.chat_id, store.pendingQueueTakes[chat.value.chat_id]?.length,
+    inputText.value, view.pendingImages.length, view.pendingFiles.length, view.pendingComments.length,
+    view.pendingChatComments.length] as const,
+  () => {
+    const chatId = chat.value.chat_id
+    const entry = store.pendingQueueTakes[chatId]?.[0]
+    if (!entry) return
+    if (inputText.value || view.pendingImages.length || view.pendingFiles.length || view.pendingComments.length || view.pendingChatComments.length) {
+      queueEditNotice.value = `“${queuedExcerpt(entry.text)}” was taken out of the queue. Delete the current draft and its attachments to edit it.`
+      return
+    }
+    // A queued message that carried staged files gets its chips back, not its raw block.
+    const restored = splitAttachmentBlock(entry.text)
+    const files: AttachedFile[] = restored.attachments.flatMap(a => (a.ref ? [{ ref: a.ref, name: a.name }] : []))
+    if (files.length && files.length === restored.attachments.length) {
+      inputText.value = restored.text
+      store.addPendingFiles(chatId, files)
+    } else {
+      inputText.value = entry.text
+    }
+    if (entry.images?.length) store.addPendingImageRefs(chatId, entry.images)
+    store.ackQueuedEdit(chatId, entry.entry_id)
+    store.pendingQueueTakes[chatId] = store.pendingQueueTakes[chatId].slice(1)
+    queueEditNotice.value = ''
+    void nextTick(() => {
+      composer.autoResize()
+      inputEl.value?.focus({ preventScroll: true })
+    })
+  },
+  { immediate: true },
+)
 
 const taskStore = useTaskStore()
 // Automations linked to this chat: either the chat carries a schedule_id
@@ -2060,7 +2183,7 @@ const dockStripVisible = computed(() =>
   dockDeferred.value.length > 0
   || (dockExpanded.value && (pendingApprovals.value.length > 1
     || activeQuestions.value.length > 0
-    || store.currentQueued.length > 0)),
+    || view.currentQueued.length > 0)),
 )
 
 const dockDeferred = computed<DockItem[]>(() => {
@@ -2072,8 +2195,8 @@ const dockDeferred = computed<DockItem[]>(() => {
   if (!dockExpanded.value && dockPrimary.value === 'permission' && activeQuestions.value.length) {
     items.push({ key: 'question', label: 'a question waiting', blocking: true })
   }
-  if (!dockExpanded.value && dockPrimary.value && store.currentQueued.length) {
-    const n = store.currentQueued.length
+  if (!dockExpanded.value && dockPrimary.value && view.currentQueued.length) {
+    const n = view.currentQueued.length
     items.push({ key: 'queued', label: `${n} queued` })
   }
   return items
@@ -2083,13 +2206,13 @@ onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
 })
 
-const project = computed(() => store.activeProject)
+const project = computed(() => view.project)
 const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
 // The chat payload's turn count only refreshes on refetch, so a user row in the
 // loaded transcript locks the switch as soon as the first message is sent.
 const codeModeLocked = computed(() =>
   isCodeModeLocked(chat.value)
-  || (codeModeOn.value && store.activeMessages.some(m => m.role === 'user')))
+  || (codeModeOn.value && view.activeMessages.some(m => m.role === 'user')))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -2143,7 +2266,7 @@ const chatActivityLines = computed<string[]>(() => {
     take(item.steps)
     for (const sub of item.subs ?? []) take(sub.messages)
   }
-  for (const entry of store.currentTimeline) {
+  for (const entry of view.currentTimeline) {
     if (entry.kind === 'tool') lines.push(...activityLines(entry.content))
   }
   return lines
@@ -2187,20 +2310,18 @@ const shownTools = computed(() => railShowAll.value.tools ? railTools.value : ra
 // the transcript's only statement of occupancy: the Chat details rail shows it
 // as a meter, because a percentage means nothing without the window's size
 // beside it. Providers report it as text ("13.2%"), so parseFloat, not
-// Number. Null when it reported none.
-const contextPct = computed<number | null>(() => {
-  const items = renderItems.value
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i]
-    if (item.kind !== 'assistant' || !item.meta?.usage) continue
-    const usage = item.meta.usage as Record<string, unknown>
-    const pct = Number.parseFloat(String(usage.context_pct ?? usage.contextPct ?? ''))
-    return Number.isFinite(pct) && pct > 0 ? pct : null
-  }
-  return null
-})
-const compacting = computed(() => Boolean(chat.value && store.compactRequests[chat.value.chat_id]))
-const compactDisabled = computed(() => store.isStreaming || compacting.value || Boolean(chat.value?.archived))
+// Number. Null when it reported none. A compaction newer than the last usage
+// rescales it by the compaction's post/pre tokens, or hides the meter when
+// those are unknown.
+const contextUsage = computed(() => latestContextUsage(
+  renderItems.value,
+  chat.value ? store.compactState[chat.value.chat_id]?.tokens ?? null : null,
+))
+const contextPct = computed<number | null>(() => contextUsage.value.pct)
+const compacting = computed(() => Boolean(
+  chat.value && (store.compactRequests[chat.value.chat_id] || store.compactState[chat.value.chat_id]?.running),
+))
+const compactDisabled = computed(() => view.isStreaming || compacting.value || Boolean(chat.value?.archived))
 function compactContext() {
   if (!chat.value || compactDisabled.value) return
   void store.compactChat(chat.value.chat_id)
@@ -2215,7 +2336,7 @@ function stopShell(taskId: string) {
 }
 const runningShells = computed(() => runningRows.value.filter(isShellRow))
 watch(
-  () => store.isStreaming || runningShells.value.length > 0,
+  () => view.isStreaming || runningShells.value.length > 0,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
@@ -2229,7 +2350,7 @@ watch(
 )
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.
-const composerAgentCount = computed(() => Math.max(store.activeBackgroundAgents, runningSubagents.value.length))
+const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, runningSubagents.value.length))
 
 
 // On a pane wide enough for the rail beside a full reading column, Chat
@@ -2245,8 +2366,9 @@ const isWidePane = ref(false)
 // the right then, and two docked windows would leave the chat a sliver. It
 // comes back when the file is unpinned, because ChatLayout mounts a separate
 // ChatPanel for each layout, so the prop never changes on a live instance.
-// The info tab still opens it on demand.
-const railOpen = ref(!props.filePinned)
+// The info tab still opens it on demand. A user's close carries to the next chat
+// (each chat mounts its own panel): it stays closed until opened again.
+const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
@@ -2295,6 +2417,7 @@ function showDetails(target: DetailsTarget = 'close') {
     return
   }
   railOpen.value = true
+  rememberChatDetails(true)
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
@@ -2303,7 +2426,7 @@ function showDetails(target: DetailsTarget = 'close') {
   })
 }
 function closeDetails() {
-  if (isWidePane.value) railOpen.value = false
+  if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   void nextTick(() => inspectorTrigger.value?.focus())
 }
@@ -2377,7 +2500,7 @@ const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | 
 const commentComposeEditRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
-const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
+const showScrollBtn = computed(() => Boolean(messagesEl.value && view.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
 
@@ -2519,7 +2642,7 @@ async function loadMentionAgents(): Promise<void> {
 type TouchedFile = { file_path: string; action: string; count: number; index: number }
 const touchedFiles = computed<TouchedFile[]>(() => {
   const byPath = new Map<string, TouchedFile>()
-  const msgs = store.activeMessages
+  const msgs = view.activeMessages
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i]
     if (m.tool_name !== '_filecard') continue
@@ -2636,9 +2759,9 @@ function checkScroll() {
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
   const movedUp = el.scrollTop < lastScrollTop - 1
   lastScrollTop = el.scrollTop
-  if (store.isStreaming && movedUp && !isNearBottom.value) liveTraceReading.value = true
+  if (view.isStreaming && movedUp && !isNearBottom.value) liveTraceReading.value = true
   const collapseIdx = pendingCollapseIdx.value
-  if (collapseIdx !== null && !store.isStreaming) {
+  if (collapseIdx !== null && !view.isStreaming) {
     if (!isNearBottom.value) {
       pendingCollapseArmed.value = true
     } else if (pendingCollapseArmed.value) {
@@ -2652,7 +2775,7 @@ function checkScroll() {
   // Paginated history: near the top of a windowed timeline, pull the older
   // page in. The store's loadingOlder flag debounces repeat fires.
   if (el.scrollTop <= 80) {
-    const chatId = store.activeChatId
+    const chatId = props.chatId
     if (chatId && store.canLoadOlderByChat[chatId] && !store.isLoadingOlderByChat[chatId]) {
       void loadOlderAnchored()
     }
@@ -2663,7 +2786,7 @@ function checkScroll() {
 // rows the user is looking at: compensate for the height the prepend adds.
 async function loadOlderAnchored() {
   const el = messagesEl.value
-  const chatId = store.activeChatId
+  const chatId = props.chatId
   if (!el || !chatId) return
   const prevHeight = el.scrollHeight
   await store.loadOlderMessages(chatId)
@@ -2672,7 +2795,7 @@ async function loadOlderAnchored() {
 }
 
 function expandLazyStep(step: { i?: number }): void {
-  const chatId = store.activeChatId
+  const chatId = props.chatId
   if (!chatId || typeof step.i !== 'number') return
   void store.expandMessagePart(chatId, step.i)
 }
@@ -2764,12 +2887,12 @@ function stickToBottomIfNeeded() {
 }
 
 const pendingApprovals = computed(() => {
-  const id = store.activeChatId
+  const id = props.chatId
   if (!id) return []
   return store.pendingPermissions[id] || []
 })
 const permissionSubmission = computed(() => {
-  const id = store.activeChatId
+  const id = props.chatId
   return id ? store.permissionSubmissions[id] : undefined
 })
 function permissionSubmittingFor(requestId: string, sessionId = '') {
@@ -2837,13 +2960,13 @@ function permissionArgs(raw: string): { key: string; value: string }[] | null {
 // selections keyed by chat_id + question index; cleared along with
 // `activeQuestions` when sendMessage fires.
 const activeQuestions = computed(() => {
-  const id = store.activeChatId
+  const id = props.chatId
   if (!id) return []
   return store.activeQuestions[id] || []
 })
 
 const questionSubmission = computed(() => {
-  const id = store.activeChatId
+  const id = props.chatId
   const submission = id ? store.questionSubmissions[id] : undefined
   const requestId = activeQuestions.value[0]?.requestId
   return submission && requestId === submission.requestId ? submission : undefined
@@ -3099,7 +3222,7 @@ function submitQuestionAnswers() {
 
 function dismissQuestions() {
   if (questionSubmitting.value) return
-  const id = store.activeChatId
+  const id = props.chatId
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   const sessionId = activeQuestions.value[0]?.sessionId || ''
@@ -3121,7 +3244,7 @@ function dismissQuestions() {
 // mirrors the server's 30s wait_for; when it hits zero the buttons disable
 // and the server closes the turn with a system bubble.
 const activeCapabilityQuestions = computed(() => {
-  const id = store.activeChatId
+  const id = props.chatId
   if (!id) return []
   return store.activeCapabilityQuestions[id] || []
 })
@@ -3249,7 +3372,7 @@ const bucketLocked = computed(() => {
   // value means the chat has history and the bucket is fixed. The
   // server enforces the same rule on PATCH; this just hides the choice
   // so the user doesn't try and get a 400 back.
-  return Boolean(c.session_id) || store.activeMessages.length > 0
+  return Boolean(c.session_id) || view.activeMessages.length > 0
 })
 
 // Thinking levels are provider-native and may be narrowed per model when the
@@ -3297,9 +3420,9 @@ const chipModelLabel = computed(() => {
 })
 
 const inputPlaceholder = computed(() => {
-  const comments = store.pendingChatComments.length + store.pendingComments.length
+  const comments = view.pendingChatComments.length + view.pendingComments.length
   if (comments) return `Reply — ${comments} comment${comments === 1 ? '' : 's'} will be sent with it`
-  if (store.isStreaming) return 'Reply — it is queued until Ciao finishes'
+  if (view.isStreaming) return 'Reply — it is queued until Ciao finishes'
   return 'Reply to Ciao'
 })
 const keyboard = useKeyboardSettings()
@@ -3524,7 +3647,7 @@ function saveChatComment(): void {
   if (!draft) return
   const note = draft.text.trim()
   if (!note) return
-  const id = store.addPendingChatComment({
+  const id = store.addPendingChatComment(props.chatId, {
     selection: draft.selection,
     comment: note,
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
@@ -3551,7 +3674,7 @@ function saveChatComment(): void {
 }
 
 async function addDraftImages(files: File[]): Promise<void> {
-  const chatId = store.activeChatId
+  const chatId = props.chatId
   if (!chatId || !files.length) return
   try {
     const refs = await store.uploadImageRefs(chatId, files)
@@ -3598,7 +3721,7 @@ function saveEditChatComment(id: string): void {
   if (!text) return
   store.updatePendingChatComment(id, text)
   // Sync images: remove existing ones that are gone, add new ones
-  const existing = store.pendingChatComments.find(c => c.id === id)
+  const existing = view.pendingChatComments.find(c => c.id === id)
   const existingImages = existing?.images || []
   const nextImages = editingChatCommentImages.value
   for (const img of existingImages) {
@@ -3613,7 +3736,7 @@ function saveEditChatComment(id: string): void {
 async function handleEditImageUpload(e: Event, id: string): Promise<void> {
   const input = e.target as HTMLInputElement
   if (!input.files?.length) return
-  const chatId = store.activeChatId
+  const chatId = props.chatId
   if (!chatId) return
   try {
     const refs = await store.uploadImageRefs(chatId, Array.from(input.files))
@@ -3621,7 +3744,7 @@ async function handleEditImageUpload(e: Event, id: string): Promise<void> {
       store.addPendingChatCommentImage(id, ref)
     }
     // Refresh local edit state from store
-    const c = store.pendingChatComments.find(x => x.id === id)
+    const c = view.pendingChatComments.find(x => x.id === id)
     if (c?.images) editingChatCommentImages.value = [...c.images]
   } catch (err) {
     console.error('Comment image upload failed:', err)
@@ -3694,7 +3817,7 @@ function applyHighlights(): void {
   if (!root) return
   clearHighlights(root)
 
-  for (const c of store.pendingChatComments) {
+  for (const c of view.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
       highlightCommentText(bubble, c.selection, c.id, c.occurrenceIndex)
@@ -3792,14 +3915,14 @@ function openEditFromChatPopover(c: { id: string; comment: string; images?: stri
   const hl = messagesEl.value?.querySelector(`.comment-highlight[data-comment-id="${c.id}"]`) as HTMLElement | null
   const anchor = hl ? anchorFromElement(hl) : null
   chipEditAnchor.value = anchor
-  const target = store.pendingChatComments.find(x => x.id === c.id)
+  const target = view.pendingChatComments.find(x => x.id === c.id)
   if (target) startEditChatComment(target)
 }
 
 // Clicking a pending comment chip scrolls to the commented text in the transcript,
 // pulses the highlight, and pins the read popover over the highlight.
 function openChatCommentChip(id: string, _e: MouseEvent): void {
-  const c = store.pendingChatComments.find(x => x.id === id)
+  const c = view.pendingChatComments.find(x => x.id === id)
   if (!c) return
   cancelEditChatComment()
 
@@ -3817,7 +3940,7 @@ function openChatCommentChip(id: string, _e: MouseEvent): void {
 // bucket. Either way the chip the popover is anchored to is gone, so close it
 // instead of leaving an editor floating over a comment that no longer exists.
 watch(
-  () => store.pendingChatComments.some(c => c.id === editingChatCommentId.value),
+  () => view.pendingChatComments.some(c => c.id === editingChatCommentId.value),
   (stillThere) => {
     if (editingChatCommentId.value && !stillThere) cancelEditChatComment()
   }
@@ -3827,7 +3950,7 @@ watch(
 // document at the commented line instead.
 function openFileCommentChip(c: { id?: string; path: string; lineStart?: number | null }): void {
   if (!c.path) return
-  const activePinKey = chat.value?.chat_id || store.activeChatId
+  const activePinKey = props.chatId
   const pinnedPath = activePinKey ? store.pinnedFileFor(activePinKey) : ''
   if (pinnedPath && pinnedPath === c.path) {
     window.dispatchEvent(new CustomEvent('ciao:jump-pinned-comment', {
@@ -3860,8 +3983,14 @@ if (typeof document !== 'undefined') {
 const COMPOSER_FOCUS_MIN_WIDTH = 768
 
 function focusComposerOnOpen(): void {
+  if (props.inactive) return
   if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
   if (questionCardVisible.value || pendingApprovals.value.length) return
+  focusComposer()
+}
+
+/** Put the caret at the end of this pane's composer (ChatLayout's focus-pane shortcuts). */
+function focusComposer(): void {
   const el = inputEl.value
   if (!el) return
   el.focus()
@@ -3869,6 +3998,11 @@ function focusComposerOnOpen(): void {
   // keystroke would prepend to what the user already wrote.
   el.selectionStart = el.selectionEnd = el.value.length
 }
+
+// Only the pane with the keyboard imports a native desktop drop.
+const onNativeDragEnter = () => { if (!props.inactive) handleNativeFileDragEnter() }
+const onNativeDragLeave = () => { if (!props.inactive) handleNativeFileDragLeave() }
+const onNativeDrop = (e: Event) => { if (!props.inactive) handleNativeFileDrop(e) }
 
 let modelsSeq = 0
 async function loadModels(): Promise<void> {
@@ -3886,9 +4020,9 @@ async function loadModels(): Promise<void> {
 }
 
 onMounted(async () => {
-  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
-  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
-  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
+  window.addEventListener('ciao:native-file-drop', onNativeDrop)
   await loadModels()
   await loadSlashCommands()
   await loadMentionAgents()
@@ -3918,9 +4052,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   composer.persistDraft()
-  window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
-  window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
-  window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
+  window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
+  window.removeEventListener('ciao:native-file-drop', onNativeDrop)
   commentPopover.value?.clearPendingClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onChatSelectionChange)
@@ -3937,7 +4071,8 @@ onBeforeUnmount(() => {
 
 // Tell the service worker which chat is in focus so it can clear the badge
 function notifyChatFocused(chatId: string | undefined) {
-  if (!chatId) return
+  // Only the pane with the keyboard is the chat in focus.
+  if (!chatId || props.inactive) return
   if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
     navigator.serviceWorker.controller.postMessage({ type: 'chat-focused', chat_id: chatId })
   }
@@ -4008,6 +4143,9 @@ function renderMarkdown(text: string): string {
   return rendered
 }
 
+function userAttachments(content: string) { return splitAttachmentBlock(content || '').attachments }
+function userText(content: string) { return splitAttachmentBlock(content || '').text }
+
 function renderUserMessage(text: string): string {
   if (!text) return ''
   const cached = userMdCache.get(text)
@@ -4038,9 +4176,9 @@ async function copyMessageText(text: string, key: string): Promise<void> {
 }
 
 async function forkConversation(message: ChatMessage, key: string): Promise<void> {
-  const sourceChatId = store.activeChatId
+  const sourceChatId = props.chatId
   if (!sourceChatId || forkLoadingKey.value) return
-  const snapshot = buildForkSnapshot(store.activeMessages, message)
+  const snapshot = buildForkSnapshot(view.activeMessages, message)
   if (!snapshot) {
     store.pushErrorToast(
       'Could not fork conversation',
@@ -4101,7 +4239,7 @@ function handlePanelClick(e: MouseEvent): void {
 // summary and footer, where they no longer change every second.
 const liveTraceMetaParts = computed(() => {
   const parts: { key: string; text: string; shortText?: string; isImportant?: boolean }[] = []
-  const startedAt = store.currentStreamStartedAt
+  const startedAt = view.currentStreamStartedAt
   if (startedAt) {
     const elapsed = nowTs.value - startedAt
     if (elapsed >= 0) parts.push({ key: 'duration', text: formatDuration(elapsed), isImportant: true })
@@ -4119,17 +4257,17 @@ const openPermissionLines = computed(() => new Set(
   pendingApprovals.value.flatMap(p => activityLines(permissionActivityLine(p.tool_name, p.message))),
 ))
 const liveStepLabel = computed(() => {
-  if (store.currentStreamingThinking) return ''
-  const last = store.currentTimeline[store.currentTimeline.length - 1]
+  if (view.currentStreamingThinking) return ''
+  const last = view.currentTimeline[view.currentTimeline.length - 1]
   if (!last) return ''
   if (last.kind === 'filecard' && last.file_path) return `Editing ${fileCardBasename(last.file_path)}`
   if (last.kind !== 'tool') return ''
-  return liveToolStep(activityLines(last.content), last.tool_use_ids, openPermissionLines.value, new Set(store.currentDeniedToolUseIds))
+  return liveToolStep(activityLines(last.content), last.tool_use_ids, openPermissionLines.value, new Set(view.currentDeniedToolUseIds))
 })
 const liveStepPreview = computed(() => {
-  if (store.currentStreamingThinking) return 'Thinking…'
-  if (store.currentStreamingText) return 'Writing response…'
-  const last = store.currentTimeline[store.currentTimeline.length - 1]
+  if (view.currentStreamingThinking) return 'Thinking…'
+  if (view.currentStreamingText) return 'Writing response…'
+  const last = view.currentTimeline[view.currentTimeline.length - 1]
   if (last?.kind === 'tool' || last?.kind === 'filecard') return liveStepLabel.value || 'Working…'
   if (last?.kind === 'status') return last.content
   if (last?.kind === 'text') return 'Sharing an update…'
@@ -4139,18 +4277,18 @@ const liveStepPreview = computed(() => {
 // repeated same-label tools, and the line index covers providers with no IDs.
 // Live phases get a stable key, so token additions and clock ticks never slide.
 const liveStepIdentity = computed(() => {
-  if (store.currentStreamingThinking) return 'phase:thinking'
-  if (store.currentStreamingText) return 'phase:response'
-  const last = store.currentTimeline[store.currentTimeline.length - 1]
+  if (view.currentStreamingThinking) return 'phase:thinking'
+  if (view.currentStreamingText) return 'phase:response'
+  const last = view.currentTimeline[view.currentTimeline.length - 1]
   if (!last) return 'phase:thinking'
-  const entryIndex = store.currentTimeline.length - 1
+  const entryIndex = view.currentTimeline.length - 1
   if (last.kind === 'tool') {
     const lines = activityLines(last.content)
     let lineIndex = lines.length - 1
     while (lineIndex >= 0 && isPermissionActivityLine(lines[lineIndex]) && !openPermissionLines.value.has(lines[lineIndex].trim())) lineIndex--
     if (lineIndex < 0) return `activity:${entryIndex}:tool:idle`
     const toolId = last.tool_use_ids?.[lineIndex]
-    const denied = lineIndex < lines.length - 1 && !!toolId && new Set(store.currentDeniedToolUseIds).has(toolId)
+    const denied = lineIndex < lines.length - 1 && !!toolId && new Set(view.currentDeniedToolUseIds).has(toolId)
     const permissionState = isPermissionActivityLine(lines[lineIndex]) ? 'pending' : denied ? 'denied' : 'active'
     return `activity:${entryIndex}:tool:${lineIndex}:${toolId || 'line'}:${permissionState}`
   }
@@ -4232,7 +4370,7 @@ const renderData = computed<{
   // to the last turn so they stay visible.
   const subsByTurn = new Map<number, SubagentTranscript[]>()
   const unanchoredSubs: SubagentTranscript[] = []
-  for (const sub of store.activeSubagents) {
+  for (const sub of view.activeSubagents) {
     if (typeof sub.turn_index === 'number') {
       const list = subsByTurn.get(sub.turn_index) || []
       list.push(sub)
@@ -4291,13 +4429,13 @@ const renderData = computed<{
     }
 
     // The in-flight turn is already drawn by the live stream trace block
-    // (`store.currentTimeline`), so drop its buffer rather than emitting a
+    // (`view.currentTimeline`), so drop its buffer rather than emitting a
     // second, static copy. Only the trailing turn is in flight — earlier turns
     // keep their trace even when they never produced an answer bubble (the
     // user hit Stop, or the turn ended in tool calls only). A wake stream has
     // no user row of its own, so the trailing turn is the settled one before
     // it and stays drawn.
-    if (isFinal && store.isStreaming && !store.isWakeStreaming) {
+    if (isFinal && view.isStreaming && !view.isWakeStreaming) {
       buffer = []
       return
     }
@@ -4337,7 +4475,7 @@ const renderData = computed<{
     buffer = []
   }
 
-  for (const msg of store.activeMessages) {
+  for (const msg of view.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
       currentTurnIndex = typeof msg.turn_index === 'number'
@@ -4375,7 +4513,7 @@ const renderData = computed<{
   // While streaming, the in-flight turn's subagents nest in the live trace,
   // along with any still running from an earlier turn. Finished agents of
   // earlier rendered turns were already placed by flushTurn.
-  if (store.isStreaming) {
+  if (view.isStreaming) {
     const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
       .filter(sub => !belongsToUnloadedTurn(sub))
     return { items, liveSubs: live, liveStandaloneSubs: [] }
@@ -4463,11 +4601,11 @@ const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.live
 // engine-started turn whose echo has not arrived) the live UI has no user turn
 // to sit under, and "Start with a request" would be a lie, so the skeleton stays.
 const blockingHistoryLoad = computed(() =>
-  store.messageHistoryLoading && (!store.isStreaming || transcriptEmpty.value))
+  view.messageHistoryLoading && (!view.isStreaming || transcriptEmpty.value))
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(
-  () => [store.pendingChatComments.length, renderItems.value.length] as const,
+  () => [view.pendingChatComments.length, renderItems.value.length] as const,
   ([n]) => {
     if (n === 0) {
       commentBubbleById.clear()
@@ -4479,7 +4617,7 @@ watch(
 )
 
 // Force-scroll to bottom when switching to a different chat.
-watch(() => store.activeChatId, () => {
+watch(() => props.chatId, () => {
   isNearBottom.value = true
   resetLiveTraceState()
   openTraces.value = {}
@@ -4504,7 +4642,7 @@ watch(blockingHistoryLoad, (loading, wasLoading) => {
   if (!loading && wasLoading) nextTick(() => pinToBottom())
 })
 
-watch(() => store.isStreaming, (streaming) => {
+watch(() => view.isStreaming, (streaming) => {
   if (streaming) resetLiveTraceState()
 })
 
@@ -4527,7 +4665,7 @@ function holdTraceOpen() {
 
 // Keep the live trace body on its newest step unless the user scrolled up in it.
 watch(
-  () => [store.currentTimeline.length, store.currentStreamingText, store.currentStreamingThinking],
+  () => [view.currentTimeline.length, view.currentStreamingText, view.currentStreamingThinking],
   () => {
     nextTick(() => {
       const body = liveTraceBodyEl.value
@@ -4540,16 +4678,16 @@ watch(
 // Use direct scrollTop assignment instead of scrollIntoView — the latter
 // can stop short of the absolute bottom with smooth scrolling, especially
 // inside flex containers where the anchor is a zero-height child.
-let prevStreaming = store.isStreaming
-let prevStreamingChatId = store.activeChatId
+let prevStreaming = view.isStreaming
+let prevStreamingChatId = props.chatId
 watch(
-  () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
+  () => [view.activeMessages.length, view.currentStreamingText, view.currentActivity.length, view.isStreaming],
   () => {
-    const streaming = store.isStreaming
+    const streaming = view.isStreaming
     // A chat switch also flips isStreaming; that is not a turn end.
-    const justFinished = prevStreaming && !streaming && prevStreamingChatId === store.activeChatId
+    const justFinished = prevStreaming && !streaming && prevStreamingChatId === props.chatId
     prevStreaming = streaming
-    prevStreamingChatId = store.activeChatId
+    prevStreamingChatId = props.chatId
     if (justFinished) {
       if (liveTraceReading.value && (!isNearBottom.value || (liveTraceOpen.value && !liveBodyAtBottom.value))) {
         // The reader scrolled away from the bottom (of the transcript, or of
@@ -4689,17 +4827,19 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
+  if (uploadsInFlight.value) return
   const text = inputText.value.trim()
-  const hasAttachments = store.pendingImages.length > 0 || store.pendingComments.length > 0 || store.pendingChatComments.length > 0
+  const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
+    || view.pendingComments.length > 0 || view.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
   if (text) recordSentPrompt(chat.value.chat_id, inputText.value)
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
-  if (!text && !store.pendingComments.length && !store.pendingChatComments.length) {
+  if (!text && !view.pendingComments.length && !view.pendingChatComments.length) {
     // Images-only with no text and no comments: emit numbered references so
     // the user bubble has content and the model gets explicit image indices.
-    sendText = store.pendingImages.map((_, i) => `[Image ${i + 1}]`).join(' ')
+    sendText = view.pendingImages.map((_, i) => `[Image ${i + 1}]`).join(' ')
   }
   // When any comments exist and there is no typed text, sendMessage builds
   // the composed content from the comment blocks, so we pass an empty string
@@ -4845,7 +4985,7 @@ const retryCardTitle = computed(() => {
 })
 
 async function tryRetryNow() {
-  if (!chat.value || store.isStreaming) return
+  if (!chat.value || view.isStreaming) return
   await store.tryChatRetryNow(chat.value.chat_id)
 }
 
@@ -4860,7 +5000,7 @@ async function stopRetry() {
 // while the picker is open.
 function openRecoveryPicker(errorIdx: number | null) {
   if (!chat.value || chat.value.archived) return
-  if (store.isStreaming) return
+  if (view.isStreaming) return
   recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
   pickerMode.value = 'recovery'
   stagedThinkingLevel.value = null
@@ -5142,15 +5282,19 @@ async function archiveAfterTaskDone() {
 
 const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
+  // With the title rail on, archiving moves to the next chat in its order (the
+  // previous one at the end), sliding in like a swipe, rather than going Home.
+  const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
+  if (next) markRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
-    if (!await archiveChatWithTaskCheck(chat.value)) return
+    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markRailArrival(0); return }
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.
     return
   }
-  // Notify ChatLayout so it closes the chat pane.
-  emit('close')
+  // Notify ChatLayout so it closes the chat pane, unless the next chat took its place.
+  if (!next) emit('close')
 }
 
 const taskSignals = useTaskSignalsStore()
@@ -5204,7 +5348,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut })
+defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut, selectAdjacentChat, focusComposer })
 </script>
 
 <style scoped>
@@ -5614,6 +5758,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
    title is the one title that may take a second line, and the full title
    stays in the title attribute. `overflow-wrap: anywhere` breaks a title
    that has no spaces in it (a URL, a path). */
+.chat-title-signals { flex: none; margin-left: var(--space-1); }
+
 .chat-title-row .chat-title {
   flex: 0 1 auto;
   min-width: 0;
@@ -5627,11 +5773,19 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-.chat-code-badge { display: inline-grid; place-items: center; flex: none; min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
-.chat-code-badge-tag { display: inline-grid; place-items: center; height: 20px; padding: 0 3px; color: var(--accent); font: 700 calc(14px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
-.chat-code-badge:hover { background: var(--bg3); }
-.chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
+/* Rail mode: close and the title block share one vertical centre, and the row is
+   the reading column's width (it starts where the column starts), so the rail can
+   centre its title on the chat rather than on the whole header. */
+.chat-column--leaning { will-change: transform, opacity; }
+.chat-column:not(.chat-column--leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
+.chat-column--arrive-next { animation: chat-arrive 260ms var(--ease) both; --arrive-from: 12%; }
+.chat-column--arrive-prev { animation: chat-arrive 260ms var(--ease) both; --arrive-from: -12%; }
+@keyframes chat-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .chat-column:not(.chat-column--leaning) { transition: none; }
+  .chat-column--arrive-next, .chat-column--arrive-prev { animation: none; }
+}
+.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
 
 .chat-title {
   cursor: pointer;
@@ -6081,14 +6235,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   white-space: nowrap;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
   overscroll-behavior-inline: contain;
-}
-/* This strip is the one opt-out from the app's visible thin scrollbars: it
-   still scrolls by wheel, trackpad or touch, but a bar under a reply reads as
-   a rule across the transcript rather than as an affordance. */
-.message-actions .message-meta::-webkit-scrollbar {
-  display: none;
 }
 .message-actions .message-meta > :first-child { margin-left: auto; }
 .message-actions > span.message-meta { justify-content: flex-end; }
@@ -6227,7 +6374,7 @@ details[open] > .activity-summary::before {
 }
 
 /* "N agents" header pill: background subagents still running after the
-   parent turn ended (store.activeBackgroundAgents, fed by /ws/events). */
+   parent turn ended (view.activeBackgroundAgents, fed by /ws/events). */
 .bg-agents-pill {
   display: inline-flex;
   align-items: center;
@@ -6613,6 +6760,10 @@ details[open] > .activity-summary::before {
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .message-image-link { display: inline-block; line-height: 0; text-decoration: none; }
+.message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
+.message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
+.message-file-icon { flex: none; color: var(--accent2); }
+.message-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .message-image {
   max-height: 160px;
   max-width: 240px;
@@ -6753,6 +6904,7 @@ details[open] > .activity-summary::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.file-chip-name { flex: 0 1 auto; min-width: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .comment-chip-remove {
   position: relative;
   flex-shrink: 0;
@@ -7382,18 +7534,6 @@ details[open] > .activity-summary::before {
   font-size: 12px;
   color: var(--fg2);
 }
-.queued-edit-input {
-  width: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 8px;
-  font-family: var(--font);
-  font-size: 13px;
-  resize: vertical;
-}
-
 /* AskUserQuestion picker. Same docking pattern as the permission card so
    the model's structured question doesn't get lost in the trace. */
 .question-card {
@@ -7936,12 +8076,10 @@ details[open] > .activity-summary::before {
 }
 
 /* Phones (the pane header bell's breakpoint): the title needs the room. Back and
-   the menu already leave the chat, and Chat details' Repository section carries
-   the code mode switch, so neither control is lost. Hidden, not removed, so
-   desktop keeps them. */
+   the menu already leave the chat, so the close control is not lost. Hidden, not
+   removed, so desktop keeps it. */
 @media (max-width: 767px) {
-  .close-btn,
-  .chat-code-badge { display: none; }
+  .close-btn { display: none; }
 }
 
 @media (max-width: 768px) {

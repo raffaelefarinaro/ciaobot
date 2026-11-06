@@ -174,9 +174,18 @@ describe('AgentContextSection', () => {
     expect(wrapper.get('details.agent-context-loaded').find('.rail-list').exists()).toBe(true)
   })
 
-  it('describes reported context usage in words', async () => {
+  it('shows reported context usage once, as the meter figure', async () => {
     const wrapper = await mountSection({ contextPct: 56 })
-    expect(wrapper.get('.agent-context-usage-note').text()).toBe('56% of context window used')
+    expect(wrapper.get('[role="meter"]').text()).toContain('56%')
+    expect(wrapper.find('.agent-context-usage-note').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('of context window used')
+  })
+
+  it('keeps the section and Compact button but no meter when a compaction left usage unknown', async () => {
+    const wrapper = await mountSection({ contextPct: null, compacted: true })
+    expect(wrapper.get('.rail-label').text()).toBe('Context usage')
+    expect(wrapper.find('[role="meter"]').exists()).toBe(false)
+    expect(wrapper.get('.agent-context-compact').text()).toBe('Compact')
   })
 
   it('keeps usage unknown rather than inventing a percentage', async () => {

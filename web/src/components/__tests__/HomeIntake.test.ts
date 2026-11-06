@@ -351,8 +351,22 @@ describe('HomeIntake', () => {
     vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'fresh' } as ChatInfo)
     const uploadImages = vi.spyOn(store, 'uploadImages').mockResolvedValue(['img_1'])
     const send = vi.spyOn(store, 'sendMessage').mockReturnValue(true)
-    const fetchMock = vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify({ file_refs: [{ ref: 'drop_' + 'a'.repeat(32) }] }), { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
+    const xhrUrls: string[] = []
+    class FakeXhr {
+      status = 0
+      responseText = ''
+      upload = { onprogress: null as null | ((event: unknown) => void) }
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      onabort: (() => void) | null = null
+      open(_method: string, url: string): void { xhrUrls.push(url) }
+      send(): void {
+        this.status = 200
+        this.responseText = JSON.stringify({ file_refs: [{ ref: 'drop_' + 'a'.repeat(32), name: 'brief.pdf' }] })
+        queueMicrotask(() => this.onload?.())
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
 
     const wrapper = mount(HomeIntake)
     const doc = new File(['x'], 'brief.pdf', { type: 'application/pdf' })
@@ -361,15 +375,16 @@ describe('HomeIntake', () => {
     const chips = wrapper.findAll('.home-intake-attachment-name').map(chip => chip.text())
     expect(chips).toEqual(['brief.pdf', 'shot.png'])
     // Nothing is uploaded before the chat exists.
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(xhrUrls).toHaveLength(0)
 
     await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Summarise these')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
     expect(uploadImages).toHaveBeenCalledWith('fresh', [shot])
-    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/chats/fresh/attachments')
-    expect(send).toHaveBeenCalledWith('fresh', `Summarise these\n\n\`ciao-drop:drop_${'a'.repeat(32)}\``)
+    expect(xhrUrls[0]).toContain('/api/chats/fresh/attachments')
+    expect(send).toHaveBeenCalledWith('fresh', 'Summarise these')
+    expect(store.pendingFilesFor('fresh')).toEqual([{ ref: 'drop_' + 'a'.repeat(32), name: 'brief.pdf' }])
     expect(wrapper.findAll('.home-intake-attachment')).toHaveLength(0)
     vi.unstubAllGlobals()
     wrapper.unmount()

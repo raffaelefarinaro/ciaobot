@@ -44,6 +44,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   update_task: 'spark',
   retry: 'activity',
   restart_resume: 'activity',
+  chat_action: 'activity',
   error: 'activity',
   handover: 'activity',
 }
@@ -188,6 +189,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'restart_resume'">
         <p class="injected-card-note">Ciaobot restarted while the previous turn was running, so it asked the agent to continue where it left off.</p>
+      </template>
+
+      <template v-else-if="prompt.kind === 'chat_action'">
+        <p class="injected-card-note">You finished what this chat was waiting for, so Ciaobot asked the agent to continue.</p>
       </template>
 
       <!-- The pack is the exact text the new provider received, kept one

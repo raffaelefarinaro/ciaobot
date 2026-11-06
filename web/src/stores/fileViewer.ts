@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { fileLoadErrorMessage } from '../lib/fileLoadError'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -64,9 +65,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   /**
    * Pin the file beside the chat instead of opening the viewer, so it lands in
-   * the tile without the modal flashing up first. Only an open that carries a
-   * chat id (a link or file card inside the chat on screen) docks, replacing
-   * that chat's pin. Every other open (a project page, the sidebar, an
+   * the tile without the modal flashing up first. Only an open that carries the
+   * chat id of the dock target (a link or file card inside the chat that owns
+   * the tile on screen) docks, replacing that chat's pin. A file opened from the
+   * chat beside it opens the viewer: docking would pin it onto the other chat.
+   * Every other open (a project page, the sidebar, an
    * archived transcript) uses the viewer. Returns false (and the caller opens
    * the viewer as usual) when there is no dock, no chat, or the pin write
    * fails. An open that targets a line (a `path:N` link, a comment chip) keeps
@@ -75,7 +78,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   async function dockInstead(filePath: string, chat: string): Promise<boolean> {
     const seq = ++dockSeq
     const key = dockTarget.value
-    if (!key || !chat || isOpen.value) return false
+    // Only the chat the tile belongs to docks: a file opened from the chat beside it opens the
+    // viewer, or it would be pinned onto the other chat.
+    if (!key || !chat || chat !== key || isOpen.value) return false
     let target = filePath
     try {
       const resolved = await api.get<{ path: string }>(
@@ -237,11 +242,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       // to another file's path. Anything that no longer matches is discarded.
       if (seq !== fetchSeq) return true
       if (!resp.ok) {
-        if (resp.status === 404) error.value = 'File not found.'
-        else if (resp.status === 403) error.value = 'Forbidden — path is outside the workspace.'
-        else if (resp.status === 413) error.value = 'File is too large to preview (>2 MB).'
-        else if (resp.status === 415) error.value = 'Unsupported file type.'
-        else error.value = `Failed to load file (HTTP ${resp.status}).`
+        error.value = fileLoadErrorMessage(resp.status)
         return true
       }
       const text = await resp.text()

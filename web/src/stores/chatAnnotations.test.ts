@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
 import { createChatAnnotations, type ChatPinMutator, ChatPinConflict } from './chatAnnotations'
 import type { ChatPinState } from '../lib/types'
+import { composeAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
+
+const FILE_REF = `drop_${'a'.repeat(32)}`
+const STAGED: AttachedFile[] = [{ ref: FILE_REF, name: 'brief.pdf' }]
 
 let stored: Record<string, string> = {}
 
@@ -55,7 +59,7 @@ describe('pending images', () => {
     a.addPendingImageRefs('c1', ['one.png', 'two.png'])
     expect(a.pendingImages.value).toEqual(['one.png', 'two.png'])
     expect(JSON.parse(stored['ciao-pending-images'])).toEqual({ c1: ['one.png', 'two.png'] })
-    a.removePendingImage(0)
+    a.removePendingImage('c1', 0)
     expect(a.pendingImages.value).toEqual(['two.png'])
     a.clearPendingImages()
     expect(a.pendingImages.value).toEqual([])
@@ -80,9 +84,23 @@ describe('pending images', () => {
   test('with no active chat there is nothing staged', () => {
     const { a } = make(null)
     expect(a.pendingImages.value).toEqual([])
-    a.removePendingImage(0)
+    a.removePendingImage('', 0)
     a.clearPendingImages()
     expect(stored['ciao-pending-images']).toBeUndefined()
+  })
+})
+
+describe('pending files', () => {
+  test('adds, persists and removes by index', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    a.addPendingFiles('c1', [{ ref: `drop_${'b'.repeat(32)}`, name: 'notes.md' }])
+    expect(JSON.parse(stored['ciao-pending-files'])).toEqual({
+      c1: [STAGED[0], { ref: `drop_${'b'.repeat(32)}`, name: 'notes.md' }],
+    })
+    a.removePendingFile('c1', 0)
+    expect(a.pendingFilesFor('c1')).toHaveLength(1)
+    expect(a.pendingFilesFor('c1')[0].name).toBe('notes.md')
   })
 })
 
@@ -148,7 +166,7 @@ describe('file comments', () => {
 describe('chat comments', () => {
   test('add, edit, image add/remove and clear', () => {
     const { a } = make()
-    const id = a.addPendingChatComment({ selection: 'quoted', comment: 'note' })
+    const id = a.addPendingChatComment('c1', { selection: 'quoted', comment: 'note' })
     expect(a.pendingChatComments.value).toHaveLength(1)
     a.updatePendingChatComment(id, 'edited')
     expect(a.pendingChatComments.value[0].comment).toBe('edited')
@@ -160,9 +178,28 @@ describe('chat comments', () => {
     expect(a.pendingChatComments.value).toEqual([])
   })
 
+  test('edits a staged chat comment in a chat that is not active', () => {
+    const { a } = make('c1')
+    const id = a.addPendingChatComment('c2', { selection: 's', comment: 'c' })
+    a.updatePendingChatComment(id, 'edited')
+    a.addPendingChatCommentImage(id, 'i.png')
+    expect(a.pendingChatCommentsFor('c2')[0]).toMatchObject({ comment: 'edited', images: ['i.png'] })
+    expect(a.pendingChatCommentsFor('c1')).toEqual([])
+    a.removePendingChatComment(id)
+    expect(a.pendingChatCommentsFor('c2')).toEqual([])
+  })
+
+  test('removes a staged image from the chat it names', () => {
+    const { a } = make('c1')
+    a.addPendingImageRefs('c2', ['x', 'y'])
+    a.removePendingImage('c2', 0)
+    expect(a.pendingImagesFor('c2')).toEqual(['y'])
+    expect(a.pendingImagesFor('c1')).toEqual([])
+  })
+
   test('nothing is staged when no chat is active', () => {
     const { a } = make(null)
-    a.addPendingChatComment({ selection: 's', comment: 'c' })
+    a.addPendingChatComment('', { selection: 's', comment: 'c' })
     expect(a.pendingChatComments.value).toEqual([])
   })
 })
@@ -291,6 +328,13 @@ describe('restoreFromStorage', () => {
     expect(a.pendingChatComments.value).toHaveLength(1)
   })
 
+  test('restores ciao-pending-files', () => {
+    stored['ciao-pending-files'] = JSON.stringify({ c1: STAGED })
+    const { a } = make()
+    a.restoreFromStorage()
+    expect(a.pendingFilesFor('c1')).toEqual(STAGED)
+  })
+
   test('a legacy chat-wide dismissal map is dropped rather than translated', () => {
     stored['ciao-dismissed-auto-pins'] = JSON.stringify({ c1: true, c2: ['x.md'] })
     const { a } = make()
@@ -317,12 +361,25 @@ describe('prepare and consume', () => {
   test('reference blocks lead, the typed prompt follows', () => {
     const { a } = make()
     a.addPendingComment({ path: 'a.md', selection: 'quoted', comment: 'why?' })
-    a.addPendingChatComment({ selection: 'said', comment: 'expand' })
+    a.addPendingChatComment('c1', { selection: 'said', comment: 'expand' })
     const prepared = a.prepareMessage('c1', '  do it  ')
     expect(prepared.composed.endsWith('do it')).toBe(true)
     expect(prepared.composed.indexOf('quoted')).toBeLessThan(prepared.composed.indexOf('do it'))
     expect(prepared.fileComments).toHaveLength(1)
     expect(prepared.chatComments).toHaveLength(1)
+  })
+
+  test('staged files follow the typed prompt as an attachment block', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    expect(a.prepareMessage('c1', 'go').composed).toBe('go\n\n' + composeAttachmentBlock(STAGED))
+  })
+
+  test('consuming clears staged files', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    a.consumePreparedAttachments('c1', a.prepareMessage('c1', 'go'))
+    expect(a.pendingFilesFor('c1')).toEqual([])
   })
 
   test('with nothing staged the composed text is just the prompt', () => {
@@ -337,7 +394,7 @@ describe('prepare and consume', () => {
     a.addPendingImageRefs('c1', ['shot.png'])
     const id = a.addPendingComment({ path: 'a.md', selection: 's', comment: 'c' })
     a.addFileCommentImage('a.md', id, 'shot.png')
-    a.addPendingChatComment({ selection: 's', comment: 'c', images: ['other.png'] })
+    a.addPendingChatComment('c1', { selection: 's', comment: 'c', images: ['other.png'] })
     expect(a.prepareMessage('c1', 'go').imageRefs?.sort()).toEqual(['other.png', 'shot.png'])
   })
 
@@ -345,7 +402,7 @@ describe('prepare and consume', () => {
     const { a } = make()
     a.addPendingImageRefs('c1', ['shot.png'])
     a.addPendingComment({ path: 'a.md', selection: 's', comment: 'c' })
-    a.addPendingChatComment({ selection: 's', comment: 'c' })
+    a.addPendingChatComment('c1', { selection: 's', comment: 'c' })
     const prepared = a.prepareMessage('c1', 'go')
     a.consumePreparedAttachments('c1', prepared)
     expect(a.pendingImages.value).toEqual([])
@@ -375,10 +432,16 @@ describe('hasStagedAttachments', () => {
     a.addPendingComment({ path: 'a.md', selection: 's', comment: 'c' })
     expect(a.hasStagedAttachments('c1')).toBe(true)
     a.clearPendingComments()
-    a.addPendingChatComment({ selection: 's', comment: 'c' })
+    a.addPendingChatComment('c1', { selection: 's', comment: 'c' })
     expect(a.hasStagedAttachments('c1')).toBe(true)
     a.clearPendingChatComments()
     expect(a.hasStagedAttachments('c1')).toBe(false)
+  })
+
+  test('true for staged files', () => {
+    const { a } = make()
+    a.addPendingFiles('c1', STAGED)
+    expect(a.hasStagedAttachments('c1')).toBe(true)
   })
 
   test("another chat's staged material does not count", () => {

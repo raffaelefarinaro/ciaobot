@@ -107,7 +107,7 @@ enableAutoUnmount(afterEach)
  * use is silent — the assertions then read a panel that never saw the
  * change — and it is exactly what made this file fail on a loaded machine.
  */
-async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
+async function mountPanel(opts: { realRepoSection?: boolean; plainHeader?: boolean } = {}): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -127,6 +127,7 @@ async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ w
   })
 
   const wrapper = shallowMount(ChatPanel, {
+    props: { chatId: 'chat-1', ...(opts.plainHeader ? { plainHeader: true } : {}) },
     global: {
       plugins: [pinia],
       stubs: {
@@ -185,7 +186,7 @@ describe('ChatPanel code mode rows', () => {
     store.chats[0].code_mode = true
     store.chats[0].user_turn_count = 0
     await flushPromises()
-    await wrapper.get('.chat-code-badge').trigger('click')
+    await wrapper.get('[aria-label="Show chat details"]').trigger('click')
     await flushPromises()
     const section = wrapper.getComponent(ChatRepoSection)
     expect(section.props('codeModeLocked')).toBe(false)
@@ -205,55 +206,28 @@ describe('ChatPanel code mode rows', () => {
   })
 })
 
-describe('ChatPanel code badge', () => {
-  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
-  const originalScrollTo = scrollProto.scrollTo
+describe('ChatPanel code mode in the header', () => {
   const REPO = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
 
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
     localStorage.clear()
-    scrollProto.scrollTo = function scrollTo() {}
   })
 
   afterEach(() => {
-    scrollProto.scrollTo = originalScrollTo
     document.body.innerHTML = ''
     vi.restoreAllMocks()
     localStorage.clear()
   })
 
-  it('shows a code badge beside the title only while code mode is on', async () => {
+  // Code mode is shown on the sidebar row and switched in Chat details; the header carries no badge.
+  it('shows no code badge in the header while code mode is on', async () => {
     const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     await flushPromises()
-    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('›_')
-    expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
-
-    store.chats[0].code_mode = false
-    await flushPromises()
     expect(wrapper.find('.chat-code-badge').exists()).toBe(false)
     expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
-  })
-
-  it('shows no badge for an unlinked chat in code mode', async () => {
-    const { wrapper, store } = await mountPanel()
-    store.chats[0].code_mode = true
-    await flushPromises()
-    expect(wrapper.find('.chat-code-badge').exists()).toBe(false)
-  })
-
-  it('opens Chat details at the Repository section from the badge', async () => {
-    const { wrapper, store } = await mountPanel()
-    store.projects[0].repo = REPO
-    store.chats[0].code_mode = true
-    await flushPromises()
-    await wrapper.get('.chat-code-badge').trigger('click')
-    await flushPromises()
-    const rail = document.querySelector('#chat-work-rail') ?? wrapper.element.querySelector('#chat-work-rail')
-    expect(rail).not.toBeNull()
-    expect(rail!.querySelector('.chat-rail-repo')).not.toBeNull()
   })
 })
 
@@ -290,10 +264,8 @@ describe('ChatPanel naming placeholder', () => {
     // The placeholder stands in for the title, so the temporary one never shows.
     expect(wrapper.find('.chat-title-row .chat-title').exists()).toBe(false)
     expect(wrapper.get('.chat-title-row').text()).not.toContain('New Chat')
-    // The close control and the code badge stay put while the conversation is
-    // being named.
+    // The close control stays put while the conversation is being named.
     expect(wrapper.find('.chat-title-row .close-btn').exists()).toBe(true)
-    expect(wrapper.find('.chat-title-row .chat-code-badge').exists()).toBe(true)
   })
 
   it('replaces the placeholder when the title settles', async () => {
@@ -311,7 +283,7 @@ describe('ChatPanel naming placeholder', () => {
     expect(wrapper.get('.chat-title-row .chat-title').text()).toBe('Deploy the API')
   })
 
-  it('keeps the close control, the title and the code badge in one header row', async () => {
+  it('keeps the close control and the title in one header row', async () => {
     const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.projects[0].name = 'Launch notes'
@@ -321,10 +293,9 @@ describe('ChatPanel naming placeholder', () => {
     const row = wrapper.get('.chat-title-row')
     expect(row.find('.close-btn').exists()).toBe(true)
     expect(row.find('.chat-title').exists()).toBe(true)
-    expect(row.find('.chat-code-badge').exists()).toBe(true)
-    // Close, then title, then badge: the order the header documents.
+    // Close, then title: the order the header documents.
     const order = Array.from(row.element.children).map(el => el.className)
-    expect(order).toEqual(['btn-icon close-btn', 'pane-title chat-title', 'chat-code-badge'])
+    expect(order).toEqual(['btn-icon close-btn', 'pane-title chat-title'])
     // Project context is available elsewhere and does not become another
     // line in the chat title header.
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
@@ -335,7 +306,6 @@ describe('ChatPanel naming placeholder', () => {
     const plainRow = wrapper.get('.chat-title-row')
     expect(plainRow.find('.close-btn').exists()).toBe(true)
     expect(plainRow.find('.chat-title').exists()).toBe(true)
-    expect(plainRow.find('.chat-code-badge').exists()).toBe(false)
   })
 
   it('still renames the title from the header', async () => {
@@ -364,5 +334,53 @@ describe('ChatPanel naming placeholder', () => {
     expect(css).toMatch(/\.chat-title-shimmer\s*\{[^}]*flex:\s*0 1 10rem/)
     // Reduced motion: a still bar, not a pulse.
     expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{[\s\S]*?animation:\s*none/)
+  })
+})
+
+describe('ChatPanel title rail', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
+  })
+
+  afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  function withSecondChat(store: ReturnType<typeof useProjectStore>) {
+    const stamp = '2026-11-01T10:00:00Z'
+    store.chats[0].last_activity_at = stamp
+    store.chats.push({ ...makeChat('chat-2'), last_activity_at: stamp })
+    store.activeWorkspace = 'personal'
+  }
+
+  it('shows the title rail after close when the workspace has another chat', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
+    store.chats[0].code_mode = true
+    withSecondChat(store)
+    await flushPromises()
+
+    const row = wrapper.get('.chat-title-row').element
+    const children = Array.from(row.children)
+    expect(children).toHaveLength(2)
+    expect(children[0].className).toBe('btn-icon close-btn')
+    expect(children[1].classList.contains('title-rail')).toBe(true)
+  })
+
+  it('the plain header returns with plainHeader', async () => {
+    const { wrapper, store } = await mountPanel({ plainHeader: true })
+    withSecondChat(store)
+    await flushPromises()
+
+    expect(wrapper.find('.title-rail').exists()).toBe(false)
+    expect(wrapper.find('.chat-title-row .chat-title').exists()).toBe(true)
   })
 })

@@ -77,7 +77,7 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -121,6 +121,12 @@ TERMINAL_MIN_COLS = 20
 TERMINAL_MAX_COLS = 500
 TERMINAL_MIN_ROWS = 5
 TERMINAL_MAX_ROWS = 200
+
+#: The bounds on an engine helper's argv: how many parts, and how long
+#: each part may be. A helper is a fixed program the engine builds, so
+#: these are generous limits, not a way to pass a long command line.
+HELPER_MAX_ARGS = 16
+HELPER_MAX_ARG_CHARS = 4096
 
 #: How often the sweeper looks for expired sessions. The issue asks for
 #: a sweep at least once a second; this is twice that.
@@ -333,6 +339,9 @@ class _Session:
     ended: bool = False
     cols: int = 80
     rows: int = 24
+    #: The fixed program an engine helper runs, or ``None`` for a user
+    #: shell. Set only by :meth:`TerminalSessionManager.create` with argv.
+    argv: tuple[str, ...] | None = None
     #: The tasks that close the session and its process. Both are
     #: manager-owned and shielded, so a cancelled caller cannot
     #: abandon them and neither of them runs twice.
@@ -563,6 +572,8 @@ class TerminalSessionManager:
         folder: Path,
         target_kind: TerminalTargetKind,
         target_id: str,
+        *,
+        argv: Sequence[str] | None = None,
     ) -> TerminalSessionInfo:
         """Open a shell in ``folder`` and return the session it belongs to.
 
@@ -577,11 +588,27 @@ class TerminalSessionManager:
         this manager cannot hold a session for, ``capacity`` when the
         manager is full, ``spawn_failed`` when the shell could not be
         started, and ``closed`` when a shutdown got there first.
+
+        ``argv`` makes an engine helper: that program runs instead of
+        the shell. Only engine code passes it; the routes never do. A
+        bad argv is refused with ``invalid_input`` before any process is
+        touched.
         """
         if target_kind not in ("chat", "project"):
             raise TerminalSessionError("invalid_target")
         if not isinstance(target_id, str) or not target_id.strip():
             raise TerminalSessionError("invalid_target")
+        helper_argv: tuple[str, ...] | None = None
+        if argv is not None:
+            parts = tuple(argv)
+            if not 1 <= len(parts) <= HELPER_MAX_ARGS or not all(
+                isinstance(part, str)
+                and 0 < len(part) <= HELPER_MAX_ARG_CHARS
+                and "\x00" not in part
+                for part in parts
+            ):
+                raise TerminalSessionError("invalid_input")
+            helper_argv = parts
 
         async with self._lock:
             if self._closing:
@@ -601,6 +628,7 @@ class TerminalSessionManager:
                 detached_since=now,
                 cols=self._cols,
                 rows=self._rows,
+                argv=helper_argv,
             )
             self._sessions[session.session_id] = session
 
@@ -639,13 +667,15 @@ class TerminalSessionManager:
         arrives after the session was abandoned — a cancelled create, a
         shutdown — is closed here rather than leaked.
         """
+        kwargs: dict[str, Any] = {
+            "cwd": session.folder,
+            "cols": self._cols,
+            "rows": self._rows,
+        }
+        if session.argv is not None:
+            kwargs["argv"] = list(session.argv)
         try:
-            process = await asyncio.to_thread(
-                self._factory,
-                cwd=session.folder,
-                cols=self._cols,
-                rows=self._rows,
-            )
+            process = await asyncio.to_thread(self._factory, **kwargs)
         except Exception:
             session.spawn_failed = True
             return
@@ -759,6 +789,35 @@ class TerminalSessionManager:
         if session is None:
             raise TerminalSessionError("not_found")
         return self._info(session)
+
+    def _require_helper(self, session_id: str) -> _Session:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise TerminalSessionError("not_found")
+        if session.argv is None:
+            raise TerminalSessionError("invalid_target")
+        return session
+
+    def helper_output(self, session_id: str) -> bytes:
+        """Every retained byte of an engine helper session (never a user shell).
+
+        :raises TerminalSessionError: ``not_found``, or ``invalid_target``
+            for a session that was not created with an argv.
+        """
+        session = self._require_helper(session_id)
+        return session.replay.snapshot(session.replay.oldest).data
+
+    def helper_input(self, session_id: str, data: bytes) -> int:
+        """Type into an engine helper session without holding its controller (engine-only).
+
+        :raises TerminalSessionError: ``not_found``, ``invalid_target`` for a
+            session that was not created with an argv, or ``closed`` once
+            the program has exited.
+        """
+        session = self._require_helper(session_id)
+        if session.ended or session.shell_gone or session.process is None:
+            raise TerminalSessionError("closed")
+        return self._queue_input(session, data)
 
     def list_for(
         self, target_kind: TerminalTargetKind, target_id: str
@@ -981,6 +1040,10 @@ class TerminalSessionManager:
         payload that cannot be admitted is never copied at all.
         """
         session = self._require_open(session_id, connection_id)
+        return self._queue_input(session, data)
+
+    def _queue_input(self, session: _Session, data: bytes) -> int:
+        """Queue input for the session's flusher: all of it, or refuse it whole."""
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TerminalSessionError("invalid_input")
         size = len(data)

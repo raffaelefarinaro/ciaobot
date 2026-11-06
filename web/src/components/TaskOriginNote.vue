@@ -24,7 +24,7 @@
  * task that store does not hold (not loaded yet, or deleted) still gets the
  * row, from the chat's own `task_delegation` stamp, with no state.
  */
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, useId, watch } from 'vue'
 import { taskAttemptLabel } from '../lib/taskBoard'
 import { approveTask, markTaskDone, taskClosureErrorMessage } from '../lib/taskClosure'
 import type { ChatInfo, Task } from '../lib/types'
@@ -113,6 +113,7 @@ const approveError = ref('')
 const noteOpen = ref(false)
 const noteDraft = ref('')
 const noteField = ref<HTMLTextAreaElement | null>(null)
+const resolutionId = useId()
 /** The button that opens the prompt — one of the two, never both at once. */
 const closureButton = ref<HTMLButtonElement | null>(null)
 watch(taskId, () => {
@@ -206,9 +207,9 @@ function submitNote(): void {
         </div>
         <a class="task-origin-link task-origin-title" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">{{ task ? (task.title || taskId) : 'A task on the board' }}<span class="task-origin-open"> · open on board</span></a>
         <template v-if="noteOpen">
-          <label class="task-origin-note-label" for="task-origin-resolution">How was it completed? <span class="task-origin-optional">(optional)</span></label>
+          <label class="task-origin-note-label" :for="resolutionId">How was it completed? <span class="task-origin-optional">(optional)</span></label>
           <textarea
-            id="task-origin-resolution"
+            :id="resolutionId"
             ref="noteField"
             v-model="noteDraft"
             class="task-origin-note"

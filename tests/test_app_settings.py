@@ -64,6 +64,36 @@ def test_keyboard_preferences_persist_and_validate(tmp_path):
     assert fresh.settings.keyboard_send_mode == "enter"
 
 
+def test_keyboard_preferences_accept_chat_step_shortcuts(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    store.update({
+        "keyboard_shortcuts": {"previousChat": "Alt+BracketLeft", "nextChat": "disabled"},
+    })
+
+    fresh = AppSettingsStore(path)
+    assert fresh.settings.keyboard_shortcuts == {"previousChat": "Alt+BracketLeft", "nextChat": "disabled"}
+
+
+def test_keyboard_preferences_accept_side_by_side_shortcuts(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    store.update({
+        "keyboard_shortcuts": {
+            "splitChat": "Mod+Backslash",
+            "focusPaneLeft": "Mod+Alt+BracketLeft",
+            "focusPaneRight": "disabled",
+        },
+    })
+
+    fresh = AppSettingsStore(path)
+    assert fresh.settings.keyboard_shortcuts == {
+        "splitChat": "Mod+Backslash",
+        "focusPaneLeft": "Mod+Alt+BracketLeft",
+        "focusPaneRight": "disabled",
+    }
+
+
 @pytest.mark.parametrize("changes", [
     {"keyboard_shortcuts": {"unknown": "Mod+KeyK"}},
     {"keyboard_shortcuts": {"archiveChat": "KeyK"}},

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatInfo } from '../types'
-import { groupHomeTiers } from '../homeLanes'
+import { HOME_TIER_ORDER, groupHomeTiers, orderedHomeChats } from '../homeLanes'
 
 const now = new Date('2026-08-11T12:00:00Z')
 
@@ -71,5 +71,38 @@ describe('groupHomeTiers', () => {
     expect(tiers.working).toEqual([])
     expect(tiers.quiet.map(c => c.chat_id)).toEqual(['plain-quiet'])
     expect(tiers.older).toEqual([])
+  })
+
+  it('orderedHomeChats flattens tiers in Home\'s render order', () => {
+    const tiers = groupHomeTiers(
+      [
+        chat('quiet', 60),
+        chat('older', 8 * 24 * 60 * 60),
+        chat('working', 120),
+        chat('needs', 180),
+        chat('unread', 240),
+      ],
+      id => id === 'needs',
+      id => id === 'working',
+      id => id === 'unread',
+      now,
+    )
+
+    const ordered = orderedHomeChats(tiers)
+
+    expect(ordered.map(e => e.chat.chat_id)).toEqual(['needs', 'unread', 'working', 'quiet', 'older'])
+    expect(ordered.map(e => e.tier)).toEqual(HOME_TIER_ORDER)
+  })
+
+  it('orderedHomeChats keeps recency within a tier', () => {
+    const tiers = groupHomeTiers(
+      [chat('quiet-old', 600), chat('quiet-new', 60)],
+      () => false,
+      () => false,
+      () => false,
+      now,
+    )
+
+    expect(orderedHomeChats(tiers).map(e => e.chat.chat_id)).toEqual(['quiet-new', 'quiet-old'])
   })
 })

@@ -351,6 +351,25 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if msg_type in ("queue_take", "queue_take_ack"):
+                entry_id = msg.get("entry_id")
+                if not isinstance(entry_id, str) or not 0 < len(entry_id) <= _MAX_QUEUE_ENTRY_ID_LEN:
+                    continue
+                if msg_type == "queue_take_ack":
+                    pcm.queue_take_ack(chat_id, entry_id)
+                    continue
+                request_id = msg.get("request_id")
+                if not isinstance(request_id, str) or not 0 < len(request_id) <= _MAX_QUEUE_ENTRY_ID_LEN:
+                    continue
+                taken = pcm.take_queue_for_edit(chat_id, entry_id)
+                await websocket.send_json({
+                    "type": "queue_take_result", "request_id": request_id,
+                    "entry_id": entry_id, "ok": taken is not None,
+                    "text": taken["text"] if taken else "",
+                    "images": taken["images"] if taken else [],
+                })
+                continue
+
             if msg_type == "queue_remove":
                 pcm.remove_queue(
                     chat_id,
@@ -576,6 +595,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_terminal_offer_changed` {chat_id, terminal_offer}  (null = cleared)
+    - `chat_actions_changed`    {chat_id, actions}  (the whole list; [] = none)
     - `chat_title`              {chat_id, title}
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
@@ -630,6 +650,8 @@ async def ws_events(websocket: WebSocket) -> None:
             # is missing from it has no offer and a stale offer is cleared
             # by its absence.
             "chat_terminal_offers": pcm.chat_terminal_offer_states,
+            # Sparse and COMPLETE like the offers: the map replaces the client's cache.
+            "chat_actions": pcm.chat_action_states,
             "keyboard_shortcuts": (
                 websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
                 if getattr(websocket.app.state, "app_settings", None) is not None else {}

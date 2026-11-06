@@ -24,4 +24,37 @@ describe('keyboard shortcuts', () => {
     expect(displayBinding('Alt+KeyN', true)).toBe('⌥N')
     expect(displayBinding('Alt+KeyN', false)).toBe('Alt+N')
   })
+
+  it('defaults previous/next chat to Alt+arrows, which can be captured and displayed', () => {
+    expect(DEFAULT_SHORTCUTS.previousChat).toBe('Alt+ArrowLeft')
+    expect(DEFAULT_SHORTCUTS.nextChat).toBe('Alt+ArrowRight')
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'ArrowLeft', altKey: true }))).toBe('Alt+ArrowLeft')
+    expect(displayBinding('Alt+ArrowLeft', true)).toBe('⌥←')
+    expect(displayBinding('Alt+ArrowRight', false)).toBe('Alt+→')
+  })
+
+  it('labels brackets', () => {
+    expect(displayBinding('Alt+BracketLeft', true)).toBe('⌥[')
+    expect(displayBinding('Alt+BracketRight', false)).toBe('Alt+]')
+  })
+
+  it('matches the bracket chord', () => {
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketRight', altKey: true }), 'Alt+BracketRight')).toBe(true)
+  })
+
+  it('captures it in Settings', () => {
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'BracketLeft', altKey: true }))).toBe('Alt+BracketLeft')
+  })
+
+  it('labels the side-by-side chords for each keyboard', () => {
+    expect(displayBinding('Mod+Backslash', true)).toBe('⌘\\')
+    expect(displayBinding('Mod+Alt+BracketRight', true)).toBe('⌘⌥]')
+    expect(displayBinding('Mod+Alt+BracketLeft', false)).toBe('Ctrl+Alt+[')
+  })
+
+  it('captures and matches the side-by-side chords', () => {
+    expect(bindingFromEvent(new KeyboardEvent('keydown', { code: 'Backslash', metaKey: true }))).toBe('Mod+Backslash')
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketLeft', ctrlKey: true, altKey: true }), DEFAULT_SHORTCUTS.focusPaneLeft)).toBe(true)
+    expect(keyboardMatches(new KeyboardEvent('keydown', { code: 'BracketLeft', ctrlKey: true }), DEFAULT_SHORTCUTS.focusPaneLeft)).toBe(false)
+  })
 })

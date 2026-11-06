@@ -57,7 +57,8 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
 
 _KEYBOARD_SHORTCUT_IDS = {
     "newChat", "archiveChat", "toggleSidebar", "modelPicker",
-    "fontIncrease", "fontDecrease", "closeChat",
+    "fontIncrease", "fontDecrease", "closeChat", "previousChat", "nextChat",
+    "splitChat", "focusPaneLeft", "focusPaneRight",
     *(f"workspace{i}" for i in range(1, 10)),
 }
 

@@ -70,3 +70,17 @@ export function groupHomeTiers(
 
   return tiers
 }
+
+/** The order Home renders its tiers in (HomeRecentChats tierEntries: needs you, unread, working, earlier = quiet + older):
+ * a finished reply waiting to be read comes before a chat still working. */
+export const HOME_TIER_ORDER: readonly HomeTierKey[] = ['needsYou', 'unread', 'working', 'quiet', 'older']
+
+export interface OrderedHomeChat {
+  chat: ChatInfo
+  tier: HomeTierKey
+}
+
+// Same order as HomeRecentChats.vue tierEntries, which renders these tiers. Keep them in step.
+export function orderedHomeChats(tiers: HomeTiers): OrderedHomeChat[] {
+  return HOME_TIER_ORDER.flatMap(tier => tiers[tier].map(chat => ({ chat, tier })))
+}

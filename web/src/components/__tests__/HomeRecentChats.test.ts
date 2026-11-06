@@ -178,6 +178,24 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.text()).not.toContain('nothing needs you here')
   })
 
+  it('lists unread replies before chats still working, and has no visible section heading', async () => {
+    const wrapper = await mountHome()
+    // In the shown (personal) lane: one chat with a new reply, one still working.
+    const store = useProjectStore()
+    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
+    quiet.last_activity_at = timestamp(60)
+    quiet.last_read_at = timestamp(3600)
+    store.chats.push({ ...quiet, chat_id: 'busy', title: 'Still working', last_read_at: timestamp(60) } as typeof quiet)
+    store.backgroundAgents = { ...store.backgroundAgents, busy: 1 }
+    await nextTick()
+    const order = wrapper.findAll('.home-tier').map(n => n.classes().find(c => c.startsWith('home-tier--'))!)
+    expect(order).toContain('home-tier--unread')
+    expect(order).toContain('home-tier--working')
+    expect(order.indexOf('home-tier--unread')).toBeLessThan(order.indexOf('home-tier--working'))
+    expect(wrapper.text()).not.toContain('Continue where you left off')
+    expect(wrapper.find('h2.sr-only').text()).toBe('Your chats')
+  })
+
   it('keeps tier labels lowercase', async () => {
     const wrapper = await mountHome()
     const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
@@ -360,6 +378,39 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(workLane.find('.home-chat-tidy-note').text()).toBe('needs attention')
     expect(workLane.find('.home-lane-status-text').text())
       .toBe('1 chat needs your attention. 1 agent still working.')
+    wrapper.unmount()
+  })
+
+  it('keeps a malformed-helper pass reachable without counting it as attention', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    store.projects = [
+      ...store.projects,
+      { project_id: 'work-memory', name: 'Memory', workspace: 'work', kind: 'memory' },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'fallback-pass', project_id: 'work-memory', title: 'Memory pass · Archived work chat',
+        created_at: timestamp(120), last_activity_at: timestamp(120), last_read_at: timestamp(300),
+        archived: false, local: true,
+        pending_question: JSON.stringify({ questions: [{ question: 'Which project is this?' }] }),
+        helper: { kind: 'legacy-memory-pass' },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    // No helper means no insight row, so the ordinary chat row is the access path.
+    expect(workLane.findAll('.home-insight-row')).toHaveLength(0)
+    const passRow = workLane.findAll('.home-chat-item')
+      .find(row => row.find('.home-chat-title').text() === 'Memory pass · Archived work chat')
+    expect(passRow).toBeDefined()
+    // The status sentence counts only real attention; the pass never adds one.
+    expect(workLane.find('.home-lane-status-text').text())
+      .toBe('nothing needs your attention. 1 agent still working.')
     wrapper.unmount()
   })
 

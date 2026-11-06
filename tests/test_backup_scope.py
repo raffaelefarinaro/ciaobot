@@ -511,3 +511,36 @@ def test_tracked_excluded_is_empty_outside_a_repository(tmp_path: Path) -> None:
     (workspace / "memory-vault").mkdir(parents=True)
 
     assert backup_scope.tracked_excluded(_config(workspace)) == []
+
+
+# ── per-workspace transcripts (#2536) ───────────────────────────────────────
+#
+# Each workspace's own transcripts live in its agent root's ``Logs``, outside
+# the allowlist, and an archived copy of that root keeps them refused by shape.
+# The shared install-root ``Logs`` stays refused by location. Pinned here
+# rather than enforced by new rules: the scope already refuses all three.
+
+
+def test_a_workspaces_own_transcripts_are_never_backed_up(tmp_path: Path) -> None:
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert backup_scope.is_eligible("personal/Logs/Chats/chat-1/claude/s.md", config) is False
+    assert backup_scope.is_eligible("personal/Logs/notes.md", config) is False
+    assert backup_scope.is_eligible("personal/memory-vault/Notes/x.md", config) is True
+
+
+def test_an_archived_per_root_workspaces_transcripts_stay_refused(tmp_path: Path) -> None:
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/work-20261103-120000/work/Logs/Chats/chat-1/claude/s.md",
+        config,
+    ) is False
+
+
+def test_the_shared_logs_root_is_still_refused_after_the_split(tmp_path: Path) -> None:
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert backup_scope.is_eligible("Logs/Chats/chat-1/claude/s.md", config) is False
+    assert backup_scope.is_eligible("Logs/CLI/x.md", config) is False
+

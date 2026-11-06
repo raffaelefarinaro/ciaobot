@@ -1,10 +1,11 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
        by the Chat details rail and the narrow-pane drawer. -->
-  <section v-if="contextPct != null" class="rail-section agent-context" :aria-labelledby="usageLabelId">
+  <section v-if="contextPct != null || compacted" class="rail-section agent-context" :aria-labelledby="usageLabelId">
     <p :id="usageLabelId" class="rail-label">Context usage</p>
     <div class="agent-context-meter-row">
       <div
+        v-if="contextPct != null"
         class="agent-context-meter"
         role="meter"
         :aria-valuenow="contextPct"
@@ -24,7 +25,6 @@
         @click="emit('compact')"
       >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
     </div>
-    <p class="agent-context-usage-note">{{ contextPctLabel }} of context window used</p>
   </section>
   <!-- Closed by default: these rows are the same every turn, so they are
        reference, not news. The summary still says how much they cost. -->
@@ -125,6 +125,8 @@ const props = defineProps<{
   project: ProjectInfo | null | undefined
   /** Percent of the context window used as of the last reply, when the provider reported it. */
   contextPct: number | null
+  /** A compaction is newer than the last reported usage, so the old figure no longer holds. */
+  compacted?: boolean
   /** A compact request is in flight. */
   compacting: boolean
   /** The chat is streaming or a compact request is in flight. */
@@ -277,7 +279,6 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
-.agent-context-usage-note { margin: 0 0 var(--space-2); color: var(--fg3); font-size: var(--text-xs); }
 .agent-context-meter-row {
   display: flex;
   align-items: center;

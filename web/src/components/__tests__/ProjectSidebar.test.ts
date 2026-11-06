@@ -320,6 +320,107 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  function addOtherChat(): void {
+    useProjectStore().chats.push({
+      chat_id: 'chat-other',
+      project_id: 'project-1',
+      title: 'Other chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'default',
+      session_id: 'session-2',
+      created_at: '2026-07-29T00:00:00Z',
+      archived: false,
+    })
+  }
+
+  it('offers Open beside on other chats when the layout can show it', async () => {
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    addOtherChat()
+    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined as never)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat', canOpenBeside: true },
+      global: { plugins: [router] },
+    })
+
+    const otherRow = wrapper.findAll('.chat-item').find(row => row.text().includes('Other chat'))!
+    const activeRow = wrapper.findAll('.chat-item').find(row => row.text().includes('Copy me'))!
+    expect(otherRow.find('.chat-beside-btn').exists()).toBe(true)
+    expect(activeRow.find('.chat-beside-btn').exists()).toBe(false)
+
+    await otherRow.get('.chat-beside-btn').trigger('click')
+    expect(wrapper.emitted('open-beside')).toEqual([['chat-other']])
+    expect(switchChat).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
+
+  it('lists Open beside in the row menu', async () => {
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    addOtherChat()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat', canOpenBeside: true },
+      global: { plugins: [router] },
+    })
+
+    const otherRow = wrapper.findAll('.chat-item').find(row => row.text().includes('Other chat'))!
+    await otherRow.get('[aria-label="Chat actions"]').trigger('click')
+    const openBeside = Array.from(document.body.querySelectorAll('button'))
+      .find(button => button.textContent?.trim() === 'Open beside')
+    expect(openBeside).toBeTruthy()
+    openBeside!.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('open-beside')).toEqual([['chat-other']])
+
+    wrapper.unmount()
+  })
+
+  it('offers no Open beside when a split cannot be shown', async () => {
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    addOtherChat()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat', canOpenBeside: false },
+      global: { plugins: [router] },
+    })
+
+    expect(wrapper.find('.chat-beside-btn').exists()).toBe(false)
+    const otherRow = wrapper.findAll('.chat-item').find(row => row.text().includes('Other chat'))!
+    await otherRow.get('[aria-label="Chat actions"]').trigger('click')
+    const openBeside = Array.from(document.body.querySelectorAll('button'))
+      .find(button => button.textContent?.trim() === 'Open beside')
+    expect(openBeside).toBeUndefined()
+
+    wrapper.unmount()
+  })
+
   it('moves a chat when it is dropped onto another project', async () => {
     const store = useProjectStore()
     store.projects.push({
