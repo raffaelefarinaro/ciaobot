@@ -56,12 +56,13 @@
           <p class="hint hint--warn">
             Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
           </p>
+          <p v-if="gwsIntegration?.install_problem" class="hint hint--warn" role="alert">{{ gwsIntegration.install_problem }}</p>
           <div class="action-row">
             <HostTerminalButton action="gws-install" variant="small" label="Install in Terminal" />
             <button type="button" class="btn-primary btn-small" @click="onInstallInChat">Install in Chat</button>
             <button type="button" class="btn-small" @click="fetchGwsIntegration()">Check again</button>
           </div>
-          <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
+          <p class="hint hint--compact">Opens a chat that walks through <code>{{ GWS_INSTALL_COMMAND }}</code> with you — Ciaobot does not run package installs on its own.</p>
         </section>
 
         <!-- Step 2: the OAuth client -->
@@ -215,6 +216,7 @@ import { WORKSPACE_ADMIN_KEY, type WorkspaceAdminContext } from '../../composabl
 import { useProjectStore } from '../../stores/projects'
 import { errorMessage } from '../../lib/errorMessage'
 import { deriveGwsProfileId, gwsStorageHint, slugifyGwsProfile } from '../../lib/gwsProfileId'
+import { GWS_INSTALL_COMMAND } from '../../lib/gwsInstall'
 import { gwsAccountState, gwsDialogSteps, type GwsDialogStepId } from '../../lib/gwsSetup'
 import { workspaceLabel } from '../../lib/workspaceLabel'
 import { writeClipboard } from '../../lib/codeCopy'

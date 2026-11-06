@@ -253,6 +253,8 @@
         <div v-else-if="item.kind === 'user' && taskHandover && item.msg === taskHandover.msg" class="message-wrap task-handover-wrap">
           <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
         </div>
+        <!-- A retry that failed again is said once, on the failure's own card. -->
+        <template v-else-if="item.kind === 'user' && retryFailedAgain(i)"></template>
         <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook,
              an update task) or a request the user retried reads as a notice, not
              as something the reader typed. -->
@@ -346,13 +348,28 @@
           :data-msg-role="item.kind"
         >
           <InjectedPromptCard
-            :prompt="errorNoticePrompt(item.msg.content)"
+            :prompt="errorNoticePrompt(item.msg.content, retryFailedFrom(i))"
             :raw="item.msg.content"
             :timestamp="item.msg.timestamp"
             :chat-title="chat.title"
             :known-paths="knownFilePaths"
           >
             <template v-if="errorHasActions(i, item.msg.content)" #actions>
+              <template v-if="retryOwnerIdx === i && chat.retry">
+                <ChatRetryState
+                  :retry="chat.retry"
+                  :provider="chat.provider"
+                  :streaming="view.isStreaming"
+                  @continue="openRecoveryPicker(null)"
+                  @try-now="tryRetryNow"
+                  @stop="stopRetry"
+                />
+                <!-- The retry state does not replace the diagnosis chat. -->
+                <div v-if="errorBubbleAction(i, item.msg.content) === 'fix'" class="error-actions">
+                  <button class="retry-btn fix-btn" @click="openFixChat(i)">Fix this error</button>
+                </div>
+              </template>
+              <template v-else>
               <div class="error-actions">
                 <button
                   v-if="lastUserBefore(i) && !hasLaterItem(i)"
@@ -384,6 +401,7 @@
                 :action-disabled="view.isStreaming"
                 @action="retryFromError(i)"
               />
+              </template>
             </template>
           </InjectedPromptCard>
         </div>
@@ -494,30 +512,27 @@
       </template>
       </template>
 
-      <div v-if="chat.retry?.status === 'pending' && !view.isStreaming" class="retry-card">
-        <div class="retry-card-main">
-          <AppIcon class="retry-card-icon" name="clock" :size="18" />
-          <div>
-            <div class="retry-card-title">{{ retryCardTitle }}</div>
-            <div class="retry-card-meta">
-              <span v-if="chat.retry.next_at">Next try {{ formatRetryTime(chat.retry.next_at) }}</span>
-              <span v-if="chat.retry.attempts"> · {{ chat.retry.attempts }} attempt{{ chat.retry.attempts === 1 ? '' : 's' }}</span>
-            </div>
-          </div>
-        </div>
-        <div class="retry-card-actions">
-          <button class="btn-small" :disabled="view.isStreaming" @click="openRecoveryPicker(null)">Continue with...</button>
-          <button class="btn-small" :disabled="view.isStreaming" @click="tryRetryNow">Try now</button>
-          <button class="btn-small" @click="stopRetry">Stop trying</button>
-        </div>
-        <ProviderSignInHint
-          v-if="isProviderAuthError(chat.retry.last_error)"
-          class="retry-card-hint"
-          :provider="chat.provider"
-          action-label="Try now"
-          :action-disabled="view.isStreaming"
-          @action="tryRetryNow"
-        />
+      <!-- A pending retry whose failure is not the transcript's last row (or
+           has none) gets its own error card; otherwise the last error row
+           carries the retry state itself. -->
+      <div v-if="retryPending && chat.retry && retryOwnerIdx === -1" class="message-wrap injected-prompt-wrap">
+        <InjectedPromptCard
+          :prompt="errorNoticePrompt(chat.retry.last_error || '')"
+          :raw="chat.retry.last_error || ''"
+          :chat-title="chat.title"
+          :known-paths="knownFilePaths"
+        >
+          <template #actions>
+            <ChatRetryState
+              :retry="chat.retry"
+              :provider="chat.provider"
+              :streaming="view.isStreaming"
+              @continue="openRecoveryPicker(null)"
+              @try-now="tryRetryNow"
+              @stop="stopRetry"
+            />
+          </template>
+        </InjectedPromptCard>
       </div>
 
       <!-- Live reasoning trace: shown from the moment streaming starts.
@@ -1095,9 +1110,9 @@
               <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
               <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
             </span>
-            <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip">
+            <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip" :title="f.name">
               <AppIcon class="comment-chip-icon" name="doc" :size="14" />
-              <span class="file-chip-name" :title="f.name">{{ f.name }}</span>
+              <span class="file-chip-name">{{ f.name }}</span>
               <button type="button" class="comment-chip-remove" :aria-label="`Remove ${f.name}`" title="Remove" @click="removePendingFile(i)">&times;</button>
             </span>
             <span
@@ -1490,6 +1505,7 @@ import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
+import ChatRetryState from './ChatRetryState.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'
@@ -4889,9 +4905,52 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
 function hasLaterItem(errorIdx: number): boolean {
   return renderItems.value.slice(errorIdx + 1).some(it => it.kind !== 'trace')
 }
+// A pending retry shows on the transcript's last row when that row is the
+// failure (a trace after it does not count); -1 when no error row owns it.
+const retryPending = computed(() => chat.value?.retry?.status === 'pending' && !view.isStreaming)
+const retryOwnerIdx = computed(() => {
+  if (!retryPending.value) return -1
+  const items = renderItems.value
+  for (let k = items.length - 1; k >= 0; k--) {
+    const it = items[k]
+    if (it.kind === 'trace') continue
+    const isError = (it.kind === 'assistant' && it.msg.is_error)
+      || (it.kind === 'system' && isErrorMsg(it.msg.content))
+    return isError ? k : -1
+  }
+  return -1
+})
+// The next row that is not a trace, or -1.
+function nextNonTraceIdx(idx: number): number {
+  const items = renderItems.value
+  for (let k = idx + 1; k < items.length; k++) if (items[k].kind !== 'trace') return k
+  return -1
+}
+function isErrorItem(k: number): boolean {
+  const it = renderItems.value[k]
+  return Boolean(it) && ((it.kind === 'assistant' && Boolean(it.msg.is_error))
+    || (it.kind === 'system' && isErrorMsg(it.msg.content)))
+}
+// A retry-origin turn whose next row is an error: the retry failed again.
+function retryFailedAgain(idx: number): boolean {
+  const it = renderItems.value[idx]
+  if (!it || it.kind !== 'user' || injectedPrompts.value.get(it.msg)?.kind !== 'retry') return false
+  const next = nextNonTraceIdx(idx)
+  return next !== -1 && isErrorItem(next)
+}
+// The error row at `idx` follows a retry-origin turn.
+function retryFailedFrom(errorIdx: number): boolean {
+  const items = renderItems.value
+  for (let k = errorIdx - 1; k >= 0; k--) {
+    if (items[k].kind === 'trace') continue
+    return retryFailedAgain(k)
+  }
+  return false
+}
 // Whether the notice's actions slot has anything to draw. The same
 // conditions the template uses for each button and the sign-in hint.
 function errorHasActions(errorIdx: number, content: string): boolean {
+  if (retryOwnerIdx.value === errorIdx) return true
   const canRetry = Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
   const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
   return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
@@ -4965,24 +5024,6 @@ async function openFixChat(errorIdx: number) {
     store.pushErrorToast('Could not open fix chat', `${(e as Error)?.message || e}`)
   }
 }
-
-function formatRetryTime(value: string): string {
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return ''
-  return formatTime(d.toISOString())
-}
-
-// Quota retries back off from an hour (1h, 2h, 4h, then 8h), weekly/monthly
-// limits wait a day; connection, startup and auth retries 30s.
-const retryCardTitle = computed(() => {
-  const retry = chat.value?.retry
-  if (retry && isProviderAuthError(retry.last_error)) return 'Signed out — retrying this turn'
-  const seconds = retry?.interval_seconds || 0
-  if (seconds && seconds < 3600) return 'Retrying this turn shortly'
-  if (seconds >= 86400) return 'Retrying this turn once a day'
-  if (seconds > 3600) return 'Retrying this turn every few hours'
-  return 'Retrying this turn every hour'
-})
 
 async function tryRetryNow() {
   if (!chat.value || view.isStreaming) return
@@ -6262,59 +6303,29 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .retry-btn {
   margin-top: 6px;
-  padding: 4px 12px;
+  padding: 8px 16px;
   background: var(--bg3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius);
   font-family: var(--font);
-  font-size: 11px;
+  font-size: var(--text-sm);
+  font-weight: 600;
   cursor: pointer;
 }
 .retry-btn:hover { background: var(--border-strong); border-color: var(--fg2); }
 .retry-btn:active { transform: scale(0.97); }
+@media (pointer: coarse) {
+  .retry-btn { min-height: var(--touch); }
+}
 .error-actions {
   display: flex;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-
-.retry-card {
-  align-self: center;
-  width: min(680px, 90%);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  background: rgba(255, 193, 7, 0.08);
-  border: 1px solid rgba(255, 193, 7, 0.28);
-  border-radius: var(--radius);
-  color: var(--fg);
-}
-
-.retry-card-main {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.retry-card-icon { flex-shrink: 0; }
-.retry-card-title { font-size: var(--text-sm); font-weight: 700; }
-.retry-card-meta { color: var(--fg2); font-size: var(--text-xs); margin-top: 2px; }
-.retry-card-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
-.retry-card-hint { flex-basis: 100%; margin-top: 0; }
-
-@media (max-width: 640px) {
-  .retry-card { align-items: stretch; flex-direction: column; }
-  .retry-card-actions { justify-content: flex-end; }
-  .retry-card-hint { flex-basis: auto; }
-}
 
 /* Activity blocks (live streaming) */
 .activity-block {
@@ -6780,8 +6791,10 @@ details[open] > .activity-summary::before {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 4px 4px 2px;
+  gap: var(--space-2);
+  /* Same inset as the textarea's text, so a chip's left edge lines up with the
+     words typed under it. */
+  padding: var(--space-1) 12px 0;
   flex-shrink: 0;
   /* Comments wrap onto new rows, so cap the row before a long comment session
      pushes the input off screen. */
@@ -6843,12 +6856,12 @@ details[open] > .activity-summary::before {
 .comment-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
-  min-height: 30px;
-  padding: 0 4px 0 8px;
+  min-height: 32px;
+  padding: 0 var(--space-1) 0 var(--space-2);
   border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--border));
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent2) 12%, transparent);
@@ -6914,14 +6927,15 @@ details[open] > .activity-summary::before {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--fg3);
-  font-size: 14px;
+  color: var(--fg2);
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 .comment-chip-remove:hover { background: var(--bg3); color: var(--fg); }
 @media (pointer: coarse) {
   .comment-chip-remove::after { content: ''; position: absolute; inset: -10px; }
+  .comment-chip { min-height: var(--touch); }
 }
 
 
