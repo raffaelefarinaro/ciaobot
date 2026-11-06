@@ -717,7 +717,7 @@ above still has to be walked by hand on a real phone before a release.
 
 The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.
 
-Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API; keeping the packaged default writes nothing. No routine is created when the workspace has none.
+Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API, and only for a time or zone the operator edited, when Continue commits it through the stage's exposed `save()`; unchanged fields write nothing. No routine is created when the workspace has none.
 
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
 - An optional reason is asked for before every individual accept and dismissal in the queue: the row's accept opens the decision card with the reason on it (`Why keep this? (optional)`), and every Dismiss opens an inline confirmation naming the proposal (`Why dismiss this? (optional)`). Picking the workspace for a re-home is the exception — the destination is the answer — and the batch bar never asks. There is no *Why?* disclosure left on a row or a card. The shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts` holds the answer per row in the panel (`reasonById`), and it is discarded on Cancel, on a switch to another card, and after a successful decision; a failed dismissal keeps it so the retry does not lose the sentence. It is sent as `reason` only when non-empty, with that row's accept (and the retry of a deferred accept) or its dismissal, never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. With no reason typed the confirmation's button reads *Continue without a reason* and the card names the action above it (*This will save to ciao:memory.*, *This will dismiss the proposal.*); with a reason the accept button names the destination again. History renders a row's `reason` as text (`.ph-reason`), never markup.
@@ -728,22 +728,29 @@ Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks w
 ### Onboarding stages
 
 `components/onboarding/` holds presentation stages that the shell composes; each receives
-`OnboardingStageProps` (`context`, `busy`) and emits `state`, `continue`, `back` and `refresh`.
-A stage owns its domain save and reports whether it succeeded; the shell, never the stage, writes
-progress through the onboarding store.
+`OnboardingStageProps` (`context`, `busy`) and emits only `state`. The shell owns the one sticky
+footer (Back, Leave setup, Continue; Finish setup on the last step) and is the scroll container,
+because the page and body do not scroll. Stages are built from shared layout pieces that use the
+DESIGN.md spacing tokens: `OnboardingStack` (md/xl/2xl rhythm), `OnboardingField` (label, control,
+chips, help, error 8px apart, with the described-by ids), `OnboardingChoiceGroup` / `OnboardingChoice`
+(labelled radiogroup of native radios, `list`, `cards` or `segmented`, 44px rows), `OnboardingStepFooter`
+and `OnboardingButton`. Every choice is written when it is made, so there is no Save or Refresh step.
+A stage reports readiness; the shell, never the stage, writes progress through the onboarding store.
+Values the installer already set (folder, workspace name, runtime and model) are shown as set with a
+Change control rather than asked again.
 
-The onboarding location stage owns the folder-first location choice and workspace name validation; it reports readiness to the shared shell and emits `continue` only on the user's action. It never writes onboarding progress. Provisioned installs treat the current folder as read-only and link to the guarded workspace move flow.
-The onboarding finish stage shows a summary built only from observed values and offers an optional
+The onboarding location stage owns the folder-first location choice and workspace name validation; it reports readiness to the shared shell and never writes onboarding progress. Provisioned installs show the current folder and workspace as set; the folder links to the guarded workspace move flow and the workspace name is asked only after Change.
+The onboarding finish stage lists only the summary rows that need attention (built from observed values), keeps the tools and video behind a Tips disclosure, and offers an optional
 first task that creates a chat and sends the submitted text; it does not change setup progress
 itself.
 
-`OnboardingRuntimeStage` reads model provenance from
+`OnboardingRuntimeStage` reads provider status and, for the selected signed-in runtime, the model list on mount; choosing a model writes it. It reads model provenance from
 `/api/models`: runtime-reported models and configured aliases are rendered in separate sections,
 and an unobserved runtime is never described as available.
 
 ## Onboarding memory
 
-The Access & memory onboarding stage asks workspace operators to acknowledge a handover choice before continuing. Its suggested “Accept and dismiss” choice applies only while that workspace's onboarding receipt is `in_progress`; it is never written until Continue, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
+The Access & memory onboarding stage offers three plain-word handover options (Ask me first, Skip likely duplicates, File what's clear and ask about the rest) with no acknowledgement step; each is saved when chosen. The suggested last option applies only while that workspace's onboarding receipt is `in_progress`; it is not written until a choice is tapped or Continue commits it, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
 
 ### Onboarding entry
 
