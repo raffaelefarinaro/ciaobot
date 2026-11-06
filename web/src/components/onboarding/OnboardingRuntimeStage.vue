@@ -134,7 +134,7 @@ async function checkAgain(): Promise<void> {
 }
 
 function selectProvider(id: string): void {
-  if (id !== 'claude' && id !== 'opencode') return
+  if (saving.value || (id !== 'claude' && id !== 'opencode')) return
   provider.value = id
   saveError.value = ''
   selection.value = ''
@@ -144,9 +144,11 @@ function selectProvider(id: string): void {
 
 // Choosing a model saves it; there is no separate save step.
 async function choose(id: string): Promise<void> {
+  if (saving.value) return
   saveError.value = ''
   selection.value = id
   deferred.value = false
+  // A failed write keeps the selection so Retry can write the same choice.
   await save()
 }
 
@@ -215,7 +217,7 @@ defineExpose({ refresh: checkAgain, save })
     </div>
 
     <template v-else>
-      <OnboardingChoiceGroup label="Runtime" name="runtime" layout="segmented" :model-value="provider" :disabled="saving" @update:model-value="selectProvider">
+      <OnboardingChoiceGroup label="Runtime" name="runtime" layout="segmented" :model-value="provider" @update:model-value="selectProvider">
         <OnboardingChoice value="claude">Claude Code</OnboardingChoice>
         <OnboardingChoice value="opencode">OpenCode</OnboardingChoice>
       </OnboardingChoiceGroup>
@@ -244,14 +246,14 @@ defineExpose({ refresh: checkAgain, save })
       </OnboardingStack>
 
       <template v-if="editing">
-        <OnboardingChoiceGroup v-if="signedIn && models !== null && reported.length" label="Models reported by this runtime" name="model" :model-value="selection" :disabled="saving" @update:model-value="choose">
+        <OnboardingChoiceGroup v-if="signedIn && models !== null && reported.length" label="Models reported by this runtime" name="model" :model-value="selection" @update:model-value="choose">
           <OnboardingChoice v-for="model in reported" :key="model.id" :value="model.id">
             {{ model.label }}
             <template #description><code :title="model.id">{{ model.id }}</code> · reported by this runtime</template>
           </OnboardingChoice>
           <template #after><p class="quiet">A successful reply has not been verified.</p></template>
         </OnboardingChoiceGroup>
-        <OnboardingChoiceGroup v-else-if="signedIn && models !== null && configured.length" label="Configured choices; availability not checked" name="model" :model-value="selection" :disabled="saving" @update:model-value="choose">
+        <OnboardingChoiceGroup v-else-if="signedIn && models !== null && configured.length" label="Configured choices; availability not checked" name="model" :model-value="selection" @update:model-value="choose">
           <OnboardingChoice v-for="model in configured" :key="model" :value="model"><code>{{ model }}</code></OnboardingChoice>
           <template #after><p class="quiet">These configured aliases are not evidence that the account can use them.</p></template>
         </OnboardingChoiceGroup>

@@ -38,6 +38,7 @@ const context = ref<OnboardingStageContext>({
 const step = ref<OnboardingStep>('location')
 const runtimeStage = ref<InstanceType<typeof OnboardingRuntimeStage> | null>(null)
 const memoryStage = ref<InstanceType<typeof OnboardingMemoryStage> | null>(null)
+const careStage = ref<InstanceType<typeof OnboardingCareStage> | null>(null)
 const state = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const accessState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
@@ -109,6 +110,15 @@ async function advance(): Promise<void> {
       committing.value = false
     }
   }
+  if (step.value === 'care') {
+    // Care writes only a timing the person changed; an unchanged one writes nothing.
+    committing.value = true
+    try {
+      if (!await careStage.value?.save()) return
+    } finally {
+      committing.value = false
+    }
+  }
   const order: OnboardingStep[] = ['location', 'runtime', 'access_memory', 'care', 'finish']
   if (step.value === 'finish') {
     if (await store.complete(target.value)) await router.replace(validReturn())
@@ -172,7 +182,7 @@ async function reload(): Promise<void> {
         <OnboardingAccessStage v-bind="stageProps" @state="updateAccess" />
         <OnboardingMemoryStage ref="memoryStage" v-bind="stageProps" @state="updateMemory" />
       </OnboardingStack>
-      <OnboardingCareStage v-else-if="step === 'care'" v-bind="stageProps" @state="update" />
+      <OnboardingCareStage v-else-if="step === 'care'" ref="careStage" v-bind="stageProps" @state="update" />
       <OnboardingFinishStage v-else v-bind="stageProps" @state="update" />
     </template>
   </OnboardingShell>

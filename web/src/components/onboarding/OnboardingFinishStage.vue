@@ -18,6 +18,7 @@ const store = useProjectStore()
 
 const items = ref<OnboardingSummaryItem[]>([])
 // Only what needs a look is listed; a ready or deliberately deferred row is noise.
+const left = computed(() => items.value.filter(item => item.state === 'deferred').length)
 const attention = computed(() => items.value.filter(item => item.state === 'attention' || item.state === 'unknown'))
 const loading = ref(true)
 const readError = ref('')
@@ -205,7 +206,7 @@ defineExpose({ refresh: loadSummary })
     <OnboardingStack as="section" aria-labelledby="ready-title">
       <h2 id="ready-title">You're set</h2>
       <p v-if="!loading && attention.length" class="hint">These could use a look before you rely on them.</p>
-      <p v-else-if="!loading" class="hint">Everything checked looks ready.</p>
+      <p v-else-if="!loading" class="hint">Nothing needs attention.<template v-if="left"> {{ left === 1 ? '1 item was' : `${left} items were` }} left for later.</template></p>
       <OnboardingSummary :items="attention" :loading="loading" />
     </OnboardingStack>
 

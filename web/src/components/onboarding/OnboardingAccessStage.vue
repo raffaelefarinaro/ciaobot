@@ -100,12 +100,12 @@ async function save(next: { scope?: string; approval?: string }): Promise<void> 
 }
 
 function chooseScope(value: string): void {
-  if (value === savedScope.value) return
+  if (pending.value || value === savedScope.value) return
   scope.value = value
   void save({ scope: value })
 }
 function chooseApproval(value: string): void {
-  if (value === savedApproval.value) return
+  if (pending.value || value === savedApproval.value) return
   approval.value = value
   void save({ approval: value })
 }
@@ -116,7 +116,7 @@ function undoScope(): void { chooseScope(previousScope.value) }
   <OnboardingStack as="section" gap="xl" class="access-stage" aria-labelledby="access-title">
     <h2 id="access-title">Choose what the agent can access</h2>
 
-    <OnboardingChoiceGroup label="Filesystem scope" name="scope" layout="cards" :model-value="scope" :disabled="pending" @update:model-value="chooseScope">
+    <OnboardingChoiceGroup label="Filesystem scope" name="scope" layout="cards" :model-value="scope" @update:model-value="chooseScope">
       <OnboardingChoice value="workspace" :disabled="windows">
         Workspace only
         <template #description>Access stays inside this workspace.</template>
@@ -136,7 +136,7 @@ function undoScope(): void { chooseScope(previousScope.value) }
       </template>
     </OnboardingChoiceGroup>
 
-    <OnboardingChoiceGroup label="Approval mode" name="approval" layout="segmented" :model-value="approval" :disabled="pending || !provider" @update:model-value="chooseApproval">
+    <OnboardingChoiceGroup label="Approval mode" name="approval" layout="segmented" :model-value="approval" :disabled="!provider" @update:model-value="chooseApproval">
       <OnboardingChoice value="">Engine default{{ engineApproval ? ` (${engineApproval})` : ' (unknown)' }}</OnboardingChoice>
       <OnboardingChoice value="auto">Auto</OnboardingChoice>
       <OnboardingChoice value="manual">Manual approvals</OnboardingChoice>

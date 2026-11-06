@@ -19,7 +19,7 @@ function responses({ scope = 'workspace' as string | null, platform = 'darwin', 
 
 async function mounted(options = {}) {
   responses(options)
-  const wrapper = mount(OnboardingAccessStage, { props: { context, busy: false } })
+  const wrapper = mount(OnboardingAccessStage, { props: { context, busy: false }, attachTo: document.body })
   await vi.waitFor(() => expect(wrapper.text()).toContain('Filesystem scope'))
   await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
   return wrapper
@@ -104,19 +104,25 @@ describe('OnboardingAccessStage', () => {
     expect(api.patch).toHaveBeenCalledWith('/api/workspaces/personal', { provider_overrides: { claude: { model: 'opus', permission_mode: 'manual' } } })
   })
 
-  it('disables every control while a save is in flight', async () => {
+  it('ignores a second tap during a save and keeps focus on the checked radio', async () => {
     const wrapper = await mounted()
     let resolvePatch: (value: unknown) => void = () => {}
     vi.mocked(api.patch).mockReturnValue(new Promise(resolve => { resolvePatch = resolve }) as never)
-    await wrapper.find('input[value="machine"]').setValue()
-
-    expect((wrapper.get('input[name="approval"]').element as HTMLInputElement).disabled).toBe(true)
-    expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).disabled).toBe(true)
+    const machine = wrapper.find('input[value="machine"]')
+    ;(machine.element as HTMLInputElement).focus()
+    await machine.setValue()
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false, pending: true })
+    // Not disabled, so focus is not dropped mid-save.
+    expect((machine.element as HTMLInputElement).disabled).toBe(false)
+    expect(document.activeElement).toBe(machine.element)
+    await wrapper.get('input[name="approval"][value="manual"]').setValue()
+    await wrapper.find('input[value="workspace"]').setValue()
+    expect(api.patch).toHaveBeenCalledTimes(1)
 
     resolvePatch({})
     await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+    expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).checked).toBe(true)
   })
 
   it('blocks Continue after a failed save and puts the choice back', async () => {

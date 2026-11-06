@@ -154,3 +154,27 @@ describe('onboarding memory preferences conflict', () => {
     expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
   })
 })
+
+describe('onboarding memory preferences retry', () => {
+  it('retries after a failed save, clears the error and lets Continue recover', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const update = vi.spyOn(useProjectStore(), 'updateWorkspace')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(undefined as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    expect(await prefs.saveMemoryHandover()).toBe(false)
+    expect(prefs.error.value).toContain('offline')
+    // The next tap makes a second request instead of being refused by the error.
+    prefs.draft.memoryHandover = 'dismiss'
+    expect(await prefs.saveMemoryHandover()).toBe(true)
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(update).toHaveBeenLastCalledWith('personal', { memory_handover: 'dismiss' })
+    expect(prefs.error.value).toBeNull()
+    expect(prefs.savedHandover.value).toBe('dismiss')
+  })
+})

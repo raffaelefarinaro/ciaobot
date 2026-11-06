@@ -20,8 +20,10 @@ onMounted(() => { void prefs.load() })
 // A choice is written when it is made. The proposed default is the only value
 // that can still be unsaved; the shell commits it through `save` on Continue.
 async function select(value: string): Promise<void> {
+  if (prefs.pending.value) return
   prefs.draft.memoryHandover = value as MemoryHandover
-  await prefs.saveMemoryHandover()
+  // A failed save puts the group back on what is stored (or the proposal).
+  if (!await prefs.saveMemoryHandover()) prefs.draft.memoryHandover = prefs.savedHandover.value
 }
 const save = () => prefs.saveMemoryHandover()
 defineExpose({ save })
@@ -36,7 +38,7 @@ defineExpose({ save })
     <p v-if="!prefs.actingAvailable.value && prefs.draft.memoryHandover !== 'off'" role="status" class="hint">
       The trusted service is unavailable, so acceptance is not acting now. Enforcement is unchanged; this choice does not make the service available.
     </p>
-    <OnboardingChoiceGroup label="When Ciaobot suggests a memory" name="memory-handover" :model-value="prefs.draft.memoryHandover" :disabled="prefs.pending.value" @update:model-value="select">
+    <OnboardingChoiceGroup label="When Ciaobot suggests a memory" name="memory-handover" :model-value="prefs.draft.memoryHandover" @update:model-value="select">
       <OnboardingChoice value="off">
         Ask me first
         <template #description>Nothing is filed or skipped for you; every suggestion waits for review.</template>
@@ -49,6 +51,9 @@ defineExpose({ save })
         File what's clear, ask about the rest
         <template #description>Clear facts are filed to the archive and some text may enter always-loaded memory; anything uncertain is queued for review.</template>
       </OnboardingChoice>
+      <template #after>
+        <p v-if="prefs.dirty.value && !prefs.pending.value" id="memory-suggested" class="hint">Suggested. Saved when you continue.</p>
+      </template>
     </OnboardingChoiceGroup>
     <p v-if="prefs.error.value" class="error" role="alert">{{ prefs.error.value }}</p>
   </OnboardingStack>

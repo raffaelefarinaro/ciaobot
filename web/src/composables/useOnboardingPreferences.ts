@@ -35,7 +35,7 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
   }
 
   async function saveMemoryHandover(): Promise<boolean> {
-    if (!loaded.value || pending.value || error.value) return false
+    if (!loaded.value || pending.value) return false
     if (!dirty.value) return true
     pending.value = true; error.value = null
     const value = draft.memoryHandover

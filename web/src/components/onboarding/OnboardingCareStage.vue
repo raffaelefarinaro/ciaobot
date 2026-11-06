@@ -4,7 +4,6 @@ import { useTaskStore } from '../../stores/tasks'
 import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
 import OnboardingStack from './OnboardingStack.vue'
 import OnboardingField from './OnboardingField.vue'
-import OnboardingButton from './OnboardingButton.vue'
 import OnboardingChoiceGroup from './OnboardingChoiceGroup.vue'
 import OnboardingChoice from './OnboardingChoice.vue'
 import type { Schedule } from '../../lib/types'
@@ -16,22 +15,24 @@ const routine = ref<Schedule | null>(null)
 const time = ref('08:00')
 const timezone = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
 const availability = ref('always on')
-const keepDefault = ref(false)
-const savedOnce = ref(false)
 const saving = ref(false)
 const error = ref('')
 const touchedTime = ref(false)
+// Only an edit by the person is ever written; the browser-local proposal that
+// load() puts in the fields is not a choice.
+const edited = ref(false)
 // What the engine currently has; `dirty` compares the proposal against it.
 const saved = ref({ time: '08:00', zone: 'UTC' })
 const dirty = computed(() =>
   !!routine.value && (time.value !== saved.value.time || timezone.value !== saved.value.zone),
 )
-// Continue needs a decision that still matches the fields: a later edit or a
-// failed save invalidates it, and a proposal is not a saved choice.
+const pendingWrite = computed(() => edited.value && dirty.value)
+// Continue is never a dead end: with nothing edited it writes nothing, and an
+// edit is committed by `save`, so only a pending write or an error blocks it.
 const state = computed<StageState>(() => ({
-  dirty: dirty.value,
+  dirty: pendingWrite.value,
   pending: saving.value,
-  canContinue: !!routine.value && !saving.value && !error.value && (keepDefault.value || (savedOnce.value && !dirty.value)),
+  canContinue: !saving.value && !error.value,
   error: error.value || null,
 }))
 watch([state, () => props.busy], () => emit('state', state.value), { immediate: true, deep: true })
@@ -56,8 +57,10 @@ function suggestedTime(): string {
   if (availability.value === 'varies') return '09:00'
   return '08:00'
 }
-async function save() {
-  if (!routine.value || !dirty.value) return
+// Called by the shell on Continue. Unchanged fields write nothing.
+async function save(): Promise<boolean> {
+  if (saving.value) return false
+  if (!routine.value || !pendingWrite.value) return true
   // Snapshot what is being sent: edits made while the request is in flight must
   // stay dirty rather than being reported as saved.
   const submitted = { time: time.value, zone: timezone.value }
@@ -66,29 +69,20 @@ async function save() {
   try {
     await store.updateSchedule(routine.value.schedule_id, { time: submitted.time, timezone: submitted.zone })
     saved.value = submitted
-    keepDefault.value = false
-    savedOnce.value = true
+    return true
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not save care timing.'
-    savedOnce.value = false
+    return false
   } finally { saving.value = false }
 }
-// Any edit abandons an earlier "keep the packaged default": the fields no
-// longer describe that decision.
-watch([time, timezone], () => { keepDefault.value = false })
 
 function chooseAvailability(value: string): void {
   availability.value = value
+  edited.value = true
   if (!touchedTime.value) time.value = suggestedTime()
 }
-function useDefault() {
-  // An earlier failed save no longer matters: this decision writes nothing.
-  error.value = ''
-  keepDefault.value = true
-  savedOnce.value = false
-}
 onMounted(() => { void load() })
-defineExpose({ refresh: load })
+defineExpose({ refresh: load, save })
 </script>
 
 <template>
@@ -108,23 +102,16 @@ defineExpose({ refresh: load })
       <div class="fields">
         <OnboardingField id="care-time" label="Local time">
           <template #default="{ describedby }">
-            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true">
+            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true; edited = true">
           </template>
         </OnboardingField>
         <OnboardingField id="care-timezone" label="Timezone">
           <template #default="{ describedby }">
-            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby">
+            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby" @input="edited = true">
           </template>
         </OnboardingField>
       </div>
-      <OnboardingStack>
-        <div class="actions">
-          <OnboardingButton :disabled="!dirty || saving || props.busy" aria-label="Save care timing" @click="save">{{ saving ? 'Saving…' : 'Save timing' }}</OnboardingButton>
-          <OnboardingButton :disabled="saving || props.busy" aria-label="Keep packaged default" @click="useDefault">Keep packaged default</OnboardingButton>
-        </div>
-        <p v-if="keepDefault" role="status" class="hint">Keeping the packaged default. Nothing was written.</p>
-        <p v-else-if="!dirty" role="status" class="hint">Timing is saved.</p>
-      </OnboardingStack>
+      <p class="hint" role="status">{{ pendingWrite ? 'Saved when you continue.' : 'The packaged default stays unless you change it. Nothing is written.' }}</p>
     </template>
   </OnboardingStack>
 </template>
@@ -132,7 +119,6 @@ defineExpose({ refresh: load })
 <style scoped>
 .hint { color: var(--fg2); line-height: 1.5; }
 .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-4, 16px); }
-.actions { display: flex; flex-wrap: wrap; gap: var(--space-3, 12px); }
 .availability { text-transform: capitalize; }
 .error { margin: 0; color: var(--error); }
 </style>

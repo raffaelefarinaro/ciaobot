@@ -87,7 +87,7 @@ describe('OnboardingFinishStage focus on what needs attention', () => {
     expect(wrapper.text()).not.toContain('Care timing')
   })
 
-  it('says everything is ready when nothing needs attention', async () => {
+  it('says nothing needs attention and counts what was left for later', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
@@ -100,7 +100,10 @@ describe('OnboardingFinishStage focus on what needs attention', () => {
     const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
     await flushPromises()
     expect(wrapper.find('.summary-row').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Everything checked looks ready')
+    expect(wrapper.text()).toContain('Nothing needs attention.')
+    // Rows the person left for later are counted, not called ready.
+    expect(wrapper.text()).toContain('items were left for later')
+    expect(wrapper.text()).not.toContain('looks ready')
   })
 
   it('keeps tools and the video behind a Tips disclosure and has no button row of its own', async () => {

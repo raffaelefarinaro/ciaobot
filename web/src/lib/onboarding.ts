@@ -32,9 +32,9 @@ export interface OnboardingSummaryItem {
 }
 
 export const ONBOARDING_STEPS: { id: OnboardingStep; label: string }[] = [
-  { id: 'location', label: 'Location' },
-  { id: 'runtime', label: 'Runtime' },
-  { id: 'access_memory', label: 'Access & memory' },
+  { id: 'location', label: 'Your folder' },
+  { id: 'runtime', label: 'Your assistant' },
+  { id: 'access_memory', label: 'Memory & access' },
   { id: 'care', label: 'Care' },
   { id: 'finish', label: 'Finish' },
 ]

@@ -49,7 +49,7 @@ describe('OnboardingView resumes', () => {
       return Promise.resolve({ provider_catalog_evidence: {}, provider_models: {} }) as never
     })
     const wrapper = mount(OnboardingView)
-    await vi.waitFor(() => expect(wrapper.text()).toContain('Access & memory'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Memory & access'))
     // One scrolling screen: both halves are present, and Memory's options are
     // reachable above the single footer.
     expect(wrapper.text()).toContain('Memory handover')
@@ -128,7 +128,7 @@ describe('OnboardingView advancement', () => {
     await wrapper.get('footer button.continue').trigger('click')
     await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'access_memory' })))
     expect(vi.mocked(api.patch).mock.calls.filter(([url]) => url === '/api/workspaces/personal')).toHaveLength(1)
-    await vi.waitFor(() => expect(wrapper.get('h1').text()).toBe('Access & memory'))
+    await vi.waitFor(() => expect(wrapper.get('h1').text()).toBe('Memory & access'))
   })
   it('advances from the shared screen only after memory saves and access is ready', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
@@ -189,7 +189,7 @@ describe('OnboardingView failed save', () => {
     await vi.waitFor(() => expect(memorySave).toHaveBeenCalledTimes(1))
     // The commit failed: the journey did not move and nothing was written.
     expect(vi.mocked(api.patch)).not.toHaveBeenCalled()
-    expect(wrapper.get('h1').text()).toBe('Access & memory')
+    expect(wrapper.get('h1').text()).toBe('Memory & access')
     expect(wrapper.text()).not.toContain('When should workspace care run?')
   })
 })
