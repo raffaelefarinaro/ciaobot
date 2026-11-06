@@ -456,6 +456,8 @@ describe('summarizeInjectedPrompt', () => {
     expect(summary.hint).toBe('you have reached your weekly usage limit, upgrade for higher limits')
 
     // Leading "Error:" is dropped, only the first non-empty line is kept.
+    expect(summarizeInjectedPrompt(errorNoticePrompt('Error: boom', true)).facts).toBe('Retry failed')
+    expect(summarizeInjectedPrompt(errorNoticePrompt('Error: boom')).facts).toBe('')
     const multi = errorNoticePrompt('Error:\n\n  connection refused\nstack line two')
     expect(summarizeInjectedPrompt(multi).hint).toBe('connection refused')
 
