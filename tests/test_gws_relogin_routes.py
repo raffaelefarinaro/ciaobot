@@ -8,6 +8,8 @@ exercised end to end without touching the network.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +20,7 @@ from starlette.testclient import TestClient
 
 from ciao import gws_auth
 from ciao.config import CiaoConfig
+from ciao.web import routes_api as gws_routes
 from ciao.web.routes_api import (
     gws_integration_settings,
     gws_relogin_cancel,
@@ -141,3 +144,94 @@ def test_relogin_cancel(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert resp.json()["cancelled"] is True
     assert client.get("/api/integrations/gws/relogin/status?profile=personal").json()["status"] == "none"
+
+
+class _BlockingMonitor:
+    """Fake health monitor whose check_once blocks until released."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self.fail = fail
+
+    def check_once(self) -> dict:
+        self.calls += 1
+        self.started.set()
+        self.release.wait(10)
+        if self.fail:
+            raise RuntimeError("probe boom")
+        return {}
+
+
+def _completed_client(tmp_path: Path, monitor):
+    client, config = _client(tmp_path)
+    _write_client_secret(config)
+    gws_auth.save_profile_registry(config, [{"name": "personal", "label": "Personal"}])
+    manager = gws_auth.GwsReloginManager(config)
+    session = gws_auth._ReloginSession.__new__(gws_auth._ReloginSession)
+    manager._sessions["personal"] = session
+    session.status = "completed"
+    session.email = "a@b.c"
+    session.error = ""
+    session.expires_at = time.time() + 60
+    client.app.state.gws_relogin_manager = manager
+    client.app.state.gws_health_monitor = monitor
+    # Entering the client keeps one event loop alive across requests, so the
+    # background refresh task survives past the response.
+    client.__enter__()
+    return client
+
+
+def _wait(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_status_completed_does_not_wait_for_health_refresh(tmp_path: Path) -> None:
+    gws_routes._gws_refresh_tasks.clear()
+    monitor = _BlockingMonitor()
+    client = _completed_client(tmp_path, monitor)
+    try:
+        started = time.monotonic()
+        resp = client.get("/api/integrations/gws/relogin/status?profile=personal")
+        elapsed = time.monotonic() - started
+        assert resp.json()["status"] == "completed"
+        # check_once is still blocked, yet the response already came back.
+        assert not monitor.release.is_set()
+        assert elapsed < 5
+        assert _wait(monitor.started.is_set)
+    finally:
+        monitor.release.set()
+        client.__exit__(None, None, None)
+
+
+def test_second_completed_poll_does_not_start_second_refresh(tmp_path: Path) -> None:
+    gws_routes._gws_refresh_tasks.clear()
+    monitor = _BlockingMonitor()
+    client = _completed_client(tmp_path, monitor)
+    try:
+        client.get("/api/integrations/gws/relogin/status?profile=personal")
+        assert _wait(monitor.started.is_set)
+        client.get("/api/integrations/gws/relogin/status?profile=personal")
+        assert monitor.calls == 1
+    finally:
+        monitor.release.set()
+        client.__exit__(None, None, None)
+
+
+def test_background_refresh_error_is_logged_not_raised(tmp_path: Path, caplog) -> None:
+    gws_routes._gws_refresh_tasks.clear()
+    monitor = _BlockingMonitor(fail=True)
+    monitor.release.set()
+    client = _completed_client(tmp_path, monitor)
+    with caplog.at_level("ERROR"):
+        resp = client.get("/api/integrations/gws/relogin/status?profile=personal")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "completed"
+        assert _wait(lambda: "Post-relogin health refresh failed" in caplog.text)
+    client.__exit__(None, None, None)

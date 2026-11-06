@@ -1686,6 +1686,27 @@ async def gws_relogin_start(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+_gws_refresh_tasks: "dict[str, asyncio.Task[None]]" = {}
+
+
+def _schedule_gws_health_refresh(app: Any, profile: str) -> None:
+    """Run ``check_once`` off the request path, one refresh per profile at a time."""
+    monitor = getattr(app.state, "gws_health_monitor", None)
+    if monitor is None:
+        return
+    running = _gws_refresh_tasks.get(profile)
+    if running is not None and not running.done():
+        return
+
+    async def _refresh() -> None:
+        try:
+            await asyncio.to_thread(monitor.check_once)
+        except Exception:
+            logger.exception("Post-relogin health refresh failed")
+
+    _gws_refresh_tasks[profile] = asyncio.get_running_loop().create_task(_refresh())
+
+
 async def gws_relogin_status(request: Request) -> JSONResponse:
     """Poll a pending re-login. Returns pending/completed/error/none."""
     profile = _valid_gws_profile(request.query_params.get("profile", ""))
@@ -1693,15 +1714,11 @@ async def gws_relogin_status(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Invalid profile"}, status_code=400)
     manager = _gws_relogin_manager(request)
     result = manager.status(profile)
-    # When a re-login just completed, refresh the health cache so Settings and
-    # the next status check see the profile as valid without waiting a cycle.
+    # When a re-login just completed, refresh the health cache in the
+    # background: check_once runs gws probes (up to 30 s each) and must not
+    # hold the answer back. Settings picks the refreshed health on its next fetch.
     if result.get("status") == "completed":
-        monitor = getattr(request.app.state, "gws_health_monitor", None)
-        if monitor is not None:
-            try:
-                await asyncio.to_thread(monitor.check_once)
-            except Exception:
-                logger.exception("Post-relogin health refresh failed")
+        _schedule_gws_health_refresh(request.app, profile)
     return JSONResponse(result)
 
 
