@@ -17,6 +17,7 @@ sign-in URL or a command can carry a credential. Ids are random per new action.
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -60,7 +61,6 @@ ChatActionErrorReason = Literal[
     "too_long", "invalid_characters", "invalid_url",
     "invalid_body",          # a start/callback body the kind does not accept (E1 command steps)
     "invalid_state",         # start/continue/callback in the wrong state
-    "unsupported_provider",  # mcp_auth for a provider with no MCP_AUTH_FLOWS entry (claude until C2; C2 deletes this value)
     "not_local",             # J: a host-only start from a non-loopback caller
     "already_used",          # D1: a second paste-back for the same action
     "no_pending_sign_in",    # F: gws paste-back with no pending sign-in
@@ -75,6 +75,7 @@ _MCP_PROVIDERS = ("claude", "opencode")
 _SERVER_MAX = 128
 _PROVIDER_MAX = 16
 _URL_MAX = 4096
+_SESSION_ID_MAX = 64
 _NOTE_MAX = 200
 _ERROR_MAX = 300
 
@@ -134,8 +135,12 @@ def _text(
     return stripped
 
 
+#: The helper terminal's id for a Claude sign-in: the engine writes it, never the agent.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
-    if set(raw) - {"server", "provider", "url"}:
+    if set(raw) - {"server", "provider", "url", "session_id"}:
         raise ChatActionError("unknown_param")
     server = _text(raw, "server", required=True, limit=_SERVER_MAX)
     provider = _text(raw, "provider", required=True, limit=_PROVIDER_MAX)
@@ -150,6 +155,11 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
         if parts.scheme not in ("https", "http") or not parts.netloc:
             raise ChatActionError("invalid_url")
         validated["url"] = url
+    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
+    if session_id is not None:
+        if not _SESSION_ID_RE.match(session_id):
+            raise ChatActionError("invalid_param")
+        validated["session_id"] = session_id
     return validated
 
 
@@ -216,7 +226,7 @@ _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
 
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
-ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {"mcp_auth": frozenset({"url"})}
+ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {"mcp_auth": frozenset({"url", "session_id"})}
 
 
 def check_agent_params(kind: str, raw: Mapping[str, object]) -> None:

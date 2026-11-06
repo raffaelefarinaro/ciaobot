@@ -132,6 +132,8 @@ _STEER_CANCEL_TIMEOUT_S = 5.0
 # CLI measured 0.7-27.8 s and later calls <= 0.44 s (#1402), so the bound only
 # ever costs the first turn its exact figure; the local estimate covers it.
 _CONTEXT_USAGE_TIMEOUT_S = 3.0
+#: How long a live reconnect of one MCP server may take after a sign-in helper exits.
+MCP_RECONNECT_TIMEOUT_S = 20.0
 
 # Claude Code fetches the account's claude.ai connector list at startup with a
 # hardcoded 5 s timeout. The interactive TUI retries a failed fetch in the
@@ -843,6 +845,17 @@ class ClaudeProvider(BaseSDKProvider):
             if name and state in allowed:
                 result[name] = "needs_auth" if state == "needs-auth" else state
         return result
+
+    async def reconnect_mcp_server(self, server_name: str) -> bool:
+        """Reconnect one MCP server on the live CLI so a fresh sign-in takes effect.
+
+        False when no client is connected (the next turn's spawn loads the new token).
+        """
+        client = self._client
+        if client is None or not self._connected:
+            return False
+        await asyncio.wait_for(client.reconnect_mcp_server(server_name), timeout=MCP_RECONNECT_TIMEOUT_S)
+        return True
 
     async def _watch_claudeai_catalog(self, client: ClaudeSDKClient) -> None:
         """Wait for claude.ai MCP rows after a spawn; flag the catalog missing if none show."""

@@ -4403,7 +4403,7 @@ class ProjectChatManager:
         return had
 
     def _schedule_action_detection(self, chat_id: str) -> None:
-        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode chat."""
+        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode server or a connected Claude session."""
         if self.actions_runtime.detection_provider(chat_id) is None:
             return
         self._spawn_detached(

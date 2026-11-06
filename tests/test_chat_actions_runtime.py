@@ -25,6 +25,7 @@ from ciao.chat_actions import ChatAction, ChatActionError, _VALIDATORS
 from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
 from ciao.provider_service import ProviderService
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -477,28 +478,6 @@ async def test_start_in_code_mode_fails_and_cancels_the_attempt(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_start_of_a_claude_action_is_refused_and_left_open(tmp_path: Path) -> None:
-    manager = make_manager(tmp_path)
-    project = manager.create_project("Claude", workspace="work")
-    chat = manager.create_chat(project.project_id, title="Claude", provider="claude")
-    runtime = make_runtime(manager)
-    raised = manager.raise_action(
-        chat.chat_id,
-        "mcp_auth",
-        {"server": "linear", "provider": "claude"},
-        origin="engine",
-    )
-    assert raised is not None
-    action_id = str(raised["id"])
-
-    with pytest.raises(ChatActionError) as info:
-        await runtime.start(chat.chat_id, action_id, {}, is_loopback=True)
-
-    assert info.value.reason == "unsupported_provider"
-    assert _state(manager, chat, action_id) == "open"
-
-
-@pytest.mark.asyncio
 async def test_start_while_waiting_is_an_invalid_state(tmp_path: Path) -> None:
     client = FakeClient(sign_in_routes())
     manager = make_manager(tmp_path)
@@ -802,17 +781,18 @@ async def test_detection_marks_an_open_action_done_when_its_server_connects(
 
 
 @pytest.mark.asyncio
-async def test_detection_ignores_a_claude_chat(tmp_path: Path) -> None:
-    client = _detection_routes([("linear", "needs_auth")])
+async def test_detection_ignores_a_claude_chat_without_a_live_session(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
-    chat = opencode_chat(manager, live_opencode(tmp_path, client))
-    chat.provider = "claude"
+    project = manager.create_project("Claude", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Claude", provider="claude")
+    idle = ClaudeProvider(tmp_path)
+    manager._providers[chat.chat_id] = cast(Any, SimpleNamespace(provider=idle))
     runtime = make_runtime(manager)
 
     assert runtime.detection_provider(chat.chat_id) is None
     await runtime.detect_mcp_auth(chat.chat_id)
 
-    assert client.calls == []
+    assert chat.actions == []
 
 
 @pytest.mark.asyncio
