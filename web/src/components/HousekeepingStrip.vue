@@ -321,11 +321,17 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
  * for a background poll would nag about a condition the operator cannot act on
  * from this page). Silence is not a false "done": the list has no all-clear
  * state at all, so its absence never reads as a verdict. The one place a failed
- * update-task check *is* reported is Settings → Overview → Update task history. */
+ * update-task check *is* reported is Settings → Overview → Update task history.
+ *
+ * Nothing is drawn until the first load of all three sources has settled
+ * (`initialLoadPending`), so the list arrives once instead of growing source by
+ * source under the composer. */
 const rowCount = computed(
   () => housekeeping.healthErrors.length + orderedActions.value.length + openUpdateTasks.value.length,
 )
-const showNeedsYou = computed(() => rowCount.value > 0 || groupStatus.value !== '')
+const showNeedsYou = computed(
+  () => !housekeeping.initialLoadPending && (rowCount.value > 0 || groupStatus.value !== ''),
+)
 
 /** One task's key. A revision is a different record and a different card, so
  *  the two are never collapsed into one row. */

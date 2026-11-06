@@ -439,6 +439,26 @@ def test_missed_schedules_fires_collapsed_tile(tmp_path: Path) -> None:
     assert tiles == []
 
 
+def test_missed_schedules_first_line_names_the_reminders(tmp_path: Path) -> None:
+    """Home shows one line per row, so line one must carry the decision data."""
+    now = datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
+    entries = [
+        _Entry(frequency="once", run_at_date=f"2026-11-0{i}", title=name, schedule_id=f"s{i}")
+        for i, name in ((1, "Call Anna"), (2, "Renew licence"), (3, "Book flights"), (4, "Pay rent"))
+    ]
+    context = DetectionContext(
+        config=_FakeConfig(tmp_path, workspaces=("personal",)),
+        runtime_dir=_runtime(tmp_path),
+        schedule_store=_Store(entries),
+        now=now,
+    )
+    tile = next(a for a in detect_actions(context) if a.kind == "missed-schedules")
+    first = tile.detail.splitlines()[0]
+    assert first == "4 missed: Call Anna (due 2026-11-01), Renew licence (due 2026-11-02) and 2 more"
+    # The linked list stays below for the chat and any full view.
+    assert "- [Call Anna](/schedules/s1)" in tile.detail
+
+
 def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
     """A once reminder due later today is not missed, and not fired early.
 

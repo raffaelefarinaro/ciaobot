@@ -147,13 +147,36 @@ describe('HousekeepingStrip', () => {
     wrapper.unmount()
   })
 
-  it('reduces a markdown detail to its first plain line', async () => {
+  it('shows the first line of a detail as plain text, which names the missed reminders', async () => {
     useHousekeepingStore().actions = [action({
-      detail: 'The server was down past **2** reminders.\n\nMissed:\n- [Pay rent](/schedules/s1) — due today',
+      detail: '2 missed: Call Anna (due 2026-11-02), Renew licence (due 2026-11-01)\n\nThe server was down.\n\nMissed:\n- [Call Anna](/schedules/s1) — due 2026-11-02',
     })]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('The server was down past 2 reminders.')
+    expect(rows(wrapper)[0].get('.needs-you-line').text())
+      .toBe('2 missed: Call Anna (due 2026-11-02), Renew licence (due 2026-11-01)')
+    wrapper.unmount()
+  })
+
+  it('strips markdown from the first line', async () => {
+    useHousekeepingStore().actions = [action({ detail: 'Run **now** with [the guide](/g) and `cmd`' })]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Run now with the guide and cmd')
+    wrapper.unmount()
+  })
+
+  it('paints nothing until the first load has settled, then the whole list at once', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action()]
+    store.health = { status: 'error', checks: [healthCheck()] }
+    store.initialLoadPending = true
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
+    store.initialLoadPending = false
+    await nextTick()
+    expect(rows(wrapper)).toHaveLength(2)
     wrapper.unmount()
   })
 
@@ -622,6 +645,16 @@ describe('the update row', () => {
 })
 
 describe('a row that names an existing surface', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('leads with a button that navigates there and keeps chat in the menu', async () => {
     // The queue rows offered "Review in chat" alone, so the operator was asked
     // to work through 109 proposals in prose while the panel with per-row
@@ -656,6 +689,16 @@ describe('a row that names an existing surface', () => {
 })
 
 describe('scoping to the active workspace', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('hides other workspaces rows, shows shared plus current unlabeled', async () => {
     // Another workspace's pile is not this tab's business.
     const housekeeping = useHousekeepingStore()
@@ -711,6 +754,16 @@ describe('scoping to the active workspace', () => {
 })
 
 describe('a blocking precondition', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('reads as an error-toned row, first, with a filled lead', async () => {
     const housekeeping = useHousekeepingStore()
     useProjectStore().activeWorkspace = 'personal'

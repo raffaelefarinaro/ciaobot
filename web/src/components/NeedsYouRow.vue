@@ -77,7 +77,9 @@ function onMenuKeydown(event: KeyboardEvent): void {
     close(true)
     return
   } else if (event.key === 'Tab') {
-    close(false)
+    // Let the browser move focus first; removing the focused node first would
+    // drop focus to the page start.
+    requestAnimationFrame(() => close(false))
     return
   }
   if (next >= 0) {
@@ -109,7 +111,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside, tru
         <span v-if="tone" class="needs-you-marker" aria-hidden="true"></span>
         <span v-if="tone === 'error'" class="sr-only">Error: </span>
         <span v-else-if="tone === 'blocking'" class="sr-only">Blocking: </span>
-        <span class="needs-you-title-text">{{ title }}</span>
+        <span class="needs-you-title-text" :title="title">{{ title }}</span>
       </p>
       <p class="needs-you-line" :class="{ 'needs-you-line--alert': alert }" :role="alert ? 'alert' : undefined" :title="line">{{ line }}</p>
     </div>
@@ -224,7 +226,15 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside, tru
   white-space: nowrap;
 }
 
-.needs-you-line--alert { color: var(--error); }
+/* A refusal has to be readable, not clipped: allow two lines. */
+.needs-you-line--alert {
+  color: var(--error);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+}
 
 .needs-you-controls {
   display: flex;

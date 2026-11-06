@@ -365,16 +365,23 @@ test.describe('workbench layout', () => {
     expect(group.y + group.height).toBeLessThanOrEqual(form.y)
   })
 
-  test('Home is top-aligned: the page does not move when rows appear', async ({ page }) => {
-    await boot(page, '/', '.home-intake')
-    const bare = (await page.locator('.home-workbench').boundingBox())!
-    await expect(page.locator('.needs-you')).toHaveCount(0)
-
+  test('Home is top-aligned and the composer is stable once the first load has settled', async ({ page }) => {
     await page.request.post('/__fixture__/update-tasks')
     await boot(page, '/', '.needs-you')
-    const withRows = (await page.locator('.home-workbench').boundingBox())!
-    // The workbench starts at the same place; only what is inside it grows.
-    expect(withRows.y).toBeCloseTo(bare.y, 0)
+    const form = page.locator('.home-intake-form')
+    const settled = (await form.boundingBox())!
+    // The list is already in place; nothing arrives later to push the composer.
+    await page.waitForTimeout(1500)
+    expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+    // Re-reading the data (the 60s poll, a focus) does not move it either.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await page.waitForTimeout(500)
+    expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+
+    // Top-aligned: the content starts at the top of the pane, not centred in it.
+    const pane = (await page.locator('.empty-state').boundingBox())!
+    const bench = (await page.locator('.home-workbench').boundingBox())!
+    expect(bench.y - pane.y).toBeLessThan(80)
     await expect(page.getByRole('button', { name: /^\+ .* chat$/ })).toHaveCount(0)
   })
 

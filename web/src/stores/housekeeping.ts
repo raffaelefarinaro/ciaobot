@@ -127,6 +127,11 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    *  opened before the decision cannot restore the pre-decision list. */
   let actionsSeq = 0
   const loading = ref(false)
+  /** True from `init` until its first three reads (actions, update tasks,
+   *  workspace health) have each answered or failed. Home paints no "Needs you"
+   *  row before then, so rows do not arrive one source at a time and push the
+   *  composer down in steps. Later refreshes never set it. */
+  const initialLoadPending = ref(false)
 
   // ── Workspace health ─────────────────────────────────────────────────────
   //
@@ -442,9 +447,9 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   function init() {
     if (initialized) return
     initialized = true
-    void refresh()
-    void refreshUpdateTasks()
-    void refreshHealth()
+    initialLoadPending.value = true
+    void Promise.allSettled([refresh(), refreshUpdateTasks(), refreshHealth()])
+      .then(() => { initialLoadPending.value = false })
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', () => {
         void refresh()
@@ -463,6 +468,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     actions,
     actionsHealth,
     loading,
+    initialLoadPending,
     health,
     healthErrors,
     healthFixing,

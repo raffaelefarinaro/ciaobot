@@ -758,7 +758,18 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
         bullet_lines.append(f"- [{label}](/schedules/{sid}){due_suffix}")
     if len(missed) > len(preview):
         bullet_lines.append(f"- …and {len(missed) - len(preview)} more")
+    # The first line is what Home shows (one line per row), so it carries the
+    # decision data itself: which reminders, and when each was due.
+    summary_names = [
+        f"{_schedule_display_name(e)}"
+        + (f" (due {e.run_at_date})" if getattr(e, "run_at_date", "") else "")
+        for e in preview[:2]
+    ]
+    summary = f"{len(missed)} missed: " + ", ".join(summary_names)
+    if len(missed) > len(summary_names):
+        summary += f" and {len(missed) - len(summary_names)} more"
     detail_base = (
+        f"{summary}\n\n"
         f"The server was down past {len(missed)} one-time reminder(s). "
         "They were not auto-fired because they are stale by now."
     )
