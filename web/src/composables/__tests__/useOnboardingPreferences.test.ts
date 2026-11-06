@@ -22,7 +22,6 @@ describe('useOnboardingPreferences', () => {
     expect(prefs.dirty.value).toBe(false)
     await prefs.load()
     expect(prefs.dirty.value).toBe(true)
-    prefs.draft.acknowledged = true
     expect(await prefs.saveMemoryHandover()).toBe(true)
     expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
     expect(prefs.dirty.value).toBe(false)
@@ -37,7 +36,6 @@ describe('useOnboardingPreferences', () => {
     await pref.load()
     expect(pref.draft.memoryHandover).toBe('all')
     expect(store.updateWorkspace).not.toHaveBeenCalled()
-    pref.draft.acknowledged = true
     expect(await pref.saveMemoryHandover()).toBe(true)
     expect(store.updateWorkspace).toHaveBeenCalledWith('studio', { memory_handover: 'all' })
   })
@@ -52,8 +50,8 @@ describe('useOnboardingPreferences', () => {
 })
 // @vitest-environment jsdom
 
-describe('onboarding memory preferences consent', () => {
-  it('cannot save without the acknowledgement', async () => {
+describe('onboarding memory preferences saving', () => {
+  it('saves the proposed choice without a confirmation step', async () => {
     const store = useProjectStore()
     const update = vi.spyOn(store, 'updateWorkspace').mockResolvedValue(undefined as never)
     vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
@@ -62,13 +60,12 @@ describe('onboarding memory preferences consent', () => {
         : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
     ) as never)
     const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
-    await prefs.load()
-    // An installation whose own journey is running is eligible too.
-    expect(prefs.draft.memoryHandover).toBe('all')
     expect(await prefs.saveMemoryHandover()).toBe(false)
+    await prefs.load()
+    // An installation whose own journey is running is eligible too, and nothing
+    // is written until a save is requested.
+    expect(prefs.draft.memoryHandover).toBe('all')
     expect(update).not.toHaveBeenCalled()
-
-    prefs.draft.acknowledged = true
     expect(await prefs.saveMemoryHandover()).toBe(true)
     expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
   })
@@ -107,7 +104,6 @@ describe('onboarding memory preferences failures', () => {
     store.updateWorkspace = vi.fn().mockRejectedValue(new Error('offline')) as never
     const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
     await prefs.load()
-    prefs.draft.acknowledged = true
     expect(await prefs.saveMemoryHandover()).toBe(false)
     expect(prefs.draft.memoryHandover).toBe('all')
     expect(prefs.savedHandover.value).toBe('off')
@@ -138,7 +134,6 @@ describe('onboarding memory preferences conflict', () => {
     const update = vi.spyOn(store, 'updateWorkspace').mockResolvedValue(undefined as never)
     const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
     await prefs.load()
-    prefs.draft.acknowledged = true
     expect(await prefs.saveMemoryHandover()).toBe(true)
 
     // The shell then advances the journey and loses the revision race. That

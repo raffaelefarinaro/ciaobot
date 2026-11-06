@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useTaskStore } from '../../stores/tasks'
-import type { OnboardingStageProps, OnboardingStageEvents, StageState } from '../../lib/onboarding'
+import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
+import OnboardingStack from './OnboardingStack.vue'
+import OnboardingField from './OnboardingField.vue'
+import OnboardingButton from './OnboardingButton.vue'
+import OnboardingChoiceGroup from './OnboardingChoiceGroup.vue'
+import OnboardingChoice from './OnboardingChoice.vue'
 import type { Schedule } from '../../lib/types'
 
 const props = defineProps<OnboardingStageProps>()
-const emit = defineEmits<OnboardingStageEvents>()
+const emit = defineEmits<{ state: [state: StageState] }>()
 const store = useTaskStore()
 const routine = ref<Schedule | null>(null)
 const time = ref('08:00')
@@ -72,7 +77,8 @@ async function save() {
 // longer describe that decision.
 watch([time, timezone], () => { keepDefault.value = false })
 
-function onAvailability(): void {
+function chooseAvailability(value: string): void {
+  availability.value = value
   if (!touchedTime.value) time.value = suggestedTime()
 }
 function useDefault() {
@@ -86,53 +92,47 @@ defineExpose({ refresh: load })
 </script>
 
 <template>
-  <section class="care-stage" aria-labelledby="care-title">
-    <h2 id="care-title">When should workspace care run?</h2>
-    <p>Care runs while this computer is awake. The first run may catch up on the latest missed slot at startup. You can edit or pause it later in Automations.</p>
-    <p v-if="routine">Workspace care is {{ routine.enabled ? 'on' : 'paused' }}.</p>
-    <p v-if="!routine && !error" role="status">No care routine is installed for this workspace. Nothing was created.</p>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
+  <OnboardingStack as="section" gap="xl" class="care-stage" aria-labelledby="care-title">
+    <OnboardingStack>
+      <h2 id="care-title">When should workspace care run?</h2>
+      <p class="hint">Care runs while this computer is awake. The first run may catch up on the latest missed slot at startup. You can edit or pause it later in Automations.</p>
+      <p v-if="routine" class="hint">Workspace care is {{ routine.enabled ? 'on' : 'paused' }}.</p>
+      <p v-if="!routine && !error" role="status" class="hint">No care routine is installed for this workspace. Nothing was created.</p>
+      <p v-if="error" class="error" role="alert">{{ error }}</p>
+    </OnboardingStack>
     <template v-if="routine">
-      <fieldset><legend>When is the host usually available?</legend>
-        <label v-for="answer in ['always on', 'daytime', 'varies']" :key="answer">
-          <input
-            v-model="availability"
-            type="radio"
-            name="availability"
-            :value="answer"
-            @change="onAvailability"
-          > {{ answer }}
-        </label>
-      </fieldset>
-      <p>The suggested time is a local slot; availability only guides this suggestion.</p>
+      <OnboardingChoiceGroup label="When is the host usually available?" name="availability" layout="segmented" :model-value="availability" @update:model-value="chooseAvailability">
+        <OnboardingChoice v-for="answer in ['always on', 'daytime', 'varies']" :key="answer" :value="answer" class="availability">{{ answer }}</OnboardingChoice>
+        <template #after><p class="hint">The suggested time is a local slot; availability only guides this suggestion.</p></template>
+      </OnboardingChoiceGroup>
       <div class="fields">
-        <label>Local time <input v-model="time" type="time" required @input="touchedTime = true" :aria-invalid="!!error" :aria-describedby="error ? 'care-error' : undefined"></label>
-        <label>Timezone <input v-model="timezone" name="timezone" autocomplete="off" required></label>
+        <OnboardingField id="care-time" label="Local time">
+          <template #default="{ describedby }">
+            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true">
+          </template>
+        </OnboardingField>
+        <OnboardingField id="care-timezone" label="Timezone">
+          <template #default="{ describedby }">
+            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby">
+          </template>
+        </OnboardingField>
       </div>
-      <p v-if="error" id="care-error" class="error">{{ error }}</p>
-      <div class="actions">
-        <button type="button" :disabled="!dirty || saving || props.busy" aria-label="Save care timing" @click="save">{{ saving ? 'Saving…' : 'Save timing' }}</button>
-        <button type="button" :disabled="saving || props.busy" aria-label="Keep packaged default" @click="useDefault">Keep packaged default</button>
-      </div>
-      <p v-if="keepDefault" role="status">Keeping the packaged default. Nothing was written.</p>
-      <p v-else-if="!dirty" role="status">Timing is saved.</p>
+      <OnboardingStack>
+        <div class="actions">
+          <OnboardingButton :disabled="!dirty || saving || props.busy" aria-label="Save care timing" @click="save">{{ saving ? 'Saving…' : 'Save timing' }}</OnboardingButton>
+          <OnboardingButton :disabled="saving || props.busy" aria-label="Keep packaged default" @click="useDefault">Keep packaged default</OnboardingButton>
+        </div>
+        <p v-if="keepDefault" role="status" class="hint">Keeping the packaged default. Nothing was written.</p>
+        <p v-else-if="!dirty" role="status" class="hint">Timing is saved.</p>
+      </OnboardingStack>
     </template>
-  </section>
+  </OnboardingStack>
 </template>
 
 <style scoped>
-.care-stage { display: grid; gap: 12px; }
-h2 { margin: 0; font: 700 18px/1.35 var(--font); }
-p { margin: 0; color: var(--fg2); line-height: 1.55; }
-fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; border: 0; padding: 0; margin: 0; }
-legend { margin-bottom: 8px; font-weight: 600; }
-fieldset label { min-height: 44px; display: inline-flex; align-items: center; gap: 8px; text-transform: capitalize; }
-.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-.fields label { display: grid; gap: 6px; }
-input:not([type="radio"]) { width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); background: var(--bg); color: var(--fg); font: inherit; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; }
-button { min-height: 44px; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button:disabled { opacity: .55; cursor: not-allowed; }
-.error { color: var(--error); }
+.hint { color: var(--fg2); line-height: 1.5; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-4, 16px); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-3, 12px); }
+.availability { text-transform: capitalize; }
+.error { margin: 0; color: var(--error); }
 </style>

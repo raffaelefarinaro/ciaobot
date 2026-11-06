@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../../lib/api'
 import OnboardingShell from './OnboardingShell.vue'
+import OnboardingStack from './OnboardingStack.vue'
 import OnboardingLocationStage from './OnboardingLocationStage.vue'
 import OnboardingRuntimeStage from './OnboardingRuntimeStage.vue'
 import OnboardingAccessStage from './OnboardingAccessStage.vue'
@@ -36,6 +37,7 @@ const context = ref<OnboardingStageContext>({
 })
 const step = ref<OnboardingStep>('location')
 const runtimeStage = ref<InstanceType<typeof OnboardingRuntimeStage> | null>(null)
+const memoryStage = ref<InstanceType<typeof OnboardingMemoryStage> | null>(null)
 const state = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const accessState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
@@ -44,18 +46,15 @@ const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue:
 // stays read-only in provisioned installs.
 const contextReady = ref(false)
 const targetError = ref('')
-const savingRuntime = ref(false)
-const busy = computed(() => store.loading || store.saving || savingRuntime.value)
+const committing = ref(false)
+const busy = computed(() => store.loading || store.saving || committing.value)
 const stageProps = computed(() => ({ context: context.value, busy: busy.value }))
-const combinedReady = computed(() =>
-  accessState.value.canContinue && memoryState.value.canContinue &&
-  !accessState.value.pending && !memoryState.value.pending &&
-  !accessState.value.error && !memoryState.value.error,
-)
-// On the shared screen the Memory stage owns the save, so the shell's own
-// Continue stays out of the way and memory advances after its save succeeds.
+// On the shared screen readiness lives in the two stage states, so the shell's
+// Continue follows both; Continue then commits Memory's proposed choice.
 const shellContinue = computed(() =>
-  step.value === 'access_memory' ? false : state.value.canContinue,
+  step.value === 'access_memory'
+    ? readyToAdvance(step.value, state.value, accessState.value, memoryState.value)
+    : state.value.canContinue,
 )
 
 function update(value: StageState) { state.value = value }
@@ -92,15 +91,22 @@ async function load(): Promise<void> {
 onMounted(load)
 
 async function advance(): Promise<void> {
-  // On the shared screen readiness lives in the two stage states; the shell's
-  // own flag is deliberately off there so Memory's save owns the action.
   if (!readyToAdvance(step.value, state.value, accessState.value, memoryState.value) || busy.value || !contextReady.value) return
   if (step.value === 'runtime') {
-    savingRuntime.value = true
+    committing.value = true
     try {
       if (!await runtimeStage.value?.save()) return
     } finally {
-      savingRuntime.value = false
+      committing.value = false
+    }
+  }
+  if (step.value === 'access_memory') {
+    // Memory proposes a default that is written only here, on Continue.
+    committing.value = true
+    try {
+      if (!await memoryStage.value?.save()) return
+    } finally {
+      committing.value = false
     }
   }
   const order: OnboardingStep[] = ['location', 'runtime', 'access_memory', 'care', 'finish']
@@ -113,13 +119,6 @@ async function advance(): Promise<void> {
     step.value = next
     context.value.revision = store.receipt?.revision ?? 0
   }
-}
-
-// Memory emits `continue` only after its own setting is saved; advance only
-// when the access half is also ready.
-async function afterMemorySave(): Promise<void> {
-  if (!combinedReady.value) return
-  await advance()
 }
 
 function validReturn(): string {
@@ -169,19 +168,19 @@ async function reload(): Promise<void> {
     <template #stage>
       <OnboardingLocationStage v-if="step === 'location'" v-bind="stageProps" @state="update" />
       <OnboardingRuntimeStage v-else-if="step === 'runtime'" ref="runtimeStage" v-bind="stageProps" @state="update" />
-      <template v-else-if="step === 'access_memory'">
+      <OnboardingStack v-else-if="step === 'access_memory'" gap="2xl">
         <OnboardingAccessStage v-bind="stageProps" @state="updateAccess" />
-        <OnboardingMemoryStage v-bind="stageProps" @state="updateMemory" @continue="afterMemorySave" />
-      </template>
+        <OnboardingMemoryStage ref="memoryStage" v-bind="stageProps" @state="updateMemory" />
+      </OnboardingStack>
       <OnboardingCareStage v-else-if="step === 'care'" v-bind="stageProps" @state="update" />
-      <OnboardingFinishStage v-else v-bind="stageProps" @state="update" @continue="advance" @back="back" />
+      <OnboardingFinishStage v-else v-bind="stageProps" @state="update" />
     </template>
   </OnboardingShell>
   <p v-else class="onboarding-loading" role="status">Loading setup…</p>
 </template>
 
 <style scoped>
-.onboarding-error, .onboarding-loading { max-width: 760px; margin: 24px auto; padding: 16px; }
+.onboarding-error, .onboarding-loading { max-width: 760px; margin: var(--space-5, 24px) auto; padding: var(--space-4, 16px); }
 .onboarding-error { border: 1px solid var(--warning); border-radius: var(--radius); }
 .onboarding-error button { min-height: 44px; margin-left: 12px; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
 </style>

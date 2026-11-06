@@ -40,7 +40,6 @@ export const ONBOARDING_STEPS: { id: OnboardingStep; label: string }[] = [
 ]
 
 export interface OnboardingStageProps { context: OnboardingStageContext; busy: boolean }
-export type OnboardingStageEvents = { state: [state: StageState]; continue: []; back: []; refresh: [] }
 
 export function onboardingProgress(receipt: OnboardingReceipt | null, target: OnboardingTarget) {
   if (!receipt) return null

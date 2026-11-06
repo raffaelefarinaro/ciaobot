@@ -4,6 +4,10 @@ import { api } from '../../lib/api'
 import { apiErrorMessage } from '../../lib/errorMessage'
 import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
 import { normalizeOverrides, setOverride } from '../../lib/workspaceOverrides'
+import OnboardingStack from './OnboardingStack.vue'
+import OnboardingButton from './OnboardingButton.vue'
+import OnboardingChoiceGroup from './OnboardingChoiceGroup.vue'
+import OnboardingChoice from './OnboardingChoice.vue'
 
 interface WorkspaceRow {
   name: string
@@ -13,7 +17,7 @@ interface WorkspaceRow {
 }
 
 const props = defineProps<OnboardingStageProps>()
-const emit = defineEmits<{ state: [state: StageState]; continue: []; back: []; refresh: [] }>()
+const emit = defineEmits<{ state: [state: StageState] }>()
 
 const scope = ref('')
 const savedScope = ref('')
@@ -29,14 +33,17 @@ const platformKnown = ref(false)
 const pending = ref(false)
 const error = ref('')
 
-const dirty = computed(() => scope.value !== savedScope.value || approval.value !== savedApproval.value)
-const canContinue = computed(() => !!scope.value && !dirty.value && !pending.value && !error.value)
+// Every choice is written when it is made, so nothing stays dirty: an unsaved
+// choice is one whose save failed, and that blocks Continue through `error`.
+// The scope before the last change, so a risky choice can be undone.
+const previousScope = ref('')
+const canContinue = computed(() => !!scope.value && !pending.value && !error.value)
 // Exact match: "darwin" contains "win", which would show the Windows warning
 // to every macOS user and lock them out of workspace scope.
 const windows = computed(() => platform.value === 'windows' || platform.value === 'win32')
 
 function report(): void {
-  emit('state', { dirty: dirty.value, pending: pending.value, canContinue: canContinue.value, error: error.value || null })
+  emit('state', { dirty: false, pending: pending.value, canContinue: canContinue.value, error: error.value || null })
 }
 watch([scope, approval, pending, error], report)
 
@@ -66,84 +73,88 @@ onMounted(async () => {
   report()
 })
 
-async function save(): Promise<void> {
-  // Snapshot what is being sent: edits during the request must stay unsaved.
-  const submitted = { scope: scope.value, approval: approval.value }
+// Snapshot what is sent: a failed save puts the controls back to what is stored.
+async function save(next: { scope?: string; approval?: string }): Promise<void> {
+  const body: Record<string, unknown> = {}
+  if (next.scope !== undefined) body.agent_fs_scope = next.scope
+  if (next.approval !== undefined) body.provider_overrides = setOverride(overrides.value, provider.value, 'permission_mode', next.approval)
   pending.value = true
   error.value = ''
   report()
   try {
-    await api.patch(`/api/workspaces/${encodeURIComponent(props.context.workspace)}`, {
-      ...(submitted.scope !== savedScope.value ? { agent_fs_scope: submitted.scope } : {}),
-      ...(submitted.approval !== savedApproval.value
-        ? { provider_overrides: setOverride(overrides.value, provider.value, 'permission_mode', submitted.approval) }
-        : {}),
-    })
-    savedScope.value = submitted.scope
-    savedApproval.value = submitted.approval
-    // Mirror only the field we sent; an empty value removes the override, which
-    // is how "engine default" is stored.
-    overrides.value = setOverride(overrides.value, provider.value, 'permission_mode', submitted.approval)
+    await api.patch(`/api/workspaces/${encodeURIComponent(props.context.workspace)}`, body)
+    if (next.scope !== undefined) { previousScope.value = savedScope.value; savedScope.value = next.scope }
+    if (next.approval !== undefined) {
+      savedApproval.value = next.approval
+      // An empty value removes the override, which is how "engine default" is stored.
+      overrides.value = setOverride(overrides.value, provider.value, 'permission_mode', next.approval)
+    }
   } catch (e) {
+    scope.value = savedScope.value
+    approval.value = savedApproval.value
     error.value = `Settings could not be saved: ${apiErrorMessage(e, 'The request failed.')}`
   } finally {
     pending.value = false
     report()
   }
 }
+
+function chooseScope(value: string): void {
+  if (value === savedScope.value) return
+  scope.value = value
+  void save({ scope: value })
+}
+function chooseApproval(value: string): void {
+  if (value === savedApproval.value) return
+  approval.value = value
+  void save({ approval: value })
+}
+function undoScope(): void { chooseScope(previousScope.value) }
 </script>
 
 <template>
-  <section class="access-stage" aria-labelledby="access-title">
+  <OnboardingStack as="section" gap="xl" class="access-stage" aria-labelledby="access-title">
     <h2 id="access-title">Choose what the agent can access</h2>
 
-    <fieldset>
-      <legend>Filesystem scope</legend>
-      <p>Choose the files the agent and its shell may access.</p>
-      <label>
-        <input v-model="scope" type="radio" value="workspace" :disabled="pending || windows" />
-        Workspace only <span>Access stays inside this workspace.</span>
-      </label>
-      <label>
-        <input v-model="scope" type="radio" value="machine" :disabled="pending" />
-        Whole machine <span>Access may include any file this user can read.</span>
-      </label>
-      <p v-if="windows" class="hint">Windows has no filesystem sandbox; workspace-only scope is unavailable.</p>
-      <p v-else-if="platformKnown" class="hint">Scope limits file access; it is not a safety guarantee.</p>
-      <p v-else class="hint">This host's platform was not reported, so no scope can be recommended. Choose one explicitly.</p>
-    </fieldset>
+    <OnboardingChoiceGroup label="Filesystem scope" name="scope" layout="cards" :model-value="scope" :disabled="pending" @update:model-value="chooseScope">
+      <OnboardingChoice value="workspace" :disabled="windows">
+        Workspace only
+        <template #description>Access stays inside this workspace.</template>
+      </OnboardingChoice>
+      <OnboardingChoice value="machine">
+        Whole machine
+        <template #description>Access may include any file this user can read.</template>
+      </OnboardingChoice>
+      <template #after>
+        <p v-if="scope === 'machine'" class="consequence" role="status">
+          The agent and its shell can read any file this user can read, outside this workspace too.
+          <OnboardingButton v-if="previousScope === 'workspace' && !windows" variant="link" class="undo" :disabled="pending" @click="undoScope">Undo</OnboardingButton>
+        </p>
+        <p v-if="windows" class="hint">Windows has no filesystem sandbox; workspace-only scope is unavailable.</p>
+        <p v-else-if="platformKnown" class="hint">Scope limits file access; it is not a safety guarantee.</p>
+        <p v-else class="hint">This host's platform was not reported, so no scope can be recommended. Choose one explicitly.</p>
+      </template>
+    </OnboardingChoiceGroup>
 
-    <fieldset>
-      <legend>Approval mode</legend>
-      <label>
-        Mode
-        <select v-model="approval" aria-label="Approval mode" :disabled="pending || !provider">
-          <option value="">Engine default{{ engineApproval ? ` (${engineApproval})` : ' (unknown)' }}</option>
-          <option value="auto">Auto</option>
-          <option value="manual">Manual approvals</option>
-          <option value="bypass">Bypass permissions</option>
-        </select>
-      </label>
-      <p v-if="!provider" class="hint">The runtime is not known yet, so approval mode is unknown.</p>
-      <p v-else-if="provider === 'claude'">Recommended: Claude Auto. A classifier decides what is routine and what needs an approval card. This is not a safety guarantee.</p>
-      <p v-else-if="provider === 'opencode'">OpenCode manual approvals use configurable rules. Bypass relies on instructions to the model; those instructions are not enforced safeguards.</p>
-      <p v-else class="hint">No approval guidance is available for this runtime.</p>
-    </fieldset>
+    <OnboardingChoiceGroup label="Approval mode" name="approval" layout="segmented" :model-value="approval" :disabled="pending || !provider" @update:model-value="chooseApproval">
+      <OnboardingChoice value="">Engine default{{ engineApproval ? ` (${engineApproval})` : ' (unknown)' }}</OnboardingChoice>
+      <OnboardingChoice value="auto">Auto</OnboardingChoice>
+      <OnboardingChoice value="manual">Manual approvals</OnboardingChoice>
+      <OnboardingChoice value="bypass">Bypass permissions</OnboardingChoice>
+      <template #after>
+        <p v-if="!provider" class="hint">The runtime is not known yet, so approval mode is unknown.</p>
+        <p v-else-if="provider === 'claude'" class="hint">Recommended: Claude Auto. A classifier decides what is routine and what needs an approval card. This is not a safety guarantee.</p>
+        <p v-else-if="provider === 'opencode'" class="hint">OpenCode manual approvals use configurable rules. Bypass relies on instructions to the model; those instructions are not enforced safeguards.</p>
+        <p v-else class="hint">No approval guidance is available for this runtime.</p>
+      </template>
+    </OnboardingChoiceGroup>
 
-    <p v-if="error" role="alert" aria-live="assertive">{{ error }}</p>
-    <button type="button" :disabled="pending || !dirty" @click="save">{{ pending ? 'Saving…' : 'Save choices' }}</button>
-    <button type="button" :disabled="!canContinue || props.busy" @click="emit('continue')">Continue</button>
-    <button type="button" @click="emit('back')">Back</button>
-  </section>
+    <p v-if="error" class="error" role="alert" aria-live="assertive">{{ error }}</p>
+  </OnboardingStack>
 </template>
 
 <style scoped>
-.access-stage { display: grid; gap: 12px; }
-fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); padding: 8px 12px; }
-legend { padding: 0 4px; color: var(--fg2); }
-label { display: flex; align-items: center; gap: 8px; min-height: 44px; }
-span, .hint { color: var(--fg2); }
-button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
-button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button:disabled { opacity: .55; cursor: not-allowed; }
+.hint { margin: 0; color: var(--fg2); line-height: 1.5; }
+.consequence { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3, 12px); margin: 0; line-height: 1.5; }
+.error { margin: 0; color: var(--error); }
 </style>
