@@ -4907,15 +4907,6 @@ function hasLaterItem(errorIdx: number): boolean {
 }
 // A pending retry shows on the transcript's last row when that row is the
 // failure (a trace after it does not count); -1 when no error row owns it.
-// last_error is the engine's own text for the failure; the row's text may carry
-// an `Error:` prefix. A retry armed by hand ('manual') belongs to the last row.
-function sameFailure(rowText: string, lastError: string | undefined): boolean {
-  if (!lastError || lastError === 'manual') return true
-  const norm = (t: string) => t.replace(/^\s*Error:\s*/, '').trim().toLowerCase()
-  const a = norm(rowText)
-  const b = norm(lastError)
-  return a.includes(b) || b.includes(a)
-}
 const retryPending = computed(() => chat.value?.retry?.status === 'pending' && !view.isStreaming)
 const retryOwnerIdx = computed(() => {
   if (!retryPending.value) return -1
@@ -4925,7 +4916,7 @@ const retryOwnerIdx = computed(() => {
     if (it.kind === 'trace') continue
     const isError = (it.kind === 'assistant' && it.msg.is_error)
       || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return isError && sameFailure(it.msg.content, chat.value?.retry?.last_error) ? k : -1
+    return isError ? k : -1
   }
   return -1
 })
@@ -6324,6 +6315,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 .retry-btn:hover { background: var(--border-strong); border-color: var(--fg2); }
 .retry-btn:active { transform: scale(0.97); }
+@media (pointer: coarse) {
+  .retry-btn { min-height: var(--touch); }
+}
 .error-actions {
   display: flex;
   gap: var(--space-2);

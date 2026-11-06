@@ -465,24 +465,23 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('does not attach a retry to a different failure than the row', async () => {
+  it('keeps one card when the retry reason differs from the row text', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
-      { role: 'assistant', content: 'Error: strange failure 42', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      { role: 'assistant', content: 'Error: could not reach the provider', timestamp: '2026-10-11T18:01:01Z', is_error: true },
     ]
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-11T23:00:00Z',
-      last_error: 'connection reset by peer',
+      last_error: 'network unreachable',
       attempts: 1,
       interval_seconds: 30,
     }
     await flushPromises()
     const cards = wrapper.findAll('.injected-card')
-    expect(cards).toHaveLength(2)
-    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
-    expect(cards[1].find('.retry-state-title').exists()).toBe(true)
+    expect(cards).toHaveLength(1)
+    expect(cards[0].find('.retry-state-title').exists()).toBe(true)
     wrapper.unmount()
   })
 

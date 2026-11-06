@@ -372,6 +372,7 @@ onUnmounted(() => {
 /* The same screen inside a panel, for a run that is not a takeover. Only the
    full-window layer is undone — the record's rows, bar, phase line and footer
    are the same ones, so a staged run reads the same either way. */
+.update-progress-overlay--inline .update-progress-content { max-width: none; }
 .update-progress-overlay--inline {
   display: block;
   min-width: 0;

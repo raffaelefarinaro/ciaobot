@@ -410,7 +410,6 @@ pre {
   .injected-card-link {
     min-height: var(--touch);
   }
-  .injected-card-actions :slotted(button) { min-height: var(--touch); }
   .injected-card-link { display: inline-flex; align-items: center; }
   .injected-card-original > summary { min-height: var(--touch); padding: 12px 0; }
 }
