@@ -5,11 +5,11 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import { askConfirm } from '../lib/confirm'
 import type { OperatorAction, UpdateTaskRow } from '../lib/types'
-import { renderMarkdown } from '../lib/safeMarkdown'
-import HomeNoticeWindow from './HomeNoticeWindow.vue'
+import NeedsYouRow, { type NeedsYouMenuItem } from './NeedsYouRow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
-import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+import { useHostTerminal } from '../composables/useHostTerminal'
+import { focusAfterNoticeClose, useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 import { hasLiveAttempt, visibleUpdateTasks as filterVisibleUpdateTasks } from '../lib/updateTasks'
 import { actionNoticeKey, parseHomeNoticeKey, updateNoticeKey } from '../lib/notificationInbox'
 
@@ -20,13 +20,6 @@ const noticeWindows = useHomeNoticeWindows()
 const chatBusy = ref(false)
 const commandCopy = useCommandCopy()
 
-/** Actions grouped by the workspace they concern, shared ones first.
- *
- * An action's workspace decides where acting on it writes, so a flat strip made
- * the reader check each tile's prose to work out which one it was about.
- * Anything with no workspace is install-wide, and goes at the top because it
- * applies regardless of which workspace you are looking at.
- */
 /** Actions relevant to the workspace on screen.
  *
  * A shared action (no workspace) always applies. A workspace-scoped action
@@ -76,17 +69,13 @@ onMounted(() => {
   housekeeping.init()
 })
 
-// The strip has no permanent furniture: with zero actions it renders nothing at
-// all (the template guards on a non-empty list before creating any element).
-function hasActions(): boolean {
-  return visibleActions.value.length > 0
-}
-
 async function runAction(action: OperatorAction): Promise<void> {
   const { ok } = await housekeeping.run(action.id)
   // The star nudge's run records the star; the tile then disappears, so the
   // only feedback is this toast. Only the strip's explicit run button lands
-  // here — a link click never records anything (see onLinkClick).
+  // here — opening the link never records anything: the visitor may not be
+  // signed in, and inspecting or closing the tab is not a star. The nudge clears
+  // through the explicit dismiss ("Later") instead.
   if (ok && action.id === 'github-star') {
     projectStore.pushToast({
       chat_id: '',
@@ -94,18 +83,6 @@ async function runAction(action: OperatorAction): Promise<void> {
       body: 'It genuinely helps other developers discover Ciaobot.',
     })
   }
-}
-
-// A tile's external link opens in a new tab. The GitHub-star nudge's link
-// deliberately does NOT run the action: opening the repository page confirms
-// nothing — the visitor may not be signed in, and inspecting or closing the
-// tab is not a star. Recording `starred` here would thank users for an
-// action they never took and silence the nudge permanently. The tile clears
-// through the operator's explicit dismiss ("Later") instead, and other
-// links — e.g. release notes on the update tile — never ran the action in
-// the first place (clicking "Release notes" must not start an update).
-async function onLinkClick(action: OperatorAction): Promise<void> {
-  void action
 }
 
 async function dismissAction(action: OperatorAction): Promise<void> {
@@ -120,30 +97,6 @@ async function openView(action: OperatorAction): Promise<void> {
   await router.push(action.view_route)
 }
 
-function renderedDetail(detail: string): string {
-  // Missed-schedule detail is markdown (bullets with [name](/schedules/id)).
-  // Other tiles are plain sentences — markdown rendering keeps them as <p>.
-  //
-  // Details are prose, not authored HTML: a sentence naming a placeholder path
-  // ("copy it into skills/<name>/") would otherwise be parsed as an inline tag
-  // and dropped by the sanitizer, deleting the one word the sentence is about.
-  // Escaping the angle brackets first keeps the text and leaves markdown link
-  // and list syntax untouched.
-  return renderMarkdown(detail.replace(/</g, '&lt;').replace(/>/g, '&gt;'))
-}
-
-async function onDetailClick(event: MouseEvent): Promise<void> {
-  const anchor = (event.target as HTMLElement)?.closest('a')
-  if (!anchor) return
-  const href = anchor.getAttribute('href') || ''
-  // Internal schedule links should route without a full reload.
-  if (href.startsWith('/schedules')) {
-    event.preventDefault()
-    const { router } = await import('../router')
-    await router.push(href)
-  }
-}
-
 // The backend names the tile's lead button. "view" (the update tile) makes the
 // view button the filled primary and demotes the link to a chip; anything else
 // keeps the default order, where run/link/view buttons lead.
@@ -153,10 +106,6 @@ function viewLeads(action: OperatorAction): boolean {
 
 function chatButtonLabel(action: OperatorAction): string {
   return action.chat_label || 'Discuss in chat'
-}
-
-async function onChatButtonClick(action: OperatorAction): Promise<void> {
-  await openChat(action)
 }
 
 async function openChat(action: OperatorAction): Promise<void> {
@@ -182,6 +131,145 @@ async function openChat(action: OperatorAction): Promise<void> {
   } finally {
     chatBusy.value = false
   }
+}
+
+// ── One list ────────────────────────────────────────────────────────────────
+//
+// Workspace-health errors, operator actions and update tasks share one list
+// above the composer. A row is a title, one line and one lead control; anything
+// else the source can do sits in the row's ⋯ menu. The sources keep their own
+// policies (an operator action is a view of the machine and goes away when the
+// condition does; an update task is a decision that persists until somebody
+// reverses it), so each keeps its own row builder below.
+
+const hostTerminal = useHostTerminal()
+onMounted(() => { void hostTerminal.ensureCapabilities() })
+
+/** Blocking preconditions first, then the rest in the workspace order above. */
+const orderedActions = computed(() => {
+  const flat = groups.value.flatMap(group => group.actions)
+  return [...flat.filter(a => a.blocking), ...flat.filter(a => !a.blocking)]
+})
+
+/** The first line of a detail as plain text. Details are prose or short
+ *  markdown (the missed-reminder list); a row has room for one line, and the
+ *  rest is a click away in the chat the row can open. */
+function oneLine(detail: string): string {
+  const first = detail.split('\n').map(line => line.trim()).find(line => line) ?? ''
+  return first
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^[-+*]\s+/, '')
+    .replace(/\*\*|`/g, '')
+    .trim()
+}
+
+type ActionLead = 'view' | 'terminal' | 'copy' | 'run' | 'link' | 'chat' | 'dismiss' | ''
+
+function terminalReady(action: OperatorAction): boolean {
+  return !!action.terminal_action && hostTerminal.canRun(action.terminal_action)
+}
+
+/** Which of an action's controls leads its row.
+ *
+ * The backend can name the lead ("view", the update row). Otherwise the order is
+ * the one the tiles always had: a terminal that can run the command, the run
+ * button, the link, the surface that already exists, the chat. A provider update
+ * whose terminal is not on this machine leads with copying the command instead,
+ * because "Update in Terminal" would be a button that is not there. */
+function leadOf(action: OperatorAction): ActionLead {
+  if (viewLeads(action)) return 'view'
+  if (terminalReady(action)) return 'terminal'
+  if (action.terminal_action && action.command) return 'copy'
+  if (action.run_label) return 'run'
+  if (action.link_url) return 'link'
+  if (action.view_route) return 'view'
+  if (action.chat_prompt) return 'chat'
+  if (action.dismiss_label) return 'dismiss'
+  return ''
+}
+
+function copyLabel(action: OperatorAction): string {
+  return commandCopy.stateOf(action.id) === 'copied' ? 'Copied' : 'Copy command'
+}
+
+function actionTitle(action: OperatorAction): string {
+  return showHeadings.value && action.workspace ? `${action.title} · ${action.workspace}` : action.title
+}
+
+/** One line. When copying was refused the command itself takes the line, as
+ *  selectable text: the button that failed was the only other way to it. */
+function actionLine(action: OperatorAction): string {
+  if (action.command && commandCopy.stateOf(action.id) === 'failed') {
+    return `Copy failed. Run: ${action.command}`
+  }
+  return oneLine(action.detail)
+}
+
+function actionItems(action: OperatorAction): NeedsYouMenuItem[] {
+  const lead = leadOf(action)
+  const running = housekeeping.runningIds.has(action.id)
+  const items: NeedsYouMenuItem[] = []
+  if (action.view_route && lead !== 'view') {
+    items.push({ id: 'view', label: action.view_label || 'Open' })
+  }
+  if (action.run_label && lead !== 'run') {
+    items.push({ id: 'run', label: running ? 'Running…' : action.run_label, disabled: running })
+  }
+  if (action.link_url && lead !== 'link') {
+    items.push({ id: 'link', label: action.link_label || 'Open', href: action.link_url })
+  }
+  if (action.chat_prompt && lead !== 'chat') {
+    items.push({ id: 'chat', label: chatButtonLabel(action), disabled: chatBusy.value })
+  }
+  if (action.command && lead !== 'copy') items.push({ id: 'copy', label: copyLabel(action) })
+  if (action.dismiss_label && lead !== 'dismiss') items.push({ id: 'dismiss', label: action.dismiss_label })
+  items.push({ id: 'hide', label: 'Hide for now' })
+  return items
+}
+
+async function hideNotice(key: string): Promise<void> {
+  noticeWindows.close(key)
+  await focusAfterNoticeClose()
+}
+
+async function onActionSelect(action: OperatorAction, id: string): Promise<void> {
+  switch (id) {
+    case 'view': return openView(action)
+    case 'run': return runAction(action)
+    case 'chat': return openChat(action)
+    case 'copy': return commandCopy.copy(action.id, action.command || '')
+    case 'dismiss': return dismissAction(action)
+    case 'hide': return hideNotice(actionKey(action))
+    // 'link' is an anchor: the browser opens it.
+  }
+}
+
+// Workspace health: the install-wide report Settings → Advanced shows. Only
+// errors raise a row; each names its own problem, and the one remedy the engine
+// has (`POST /api/workspace-health/fix`) is the lead of every one of them.
+const HEALTH_SETTINGS_ROUTE = '/settings/advanced'
+const healthItems: NeedsYouMenuItem[] = [{ id: 'settings', label: 'Open in Settings' }]
+
+async function fixHealth(): Promise<void> {
+  const at = projectStore.activeWorkspace || ''
+  const ok = await housekeeping.fixHealth()
+  const left = housekeeping.healthErrors.length
+  if (!ok) {
+    await report(housekeeping.healthFixError, at)
+  } else if (left) {
+    await report(
+      `Applied the automatic fix. ${left} ${left === 1 ? 'problem still needs' : 'problems still need'} a look in Settings.`,
+      at,
+    )
+  } else {
+    await report('Fixed. Workspace health has no errors.', at)
+  }
+}
+
+async function onHealthSelect(id: string): Promise<void> {
+  if (id !== 'settings') return
+  const { router } = await import('../router')
+  await router.push(HEALTH_SETTINGS_ROUTE)
 }
 
 // ── "After this update" ────────────────────────────────────────────────────
@@ -213,33 +301,31 @@ watch(
 )
 onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
 
-/** Whether the group draws anything at all.
+/** Whether the list draws anything at all.
  *
- * Real rows, plus one exception: a group that still has an announcement to
- * deliver. Hiding the last card removes the button that was pressed, so without
- * this the group would vanish in the same tick — taking with it the only place
- * the outcome could be said and the only place focus could land. An operator who
- * pressed "Hide it" and saw the page rearrange itself in silence has been told
- * nothing about whether it worked.
+ * Real rows, plus one exception: a list that still has an announcement to
+ * deliver. Resolving the last row removes the button that was pressed, so
+ * without this the list would vanish in the same tick — taking with it the only
+ * place the outcome could be said and the only place focus could land. An
+ * operator who pressed "Hide it" and saw the page rearrange itself in silence
+ * has been told nothing about whether it worked.
  *
  * The exception is a *loan*, not a state: `clearGroupStatus` ends it on a timer
- * and on a workspace switch (see `GROUP_STATUS_TTL_MS`), because a heading, a
- * lede and a stale "Hidden …" left standing on Home would outlive the thing they
- * describe — and, across a workspace switch, be attributed to a workspace the
- * operator never pressed anything in.
+ * and on a workspace switch (see `GROUP_STATUS_TTL_MS`), because a heading and a
+ * stale "Hidden …" left standing on Home would outlive the thing they describe
+ * — and, across a workspace switch, be attributed to a workspace the operator
+ * never pressed anything in.
  *
- * Zero tasks and a *failed* list are otherwise drawn identically — as nothing —
- * because that is the strip's own best-effort contract (`refresh` swallows a
- * failure and leaves the strip empty rather than showing an error, and a Home
- * that raised a red line for a background poll would nag about a condition the
- * operator cannot act on from this page). Silence is not a false "done": the
- * group has no all-clear state at all, so its absence never reads as a verdict.
- *
- * The one place a failed check *is* reported is Settings → Overview → Update task history,
- * which fetches for itself and owns the error, its retry, and the empty state. */
-const showUpdateGroup = computed(
-  () => openUpdateTasks.value.length > 0 || groupStatus.value !== '',
+ * Zero rows and a *failed* source are drawn identically — as nothing — because
+ * that is the strip's own best-effort contract (a Home that raised a red line
+ * for a background poll would nag about a condition the operator cannot act on
+ * from this page). Silence is not a false "done": the list has no all-clear
+ * state at all, so its absence never reads as a verdict. The one place a failed
+ * update-task check *is* reported is Settings → Overview → Update task history. */
+const rowCount = computed(
+  () => housekeeping.healthErrors.length + orderedActions.value.length + openUpdateTasks.value.length,
 )
+const showNeedsYou = computed(() => rowCount.value > 0 || groupStatus.value !== '')
 
 /** One task's key. A revision is a different record and a different card, so
  *  the two are never collapsed into one row. */
@@ -323,7 +409,7 @@ function canStart(task: UpdateTaskRow): boolean {
 
 const groupEl = ref<HTMLElement | null>(null)
 /** The outcome of the last press. Declared here rather than beside the click
- *  handlers because `showUpdateGroup` reads it: a group that still owes the
+ *  handlers because `showNeedsYou` reads it: a list that still owes the
  *  operator an announcement has to stay on screen to deliver it. */
 const groupStatus = ref('')
 
@@ -477,6 +563,51 @@ async function recheckTasks(): Promise<void> {
   await keepFocus()
 }
 
+type TaskLead = 'review' | 'start' | 'check'
+
+function taskLead(task: UpdateTaskRow): TaskLead {
+  if (task.status === 'waiting_review') return 'review'
+  return canStart(task) ? 'start' : 'check'
+}
+
+function startText(task: UpdateTaskRow): string {
+  if (taskBusy(task)) return 'Working…'
+  if (task.status === 'in_progress' || task.status === 'waiting_review') return startLabel(task)
+  if (task.status === 'failed') return 'Try again'
+  return 'Start in chat'
+}
+
+/** One line: a refusal first (it is the thing the operator must read), then —
+ *  for an offer the detector has confirmed — why it exists, and otherwise where
+ *  the attempt stands. */
+function taskLine(task: UpdateTaskRow): string {
+  const error = taskError(task)
+  if (error) return error
+  if (task.status === 'offered' && task.applicability !== 'unknown') return task.why
+  return taskStateLine(task)
+}
+
+function taskItems(task: UpdateTaskRow): NeedsYouMenuItem[] {
+  const items: NeedsYouMenuItem[] = []
+  // A review row leads with the queue; its chat is still one tap away.
+  if (taskLead(task) === 'review') {
+    items.push({ id: 'start', label: startText(task), disabled: taskBusy(task) })
+  }
+  if (task.chat_live) items.push({ id: 'chat', label: 'Open its chat' })
+  items.push({ id: 'dismiss', label: 'Hide it', disabled: taskBusy(task) })
+  items.push({ id: 'hide', label: 'Hide for now' })
+  return items
+}
+
+async function onTaskSelect(task: UpdateTaskRow, id: string): Promise<void> {
+  switch (id) {
+    case 'start': return startTask(task)
+    case 'chat': return openTaskChat(task.chat_id)
+    case 'dismiss': return dismissTask(task)
+    case 'hide': return hideNotice(updateKey(task))
+  }
+}
+
 // Applicability and state are per workspace, so a workspace switch re-asks the
 // question rather than leaving the previous workspace's answers on screen — and
 // takes the last press's announcement with them, since that press was made in
@@ -609,204 +740,162 @@ watch(
 </script>
 
 <template>
-  <!--
-    Two sections, not one list. The operator actions above are preconditions and
-    fixes, and a blocking one has to be seen first; the update tasks below are
-    optional work the update left behind, with a different policy (a decision
-    that persists, reopenable from Settings). Merging them would let an optional
-    card sort above an unmissable one and would make "hide this" mean two
-    different things in one list.
-  -->
   <p v-if="noticeUnavailable" class="home-notice-unavailable" role="status">This notice is no longer available</p>
 
-  <section v-if="hasActions()" class="housekeeping" aria-label="Housekeeping actions">
-    <template v-for="group in groups" :key="group.workspace || '_shared'">
-      <p v-if="showHeadings" class="housekeeping-group">
-        {{ group.workspace || 'shared' }}
-      </p>
-       <HomeNoticeWindow
-         v-for="action in group.actions"
-         :key="action.id"
-         class="housekeeping-tile"
-         :class="{ 'housekeeping-tile--blocking': action.blocking }"
-         :title="action.title"
-         :notice-key="actionKey(action)"
-         :data-notice-key="actionKey(action)"
-         tabindex="-1"
-         :blocking="action.blocking"
-       >
-       <div class="housekeeping-body">
-         <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-         <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
-         <p v-if="action.command" class="housekeeping-command">
-           <code>{{ action.command }}</code>
-           <button type="button" class="btn-small btn-chip" @click="commandCopy.copy(action.id, action.command)">{{ commandCopy.stateOf(action.id) === 'copied' ? 'Copied' : 'Copy' }}</button>
-           <span v-if="commandCopy.stateOf(action.id) === 'failed'" class="housekeeping-command-note" role="status">Copy failed; select the command above.</span>
-         </p>
-      </div>
-      <div class="housekeeping-actions">
-        <!-- A view-led tile (the update tile) puts its view button first and
-             filled, in DOM order so focus and screen readers meet it first. -->
-        <button
-          v-if="viewLeads(action)"
-          type="button"
-          class="btn-small btn-primary"
-          @click="openView(action)"
-        >
-          {{ action.view_label || 'Open' }}
-        </button>
-        <HostTerminalButton
-          v-if="action.terminal_action"
-          :action="action.terminal_action"
-          variant="small"
-          label="Update in Terminal"
-          :aria-label="`${action.title} in Terminal`"
-          @not-applicable="housekeeping.refresh()"
-        />
-        <button
-          v-if="action.run_label"
-          type="button"
-          class="btn-small"
-          :class="action.terminal_action ? 'btn-chip' : 'btn-primary'"
-          :disabled="housekeeping.runningIds.has(action.id)"
-          @click="runAction(action)"
-        >
-          {{ housekeeping.runningIds.has(action.id) ? 'Running…' : action.run_label }}
-        </button>
-        <a
-          v-if="action.link_url"
-          class="btn-small housekeeping-link"
-          :class="viewLeads(action) ? 'btn-chip' : 'btn-primary'"
-          :href="action.link_url"
-          target="_blank"
-          rel="noopener noreferrer"
-          @click="onLinkClick(action)"
-        >{{ action.link_label || 'Open' }}</a>
-        <button
-          v-if="action.view_route && !viewLeads(action)"
-          type="button"
-          class="btn-small btn-primary"
-          @click="openView(action)"
-        >
-          {{ action.view_label || 'Open' }}
-        </button>
-        <button
-          v-if="action.chat_prompt"
-          type="button"
-          class="btn-small btn-chip"
-          :disabled="chatBusy"
-          @click="onChatButtonClick(action)"
-        >
-          {{ chatButtonLabel(action) }}
-        </button>
-        <button
-          v-if="action.dismiss_label"
-          type="button"
-          class="btn-small btn-chip"
-          @click="dismissAction(action)"
-        >{{ action.dismiss_label }}</button>
-        </div>
-       </HomeNoticeWindow>
-    </template>
-  </section>
-
+  <!--
+    One list, above the composer. Health errors lead (the install cannot do its
+    work), then blocking preconditions, then everything else an operator action
+    offers, then the work the last update left behind. Each row is a title, one
+    line and one lead control; the rest is in the row's menu. With nothing to
+    show the section is not rendered at all: there is no "all clear" row, so the
+    page below does not move when a row appears or goes.
+  -->
   <section
-    v-if="showUpdateGroup"
+    v-if="showNeedsYou"
     ref="groupEl"
-    class="update-tasks"
+    class="needs-you"
     tabindex="-1"
-    aria-labelledby="update-tasks-heading"
+    aria-labelledby="needs-you-heading"
   >
-     <h2 id="update-tasks-heading" class="update-tasks-heading">After this update</h2>
+    <h2 id="needs-you-heading" class="needs-you-heading">Needs you</h2>
 
     <!-- The outcome of the last press, in a live region. The button that was
          pressed is often the thing that disappeared, so this is where the
-         result is announced once focus has landed back on the group. -->
-    <p class="update-tasks-status" role="status">{{ groupStatus }}</p>
+         result is announced once focus has landed back on the list. -->
+    <p class="needs-you-status" role="status">{{ groupStatus }}</p>
 
-     <HomeNoticeWindow
-       v-for="task in openUpdateTasks"
-       :key="taskKey(task)"
-       class="housekeeping-tile update-task"
-       :title="task.title"
-       :notice-key="updateKey(task)"
-       :data-notice-key="updateKey(task)"
-       tabindex="-1"
-     >
-       <div class="housekeeping-body">
-         <div class="housekeeping-detail">{{ task.why }}</div>
-        <p class="update-task-meta">
-          <span>{{ taskStateLine(task) }}</span>
-          <span v-if="task.since_version">Since Ciaobot {{ task.since_version }}</span>
-        </p>
-        <!-- A refusal leaves the card exactly as it was and says why here. A
-             cleared card would read as "handled", which is the one thing a
-             failed start, a refused dismiss and a declined reopen have in
-             common and none of them are. -->
-        <p v-if="taskError(task)" class="update-task-error" role="alert">
-          {{ taskError(task) }}
-        </p>
-      </div>
-      <div class="housekeeping-actions">
-        <!-- waiting_review: the decisions are on the review queue, which has
-             per-row accept/dismiss and a destination picker. Sending the
-             operator to the chat to re-decide them in prose would be worse than
-             naming the surface that already exists. -->
-        <button
-          v-if="task.status === 'waiting_review'"
-          type="button"
-          class="btn-small btn-primary"
-          @click="reviewTask()"
-        >Review proposals</button>
+    <ul v-if="rowCount" class="needs-you-list">
+      <NeedsYouRow
+        v-for="check in housekeeping.healthErrors"
+        :key="`health:${check.id}`"
+        tone="error"
+        :title="check.title"
+        :line="housekeeping.healthFixError || check.detail"
+        :alert="!!housekeeping.healthFixError"
+        :items="healthItems"
+        @select="onHealthSelect"
+      >
+        <template #primary>
+          <button
+            type="button"
+            class="btn-small btn-primary"
+            :disabled="housekeeping.healthFixing"
+            @click="fixHealth"
+          >{{ housekeeping.healthFixing ? 'Fixing…' : 'Fix' }}</button>
+        </template>
+      </NeedsYouRow>
 
-        <!-- One start button for every state that can start. Idempotent on the
-             server per (task, revision), so the label is the only thing that
-             differs between "begin" and "carry on". Gate is the lifecycle, not
-             the detector (see canStart): a live attempt gets Resume even when
-             the detector has already decided the work is not needed, because
-             the chat is open and stranding it is the worse outcome. -->
-        <button
-          v-if="canStart(task)"
-          type="button"
-          class="btn-small"
-          :class="task.status === 'offered' ? 'btn-primary' : 'btn-chip'"
-          :disabled="taskBusy(task)"
-          @click="startTask(task)"
-        >
-          <template v-if="taskBusy(task)">Working…</template>
-          <template v-else-if="task.status === 'in_progress'">{{ startLabel(task) }}</template>
-          <template v-else-if="task.status === 'waiting_review'">{{ startLabel(task) }}</template>
-          <template v-else-if="task.status === 'failed'">Try again</template>
-          <template v-else>Start in chat</template>
-        </button>
+      <NeedsYouRow
+        v-for="action in orderedActions"
+        :key="action.id"
+        :tone="action.blocking ? 'blocking' : ''"
+        :title="actionTitle(action)"
+        :line="actionLine(action)"
+        :alert="!!action.command && commandCopy.stateOf(action.id) === 'failed'"
+        :notice-key="actionKey(action)"
+        :items="actionItems(action)"
+        @select="onActionSelect(action, $event)"
+      >
+        <template #primary>
+          <button
+            v-if="leadOf(action) === 'view'"
+            type="button"
+            class="btn-small"
+            :class="{ 'btn-primary': action.blocking }"
+            @click="openView(action)"
+          >{{ action.view_label || 'Open' }}</button>
+          <HostTerminalButton
+            v-else-if="leadOf(action) === 'terminal'"
+            :action="action.terminal_action"
+            variant="small"
+            label="Update in Terminal"
+            :aria-label="`${action.title} in Terminal`"
+            @not-applicable="housekeeping.refresh()"
+          />
+          <button
+            v-else-if="leadOf(action) === 'copy'"
+            type="button"
+            class="btn-small"
+            @click="onActionSelect(action, 'copy')"
+          >{{ copyLabel(action) }}</button>
+          <button
+            v-else-if="leadOf(action) === 'run'"
+            type="button"
+            class="btn-small"
+            :class="{ 'btn-primary': action.blocking }"
+            :disabled="housekeeping.runningIds.has(action.id)"
+            @click="runAction(action)"
+          >{{ housekeeping.runningIds.has(action.id) ? 'Running…' : action.run_label }}</button>
+          <a
+            v-else-if="leadOf(action) === 'link'"
+            class="btn-small needs-you-link"
+            :class="{ 'btn-primary': action.blocking }"
+            :href="action.link_url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >{{ action.link_label || 'Open' }}</a>
+          <button
+            v-else-if="leadOf(action) === 'chat'"
+            type="button"
+            class="btn-small"
+            :class="{ 'btn-primary': action.blocking }"
+            :disabled="chatBusy"
+            @click="openChat(action)"
+          >{{ chatButtonLabel(action) }}</button>
+          <button
+            v-else-if="leadOf(action) === 'dismiss'"
+            type="button"
+            class="btn-small"
+            @click="dismissAction(action)"
+          >{{ action.dismiss_label }}</button>
+        </template>
+      </NeedsYouRow>
 
-        <!-- The one row that reaches here is an offer nobody can say applies:
-             `visibleUpdateTasks` drops an offer the detector has ruled out, and
-             `canStart` gives every live attempt its Resume. So a quiet re-check
-             is the only honest action left — and it is never drawn as "done". -->
-        <button
-          v-else
-          type="button"
-          class="btn-small btn-chip"
-          :disabled="taskBusy(task)"
-          @click="recheckTasks()"
-        >Check again</button>
-
-        <button
-          v-if="task.chat_live"
-          type="button"
-          class="btn-small btn-chip"
-          @click="openTaskChat(task.chat_id)"
-        >Open its chat</button>
-
-        <button
-          type="button"
-          class="btn-small btn-chip"
-          :disabled="taskBusy(task)"
-          @click="dismissTask(task)"
-        >Hide it</button>
-      </div>
-     </HomeNoticeWindow>
+      <NeedsYouRow
+        v-for="task in openUpdateTasks"
+        :key="taskKey(task)"
+        :title="task.title"
+        :line="taskLine(task)"
+        :alert="!!taskError(task)"
+        :notice-key="updateKey(task)"
+        :items="taskItems(task)"
+        @select="onTaskSelect(task, $event)"
+      >
+        <template #primary>
+          <!-- waiting_review: the decisions are on the review queue, which has
+               per-row accept/dismiss and a destination picker. Sending the
+               operator to the chat to re-decide them in prose would be worse
+               than naming the surface that already exists. -->
+          <button
+            v-if="taskLead(task) === 'review'"
+            type="button"
+            class="btn-small"
+            @click="reviewTask()"
+          >Review proposals</button>
+          <!-- One start button for every state that can start. Idempotent on the
+               server per (task, revision), so the label is the only thing that
+               differs between "begin" and "carry on". Gate is the lifecycle, not
+               the detector (see canStart). -->
+          <button
+            v-else-if="taskLead(task) === 'start'"
+            type="button"
+            class="btn-small"
+            :disabled="taskBusy(task)"
+            @click="startTask(task)"
+          >{{ startText(task) }}</button>
+          <!-- The one row that reaches here is an offer nobody can say applies,
+               so a quiet re-check is the only honest action — never drawn as
+               "done". -->
+          <button
+            v-else
+            type="button"
+            class="btn-small"
+            :disabled="taskBusy(task)"
+            @click="recheckTasks()"
+          >Check again</button>
+        </template>
+      </NeedsYouRow>
+    </ul>
   </section>
 </template>
 
@@ -817,197 +906,29 @@ watch(
   color: var(--fg2);
 }
 
-:deep(.home-notice-window:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* A blocking action is a precondition the install cannot get past on its own,
-   so it reads as a warning rather than as one tile among several. Not a modal
-   and not an app-wide lock: the one realistic cause is an uncommitted vault, and
-   locking the app would take away the assistant needed to fix it. */
-.housekeeping-tile--blocking {
-  border-top-color: var(--warning);
-  background: rgba(210, 153, 34, 0.08);
-  padding-inline: var(--space-3);
-  border-radius: var(--radius);
-}
-
-.housekeeping-group {
-  margin: var(--space-2) 0 0;
-  font-size: 0.72rem;
-  text-transform: lowercase;
-  letter-spacing: 0.04em;
-  color: var(--fg2);
-}
-
-.housekeeping-group:first-child {
-  margin-top: 0;
-}
-
-.housekeeping {
+.needs-you {
   width: 100%;
-  max-width: var(--home-max);
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  margin-block: var(--space-3);
-  gap: var(--space-3);
-  /* The strip is laid out in the Home rail (280px) on wide panes and in the
-     full column on narrow ones, so the window's width decides nothing: the
-     tile layout below follows the strip's own width. */
-  container-type: inline-size;
-  container-name: housekeeping;
-}
-
-.housekeeping-tile {
-  min-width: 0;
-}
-.housekeeping-tile :deep(.home-notice-content) {
-  display: grid;
-  grid-template-columns: 1fr;
-  grid-template-areas: 'body' 'actions';
-  column-gap: var(--space-2);
-  row-gap: var(--space-2);
-  align-items: start;
-}
-
-@container housekeeping (min-width: 600px) {
-  .housekeeping-tile :deep(.home-notice-content) {
-    grid-template-columns: 1fr auto;
-    grid-template-areas: 'body actions';
-    align-items: center;
-  }
-
-  .housekeeping-actions {
-    min-width: 160px;
-  }
-
-  .housekeeping-actions .btn-small {
-    width: auto;
-    min-width: 140px;
-  }
-}
-
-.housekeeping-body {
-  grid-area: body;
-  min-width: 0;
-}
-
-.housekeeping-title {
-  margin: 0;
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--fg);
-}
-
-.housekeeping-detail {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.housekeeping-command {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-2) 0 0;
-  font-size: var(--text-sm);
-}
-.housekeeping-command-note { color: var(--fg3); }
-.housekeeping-command code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  color: var(--fg);
-}
-
-.housekeeping-detail :deep(a) {
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.housekeeping-detail :deep(ul) {
-  margin: var(--space-1) 0 0;
-  padding-left: 1.1em;
-}
-
-.housekeeping-detail :deep(li) {
-  margin: 2px 0;
-}
-
-.housekeeping-detail :deep(p) {
-  margin: 0;
-}
-
-.housekeeping-detail :deep(p + ul) {
-  margin-top: var(--space-1);
-}
-
-.housekeeping-actions {
-  grid-area: actions;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-1);
-}
-
-.housekeeping-actions .btn-small {
-  width: 100%;
-}
-
-/* The link variant is an <a> styled like a button: same size, centered text,
-   no underline. It inherits .btn-small plus .btn-primary (or .btn-chip on a
-   chat-led tile) from the global button tokens; only the anchor-specific
-   resets are needed here. */
-.housekeeping-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  text-decoration: none;
-  box-sizing: border-box;
-}
-
-/* ── "After this update" ────────────────────────────────────────────────────
-   The same hairline row and the same buttons the strip above uses — an update
-   task is a different *kind* of thing, not a different design language, and a
-   reader who knows the strip already knows these. What changes is the heading:
-   this is a group with a name, where the strip's tiles are a list without one. */
-
-.update-tasks {
-  width: 100%;
-  max-width: var(--home-max);
-  margin: 0 auto;
-  margin-block: var(--space-3);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  /* Same reason as `.housekeeping`: the rail or the full column decides. */
+  /* The row lays itself out against the list's own width, not the window's: the
+     main column is narrower than the pane once a panel is docked. */
   container-type: inline-size;
-  container-name: housekeeping;
+  container-name: needs-you;
 }
 
-/* The group takes focus when a card it owns disappears (see keepFocus), and a
+/* The list takes focus when a row it owns disappears (see keepFocus), and a
    visible ring is the only way that landing spot is findable by keyboard. The
-   heading carries the focus outline instead, which is where the eye goes next
-   anyway and keeps the ring off a full-width empty row. */
-.update-tasks:focus {
-  outline: none;
-}
-
-.update-tasks:focus-visible .update-tasks-heading {
+   heading carries the ring, which is where the eye goes next anyway. */
+.needs-you:focus { outline: none; }
+.needs-you:focus-visible .needs-you-heading {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
 }
 
-/* The one Home heading shared with `HomeRecentChats`'s "Continue where you left
-   off", token for token — same size, weight and tracking — so a Home with both
-   on screen has one heading scale rather than two. */
-.update-tasks-heading {
+/* The same Home heading as "Continue where you left off" token for token. */
+.needs-you-heading {
   margin: 0;
   font-size: var(--text-lg);
   font-weight: 650;
@@ -1016,45 +937,28 @@ watch(
   width: fit-content;
 }
 
-.update-tasks-status {
+.needs-you-status {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--fg2);
 }
+/* An empty live region must not reserve a row: the height comes from the text. */
+.needs-you-status:empty { display: none; }
 
-/* An empty live region must not reserve a row: `role="status"` regions are
-   always in the accessibility tree, so the height has to come from the text
-   rather than from a min-height. */
-.update-tasks-status:empty {
-  display: none;
+.needs-you-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 
-.update-tasks-note {
-  display: flex;
-  flex-wrap: wrap;
+.needs-you-link {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-1) 0 0;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-}
-
-.update-task .housekeeping-detail {
-  margin-top: 2px;
-}
-
-.update-task-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
-  margin: var(--space-1) 0 0;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
-
-.update-task-error {
-  margin: var(--space-1) 0 0;
-  font-size: var(--text-sm);
-  color: var(--error);
+  justify-content: center;
+  text-decoration: none;
+  box-sizing: border-box;
 }
 </style>

@@ -11,10 +11,17 @@ import { resetHomeNoticeWindows, useHomeNoticeWindows } from '../../composables/
 import { api } from '../../lib/api'
 import * as confirmModule from '../../lib/confirm'
 import { actionNoticeKey, updateNoticeKey } from '../../lib/notificationInbox'
+import { resetHostTerminalForTests, useHostTerminal } from '../../composables/useHostTerminal'
+import { leadLabels, leads, menuLabels, pick, rows, titles, visibleControls } from './needsYouHelpers'
 import { readyHealth } from '../../lib/sourceHealth'
 import { useProjectStore } from '../../stores/projects'
 import { useHousekeepingStore } from '../../stores/housekeeping'
-import type { OperatorAction, UpdateTaskRow } from '../../lib/types'
+import type { OperatorAction, UpdateTaskRow, WorkspaceHealthCheck } from '../../lib/types'
+
+// The router is imported lazily inside the click handlers, so it is stubbed as a
+// module: the component's own import is what has to be intercepted.
+const routerPush = vi.hoisted(() => vi.fn(async () => {}))
+vi.mock('../../router', () => ({ router: { push: routerPush, replace: vi.fn(async () => {}) } }))
 
 // The reveal request is module-level state shared by every mounted strip, so a
 // strip left mounted by an earlier test would answer a later test's request.
@@ -39,6 +46,18 @@ function action(overrides: Partial<OperatorAction> = {}): OperatorAction {
   }
 }
 
+function healthCheck(overrides: Partial<WorkspaceHealthCheck> = {}): WorkspaceHealthCheck {
+  return {
+    id: 'vault-root-work',
+    title: 'Vault root for work is missing',
+    status: 'error',
+    detail: 'The folder does not exist.',
+    path: '/vaults/work',
+    action: 'Create it.',
+    ...overrides,
+  }
+}
+
 describe('HousekeepingStrip', () => {
   let pinia: ReturnType<typeof createPinia>
 
@@ -56,83 +75,128 @@ describe('HousekeepingStrip', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders nothing at all with zero actions (no wrapper element)', () => {
+  it('renders nothing at all with zero rows (no wrapper element)', () => {
     const store = useHousekeepingStore()
     store.actions = []
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
-    // No wrapper element, no heading, no "all clear" row. The v-if renders a
-    // placeholder comment, not a real DOM element.
-    expect(wrapper.find('.housekeeping').exists()).toBe(false)
+    // No wrapper element, no heading, no "all clear" row: with nothing to show
+    // the page below does not move, because there is nothing above it.
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
     expect(wrapper.find('section').exists()).toBe(false)
     expect(wrapper.findAll('*').length).toBe(0)
     wrapper.unmount()
   })
 
-  it('renders a tile per action with run and chat buttons as offered', async () => {
+  it('is one section titled Needs you holding one row per action', async () => {
     const store = useHousekeepingStore()
     store.actions = [
-      action({ id: 'a', run_label: 'Install', chat_prompt: '' }),
-      action({ id: 'b', run_label: '', chat_label: 'Fix in chat', chat_prompt: 'do it' }),
+      action({ id: 'a', run_label: 'Install' }),
+      action({ id: 'b', chat_label: 'Fix in chat', chat_prompt: 'do it' }),
       action({ id: 'c', run_label: 'Run', chat_prompt: 'talk' }),
     ]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    const tiles = wrapper.findAll('.housekeeping-tile')
-    expect(tiles.length).toBe(3)
-
-    // Run-only tile: no chat button.
-    const aButtons = tiles[0].findAll('.housekeeping-actions button')
-    expect(aButtons.length).toBe(1)
-    expect(aButtons[0].text()).toBe('Install')
-
-    // Chat-only tile: one button seeded from chat_label.
-    const bButtons = tiles[1].findAll('.housekeeping-actions button')
-    expect(bButtons.length).toBe(1)
-    expect(bButtons[0].text()).toBe('Fix in chat')
-
-    // Both-buttons tile.
-    const cButtons = tiles[2].findAll('.housekeeping-actions button')
-    expect(cButtons.length).toBe(2)
+    expect(wrapper.findAll('section')).toHaveLength(1)
+    expect(wrapper.get('#needs-you-heading').text()).toBe('Needs you')
+    expect(wrapper.get('section').attributes('aria-labelledby')).toBe('needs-you-heading')
+    expect(rows(wrapper)).toHaveLength(3)
     wrapper.unmount()
   })
 
-  it('closes one window without dismissing its action and reopens it on Home', async () => {
+  it('gives every row one title, one line and at most one lead control', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [
+      action({ id: 'a', run_label: 'Install', chat_prompt: 'x', dismiss_label: 'Later', link_label: 'Notes', link_url: 'https://example.test' }),
+      action({ id: 'b', chat_label: 'Fix in chat', chat_prompt: 'do it' }),
+      action({ id: 'c', view_label: 'Open queue', view_route: '/proposals', run_label: 'Run', dismiss_label: 'Not now' }),
+      action({ id: 'd', dismiss_label: 'Later' }),
+    ]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    for (const row of rows(wrapper)) {
+      expect(row.findAll('.needs-you-title')).toHaveLength(1)
+      expect(row.findAll('.needs-you-line')).toHaveLength(1)
+      expect(leads(row)).toHaveLength(1)
+      // Closed menu: the lead and the ⋯ trigger are the only controls.
+      expect(visibleControls(row)).toHaveLength(2)
+    }
+    wrapper.unmount()
+  })
+
+  it('leads with run, and moves chat, link and dismiss into the menu', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'a', run_label: 'Install', chat_label: 'Ask', chat_prompt: 'x',
+      link_label: 'Notes', link_url: 'https://example.test/n', dismiss_label: 'Later',
+    })]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Install'])
+    expect(await menuLabels(row)).toEqual(['Notes', 'Ask', 'Later', 'Hide for now'])
+    wrapper.unmount()
+  })
+
+  it('leads a chat-only action with its chat button', async () => {
+    useHousekeepingStore().actions = [action({ chat_label: 'Fix in chat', chat_prompt: 'do it' })]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Fix in chat'])
+    expect(await menuLabels(row)).toEqual(['Hide for now'])
+    wrapper.unmount()
+  })
+
+  it('reduces a markdown detail to its first plain line', async () => {
+    useHousekeepingStore().actions = [action({
+      detail: 'The server was down past **2** reminders.\n\nMissed:\n- [Pay rent](/schedules/s1) — due today',
+    })]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('The server was down past 2 reminders.')
+    wrapper.unmount()
+  })
+
+  it('hides a row for now without dismissing its action, and Show N closed notices brings it back', async () => {
     const store = useHousekeepingStore()
     store.actions = [action({ id: 'a' }), action({ id: 'b', title: 'Another condition' })]
-    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
-    const reopen = mount(HomeNoticeReopen)
+    const dismiss = vi.spyOn(store, 'dismiss')
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] }, attachTo: document.body })
+    const reopen = mount(HomeNoticeReopen, { attachTo: document.body })
     await nextTick()
-    await wrapper.get('[aria-label="Close A condition needs you window"]').trigger('click')
-    await nextTick()
-    expect(wrapper.findAll('.housekeeping-tile')).toHaveLength(1)
+    await pick(rows(wrapper)[0], 'Hide for now')
+    await flushPromises()
+    expect(titles(wrapper)).toEqual(['Another condition'])
     expect(store.actions).toHaveLength(2)
+    expect(dismiss).not.toHaveBeenCalled()
     expect(reopen.text()).toBe('Show 1 closed notice')
+    // Focus moves to the recovery control, not the page start.
+    expect(document.activeElement).toBe(reopen.get('button').element)
     await reopen.get('button').trigger('click')
     await nextTick()
-    expect(wrapper.findAll('.housekeeping-tile')).toHaveLength(2)
+    expect(rows(wrapper)).toHaveLength(2)
     reopen.unmount()
     wrapper.unmount()
   })
 
-  it('run button calls run and re-renders from the response list', async () => {
+  it('run button calls run and the list collapses when the response empties it', async () => {
     const store = useHousekeepingStore()
     store.actions = [action({ id: 'a', run_label: 'Run' })]
     const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    const runButton = wrapper.find('.housekeeping-actions button')
+    const runButton = leads(rows(wrapper)[0])[0]
     expect(runButton.text()).toBe('Run')
     await runButton.trigger('click')
     expect(runSpy).toHaveBeenCalledWith('a')
 
-    // Response replaced the list: now empty, so the strip collapses.
     store.actions = []
     await nextTick()
-    expect(wrapper.find('.housekeeping').exists()).toBe(false)
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('renders an external link and a dismiss button for ask-style actions', async () => {
+  it('renders an external link and a dismiss item for ask-style actions', async () => {
     const store = useHousekeepingStore()
     store.actions = [action({
       id: 'github-star',
@@ -144,15 +208,14 @@ describe('HousekeepingStrip', () => {
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
 
-    const link = wrapper.find('a.housekeeping-link')
-    expect(link.exists()).toBe(true)
+    const [link] = leads(rows(wrapper)[0])
+    expect(link.element.tagName).toBe('A')
     expect(link.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot')
     expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noopener')
     expect(link.text()).toBe('Star on GitHub')
 
-    const later = wrapper.findAll('button').find((b) => b.text() === 'Later')
-    expect(later).toBeTruthy()
-    await later!.trigger('click')
+    await pick(rows(wrapper)[0], 'Later')
     expect(dismissSpy).toHaveBeenCalledWith('github-star')
     wrapper.unmount()
   })
@@ -166,24 +229,20 @@ describe('HousekeepingStrip', () => {
       link_url: 'https://github.com/raffaelefarinaro/ciaobot',
     })]
     vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: 'Thank you!' })
-    const { useProjectStore } = await import('../../stores/projects')
     const projectStore = useProjectStore()
     const toastSpy = vi.spyOn(projectStore, 'pushToast').mockImplementation(() => ({ id: 1 }) as never)
 
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    // Only the strip's explicit run button records the star; the link click
-    // must not (issue: opening the repo confirms nothing).
-    await wrapper.findAll('button').find((b) => b.text() === 'I starred it')!.trigger('click')
+    // Only the explicit run button records the star; opening the link must not.
+    await leads(rows(wrapper)[0])[0].trigger('click')
     expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ title: '★ Starred — thank you!' }))
     wrapper.unmount()
   })
 
   it('does not record a star when the repository link is merely opened', async () => {
-    // Clicking "Star on GitHub" used to record the star and dismiss the
-    // nudge permanently, but opening the page confirms nothing — the visitor
-    // may not be signed in or may just be inspecting. The link must only
-    // open the page; the tile clears through the explicit "Later" dismiss.
+    // Opening the page confirms nothing — the visitor may not be signed in or
+    // may just be inspecting. The nudge clears through the explicit dismiss.
     const store = useHousekeepingStore()
     store.actions = [action({
       id: 'github-star',
@@ -192,21 +251,22 @@ describe('HousekeepingStrip', () => {
       dismiss_label: 'Later',
     })]
     const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
-    const { useProjectStore } = await import('../../stores/projects')
+    const dismissSpy = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
     const projectStore = useProjectStore()
     const toastSpy = vi.spyOn(projectStore, 'pushToast').mockImplementation(() => ({ id: 1 }) as never)
 
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    await wrapper.find('a.housekeeping-link').trigger('click')
+    await leads(rows(wrapper)[0])[0].trigger('click')
     expect(runSpy).not.toHaveBeenCalled()
+    expect(dismissSpy).not.toHaveBeenCalled()
     expect(toastSpy).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('does not run the action when a non-star link is clicked', async () => {
-    // The update tile's "Release notes" link must open the notes WITHOUT
-    // starting an update the user never asked for.
+  it('does not run the action when a non-star link is clicked from the menu', async () => {
+    // The update row's "Release notes" link must open the notes WITHOUT starting
+    // an update the user never asked for.
     const store = useHousekeepingStore()
     store.actions = [action({
       id: 'package-update',
@@ -217,13 +277,297 @@ describe('HousekeepingStrip', () => {
     const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    await wrapper.find('a.housekeeping-link').trigger('click')
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Update'])
+    await pick(row, 'Release notes')
     expect(runSpy).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })
 
-describe('the update tile', () => {
+describe('the menu', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    resetHomeNoticeWindows()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    useHousekeepingStore().actions = [
+      action({ id: 'a', run_label: 'Run', chat_label: 'Ask', chat_prompt: 'x', dismiss_label: 'Later' }),
+    ]
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function mountAttached() {
+    return mount(HousekeepingStrip, { global: { plugins: [pinia] }, attachTo: document.body })
+  }
+
+  it('is a labelled menu button that reports whether it is open', async () => {
+    const wrapper = mountAttached()
+    await nextTick()
+    const trigger = wrapper.get('.needs-you-more')
+    expect(trigger.attributes('aria-haspopup')).toBe('menu')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(trigger.attributes('aria-label')).toBe('More actions for A condition needs you')
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+
+    await trigger.trigger('click')
+    await nextTick()
+    expect(trigger.attributes('aria-expanded')).toBe('true')
+    expect(trigger.attributes('aria-controls')).toBe(wrapper.get('[role="menu"]').attributes('id'))
+    wrapper.unmount()
+  })
+
+  it('moves focus into the menu, steps with the arrow keys and wraps', async () => {
+    const wrapper = mountAttached()
+    await nextTick()
+    await wrapper.get('.needs-you-more').trigger('click')
+    await nextTick()
+    const items = wrapper.findAll('[role="menuitem"]')
+    expect(items.map(i => i.text())).toEqual(['Ask', 'Later', 'Hide for now'])
+    expect(document.activeElement).toBe(items[0].element)
+
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[1].element)
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'End' })
+    expect(document.activeElement).toBe(items[2].element)
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[0].element)
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(items[2].element)
+    wrapper.unmount()
+  })
+
+  it('closes on Escape and gives focus back to the trigger', async () => {
+    const wrapper = mountAttached()
+    await nextTick()
+    const trigger = wrapper.get('.needs-you-more')
+    await trigger.trigger('click')
+    await nextTick()
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('closes on an outside press without stealing focus', async () => {
+    const wrapper = mountAttached()
+    await nextTick()
+    await wrapper.get('.needs-you-more').trigger('click')
+    await nextTick()
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await nextTick()
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('runs the chosen item and closes, returning focus to the trigger', async () => {
+    const store = useHousekeepingStore()
+    const dismiss = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mountAttached()
+    await nextTick()
+    await wrapper.get('.needs-you-more').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[role="menuitem"]').find(i => i.text() === 'Later')!.trigger('click')
+    await flushPromises()
+    expect(dismiss).toHaveBeenCalledWith('a')
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('.needs-you-more').element)
+    wrapper.unmount()
+  })
+
+  it('is on a health row only because it has something in it', async () => {
+    // A health row still carries "Open in Settings"; this pins that the menu is
+    // there only because it has something in it.
+    const store = useHousekeepingStore()
+    store.actions = []
+    store.health = { status: 'error', checks: [healthCheck()] }
+    const wrapper = mountAttached()
+    await nextTick()
+    expect(await menuLabels(rows(wrapper)[0])).toEqual(['Open in Settings'])
+    wrapper.unmount()
+  })
+})
+
+describe('workspace health', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    resetHomeNoticeWindows()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  it('raises a row per error, with its detail and a Fix button', async () => {
+    const store = useHousekeepingStore()
+    store.health = {
+      status: 'error',
+      checks: [
+        healthCheck(),
+        healthCheck({ id: 'vault-writable-work', title: 'Vault for work is not writable', detail: 'Not writable.' }),
+      ],
+    }
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(titles(wrapper)).toEqual(['Vault root for work is missing', 'Vault for work is not writable'])
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('The folder does not exist.')
+    expect(leadLabels(rows(wrapper)[0])).toEqual(['Fix'])
+    expect(rows(wrapper)[0].classes()).toContain('needs-you-row--error')
+    // Not colour alone: assistive tech is told it is an error.
+    expect(rows(wrapper)[0].get('.sr-only').text()).toContain('Error')
+    wrapper.unmount()
+  })
+
+  it('does not raise a row for a warning or an ok check', async () => {
+    const store = useHousekeepingStore()
+    store.health = {
+      status: 'warn',
+      checks: [healthCheck({ status: 'warn' }), healthCheck({ id: 'fine', status: 'ok' })],
+    }
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(wrapper.find('.needs-you').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('sorts health errors above blocking actions above everything else', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    store.actions = [
+      action({ id: 'plain', title: 'Plain' }),
+      action({ id: 'gate', title: 'Gate', blocking: true, run_label: 'Fix now' }),
+    ]
+    store.updateTasks = [updateTask()]
+    store.updateTasksWorkspace = 'personal'
+    useProjectStore().activeWorkspace = 'personal'
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(titles(wrapper)).toEqual([
+      'Vault root for work is missing',
+      'Gate',
+      'Plain',
+      'Review the rows your old notes left behind',
+    ])
+    wrapper.unmount()
+  })
+
+  it('Fix posts the existing endpoint through the store and announces the outcome', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ status: 'ok', checks: [healthCheck({ status: 'ok' })] })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] }, attachTo: document.body })
+    await nextTick()
+    await leads(rows(wrapper)[0])[0].trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/workspace-health/fix', {})
+    // The report the endpoint returned replaces the list: the row is gone and
+    // the list stays up just long enough to say so.
+    expect(rows(wrapper)).toHaveLength(0)
+    expect(wrapper.get('.needs-you-status').text()).toBe('Fixed. Workspace health has no errors.')
+    // And focus did not fall to the page start with the pressed button.
+    expect(document.activeElement).toBe(wrapper.get('.needs-you').element)
+    wrapper.unmount()
+  })
+
+  it('says how many are left when the fix did not clear them all', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck(), healthCheck({ id: 'b', title: 'B' })] }
+    vi.spyOn(api, 'post').mockResolvedValue({ status: 'error', checks: [healthCheck({ id: 'b', title: 'B' })] })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await leads(rows(wrapper)[0])[0].trigger('click')
+    await flushPromises()
+    expect(titles(wrapper)).toEqual(['B'])
+    expect(wrapper.get('.needs-you-status').text()).toContain('1 problem still needs a look in Settings')
+    wrapper.unmount()
+  })
+
+  it('disables Fix while it runs', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    let release: (value: unknown) => void = () => {}
+    vi.spyOn(api, 'post').mockImplementation(() => new Promise((resolve) => { release = resolve }))
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await leads(rows(wrapper)[0])[0].trigger('click')
+    await nextTick()
+    const busy = leads(rows(wrapper)[0])[0]
+    expect(busy.text()).toBe('Fixing…')
+    expect(busy.attributes('disabled')).toBeDefined()
+    release({ status: 'ok', checks: [] })
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('keeps the row and shows the refusal as an alert when the fix fails', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    vi.spyOn(api, 'post').mockRejectedValue(new Error('failed to repair workspace'))
+    vi.spyOn(api, 'get').mockResolvedValue({ status: 'error', checks: [healthCheck()] })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await leads(rows(wrapper)[0])[0].trigger('click')
+    await flushPromises()
+    expect(rows(wrapper)).toHaveLength(1)
+    const line = rows(wrapper)[0].get('.needs-you-line')
+    expect(line.attributes('role')).toBe('alert')
+    expect(line.text()).toContain('failed to repair workspace')
+    wrapper.unmount()
+  })
+
+  it('offers Open in Settings, which goes to the Advanced tab', async () => {
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    routerPush.mockClear()
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+    await pick(rows(wrapper)[0], 'Open in Settings')
+    await flushPromises()
+    expect(routerPush).toHaveBeenCalledWith('/settings/advanced')
+    wrapper.unmount()
+  })
+})
+
+describe('the store reads the health report', () => {
+  it('asks /api/workspace-health on init and adopts the report', async () => {
+    setActivePinia(createPinia())
+    const get = vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/api/workspace-health') return { status: 'error', checks: [healthCheck(), healthCheck({ id: 'w', status: 'warn' })] }
+      if (path === '/api/housekeeping') return { actions: [] }
+      return { tasks: [] }
+    })
+    const store = useHousekeepingStore()
+    await store.refreshHealth()
+    expect(get).toHaveBeenCalledWith('/api/workspace-health')
+    expect(store.healthErrors.map(c => c.id)).toEqual(['vault-root-work'])
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the previous report when a read fails', async () => {
+    setActivePinia(createPinia())
+    const store = useHousekeepingStore()
+    store.health = { status: 'error', checks: [healthCheck()] }
+    vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'))
+    await store.refreshHealth()
+    expect(store.healthErrors).toHaveLength(1)
+    vi.restoreAllMocks()
+  })
+})
+
+describe('the update row', () => {
   let pinia: ReturnType<typeof createPinia>
 
   beforeEach(() => {
@@ -250,48 +594,38 @@ describe('the update tile', () => {
     })
   }
 
-  function controls(wrapper: ReturnType<typeof mount>) {
-    return wrapper.findAll('.housekeeping-actions > *')
-  }
-
-  it('leads with the filled settings button and demotes release notes', async () => {
+  it('leads with the settings button and keeps release notes in the menu', async () => {
     useHousekeepingStore().actions = [updateAction()]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-
-    const [first, second] = controls(wrapper)
-    expect(controls(wrapper)).toHaveLength(2)
-    expect(first.element.tagName).toBe('BUTTON')
-    expect(first.text()).toBe('Update in Settings')
-    expect(first.classes()).toContain('btn-primary')
-    expect(first.classes()).not.toContain('btn-chip')
-    expect(second.element.tagName).toBe('A')
-    expect(second.text()).toBe('Release notes')
-    expect(second.classes()).toContain('btn-chip')
-    expect(second.classes()).not.toContain('btn-primary')
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Update in Settings'])
+    expect(leads(row)[0].element.tagName).toBe('BUTTON')
+    const labels = await menuLabels(row)
+    expect(labels).toEqual(['Release notes', 'Hide for now'])
+    const notes = row.get('[role="menuitem"]')
+    expect(notes.element.tagName).toBe('A')
+    expect(notes.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot/releases/latest')
     wrapper.unmount()
   })
 
-  it('keeps the default order when the action names no lead', async () => {
+  it('leads with the link when the action names no lead', async () => {
     useHousekeepingStore().actions = [{ ...updateAction(), primary: '' }]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-
-    const [first, second] = controls(wrapper)
-    expect(first.element.tagName).toBe('A')
-    expect(first.classes()).toContain('btn-primary')
-    expect(second.element.tagName).toBe('BUTTON')
-    expect(second.classes()).toContain('btn-primary')
+    const [row] = rows(wrapper)
+    expect(leads(row)[0].element.tagName).toBe('A')
+    expect(leadLabels(row)).toEqual(['Release notes'])
+    expect(await menuLabels(row)).toEqual(['Update in Settings', 'Hide for now'])
     wrapper.unmount()
   })
 })
 
-describe('a tile that names an existing surface', () => {
-  it('offers a button that navigates there, not only chat', async () => {
-    // The queue tiles offered "Review in chat" alone, so the operator was asked
+describe('a row that names an existing surface', () => {
+  it('leads with a button that navigates there and keeps chat in the menu', async () => {
+    // The queue rows offered "Review in chat" alone, so the operator was asked
     // to work through 109 proposals in prose while the panel with per-row
-    // accept/dismiss, a destination picker and batch operations sat one route
-    // away, unreachable from the only place that mentions them.
+    // accept/dismiss sat one route away.
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [action({
       id: 'review-queue-depth',
@@ -303,10 +637,13 @@ describe('a tile that names an existing surface', () => {
     })]
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
-
-    const labels = wrapper.findAll('button').map((b) => b.text())
-    expect(labels).toContain('Open queue')
-    expect(labels).toContain('Review in chat')
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Open queue'])
+    expect(await menuLabels(row)).toEqual(['Review in chat', 'Hide for now'])
+    routerPush.mockClear()
+    await leads(row)[0].trigger('click')
+    await flushPromises()
+    expect(routerPush).toHaveBeenCalledWith('/proposals')
   })
 
   it('shows no view button when the action names no surface', async () => {
@@ -314,20 +651,13 @@ describe('a tile that names an existing surface', () => {
     housekeeping.actions = [action({ chat_prompt: 'discuss it', chat_label: 'Discuss' })]
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
-
-    expect(wrapper.findAll('.housekeeping-actions button').map((b) => b.text())).toEqual(['Discuss'])
+    expect(leadLabels(rows(wrapper)[0])).toEqual(['Discuss'])
   })
 })
 
 describe('scoping to the active workspace', () => {
-  const tileTitles = (wrapper: ReturnType<typeof mount>) =>
-    wrapper.findAll('.home-notice-title').map((t) => t.text())
-
-  it('hides other workspaces tiles, shows shared plus current unlabeled', async () => {
-    // Another workspace's pile is not this tab's business. The strip used to
-    // sum every workspace's queue into one tile, so the review tile claimed
-    // proposals for a tab whose own queue held fewer — while /proposals, the
-    // page the tile opens, scopes its rows to the active workspace.
+  it('hides other workspaces rows, shows shared plus current unlabeled', async () => {
+    // Another workspace's pile is not this tab's business.
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [
       action({ id: 'w', workspace: 'work', title: 'Work thing' }),
@@ -337,10 +667,7 @@ describe('scoping to the active workspace', () => {
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(tileTitles(wrapper)).toEqual(['Install-wide thing', 'Personal thing'])
-    // Both surviving groups concern the reader's own position or the whole
-    // install, so headings would be noise.
-    expect(wrapper.findAll('.housekeeping-group')).toHaveLength(0)
+    expect(titles(wrapper)).toEqual(['Install-wide thing', 'Personal thing'])
     wrapper.unmount()
   })
 
@@ -350,69 +677,68 @@ describe('scoping to the active workspace', () => {
       action({ id: 'w', workspace: 'work', title: 'Work thing' }),
       action({ id: 'p', workspace: 'personal', title: 'Personal thing' }),
     ]
-    const { useProjectStore } = await import('../../stores/projects')
-    const projectStore = useProjectStore()
-    projectStore.activeWorkspace = 'work'
+    useProjectStore().activeWorkspace = 'work'
 
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(tileTitles(wrapper)).toEqual(['Work thing'])
+    expect(titles(wrapper)).toEqual(['Work thing'])
     wrapper.unmount()
   })
 
-  it('labels named groups only when no workspace is active', async () => {
+  it('names the workspace in the title only when no workspace is active', async () => {
     // With an active workspace, scoping can only leave shared plus that one
     // workspace, which need no labels. The unscoped fallback (no active
-    // workspace yet) can mix several named groups, and then they need them.
+    // workspace yet) can mix several, and then they need them.
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [
       action({ id: 'w', workspace: 'work', title: 'Work thing' }),
       action({ id: 'p', workspace: 'personal', title: 'Personal thing' }),
       action({ id: 's', workspace: '', title: 'Install-wide thing' }),
     ]
-    const { useProjectStore } = await import('../../stores/projects')
-    const projectStore = useProjectStore()
-    projectStore.activeWorkspace = ''
+    useProjectStore().activeWorkspace = ''
 
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(tileTitles(wrapper)).toEqual([
+    expect(titles(wrapper)).toEqual([
       'Install-wide thing',
-      'Personal thing',
-      'Work thing',
+      'Personal thing · personal',
+      'Work thing · work',
     ])
-    expect(wrapper.findAll('.housekeeping-group').map((h) => h.text()))
-      .toEqual(['shared', 'personal', 'work'])
     wrapper.unmount()
   })
 })
 
 describe('a blocking precondition', () => {
-  it('renders as a warning rather than one tile among several', async () => {
+  it('reads as an error-toned row, first, with a filled lead', async () => {
     const housekeeping = useHousekeepingStore()
+    useProjectStore().activeWorkspace = 'personal'
     housekeeping.actions = [
+      action({ id: 'other', title: 'Something optional', run_label: 'Do it' }),
       action({ id: 'gate', blocking: true, title: 'Workspaces still share one vault', run_label: 'Separate them now' }),
-      action({ id: 'other', title: 'Something optional' }),
     ]
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    const tiles = wrapper.findAll('.housekeeping-tile')
-    expect(tiles[0].classes()).toContain('housekeeping-tile--blocking')
-    expect(tiles[1].classes()).not.toContain('housekeeping-tile--blocking')
+    const list = rows(wrapper)
+    expect(titles(wrapper)).toEqual(['Workspaces still share one vault', 'Something optional'])
+    expect(list[0].classes()).toContain('needs-you-row--blocking')
+    expect(list[1].classes()).not.toContain('needs-you-row--blocking')
+    expect(list[0].get('.sr-only').text()).toContain('Blocking')
+    expect(leads(list[0])[0].classes()).toContain('btn-primary')
+    expect(leads(list[1])[0].classes()).not.toContain('btn-primary')
     // It is actionable in place: no navigation required to clear it.
-    expect(tiles[0].text()).toContain('Separate them now')
+    expect(leadLabels(list[0])).toEqual(['Separate them now'])
   })
 })
 
-describe('a provider update tile', () => {
+describe('a provider update row', () => {
   const terminalStub = defineComponent({
     name: 'HostTerminalButton',
     props: { action: { type: String, default: '' }, label: { type: String, default: '' } },
     emits: ['not-applicable'],
-    template: '<button class="terminal-stub" @click="$emit(\'not-applicable\')">{{ label }}</button>',
+    template: '<button class="terminal-stub btn-small" @click="$emit(\'not-applicable\')">{{ label }}</button>',
   })
 
   function providerUpdate(overrides: Partial<OperatorAction> = {}): OperatorAction {
@@ -427,26 +753,55 @@ describe('a provider update tile', () => {
     })
   }
 
+  function terminalOn(on: boolean) {
+    useHostTerminal().capabilities.value = {
+      available: on,
+      platform: 'darwin',
+      reason: on ? '' : 'not_on_host',
+      terminal: 'Terminal',
+      actions: on ? ['opencode-update'] : [],
+    } as never
+  }
+
   function mountStrip() {
     return mount(HousekeepingStrip, { global: { stubs: { HostTerminalButton: terminalStub } } })
   }
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
+  beforeEach(() => {
+    resetHostTerminalForTests()
+    terminalOn(true)
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
   })
 
-  it('renders the copyable command and the terminal button for a provider update', async () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    resetHostTerminalForTests()
+  })
+
+  it('leads with the terminal button and moves the rest into the menu', async () => {
     useHousekeepingStore().actions = [providerUpdate()]
     const wrapper = mountStrip()
     await nextTick()
 
-    expect(wrapper.get('.housekeeping-command code').text()).toBe('opencode upgrade 2.1.0')
     const terminal = wrapper.getComponent(terminalStub)
     expect(terminal.props('action')).toBe('opencode-update')
     expect(terminal.props('label')).toBe('Update in Terminal')
-    const checkAgain = wrapper.findAll('.housekeeping-actions button').find(b => b.text() === 'Check again')!
-    expect(checkAgain.classes()).toContain('btn-chip')
-    expect(checkAgain.classes()).not.toContain('btn-primary')
+    const [row] = rows(wrapper)
+    expect(leads(row)).toHaveLength(1)
+    expect(await menuLabels(row)).toEqual(['Check again', 'Copy command', 'Not now', 'Hide for now'])
+  })
+
+  it('leads with Copy command when the terminal is not on this machine', async () => {
+    terminalOn(false)
+    useHousekeepingStore().actions = [providerUpdate()]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    expect(wrapper.find('.terminal-stub').exists()).toBe(false)
+    const [row] = rows(wrapper)
+    expect(leadLabels(row)).toEqual(['Copy command'])
+    expect(await menuLabels(row)).toEqual(['Check again', 'Not now', 'Hide for now'])
   })
 
   it('copies the command and says Copied', async () => {
@@ -456,39 +811,37 @@ describe('a provider update tile', () => {
     const wrapper = mountStrip()
     await nextTick()
 
-    const copy = wrapper.get('.housekeeping-command button')
-    expect(copy.text()).toBe('Copy')
-    await copy.trigger('click')
+    await pick(rows(wrapper)[0], 'Copy command')
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith('opencode upgrade 2.1.0')
-    expect(copy.text()).toBe('Copied')
+    expect(await menuLabels(rows(wrapper)[0])).toContain('Copied')
   })
 
-  it('says the copy failed, in text, when the clipboard is refused', async () => {
+  it('puts the command on the line, as text, when the clipboard is refused', async () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
     useHousekeepingStore().actions = [providerUpdate()]
     const wrapper = mountStrip()
     await nextTick()
 
-    await wrapper.get('.housekeeping-command button').trigger('click')
+    await pick(rows(wrapper)[0], 'Copy command')
     await flushPromises()
-    expect(wrapper.get('.housekeeping-command [role=status]').text()).toBe('Copy failed; select the command above.')
-    expect(wrapper.get('.housekeeping-command button').text()).toBe('Copy')
+    const line = rows(wrapper)[0].get('.needs-you-line')
+    expect(line.text()).toBe('Copy failed. Run: opencode upgrade 2.1.0')
+    expect(line.attributes('role')).toBe('alert')
   })
 
-  it('reverts Copied and the failure note after a moment', async () => {
+  it('reverts Copied and the failure line after a moment', async () => {
     vi.useFakeTimers()
     try {
       vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
       useHousekeepingStore().actions = [providerUpdate()]
       const wrapper = mountStrip()
       await nextTick()
-      const copy = wrapper.get('.housekeeping-command button')
-      await copy.trigger('click')
+      await pick(rows(wrapper)[0], 'Copy command')
       await flushPromises()
-      expect(copy.text()).toBe('Copied')
+      expect(await menuLabels(rows(wrapper)[0])).toContain('Copied')
       await vi.advanceTimersByTimeAsync(3000)
-      expect(copy.text()).toBe('Copy')
+      expect(await menuLabels(rows(wrapper)[0])).toContain('Copy command')
       wrapper.unmount()
     } finally {
       vi.useRealTimers()
@@ -502,11 +855,22 @@ describe('a provider update tile', () => {
     const wrapper = mountStrip()
     await nextTick()
 
-    await wrapper.findAll('.housekeeping-actions button').find(b => b.text() === 'Not now')!.trigger('click')
+    await pick(rows(wrapper)[0], 'Not now')
     expect(dismiss).toHaveBeenCalledWith('provider-update:opencode')
   })
 
-  it('refreshes the strip when the terminal says there is nothing to update', async () => {
+  it('re-checks from the menu', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [providerUpdate()]
+    const run = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mountStrip()
+    await nextTick()
+
+    await pick(rows(wrapper)[0], 'Check again')
+    expect(run).toHaveBeenCalledWith('provider-update:opencode')
+  })
+
+  it('refreshes the list when the terminal says there is nothing to update', async () => {
     const store = useHousekeepingStore()
     store.actions = [providerUpdate()]
     const refresh = vi.spyOn(store, 'refresh').mockResolvedValue(undefined)
@@ -517,21 +881,21 @@ describe('a provider update tile', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
   })
 
-  it('shows no command row or terminal button for actions without one', async () => {
+  it('shows no terminal button or copy item for actions without a command', async () => {
     useHousekeepingStore().actions = [action({ run_label: 'Run' })]
     const wrapper = mountStrip()
     await nextTick()
 
-    expect(wrapper.find('.housekeeping-command').exists()).toBe(false)
     expect(wrapper.find('.terminal-stub').exists()).toBe(false)
+    expect(await menuLabels(rows(wrapper)[0])).toEqual(['Hide for now'])
   })
 
-  it('keeps the filled run button when there is no terminal action', async () => {
+  it('keeps the plain run button as the lead when there is no terminal action', async () => {
     useHousekeepingStore().actions = [action({ run_label: 'Install' })]
     const wrapper = mountStrip()
     await nextTick()
 
-    expect(wrapper.get('.housekeeping-actions button').classes()).toContain('btn-primary')
+    expect(leadLabels(rows(wrapper)[0])).toEqual(['Install'])
   })
 })
 

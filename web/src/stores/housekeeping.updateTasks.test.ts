@@ -787,7 +787,11 @@ describe('source health', () => {
       const interval = vi.spyOn(window, 'setInterval')
       const listen = vi.spyOn(window, 'addEventListener').mockImplementation(() => {})
       vi.mocked(api.get).mockImplementation(((path: string) =>
-        Promise.resolve(path === '/api/housekeeping' ? { actions: [] } : { tasks: [] })) as never)
+        Promise.resolve(
+          path === '/api/housekeeping' ? { actions: [] }
+            : path === '/api/workspace-health' ? { status: 'ok', checks: [] }
+              : { tasks: [] },
+        )) as never)
       const store = useHousekeepingStore()
       store.init()
       store.init()
@@ -795,10 +799,12 @@ describe('source health', () => {
 
       expect(interval).toHaveBeenCalledTimes(1)
       expect(listen.mock.calls.filter(([type]) => type === 'focus')).toHaveLength(1)
-      expect(api.get).toHaveBeenCalledTimes(2)
+      // Actions, update tasks and the workspace-health report, once each.
+      expect(api.get).toHaveBeenCalledTimes(3)
+      expect(vi.mocked(api.get).mock.calls.map(([path]) => path)).toContain('/api/workspace-health')
 
       await vi.advanceTimersByTimeAsync(60_000)
-      expect(api.get).toHaveBeenCalledTimes(4)
+      expect(api.get).toHaveBeenCalledTimes(6)
     } finally {
       vi.useRealTimers()
     }

@@ -13,6 +13,8 @@ import type {
   UpdateTaskCoverageGap,
   UpdateTaskRow,
   UpdateTasksResponse,
+  WorkspaceHealthCheck,
+  WorkspaceHealthResponse,
 } from '../lib/types'
 
 const REFRESH_INTERVAL_MS = 60_000
@@ -125,6 +127,21 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    *  opened before the decision cannot restore the pre-decision list. */
   let actionsSeq = 0
   const loading = ref(false)
+
+  // ── Workspace health ─────────────────────────────────────────────────────
+  //
+  // The same install-wide report Settings → Advanced shows, read here so an
+  // error (a vault root that is missing, a vault that is not writable) raises a
+  // row on Home instead of waiting in a tab nobody opens. Best-effort like the
+  // other sources: a failed read leaves the previous report in place.
+  const health = ref<WorkspaceHealthResponse | null>(null)
+  /** The checks that are errors. Warnings stay in Settings: Home is for what
+   *  stops something working. */
+  const healthErrors = computed<WorkspaceHealthCheck[]>(
+    () => (health.value?.checks ?? []).filter(check => check.status === 'error'),
+  )
+  const healthFixing = ref(false)
+  const healthFixError = ref('')
   const runningIds = ref<Set<string>>(new Set())
   let initialized = false
 
@@ -173,6 +190,33 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       // is observable through `actionsHealth`; the rows are left as they were.
       if (seq !== actionsSeq) return
       actionsHealth.value = failedHealth(actionsHealth.value, e)
+    }
+  }
+
+  async function refreshHealth(): Promise<void> {
+    try {
+      health.value = await api.get<WorkspaceHealthResponse>('/api/workspace-health')
+    } catch {
+      // Best-effort: the rows stay as they were.
+    }
+  }
+
+  /** Apply the automatic remedies (`POST /api/workspace-health/fix`), the same
+   *  call Settings' "Fix issues" makes, and adopt the fresh report it returns. */
+  async function fixHealth(): Promise<boolean> {
+    healthFixing.value = true
+    healthFixError.value = ''
+    try {
+      const data = await api.post<WorkspaceHealthResponse>('/api/workspace-health/fix', {})
+      if (Array.isArray(data?.checks)) health.value = data
+      else await refreshHealth()
+      return true
+    } catch (e) {
+      healthFixError.value = apiErrorMessage(e, 'Fix failed')
+      await refreshHealth()
+      return false
+    } finally {
+      healthFixing.value = false
     }
   }
 
@@ -400,14 +444,17 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     initialized = true
     void refresh()
     void refreshUpdateTasks()
+    void refreshHealth()
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', () => {
         void refresh()
         void refreshUpdateTasks()
+        void refreshHealth()
       })
       window.setInterval(() => {
         void refresh()
         void refreshUpdateTasks()
+        void refreshHealth()
       }, REFRESH_INTERVAL_MS)
     }
   }
@@ -416,6 +463,12 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     actions,
     actionsHealth,
     loading,
+    health,
+    healthErrors,
+    healthFixing,
+    healthFixError,
+    refreshHealth,
+    fixHealth,
     runningIds,
     refresh,
     run,

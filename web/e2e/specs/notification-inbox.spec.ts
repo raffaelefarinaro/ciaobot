@@ -48,6 +48,12 @@ async function writes(page: Page) {
   )
 }
 
+/** Hide a "Needs you" row for now, through its ⋯ menu. */
+async function hideRow(page: Page, rowLocator: ReturnType<Page['locator']>) {
+  await rowLocator.getByRole('button', { name: /More actions/ }).click()
+  await page.getByRole('menuitem', { name: 'Hide for now' }).click()
+}
+
 const session = (ti: TestInfo) => `inbox-${ti.workerIndex}-${ti.title}`
 
 const PERM = JSON.stringify({
@@ -414,8 +420,8 @@ test.describe('notification inbox', () => {
     await expect(action).toBeVisible()
     await expect(update).toBeVisible()
 
-    await action.locator('.home-notice-close').click()
-    await update.locator('.home-notice-close').click()
+    await hideRow(page, action)
+    await hideRow(page, update)
     await expect(action).toHaveCount(0)
     await expect(update).toHaveCount(0)
 
@@ -440,7 +446,7 @@ test.describe('notification inbox', () => {
     expect(await writes(page)).toEqual([])
 
     // A key that names nothing says so and reveals nothing.
-    await action.locator('.home-notice-close').click()
+    await hideRow(page, action)
     await page.evaluate(() => {
       history.pushState({}, '', '/?notice=action%3Ashared%3Agone')
       window.dispatchEvent(new PopStateEvent('popstate'))
