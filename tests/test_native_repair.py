@@ -24,6 +24,7 @@ import ciao
 from ciao import install_discovery, install_receipt, macos_service, native_lock, release_manifest, server_host, server_host_install
 from ciao import native_installer as native
 from ciao import native_repair as repair
+from ciao.app_settings import DEFAULT_PWA_HOST
 from ciao.native_installer import EventError, EventWriter, NativeCancellation
 from ciao.native_lock import NativeRunLock
 from ciao import native_readiness
@@ -64,6 +65,7 @@ def _as_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 VERSION = ciao.__version__
 PORT = 9123
+INSTALL_PATH = "/opt/homebrew/bin:/Users/x/.local/bin:/usr/bin:/bin"
 FAST = _RepairPolicy(readiness_interval=0.01, poll_interval=0.01)
 MUTATIONS = frozenset(
     {
@@ -232,6 +234,7 @@ def _target(tmp_path: Path, **overrides: object) -> RepairTarget:
     values: dict[str, object] = dict(
         workspace=tmp_path / "Ciaobot",
         port=PORT,
+        host=DEFAULT_PWA_HOST,
         definition=tmp_path / "LaunchAgents" / "com.ciao.server.plist",
         definition_present=True,
         service_path="/usr/bin:/bin",
@@ -282,7 +285,7 @@ def _deps(tmp_path: Path, **overrides: Callable[..., object]) -> tuple[_RepairDe
         "ensure_receipt": lambda: None,
         "render_definition": lambda _target, _host: b"<plist/>",
         "write_definition": write_definition,
-        "port_bindable": lambda _port: True,
+        "port_bindable": lambda _port, _host: True,
         "bootstrap": lambda _definition, _digest: None,
         "prove_ready": ready,
     }
@@ -618,13 +621,31 @@ def test_event_bounds(tmp_path: Path) -> None:
 
 def test_foreign_listener_is_activation_refused(tmp_path: Path) -> None:
     _workspace(tmp_path)
-    deps, calls = _deps(tmp_path, port_bindable=lambda _port: False)
+    deps, calls = _deps(tmp_path, port_bindable=lambda _port, _host: False)
     outcome, events = _run(
         deps, policy=_RepairPolicy(readiness_interval=0.01, poll_interval=0.01, port_bind_timeout=0.05)
     )
     assert _phase_events(events)[-1] == ("failed", "activation_refused")
     assert "bootstrap" not in calls
     assert outcome.failure_code == "activation_refused"
+
+
+def test_the_port_check_probes_the_configured_host(tmp_path: Path) -> None:
+    _workspace(tmp_path)
+    probes: list[tuple[int, str]] = []
+
+    def bindable(port: int, host: str) -> bool:
+        probes.append((port, host))
+        return True
+
+    deps, _calls = _deps(
+        tmp_path,
+        classify=lambda _own=None: _target(tmp_path, host="127.0.0.1"),
+        port_bindable=bindable,
+    )
+    outcome, _events = _run(deps)
+    assert outcome.terminal == "service_ready"
+    assert probes == [(PORT, "127.0.0.1")]
 
 
 def test_repair_policy_rejects_a_non_positive_deadline() -> None:
@@ -735,14 +756,40 @@ def test_classify_reads_workspace_port_and_path_from_the_live_definition(home: P
     assert _tree(home) == before
 
 
-def test_classify_without_definition_uses_the_default_workspace(home: Path) -> None:
+def test_classify_reads_the_configured_bind_host(home: Path) -> None:
+    _baseline(home)
+    assert _classify(home).host == DEFAULT_PWA_HOST
+
+    (home / "Ciaobot" / ".runtime" / "app_settings.json").write_text(
+        '{"pwa_host": "100.64.1.7"}\n'
+    )
+    target = _classify(home)
+    assert target.host == "100.64.1.7"
+
+
+def test_classify_without_definition_uses_the_default_workspace(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ws = _make_workspace(home / "Ciaobot")
     (ws / ".env").write_text("CIAO_WORKSPACES=default\n")
     _write_receipt(home)  # native evidence; without it the install is not_installed (fix 3)
+    monkeypatch.setattr("ciao.tool_path.login_shell_path", lambda: INSTALL_PATH)
     target = _classify(home)
     assert target.workspace == Path(os.path.realpath(ws))
     assert target.port == 8443
+    assert target.service_path == INSTALL_PATH
     assert target.definition_present is False
+
+
+def test_classify_without_a_definition_uses_the_users_install_path(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _make_workspace(home / "Ciaobot")
+    (ws / ".env").write_text("CIAO_WORKSPACES=default\n")
+    _write_receipt(home)
+    monkeypatch.setattr("ciao.tool_path.login_shell_path", lambda: INSTALL_PATH)
+    target = _classify(home)
+    assert target.service_path == INSTALL_PATH
 
 
 def test_classify_nothing_installed_is_not_installed(home: Path) -> None:
@@ -967,6 +1014,131 @@ def test_ensure_receipt_persists_uv_and_rewrites_only_on_change(home: Path) -> N
     assert rewritten is not None
     assert rewritten.version == VERSION
     assert rewritten.installed_at == "2020-01-01T00:00:00+00:00"
+
+
+# ── A reinstall keeps the receipt history it replaced ─────────────────────
+
+
+def test_a_reinstall_keeps_the_receipt_installed_at_and_history(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool_dir, bin_dir = _layout(home)
+    install_receipt.write_receipt(
+        install_receipt.InstallReceipt(
+            version=VERSION,
+            executable=str(bin_dir / "ciao"),
+            python=str(tool_dir / "ciaobot" / "bin" / "python"),
+            service_backend="launchd",
+            service_label=macos_service.SERVER_LABEL,
+            installed_at="2026-01-02T03:04:05+00:00",
+            previous_version="1.8.0",
+            previous_executable="/old/ciao",
+        )
+    )
+    previous = install_receipt.read_receipt()
+    assert previous is not None
+    sentinel = object()
+
+    def fresh_install(*_args: object, **_kwargs: object) -> object:
+        install_receipt.write_receipt(
+            install_receipt.InstallReceipt(
+                version="9.9.9",
+                executable=str(bin_dir / "ciao"),
+                python=str(tool_dir / "ciaobot" / "bin" / "python"),
+                service_backend="launchd",
+                service_label=macos_service.SERVER_LABEL,
+                installed_at="2026-06-07T08:09:10+00:00",
+                uv="/new/uv",
+            )
+        )
+        return sentinel
+
+    monkeypatch.setattr(native, "_install_engine", fresh_install)
+    installed = repair._reinstall_engine_preserving_history(
+        previous,
+        _artifacts(tmp_path),
+        tool_dir,
+        bin_dir,
+        30.0,
+        cancellation=NativeCancellation(),
+        env={},
+        cwd=tmp_path,
+    )
+    assert installed is sentinel
+    written = install_receipt.read_receipt()
+    assert written is not None
+    assert written.installed_at == "2026-01-02T03:04:05+00:00"
+    assert written.previous_version == "1.8.0"
+    assert written.previous_executable == "/old/ciao"
+    assert written.version == "9.9.9"
+    assert written.python == str(tool_dir / "ciaobot" / "bin" / "python")
+    assert written.uv == "/new/uv"
+
+
+def test_a_reinstall_with_no_previous_receipt_writes_the_fresh_one(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool_dir, bin_dir = _layout(home)
+    sentinel = object()
+
+    def fresh_install(*_args: object, **_kwargs: object) -> object:
+        install_receipt.write_receipt(
+            install_receipt.InstallReceipt(
+                version="9.9.9",
+                executable=str(bin_dir / "ciao"),
+                python=str(tool_dir / "ciaobot" / "bin" / "python"),
+                service_backend="launchd",
+                service_label=macos_service.SERVER_LABEL,
+                installed_at="2026-06-07T08:09:10+00:00",
+            )
+        )
+        return sentinel
+
+    monkeypatch.setattr(native, "_install_engine", fresh_install)
+    installed = repair._reinstall_engine_preserving_history(
+        None,
+        _artifacts(tmp_path),
+        tool_dir,
+        bin_dir,
+        30.0,
+        cancellation=NativeCancellation(),
+        env={},
+        cwd=tmp_path,
+    )
+    assert installed is sentinel
+    written = install_receipt.read_receipt()
+    assert written is not None
+    assert written.installed_at == "2026-06-07T08:09:10+00:00"
+    assert written.previous_version == ""
+    assert written.previous_executable == ""
+
+
+def test_a_receipt_that_cannot_be_rewritten_is_install_failed(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_receipt(home)
+    previous = install_receipt.read_receipt()
+    assert previous is not None
+    monkeypatch.setattr(native, "_install_engine", lambda *_a, **_k: object())
+
+    def write_fails(_receipt: install_receipt.InstallReceipt) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install_receipt, "write_receipt", write_fails)
+    tool_dir, bin_dir = _layout(home)
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        repair._reinstall_engine_preserving_history(
+            previous,
+            _artifacts(tmp_path),
+            tool_dir,
+            bin_dir,
+            30.0,
+            cancellation=NativeCancellation(),
+            env={},
+            cwd=tmp_path,
+        )
+    assert caught.value.reason == "receipt_write_failed"
+    assert caught.value.failure_code == "install_failed"
 
 
 # ── Fix 1: the run's own lock is not a foreign lock ───────────────────────
@@ -1502,6 +1674,7 @@ def test_render_then_write_is_idempotent_and_never_touches_the_workspace(
         tmp_path,
         workspace=Path(os.path.realpath(ws)),
         port=PORT,
+        host=DEFAULT_PWA_HOST,
         definition=home / "Library" / "LaunchAgents" / "com.ciao.server.plist",
         definition_present=False,
         service_path="/usr/bin:/bin",
@@ -1520,6 +1693,7 @@ def test_render_then_write_is_idempotent_and_never_touches_the_workspace(
         tmp_path,
         workspace=target.workspace,
         port=PORT,
+        host=DEFAULT_PWA_HOST,
         definition=target.definition,
         definition_present=True,
         service_path="/usr/bin:/bin",
@@ -1528,6 +1702,28 @@ def test_render_then_write_is_idempotent_and_never_touches_the_workspace(
     assert repair._write_definition(target2, again) == digest
     assert os.lstat(target.definition).st_ino == inode
     assert _tree(ws) == workspace_before
+
+
+def test_a_recreated_definition_carries_the_install_path(
+    home: Path, tmp_path: Path
+) -> None:
+    ws = _make_workspace(home / "Ciaobot")
+    host = dataclasses.replace(
+        _ownership(tmp_path), bundle_path=str(server_host.default_bundle_path())
+    )
+    tool_python = home / ".local" / "share" / "uv" / "tools" / "ciaobot" / "bin" / "python"
+    target = _target(
+        tmp_path,
+        workspace=Path(os.path.realpath(ws)),
+        port=PORT,
+        host=DEFAULT_PWA_HOST,
+        definition=home / "Library" / "LaunchAgents" / "com.ciao.server.plist",
+        definition_present=False,
+        service_path=INSTALL_PATH,
+    )
+    rendered = repair._render_definition(target, host, tool_python)
+    data = plistlib.loads(rendered)
+    assert data["EnvironmentVariables"]["PATH"] == INSTALL_PATH
 
 
 def test_write_definition_creates_missing_definition_at_0600_under_umask_0(tmp_path: Path) -> None:
@@ -1720,7 +1916,7 @@ def test_run_with_real_lock_and_real_classify_reaches_ready(
     monkeypatch.setattr(native, "_tool_dirs", lambda *_a, **_k: (tool_dir, bin_dir))
     monkeypatch.setattr(native, "_scrubbed_env", lambda **_k: {})
     monkeypatch.setattr(native, "_install_engine", install_engine)
-    monkeypatch.setattr(native, "_service_port_bindable", lambda _port: True)
+    monkeypatch.setattr(native, "_service_port_bindable", lambda _port, _host: True)
     monkeypatch.setattr(native, "create_fresh_host", lambda **_k: type("F", (), {"ownership": owned})())
     monkeypatch.setattr(server_host_install, "verify_host_archive", lambda *_a: None)
     monkeypatch.setattr(release_manifest, "verify_manifest", lambda *_a, **_k: {})

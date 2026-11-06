@@ -3316,13 +3316,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
-def _service_port_bindable(port: int) -> bool:
+def _service_port_bindable(port: int, host: str = DEFAULT_PWA_HOST) -> bool:
     """The engine's own bind probe for the service port, on the host it serves.
 
-    The engine binds ``config.pwa_host`` (``DEFAULT_PWA_HOST`` for a fresh
-    install), so the probe uses that host and the engine's socket options.
+    A fresh install binds ``DEFAULT_PWA_HOST``; an existing workspace may bind
+    another address (Settings → Network access), so repair passes its own host.
+    The probe uses the engine's socket options for whichever host it is given.
     """
-    return port_is_available(port, DEFAULT_PWA_HOST)
+    return port_is_available(port, host)
 
 
 def _setup_port_listeners(port: int) -> frozenset[int]:
