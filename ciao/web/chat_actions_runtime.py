@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_payload
+from ciao.oauth_callback import CallbackTarget, validate_pasted_callback
 from ciao.provider_service import ProviderImpl
 from ciao.providers.claude import ClaudeProvider, is_claudeai_connector
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
@@ -49,7 +50,10 @@ POLL_DEADLINE_S = 600.0
 DETECT_TIMEOUT_S = 3.0
 START_TIMEOUT_S = 20.0
 CANCEL_TIMEOUT_S = 5.0
+CALLBACK_TIMEOUT_S = 5.0
 TIMEOUT_ERROR = "Timed out waiting for sign-in"
+UNREACHABLE_ERROR = "Could not reach the sign-in listener on this computer. Start the sign-in again."
+REFUSED_ERROR = "The sign-in listener did not accept that address. Start the sign-in again."
 
 # Error copy. The engine composes these; the PWA shows them as they are.
 NO_SIGN_IN_ERROR = "OpenCode does not offer a sign-in for this server. Sign in with `opencode mcp auth` instead."
@@ -63,6 +67,28 @@ EXPIRED_ERROR = "The sign-in page expired. Try again."
 FAILED_DEFAULT_ERROR = "The sign-in did not finish."
 
 
+async def replay_callback(target: CallbackTarget) -> int:
+    """GET the pending flow's own loopback listener once. Returns the HTTP status, 0 when unreachable.
+
+    A bare transport, not an AsyncClient: the client logs every request URL at INFO
+    (the code would reach the server log), follows redirects when asked and reads
+    proxy settings from the environment. A transport does none of the three.
+    """
+    timeout = httpx.Timeout(CALLBACK_TIMEOUT_S).as_dict()
+    request = httpx.Request("GET", target.replay_url(), extensions={"timeout": timeout})
+    try:
+        async with httpx.AsyncHTTPTransport(retries=0) as transport:
+            response = await asyncio.wait_for(
+                transport.handle_async_request(request), CALLBACK_TIMEOUT_S
+            )
+            try:
+                return response.status_code
+            finally:
+                await response.aclose()
+    except (httpx.HTTPError, OSError, asyncio.TimeoutError):
+        return 0
+
+
 class McpAuthHandler(ActionHandler):
     """Dispatches an ``mcp_auth`` action to the flow for its provider."""
 
@@ -72,6 +98,11 @@ class McpAuthHandler(ActionHandler):
         return MCP_AUTH_FLOWS.get(action.params.get("provider", ""))
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        # A new sign-in has a new authorize URL, so a paste-back mark from the last attempt no longer applies.
+        if action.params.get("callback_used") == "1":
+            ctx.pcm.update_action(
+                ctx.chat.chat_id, action.id, state=action.state, params_update={"callback_used": "0"}
+            )
         await MCP_AUTH_FLOWS[action.params["provider"]].start(ctx, action, body)
 
     async def poll(self, ctx: ActionContext, action: ChatAction) -> None:
@@ -83,6 +114,37 @@ class McpAuthHandler(ActionHandler):
         flow = self._flow(action)
         if flow is not None:
             await flow.cancel(ctx, action)
+
+    async def callback(self, ctx: ActionContext, action: ChatAction, url: str) -> None:
+        """Replay a pasted sign-in callback to the pending flow's listener, once.
+
+        Steps up to the mark are synchronous, so nothing can interleave between the
+        single-use check and the mark. A refusal from ``validate_pasted_callback``
+        changes nothing, so a typo can be fixed and sent again.
+        """
+        authorize = action.params.get("url", "")
+        if not authorize:
+            raise ChatActionError("invalid_state")
+        if action.params.get("callback_used") == "1":
+            raise ChatActionError("already_used")
+        target = validate_pasted_callback(authorize, url)
+        cid = ctx.chat.chat_id
+        attempt_url = action.params.get("url", "")
+        ctx.pcm.update_action(cid, action.id, state="waiting", params_update={"callback_used": "1"})
+        status = await replay_callback(target)
+        # The flow's poll may have finished the sign-in, or the user restarted it (a new authorize URL),
+        # while the replay was in flight: only fail the same attempt that is still waiting.
+        current = ctx.pcm.get_action(cid, action.id)
+        if (
+            current is not None
+            and current.state == "waiting"
+            and current.params.get("url", "") == attempt_url
+        ):
+            if status == 0:
+                ctx.pcm.update_action(cid, action.id, state="failed", error=UNREACHABLE_ERROR)
+            elif status >= 400:
+                ctx.pcm.update_action(cid, action.id, state="failed", error=REFUSED_ERROR)
+        logger.info("chat action %s callback replayed (status %d)", action.id, status)
 
     def wake_prompt(self, action: ChatAction) -> str:
         flow = self._flow(action)
@@ -380,6 +442,28 @@ class ChatActionsRuntime:
         self._pcm.remove_action(chat_id, action_id)
         delivery = self._pcm._deliver_wake(chat, prompt, count=1, origin="chat_action")
         return self._pcm.chat_action_payloads(chat_id), delivery
+
+    async def callback(
+        self, chat_id: str, action_id: str, url: str, *, is_loopback: bool
+    ) -> dict[str, object]:
+        """Hand a pasted sign-in address to the card kind's handler. Does not start or stop the poll:
+        the card is already ``waiting``, so its poll is running from ``start``."""
+        action = self._pcm.get_action(chat_id, action_id)
+        if action is None:
+            raise self._conflict(chat_id)
+        if action.state != "waiting":
+            raise ChatActionError("invalid_state")
+        handler = ACTION_HANDLERS.get(action.kind)
+        if handler is None:
+            raise ChatActionError("unsupported_kind")
+        ctx = self.context(chat_id, is_loopback=is_loopback)
+        if ctx is None:
+            raise self._conflict(chat_id)
+        await handler.callback(ctx, action, url)
+        current = self._pcm.get_action(chat_id, action_id)
+        if current is None:
+            raise self._conflict(chat_id)
+        return action_payload(current)
 
     def cancel_removed(self, chat_id: str, actions: list[ChatAction]) -> None:
         """Stop the polls of, and cancel, actions a lifecycle clear dropped. Synchronous."""

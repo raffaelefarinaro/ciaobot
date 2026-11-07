@@ -2,8 +2,7 @@
 
 A chat action is a card the engine or the agent puts in front of the user when
 something needs them: an MCP server wants a sign-in, a command has to be run in
-the user's own terminal. It is transient and held in memory only, like
-``ciao/terminal_offer.py``: a restart, an archive, a new session, a handover or a
+the user's own terminal. It is transient and held in memory only: a restart, an archive, a new session, a handover or a
 dismissal ends it, and it never reaches the chat registry.
 
 This module is the *text and shape* half and it is deliberately pure: it
@@ -26,7 +25,6 @@ from typing import Literal, get_args
 from urllib.parse import urlsplit
 
 from ciao.execution_modes import MODE_RANK
-from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
 
 ActionKind = Literal[
     "mcp_auth",
@@ -140,7 +138,7 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
-    if set(raw) - {"server", "provider", "url", "session_id"}:
+    if set(raw) - {"server", "provider", "url", "session_id", "callback_used"}:
         raise ChatActionError("unknown_param")
     server = _text(raw, "server", required=True, limit=_SERVER_MAX)
     provider = _text(raw, "provider", required=True, limit=_PROVIDER_MAX)
@@ -160,16 +158,61 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
         if not _SESSION_ID_RE.match(session_id):
             raise ChatActionError("invalid_param")
         validated["session_id"] = session_id
+    if "callback_used" in raw:
+        # The engine's single-use mark for a pasted sign-in callback: "1" once used, "0" after a restart.
+        used = raw["callback_used"]
+        if not isinstance(used, str):
+            raise ChatActionError("invalid_type")
+        if used not in ("0", "1"):
+            raise ChatActionError("invalid_param")
+        validated["callback_used"] = used
     return validated
 
 
-_COMMAND_REASONS: dict[str, ChatActionErrorReason] = {
-    "invalid_type": "invalid_type",
-    "invalid_encoding": "invalid_encoding",
-    "too_long": "too_long",
-    "empty": "empty",
-    "invalid_characters": "invalid_characters",
-}
+#: The largest command accepted, in UTF-8 bytes, before and after
+#: normalization: a command is a snippet, not a file.
+COMMAND_MAX_BYTES = 4096
+#: Besides printable text, a command may hold a line feed, a tab, and a
+#: carriage return (normalized to a line feed).
+_COMMAND_CONTROL_CHARACTERS = frozenset("\n\r\t")
+
+
+def normalize_command(command: object) -> str:
+    """Validate a model-written shell command and return the text a card may hold.
+
+    CRLF and a bare CR become LF and the outer whitespace is stripped, so two
+    spellings of the same command are the same command. The bound is counted
+    in UTF-8 bytes, before and after normalization. Every other control or
+    invisible character (C0/C1, DEL, ESC, bidi and format characters, line and
+    paragraph separators) is refused: it would change what the user runs
+    without changing what the card shows, and ESC could close the bracketed
+    paste the PWA types the command in. A refusal is a closed reason and never
+    quotes the text, which can carry a credential.
+    """
+    if not isinstance(command, str):
+        raise ChatActionError("invalid_type")
+    try:
+        raw = command.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate: the text has no UTF-8 form, so it cannot be
+        # copied into a shell or stored as bytes.
+        raise ChatActionError("invalid_encoding") from None
+    if len(raw) > COMMAND_MAX_BYTES:
+        raise ChatActionError("too_long")
+    for character in command:
+        if character in _COMMAND_CONTROL_CHARACTERS:
+            continue
+        if not character.isprintable():
+            # C0 and C1 controls, DEL, and every invisible or
+            # direction-changing character (Bidi controls, format
+            # characters, line and paragraph separators).
+            raise ChatActionError("invalid_characters")
+    normalized = command.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        raise ChatActionError("empty")
+    if len(normalized.encode("utf-8")) > COMMAND_MAX_BYTES:
+        raise ChatActionError("too_long")
+    return normalized
 
 
 def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
@@ -182,14 +225,7 @@ def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
     """
     if set(raw) - {"command", "note"}:
         raise ChatActionError("unknown_param")
-    value = raw.get("command")
-    if not isinstance(value, str):
-        raise ChatActionError("invalid_type")
-    try:
-        command = normalize_terminal_offer(value)
-    except TerminalOfferError as exc:
-        raise ChatActionError(_COMMAND_REASONS[exc.reason]) from None
-    params = {"command": command}
+    params = {"command": normalize_command(raw.get("command"))}
     if raw.get("note") is not None:
         params["note"] = normalize_note(raw["note"])
     return params
@@ -300,7 +336,7 @@ _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",), "device_code
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
 ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
-    "mcp_auth": frozenset({"url", "session_id"}),
+    "mcp_auth": frozenset({"url", "session_id", "callback_used"}),
     "device_code": frozenset({"session_id", "code", "url", "entered"}),
 }
 

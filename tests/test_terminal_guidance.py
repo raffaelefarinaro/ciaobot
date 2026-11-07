@@ -3,8 +3,8 @@
 The guidance is prose, so these tests pin the facts it has to keep true
 rather than its sentences: the MCP command names the Settings inventory
 actually hands the user, the Settings tab labels the app actually renders,
-the label the terminal button actually carries, and the boundaries the
-terminal offer keeps. None of them is a snapshot of the wording, and none
+the label the terminal button actually carries, and the boundaries a
+needs-action command keeps. None of them is a snapshot of the wording, and none
 of them is skipped.
 
 Ownership: this file checks the ``ciao chat needs-action command`` command form on
