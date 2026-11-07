@@ -212,12 +212,15 @@ test.describe('chat title rail, phone', () => {
     })
     const cdp = await page.context().newCDPSession(page)
     const y = box.y + box.height / 2
-    const startX = box.x + box.width * 0.85
+    // The strip is narrow on a phone, and Chrome spends the touch slop before it
+    // scrolls: a 70% pan left the strip one touchmove past the snap midpoint, so a
+    // coalesced move snapped it back (#2659). Pan 90% of the width.
+    const startX = box.x + box.width * 0.95
     const point = (x: number) => ({ x, y, id: 1 })
     try {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point(startX)] })
-      for (let i = 1; i <= 8; i++) {
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point(startX - box.width * 0.7 * i / 8)] })
+      for (let i = 1; i <= 10; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point(startX - box.width * 0.9 * i / 10)] })
       }
       await expect(page.locator('.title-rail')).toHaveAttribute('data-test-pointer-canceled', 'yes')
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
