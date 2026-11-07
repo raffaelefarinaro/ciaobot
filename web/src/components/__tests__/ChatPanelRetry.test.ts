@@ -166,6 +166,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
         // stub would only carry the props.
         InjectedPromptCard: false,
         ChatTurnActivity: false,
+        ChatRetryState: false,
       },
     },
   })
@@ -398,7 +399,7 @@ describe('ChatPanel retry from error bubble', () => {
     await flushPromises()
     expect(setRetry).toHaveBeenCalledWith('chat-1', 'Tidy my memory', [])
 
-    // Once the retry is armed the retry card owns it.
+    // Once the retry is armed the error card carries its state and actions.
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-12T11:00:00Z',
@@ -407,7 +408,91 @@ describe('ChatPanel retry from error bubble', () => {
       interval_seconds: 3600,
     }
     await flushPromises()
-    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Retry'])
+    expect(wrapper.findAll('.injected-card--error')).toHaveLength(1)
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(wrapper.findAll('.retry-state-actions .btn-small').map(b => b.text()))
+      .toEqual(['Continue with...', 'Try now', 'Stop trying'])
+    expect(wrapper.findAll('.retry-btn')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('shows one card for a failed retry: no Retry started row, retry state inside', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T19:01:00Z', origin: 'retry' },
+      {
+        role: 'assistant',
+        content: 'you have reached your session usage limit',
+        timestamp: '2026-10-11T19:01:01Z',
+        is_error: true,
+      },
+    ]
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-11T23:00:00Z',
+      last_error: 'session usage limit',
+      attempts: 1,
+      interval_seconds: 4 * 3600,
+    }
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Retry started')
+    const cards = wrapper.findAll('.injected-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].find('.injected-card-facts').text()).toContain('Retry failed')
+    expect(cards[0].find('.retry-state-title').text()).toBe('Retrying this turn every few hours')
+    expect(wrapper.find('.retry-card').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps Fix this error beside the retry state while a retry is pending', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: strange failure 42', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-11T23:00:00Z',
+      last_error: 'strange failure 42',
+      attempts: 1,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+    expect(wrapper.find('.retry-state-title').exists()).toBe(true)
+    expect(wrapper.findAll('.fix-btn').map(b => b.text())).toEqual(['Fix this error'])
+    wrapper.unmount()
+  })
+
+  it('keeps one card when the retry reason differs from the row text', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: could not reach the provider', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-11T23:00:00Z',
+      last_error: 'network unreachable',
+      attempts: 1,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+    const cards = wrapper.findAll('.injected-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].find('.retry-state-title').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps the Retry started row when the retry has not failed', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T19:01:00Z', origin: 'retry' },
+    ]
+    await flushPromises()
+    expect(wrapper.text()).toContain('Retry started')
     wrapper.unmount()
   })
 
@@ -645,7 +730,7 @@ describe('ChatPanel retry from error bubble', () => {
     }
     await flushPromises()
 
-    expect(wrapper.find('.retry-card-title').text()).toBe('Signed out — retrying this turn')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Signed out — retrying this turn')
     const hint = wrapper.findComponent({ name: 'ProviderSignInHint' })
     expect(hint.props('actionLabel')).toBe('Try now')
     hint.vm.$emit('action')
@@ -664,7 +749,7 @@ describe('ChatPanel retry from error bubble', () => {
       interval_seconds: 86400,
     }
     await flushPromises()
-    expect(wrapper.find('.retry-card-title').text()).toBe('Retrying this turn once a day')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn once a day')
     wrapper.unmount()
   })
 
@@ -678,7 +763,7 @@ describe('ChatPanel retry from error bubble', () => {
       interval_seconds: 4 * 3600,
     }
     await flushPromises()
-    expect(wrapper.find('.retry-card-title').text()).toBe('Retrying this turn every few hours')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every few hours')
     wrapper.unmount()
   })
 
@@ -692,7 +777,7 @@ describe('ChatPanel retry from error bubble', () => {
       interval_seconds: 30,
     }
     await flushPromises()
-    expect(wrapper.find('.retry-card-title').text()).toBe('Retrying this turn shortly')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn shortly')
     expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
     wrapper.unmount()
   })
@@ -752,7 +837,7 @@ describe('ChatPanel recovery model picker', () => {
   }
 
   async function openCardRecovery(wrapper: VueWrapper) {
-    const btn = wrapper.findAll('.retry-card-actions .btn-small').find(b => b.text() === 'Continue with...')
+    const btn = wrapper.findAll('.retry-state-actions .btn-small').find(b => b.text() === 'Continue with...')
     expect(btn).toBeTruthy()
     await btn!.trigger('click')
     await flushPromises()

@@ -227,7 +227,7 @@ test.describe('workbench layout', () => {
     // and this measures it in a real layout engine rather than trusting the
     // stylesheet — jsdom gives every rect 0x0.
     await page.request.post('/__fixture__/update-tasks')
-    await boot(page, '/', '.update-tasks')
+    await boot(page, '/', '.needs-you')
 
     const measure = (selector: string) => page.evaluate((sel) => {
       const column = document.querySelector(sel)
@@ -247,13 +247,12 @@ test.describe('workbench layout', () => {
     const main = await measure('.home-main')
     const rail = await measure('.home-rail')
 
-    // On a wide pane the update group is in the rail, above At a glance; the
-    // composer stays in the request column.
+    // "Needs you" is in the request column above the composer at every width;
+    // the rail holds At a glance and nothing else.
+    expect(main.names).toContain('needs-you')
     expect(main.names).toContain('home-intake')
-    expect(main.names).not.toContain('update-tasks')
-    expect(rail.names).toContain('update-tasks')
-    expect(rail.names).toContain('home-review-summary')
-    expect(rail.names.indexOf('update-tasks')).toBeLessThan(rail.names.indexOf('home-review-summary'))
+    expect(main.names.indexOf('needs-you')).toBeLessThan(main.names.indexOf('home-intake'))
+    expect(rail.names).toEqual(['home-review-summary'])
     // Every boundary is the one token, not just the two ends being equal, which
     // a leftover section margin in the middle would still pass.
     for (const column of [main, rail]) {
@@ -273,27 +272,27 @@ test.describe('workbench layout', () => {
     // Neither is a gap, so the gap assertions above stayed green throughout; only
     // the edges say otherwise, and only a real layout engine has them.
     await page.request.post('/__fixture__/update-tasks')
-    await boot(page, '/', '.update-tasks')
+    await boot(page, '/', '.needs-you')
 
-    // Closing a notice is how the recovery chip comes to be at all.
-    await page.locator('.update-tasks .home-notice-close').first().click()
+    // Hiding a row is how the recovery chip comes to be at all.
+    await page.locator('.needs-you-row').first().getByRole('button', { name: /More actions/ }).click()
+    await page.getByRole('menuitem', { name: 'Hide for now' }).click()
     await expect(page.locator('.home-notice-reopen')).toBeVisible()
     await expect(page.locator('.home-setup')).toBeVisible()
 
     const report = await page.evaluate(() => {
       const main = document.querySelector('.home-main')!.getBoundingClientRect()
-      const rail = document.querySelector('.home-rail')!.getBoundingClientRect()
       const read = (selector: string, column: DOMRect) => {
         const r = document.querySelector(selector)!.getBoundingClientRect()
         return { offset: Math.round(r.left - column.left), width: Math.round(r.width) }
       }
       return {
         column: Math.round(main.width),
-        chip: read('.home-rail .home-notice-reopen', rail),
+        chip: read('.home-main .home-notice-reopen', main),
         setup: read('.home-setup', main),
       }
     })
-    expect(report.chip.offset, 'the chip sits on the rail edge, not in its middle').toBe(0)
+    expect(report.chip.offset, 'the chip sits on the column edge, not in its middle').toBe(0)
     expect(report.setup, 'the setup card is as wide as the column').toEqual({ offset: 0, width: report.column })
   })
 
@@ -302,7 +301,7 @@ test.describe('workbench layout', () => {
     // layout reserves must not survive it: a doubled gap above the recent list
     // is the exact artefact a margin-only reset leaves behind.
     await boot(page, '/', '.home-intake')
-    await expect(page.locator('.update-tasks')).toHaveCount(0)
+    await expect(page.locator('.needs-you')).toHaveCount(0)
 
     const report = await page.evaluate(() => {
       const main = document.querySelector('.home-main')!
@@ -322,41 +321,74 @@ test.describe('workbench layout', () => {
     }
   })
 
-  test('alerts sit in the rail above At a glance and fit its width', async ({ page }) => {
+  test('"Needs you" sits above the composer, fits the column and keeps its spacing tokens', async ({ page }) => {
     await page.request.post('/__fixture__/update-tasks')
-    await boot(page, '/', '.update-tasks')
-    await expect(page.locator('.home-rail .update-tasks')).toBeVisible()
-    await expect(page.locator('.home-main .update-tasks')).toHaveCount(0)
+    await boot(page, '/', '.needs-you')
+    await expect(page.locator('.home-main .needs-you')).toBeVisible()
+    await expect(page.locator('.home-rail .needs-you')).toHaveCount(0)
 
+    const group = (await page.locator('.needs-you').boundingBox())!
     const form = (await page.locator('.home-intake-form').boundingBox())!
-    const group = (await page.locator('.update-tasks').boundingBox())!
-    const glance = (await page.locator('.home-review-summary').boundingBox())!
-    expect(group.x).toBeGreaterThan(form.x + form.width)
-    expect(group.y).toBeLessThan(glance.y)
+    const main = (await page.locator('.home-main').boundingBox())!
+    expect(group.y + group.height).toBeLessThanOrEqual(form.y)
+    expect(group.width).toBeGreaterThan(main.width - 2)
 
-    const overflow = await page.locator('.home-rail').evaluate(r => r.scrollWidth - r.clientWidth)
+    const overflow = await page.locator('.home-main').evaluate(r => r.scrollWidth - r.clientWidth)
     expect(overflow).toBeLessThanOrEqual(0)
 
-    // Stacked, not side by side: the 280px rail has no room for two columns.
-    const tile = await page.locator('.update-tasks .housekeeping-tile').first().evaluate(t => {
-      const body = t.querySelector('.housekeeping-body')!.getBoundingClientRect()
-      const actions = t.querySelector('.housekeeping-actions')!.getBoundingClientRect()
-      return { bodyBottom: body.bottom, actionsTop: actions.top }
-    })
-    expect(tile.actionsTop).toBeGreaterThanOrEqual(tile.bodyBottom - 1)
+    // Every control is a 44px target and no two are closer than 8px; the lead
+    // buttons share one width.
+    const report = await page.locator('.needs-you-row').evaluateAll(list => list.map((row) => {
+      const controls = Array.from(row.querySelectorAll('button, a')).map(el => el.getBoundingClientRect())
+      const lead = row.querySelector('.needs-you-primary button, .needs-you-primary a')!.getBoundingClientRect()
+      return {
+        heights: controls.map(c => Math.round(c.height)),
+        gaps: controls.slice(1).map((c, i) => Math.round(c.left - controls[i].right)),
+        lead: Math.round(lead.width),
+      }
+    }))
+    expect(report.length).toBeGreaterThan(0)
+    for (const row of report) {
+      for (const h of row.heights) expect(h).toBeGreaterThanOrEqual(44)
+      for (const g of row.gaps) expect(g).toBeGreaterThanOrEqual(8)
+    }
+    expect(new Set(report.map(r => r.lead)).size).toBe(1)
   })
 
-  test('alerts follow the pane across 940px', async ({ page }) => {
+  test('"Needs you" stays above the composer when the pane narrows past 940px', async ({ page }) => {
     await page.request.post('/__fixture__/update-tasks')
-    await boot(page, '/', '.update-tasks')
-    await expect(page.locator('.home-rail .update-tasks')).toBeVisible()
-
+    await boot(page, '/', '.needs-you')
     await page.setViewportSize({ width: 900, height: 900 })
-    await expect(page.locator('.home-main .update-tasks')).toBeVisible()
-    await expect(page.locator('.home-rail .update-tasks')).toHaveCount(0)
-    const group = (await page.locator('.update-tasks').boundingBox())!
-    const recent = (await page.locator('.home-recent').boundingBox())!
-    expect(group.y).toBeLessThan(recent.y)
+    await expect(page.locator('.home-main .needs-you')).toBeVisible()
+    const group = (await page.locator('.needs-you').boundingBox())!
+    const form = (await page.locator('.home-intake-form').boundingBox())!
+    expect(group.y + group.height).toBeLessThanOrEqual(form.y)
+  })
+
+  test('Home is top-aligned and the composer is stable once the first load has settled', async ({ page }) => {
+    await page.request.post('/__fixture__/update-tasks')
+    await boot(page, '/', '.needs-you')
+    const form = page.locator('.home-intake-form')
+    const settled = (await form.boundingBox())!
+    // Poll the composer's y over a short window: it must never leave `settled`.
+    const expectComposerStill = async (windowMs: number) => {
+      const until = Date.now() + windowMs
+      do {
+        expect((await form.boundingBox())!.y).toBeCloseTo(settled.y, 0)
+        await page.waitForTimeout(50)
+      } while (Date.now() < until)
+    }
+    // The list is already in place; nothing arrives later to push the composer.
+    await expectComposerStill(1500)
+    // Re-reading the data (the 60s poll, a focus) does not move it either.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expectComposerStill(500)
+
+    // Top-aligned: the content starts at the top of the pane, not centred in it.
+    const pane = (await page.locator('.empty-state').boundingBox())!
+    const bench = (await page.locator('.home-workbench').boundingBox())!
+    expect(bench.y - pane.y).toBeLessThan(80)
+    await expect(page.getByRole('button', { name: /^\+ .* chat$/ })).toHaveCount(0)
   })
 
   test('the selected chat row is marked by its fill, not by an accent bar', async ({ page }) => {
@@ -394,7 +426,7 @@ test.describe('home section gaps on a phone', () => {
 
   test('one gap between every section, at both widths', async ({ page }) => {
     await page.request.post('/__fixture__/update-tasks')
-    await boot(page, '/', '.update-tasks')
+    await boot(page, '/', '.needs-you')
 
     const report = await page.evaluate(() => {
       const main = document.querySelector('.home-main')!
@@ -408,20 +440,22 @@ test.describe('home section gaps on a phone', () => {
           Math.round((el.getBoundingClientRect().top - sections[i].getBoundingClientRect().bottom) * 100) / 100),
       }
     })
-    expect(report.names).toContain('update-tasks')
+    expect(report.names).toContain('needs-you')
     expect(report.gaps).toHaveLength(report.names.length - 1)
     for (const [i, gap] of report.gaps.entries()) {
       expect(gap, `${report.names[i]} → ${report.names[i + 1]}`).toBeCloseTo(report.rowGap, 0)
     }
     expect(report.rowGap).toBeGreaterThan(0)
 
-    // Stacked, the group stays under the composer and above the chat list.
-    await expect(page.locator('.home-rail .update-tasks')).toHaveCount(0)
+    // On a phone too the list leads the column: above the composer, which is
+    // above the chat list, so the 44px controls inside it never overflow.
+    await expect(page.locator('.home-rail .needs-you')).toHaveCount(0)
     const intake = (await page.locator('.home-intake').boundingBox())!
-    const group = (await page.locator('.update-tasks').boundingBox())!
+    const group = (await page.locator('.needs-you').boundingBox())!
     const recent = (await page.locator('.home-recent').boundingBox())!
-    expect(group.y).toBeGreaterThan(intake.y + intake.height)
-    expect(group.y).toBeLessThan(recent.y)
+    expect(group.y + group.height).toBeLessThanOrEqual(intake.y)
+    expect(intake.y).toBeLessThan(recent.y)
+    expect(await page.locator('.home-main').evaluate(r => r.scrollWidth - r.clientWidth)).toBeLessThanOrEqual(0)
   })
 })
 

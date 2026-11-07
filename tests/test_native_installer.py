@@ -4734,16 +4734,39 @@ def test_a_child_that_exits_nonzero_after_binding_is_a_wizard_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The child must still be running while the coordinator proves it owns the
+    # listener (``owns_process`` refuses an exited child), so it waits for a
+    # release file that is created only after that check has passed. Exiting
+    # straight after the handshake races the parent and is covered by the next
+    # test.
+    release = tmp_path / "release"
     script = (
-        "import os, sys\n"
+        "import os, sys, time\n"
         "fd = int(sys.argv[1])\n"
         "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
         "os.close(fd)\n"
+        "while not os.path.exists(sys.argv[2]):\n"
+        "    time.sleep(0.01)\n"
         "raise SystemExit(7)\n"
     )
+    owns_process = native._OwnedChild.owns_process
+
+    def owns_then_release(child: native._OwnedChild, pid: int) -> bool:
+        owned = owns_process(child, pid)
+        if owned:
+            release.touch()
+        return owned
+
+    monkeypatch.setattr(native._OwnedChild, "owns_process", owns_then_release)
     outcome, events, _raw = _run_coordinator(
         tmp_path,
-        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        wizard_command=lambda fd: (
+            sys.executable,
+            "-c",
+            script,
+            str(fd),
+            str(release),
+        ),
     )
 
     assert "wizard_ready" in [event["type"] for event in events]
@@ -4751,6 +4774,43 @@ def test_a_child_that_exits_nonzero_after_binding_is_a_wizard_failure(
     assert outcome.failure_code == "wizard_failed"
     assert outcome.activation_attempted is False
     assert outcome.activation_completed is False
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_child_that_exited_before_the_ownership_check_is_never_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = (
+        "import os, sys\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "raise SystemExit(7)\n"
+    )
+
+    def listener_after_exit(port: int, child_pid: int) -> frozenset[int]:
+        # Force the ordering: the child has exited, and been observed to have
+        # exited, before the coordinator asks whether it owns the listener.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                done, _status = os.waitpid(child_pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if done:
+                break
+            time.sleep(0.01)
+        return frozenset({child_pid})
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        wizard_listener=listener_after_exit,
+    )
+
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
     assert events[-1]["code"] == "wizard_failed"
 
 
