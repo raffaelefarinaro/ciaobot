@@ -218,6 +218,16 @@ class CommandActionHandler(ActionHandler):
         return COMMAND_WAKE_PROMPT
 
 
+class RestartHandler(ActionHandler):
+    """The card only navigates to Settings; the engine never restarts from it."""
+
+    async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        return None
+
+    def wake_prompt(self, action: ChatAction) -> str:
+        return "The user saw your restart request."
+
+
 MODE_WAKE_DESCRIPTIONS: dict[str, str] = {
     "plan": "read-only, propose changes",
     "normal": "ask before every action",
@@ -266,6 +276,7 @@ class PermissionModeHandler(ActionHandler):
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "mcp_auth": McpAuthHandler(),
     "command": CommandActionHandler(),
+    "restart": RestartHandler(),
     "permission_mode": PermissionModeHandler(),
 }
 

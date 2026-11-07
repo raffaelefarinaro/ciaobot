@@ -195,6 +195,28 @@ def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+#: The restart reasons: a changed setting, or a staged update. Ciaobot has no
+#: MCP restart: an MCP change is picked up by `ciao chat reload`.
+RESTART_REASONS: tuple[str, ...] = ("config", "update")
+
+
+def _validate_restart(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `restart` kind: a card that points at the Settings control that restarts or updates."""
+    if set(raw) - {"reason", "note"}:
+        raise ChatActionError("unknown_param")
+    if "reason" not in raw:
+        raise ChatActionError("missing_param")
+    reason = raw["reason"]
+    if not isinstance(reason, str):
+        raise ChatActionError("invalid_type")
+    if reason not in RESTART_REASONS:
+        raise ChatActionError("invalid_param")
+    params = {"reason": reason}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    return params
+
+
 def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
     """The `permission_mode` kind: a mode the user approves for this chat.
 
@@ -220,6 +242,7 @@ def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
+    "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
