@@ -13,9 +13,15 @@ import type {
   UpdateTaskCoverageGap,
   UpdateTaskRow,
   UpdateTasksResponse,
+  WorkspaceHealthCheck,
+  WorkspaceHealthResponse,
 } from '../lib/types'
 
 const REFRESH_INTERVAL_MS = 60_000
+/** How long Home waits for the first load before painting what it has. `api`
+ *  has no fetch timeout, so one stalled read must not hide blocking and error
+ *  rows (and their Fix button); rows still arrive when the reads land. */
+export const INITIAL_LOAD_GATE_MS = 3000
 
 /** What a start/dismiss/reopen call reports back, whichever way it went.
  *
@@ -125,6 +131,26 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    *  opened before the decision cannot restore the pre-decision list. */
   let actionsSeq = 0
   const loading = ref(false)
+  /** True from `init` until its first three reads (actions, update tasks,
+   *  workspace health) have each answered or failed. Home paints no "Needs you"
+   *  row before then, so rows do not arrive one source at a time and push the
+   *  composer down in steps. Later refreshes never set it. */
+  const initialLoadPending = ref(false)
+
+  // ── Workspace health ─────────────────────────────────────────────────────
+  //
+  // The same install-wide report Settings → Advanced shows, read here so an
+  // error (a vault root that is missing, a vault that is not writable) raises a
+  // row on Home instead of waiting in a tab nobody opens. Best-effort like the
+  // other sources: a failed read leaves the previous report in place.
+  const health = ref<WorkspaceHealthResponse | null>(null)
+  /** The checks that are errors. Warnings stay in Settings: Home is for what
+   *  stops something working. */
+  const healthErrors = computed<WorkspaceHealthCheck[]>(
+    () => (health.value?.checks ?? []).filter(check => check.status === 'error'),
+  )
+  const healthFixing = ref(false)
+  const healthFixError = ref('')
   const runningIds = ref<Set<string>>(new Set())
   let initialized = false
 
@@ -173,6 +199,33 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       // is observable through `actionsHealth`; the rows are left as they were.
       if (seq !== actionsSeq) return
       actionsHealth.value = failedHealth(actionsHealth.value, e)
+    }
+  }
+
+  async function refreshHealth(): Promise<void> {
+    try {
+      health.value = await api.get<WorkspaceHealthResponse>('/api/workspace-health')
+    } catch {
+      // Best-effort: the rows stay as they were.
+    }
+  }
+
+  /** Apply the automatic remedies (`POST /api/workspace-health/fix`), the same
+   *  call Settings' "Fix issues" makes, and adopt the fresh report it returns. */
+  async function fixHealth(): Promise<boolean> {
+    healthFixing.value = true
+    healthFixError.value = ''
+    try {
+      const data = await api.post<WorkspaceHealthResponse>('/api/workspace-health/fix', {})
+      if (Array.isArray(data?.checks)) health.value = data
+      else await refreshHealth()
+      return true
+    } catch (e) {
+      healthFixError.value = apiErrorMessage(e, 'Fix failed')
+      await refreshHealth()
+      return false
+    } finally {
+      healthFixing.value = false
     }
   }
 
@@ -398,16 +451,21 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   function init() {
     if (initialized) return
     initialized = true
-    void refresh()
-    void refreshUpdateTasks()
+    initialLoadPending.value = true
+    void Promise.race([
+      Promise.allSettled([refresh(), refreshUpdateTasks(), refreshHealth()]),
+      new Promise<void>(resolve => setTimeout(resolve, INITIAL_LOAD_GATE_MS)),
+    ]).then(() => { initialLoadPending.value = false })
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', () => {
         void refresh()
         void refreshUpdateTasks()
+        void refreshHealth()
       })
       window.setInterval(() => {
         void refresh()
         void refreshUpdateTasks()
+        void refreshHealth()
       }, REFRESH_INTERVAL_MS)
     }
   }
@@ -416,6 +474,13 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     actions,
     actionsHealth,
     loading,
+    initialLoadPending,
+    health,
+    healthErrors,
+    healthFixing,
+    healthFixError,
+    refreshHealth,
+    fixHealth,
     runningIds,
     refresh,
     run,
