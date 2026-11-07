@@ -25,6 +25,7 @@ from ciao.provider_service import ProviderImpl
 from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
+from ciao.web.device_code_auth import DeviceCodeFlow
 from ciao.web.mcp_auth_claude import ClaudeMcpAuthFlow
 
 if TYPE_CHECKING:
@@ -278,6 +279,7 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "command": CommandActionHandler(),
     "restart": RestartHandler(),
     "permission_mode": PermissionModeHandler(),
+    "device_code": DeviceCodeFlow(),
 }
 
 
