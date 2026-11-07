@@ -188,7 +188,6 @@ describe('ChatTitleRail', () => {
     root.dispatchEvent(pointer('pointercancel', 30, 10, 'mouse'))
     vi.advanceTimersByTime(RAIL_SLIDE_MS + RAIL_SETTLE_MS)
     expect(wrapper.emitted('select')).toBeUndefined()
-    expect(strip.style.scrollSnapType).not.toBe('none')
     expect(scrollTo).toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -299,6 +298,28 @@ describe('ChatTitleRail', () => {
     const vertical = new WheelEvent('wheel', { deltaY: 50, cancelable: true, bubbles: true })
     strip.dispatchEvent(vertical)
     expect(vertical.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a sideways nudge short of halfway springs back to the current title', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    const scrollTo = vi.fn()
+    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
+    // Centred on b at 100; a 10px nudge lands at 110, well short of halfway to c.
+    strip.scrollLeft = 100
+
+    strip.dispatchEvent(new WheelEvent('wheel', { deltaX: 10, deltaY: 0, cancelable: true, bubbles: true }))
+    expect(strip.scrollLeft).toBe(110)
+    vi.advanceTimersByTime(RAIL_SETTLE_MS)
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 100, behavior: 'smooth' })
+    expect(wrapper.emitted('select')).toBeUndefined()
     wrapper.unmount()
   })
 

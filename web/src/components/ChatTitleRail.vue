@@ -228,7 +228,7 @@ function onScroll(): void {
 // Only a sideways wheel is a strip gesture; a vertical one is the page scrolling. The strip
 // is not a native scroller, so a sideways wheel moves it here, then settles like a swipe.
 function onWheel(e: WheelEvent): void {
-  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || !strip.value || sliding) return
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || !strip.value || sliding || drag) return
   e.preventDefault()
   gestureSeen = true
   strip.value.scrollLeft += e.deltaX
