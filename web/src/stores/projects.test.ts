@@ -2927,6 +2927,38 @@ describe('needs-you chat actions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/continue', {})
   })
 
+  test('submitChatActionCallback posts the url to the callback route and adopts the action', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://x/authorize', callback_used: '1' } }) })
+    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x')).resolves.toEqual({ ok: true })
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/callback', { url: 'http://127.0.0.1:5/cb?code=x' })
+    expect(store.chatActions['c-1']?.[0]?.params.callback_used).toBe('1')
+  })
+
+  test('a refused callback adopts the action and returns the reason', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('state_mismatch'), {
+      status: 400,
+      payload: { error: 'state_mismatch', action: action('a1', { state: 'waiting' }) },
+    }))
+    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x'))
+      .resolves.toEqual({ ok: false, reason: 'state_mismatch' })
+    expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
+  })
+
+  test('a callback conflict adopts the engine list', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('chat_action_conflict'), {
+      status: 409,
+      payload: { error: 'chat_action_conflict', actions: [action('a9')] },
+    }))
+    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x'))
+      .resolves.toEqual({ ok: false, reason: 'chat_action_conflict' })
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
+  })
+
   test('a chat id with a slash is encoded in the action path', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ action: action('a1') })
