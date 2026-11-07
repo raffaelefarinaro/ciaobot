@@ -16,6 +16,7 @@ import McpAuthBody from './needs-you/McpAuthBody.vue'
 import RestartBody from './needs-you/RestartBody.vue'
 import CommandBody from './needs-you/CommandBody.vue'
 import PermissionModeBody from './needs-you/PermissionModeBody.vue'
+import DeviceCodeBody from './needs-you/DeviceCodeBody.vue'
 import { actionCopy } from '../lib/chatActions'
 import { shouldRestoreFocus } from '../lib/moveToBackground'
 import { useProjectStore } from '../stores/projects'
@@ -26,9 +27,15 @@ const BODIES: Partial<Record<ChatActionKind, Component>> = {
   mcp_auth: McpAuthBody,
   command: CommandBody,
   permission_mode: PermissionModeBody,
+  device_code: DeviceCodeBody,
   restart: RestartBody,
 }
-const ICONS: Partial<Record<ChatActionKind, AppIconName>> = { mcp_auth: 'shield', permission_mode: 'shield', restart: 'spark' }
+const ICONS: Partial<Record<ChatActionKind, AppIconName>> = {
+  mcp_auth: 'shield',
+  permission_mode: 'shield',
+  device_code: 'shield',
+  restart: 'spark',
+}
 /** Kinds whose card has no Not now: the body owns the way out. */
 const HIDE_DISMISS: Partial<Record<ChatActionKind, true>> = {}
 

@@ -109,6 +109,41 @@ describe('actionCopy', () => {
     expect(actionCopy(action({ state: 'failed', error: '' }))?.why).toBe('The sign-in did not finish.')
   })
 
+  it('gives the device_code copy for gh and az', () => {
+    expect(actionCopy(action({ kind: 'device_code', params: { tool: 'gh' } }))).toEqual({
+      title: 'Sign in to GitHub CLI',
+      why: 'The agent needs gh signed in to continue.',
+      primaryLabel: 'Start sign-in',
+      meta: 'gh · device code',
+    })
+    expect(actionCopy(action({ kind: 'device_code', params: { tool: 'az' } }))?.title).toBe('Sign in to Azure CLI')
+  })
+
+  it('names an unknown device_code tool by itself', () => {
+    expect(actionCopy(action({ kind: 'device_code', params: { tool: 'aws' } }))?.title).toBe('Sign in to aws')
+  })
+
+  it('gives the device_code copy while waiting and once done', () => {
+    const waiting = actionCopy(action({ kind: 'device_code', state: 'waiting', params: { tool: 'gh' } }))
+    expect(waiting?.primaryLabel).toBe('')
+    expect(waiting?.why).toContain('The card updates by itself')
+    const done = actionCopy(action({ kind: 'device_code', state: 'done', params: { tool: 'gh' } }))
+    expect(done?.primaryLabel).toBe('Continue the chat')
+  })
+
+  it('shows the engine error for a failed device_code sign-in', () => {
+    const failed = actionCopy(action({
+      kind: 'device_code',
+      state: 'failed',
+      params: { tool: 'gh' },
+      error: 'gh sign-in ended with exit code 1.',
+    }))
+    expect(failed?.why).toBe('gh sign-in ended with exit code 1.')
+    expect(failed?.primaryLabel).toBe('Try again')
+    expect(actionCopy(action({ kind: 'device_code', state: 'failed', params: { tool: 'gh' }, error: '' }))?.why)
+      .toBe('The sign-in did not finish.')
+  })
+
   it('gives the command copy for open, with the default why', () => {
     const copy = actionCopy(action({ kind: 'command', params: { command: 'ls' } }))
     expect(copy).toEqual({
