@@ -29,10 +29,11 @@ Before promising a Google call will work, check whether the active workspace's
 Google account is connected and its token is valid with `ciao gws status`.
 It reports the linked profile, whether credentials are present, the last
 health-monitor token reading, and whether a re-login is needed. It is read-only
-and never runs `gws auth status` itself. If `needs_relogin` is true, tell the
-user to re-authenticate in Settings → Overview → Google account — the
-"Sign in again" button there restores Gmail, Calendar, Drive, and
-scheduled Google tasks.
+and never runs `gws auth status` itself. If `needs_relogin` is true, or a
+Google call fails because the login expired or was revoked, run
+`ciao chat needs-action gws_auth --profile "$GWS_PROFILE"`: it puts a
+"Sign in to Google again" card in this chat and the user signs in from
+there. End your turn after raising it; you are told when they have signed in.
 
 ## Untrusted content
 

@@ -1175,3 +1175,98 @@ def test_workspace_gws_profile_unlinked_returns_empty_even_when_personal_exists(
 
 def test_workspace_gws_profile_no_config_returns_empty(tmp_path: Path) -> None:
     assert gws_auth.workspace_gws_profile(None, "home") == ""
+
+
+def _paste_manager(tmp_path: Path):
+    """A relogin manager whose exchange records what it was handed."""
+    cfg = _config(tmp_path)
+    _write_client_secret(gws_auth.profile_config_dir(cfg, "personal"))
+    calls: list[dict] = []
+
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
+        calls.append({"code": code, "redirect_uri": redirect_uri})
+        return {"ok": True, "email": "paste@example.com"}
+
+    manager = gws_auth.GwsReloginManager(cfg, exchange_fn=fake_exchange, session_ttl=10)
+    return manager, calls
+
+
+def test_complete_from_redirect_finishes_a_pending_session(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+    port, state = started["port"], started["state"]
+
+    final = manager.complete_from_redirect(
+        "personal", f"http://127.0.0.1:{port}/?code=abc&state={state}"
+    )
+
+    assert final["status"] == "completed"
+    assert calls == [{"code": "abc", "redirect_uri": started["redirect_uri"]}]
+    _assert_listener_closed(port)
+
+
+@pytest.mark.parametrize(
+    "build, expected",
+    [
+        (lambda p, s: f"https://127.0.0.1:{p}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://localhost:{p}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:{p + 1}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:notaport/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:{p}/?code=c&state=wrong", gws_auth.RELOGIN_STATE_MISMATCH),
+        (lambda p, s: f"http://127.0.0.1:{p}/?code=c&state=wröng", gws_auth.RELOGIN_STATE_MISMATCH),
+        (
+            lambda p, s: f"http://127.0.0.1:{p}/?error=access_denied&state=wrong",
+            gws_auth.RELOGIN_STATE_MISMATCH,
+        ),
+        (lambda p, s: "x" * 4097, gws_auth.RELOGIN_BAD_REDIRECT),
+    ],
+)
+def test_complete_from_redirect_rejects_wrong_port_host_scheme_state(
+    tmp_path: Path, build, expected: str
+) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect(
+            "personal", build(started["port"], started["state"])
+        )
+
+    assert str(exc.value) == expected
+    assert manager.status("personal")["status"] == "pending"
+    assert calls == []
+    manager.cancel("personal")
+
+
+def test_complete_from_redirect_without_session(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect("personal", "http://127.0.0.1:1/?code=c&state=s")
+
+    assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+    assert calls == []
+
+
+def test_complete_from_redirect_after_completion_is_no_pending(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+    url = f"http://127.0.0.1:{started['port']}/?code=abc&state={started['state']}"
+    manager.complete_from_redirect("personal", url)
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect("personal", url)
+
+    assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+    assert len(calls) == 1
+
+
+def test_relogin_listener_ignores_a_non_ascii_state(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+
+    _drive_callback(started["port"], "?code=c&state=%C3%A9")
+
+    assert manager.status("personal")["status"] == "pending"
+    assert calls == []
+    manager.cancel("personal")

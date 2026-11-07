@@ -4,6 +4,7 @@ import {
   callbackRefusalCopy,
   chatActionErrorReason,
   isChatAction,
+  isGoogleConsentUrl,
   looksLikeLoopbackCallback,
   normalizeChatActions,
   restartTarget,
@@ -239,5 +240,40 @@ describe('callbackRefusalCopy', () => {
   it('has a default for any other reason', () => {
     expect(callbackRefusalCopy('invalid_body')).toBe('That address could not be used.')
     expect(callbackRefusalCopy('nonsense')).toBe('That address could not be used.')
+  })
+})
+
+describe('gws_auth copy', () => {
+  const gws = (over: Partial<ChatAction> = {}): ChatAction =>
+    action({ kind: 'gws_auth', params: { profile: 'work' }, ...over })
+
+  it('titles an open sign-in and names the profile in the why', () => {
+    const copy = actionCopy(gws({ state: 'open' }))
+    expect(copy?.title).toBe('Sign in to Google again')
+    expect(copy?.why).toContain('work')
+    expect(copy?.primaryLabel).toBe('Sign in with Google')
+  })
+
+  it('continues the chat once the sign-in is done', () => {
+    expect(actionCopy(gws({ state: 'done' }))?.primaryLabel).toBe('Continue the chat')
+  })
+
+  it('shows the engine error as the why of a failed sign-in', () => {
+    const copy = actionCopy(gws({ state: 'failed', error: 'X' }))
+    expect(copy?.why).toBe('X')
+    expect(copy?.primaryLabel).toBe('Try again')
+  })
+
+  it('has plain copy for the two new paste-back refusals', () => {
+    expect(callbackRefusalCopy('no_pending_sign_in')).toContain('No Google sign-in is waiting')
+    expect(callbackRefusalCopy('bad_callback_url')).toContain('http://127.0.0.1:')
+  })
+
+  it('accepts only an https accounts.google.com consent URL', () => {
+    expect(isGoogleConsentUrl('https://accounts.google.com/o/oauth2/auth?a=1')).toBe(true)
+    expect(isGoogleConsentUrl('http://accounts.google.com/x')).toBe(false)
+    expect(isGoogleConsentUrl('https://accounts.google.com.evil.io/x')).toBe(false)
+    expect(isGoogleConsentUrl('javascript:alert(1)')).toBe(false)
+    expect(isGoogleConsentUrl(undefined)).toBe(false)
   })
 })

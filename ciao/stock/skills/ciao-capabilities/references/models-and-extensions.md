@@ -21,6 +21,6 @@
 ## Google Workspace (`gws`)
 
 - Ciaobot integrates with Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through the [`gws` CLI](https://github.com/googleworkspace/cli).
-- **Settings → Overview → Google account**: install `gws`, upload a GCP OAuth `client_secret.json` or create one with gcloud, and connect from the browser (no terminal required); each workspace has its own account. Terminal and headless commands sit under Advanced. In-chat, `ciao gws status` reports whether the active workspace's Google account is connected and its token valid before you promise a Google call will work.
+- **Settings → Overview → Google account**: install `gws`, upload a GCP OAuth `client_secret.json` or create one with gcloud, and connect from the browser (no terminal required); each workspace has its own account. Terminal and headless commands sit under Advanced. In-chat, `ciao gws status` reports whether the active workspace's Google account is connected and its token valid before you promise a Google call will work. When a Google login expires, the agent can put a **Sign in to Google again** card in the chat; it opens Google's consent page, and from a phone you paste back the address the browser could not load.
 - One Google account per workspace, set up in that workspace's Overview.
 - Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the Connect dialog's steps.
