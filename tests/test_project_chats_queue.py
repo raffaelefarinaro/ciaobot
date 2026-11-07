@@ -1546,6 +1546,9 @@ def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> No
 class _SteerProvider:
     """Stands in for a ProviderService: records steer requests."""
 
+    #: Stands in for the chat's ProviderService; no live implementation behind it.
+    provider = None
+
     def __init__(self, *, delivery_id: str | None = "d1", on_stop=None) -> None:
         self.delivery_id = delivery_id
         self.requests: list = []

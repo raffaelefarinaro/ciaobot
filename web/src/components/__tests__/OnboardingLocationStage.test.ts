@@ -29,8 +29,8 @@ describe('OnboardingLocationStage', () => {
     await wrapper.find('input[name="name"]').setValue('Personal')
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
 
-    await wrapper.find('form').trigger('submit')
-    expect(wrapper.emitted('continue')).toHaveLength(1)
+    // The stage has no button of its own; the shell footer owns Continue.
+    expect(wrapper.find('button').exists()).toBe(false)
     expect(api.patch).not.toHaveBeenCalled()
   })
 
@@ -43,7 +43,7 @@ describe('OnboardingLocationStage', () => {
     await wrapper.find('input[name="name"]').setValue('my workspace')
     await wrapper.find('input[name="name"]').trigger('blur')
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
-    expect(wrapper.find('#name-error').text()).toContain('letters, numbers')
+    expect(wrapper.find('#onboarding-name-error').text()).toContain('letters, numbers')
 
     await wrapper.find('input[name="name"]').setValue('my-workspace_2')
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
@@ -68,27 +68,40 @@ describe('OnboardingLocationStage', () => {
     expect(wrapper.text()).toContain('will not reorganise or upload anything')
   })
 
-  it('shows a provisioned path as read-only', () => {
+  it('shows the installer\'s folder and workspace as set, with a way to change them', async () => {
     vi.mocked(api.get).mockResolvedValue({ workspace_root: '/srv/ciaobot', ready: true })
     const wrapper = mount(OnboardingLocationStage, { props: {
-      context: { ...context, provisioned: true, workspace: '/srv/ciaobot' }, busy: false,
+      context: { ...context, provisioned: true, workspace: 'personal' }, busy: false,
     } })
-    expect((wrapper.find('input[name="folder"]').element as HTMLInputElement).readOnly).toBe(true)
-    expect((wrapper.find('input[name="folder"]').element as HTMLInputElement).value).toBe('/srv/ciaobot')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('/srv/ciaobot'))
+    expect(wrapper.find('input[name="folder"]').exists()).toBe(false)
+    expect(wrapper.find('input[name="name"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('personal')
+    expect(wrapper.get('a.change').attributes('href')).toBe('/settings/advanced#workspace-move')
+    // Nothing is asked, so the shell may continue straight away.
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+  })
+
+  it('asks for the workspace name only after Change', async () => {
+    vi.mocked(api.get).mockResolvedValue({ workspace_root: '/srv/ciaobot', ready: true })
+    const wrapper = mount(OnboardingLocationStage, { props: {
+      context: { ...context, provisioned: true, workspace: 'personal' }, busy: false,
+    } })
+    await wrapper.get('button.change-name').trigger('click')
+    expect((wrapper.get('input[name="name"]').element as HTMLInputElement).value).toBe('personal')
+    await wrapper.get('input[name="name"]').setValue('my workspace')
+    await wrapper.get('input[name="name"]').trigger('blur')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
   })
 })
 
 describe('OnboardingLocationStage races', () => {
-  it('keeps a provisioned install usable when the authoritative path differs', async () => {
+  it('uses the authoritative path when it differs from the context', async () => {
     vi.mocked(api.get).mockResolvedValue({ workspace_root: '/srv/ciaobot' })
     const wrapper = mount(OnboardingLocationStage, { props: {
-      context: { ...context, provisioned: true, workspace: '/old/path' }, busy: false,
+      context: { ...context, provisioned: true, workspace: 'personal' }, busy: false,
     } })
-    await vi.waitFor(() => {
-      const input = wrapper.get('input[name="folder"]').element as HTMLInputElement
-      expect(input.value).toBe('/srv/ciaobot')
-    })
-    await wrapper.find('input[name="name"]').setValue('Personal')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('/srv/ciaobot'))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
   })
 

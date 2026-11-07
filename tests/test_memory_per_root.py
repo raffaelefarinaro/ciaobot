@@ -277,3 +277,92 @@ def test_agent_vault_root_is_the_shared_vault_until_the_install_re_roots(
     assert config.agent_vault_root("personal") == config.vault_root
     assert config.agent_vault_root("work") == config.vault_root
     assert config.workspace_vault_root("personal") != config.agent_vault_root("personal")
+
+
+# -- #2501: a workspace-scoped audit reads only that workspace's MEMORY.md ----
+
+
+def _seed_memory_md(config: CiaoConfig, name: str, rule: str) -> Path:
+    memory = config.workspace_vault_root(name) / "MEMORY.md"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text(f"- {rule}\n", encoding="utf-8", newline="")
+    return memory
+
+
+def _deny_reads_under(
+    monkeypatch: pytest.MonkeyPatch, *denied: Path
+) -> list[Path]:
+    """Fail at the filesystem boundary a *Workspace only* sandbox denies.
+
+    Patched on ``Path.read_text`` rather than ``os_audit.read_source_text`` so
+    the denial lands where the sandbox actually raises, and every attempt is
+    recorded: a scoped audit that never opens a foreign vault makes no attempts
+    there at all.
+    """
+    real_read_text = Path.read_text
+    attempts: list[Path] = []
+
+    def guarded(self: Path, *args: object, **kwargs: object) -> str:
+        if any(self == root or self.is_relative_to(root) for root in denied):
+            attempts.append(self)
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+    return attempts
+
+
+def test_a_named_workspace_reads_only_its_own_memory_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scoped rule audit must not open another workspace's MEMORY.md (#2501)."""
+    config = _config(tmp_path)
+    _write_guide(
+        config.workspace_root,
+        memory=["Never use rtk for shell commands."],
+        profile=[],
+    )
+    personal_memory = _seed_memory_md(
+        config, "personal", "Always use rtk for shell commands."
+    )
+    work_memory = _seed_memory_md(
+        config, "work", "Always use rtk for shell commands."
+    )
+    attempts = _deny_reads_under(monkeypatch, config.workspace_vault_root("work"))
+
+    report = _audit(config, workspace_name="personal", scope="workspace")
+
+    sources = [
+        source
+        for clash in report["rule_audit"]["clashes"]
+        for source in clash["sources"]
+    ]
+    assert any(f"MEMORY.md ({personal_memory})" in source for source in sources)
+    assert not any(f"MEMORY.md ({work_memory})" in source for source in sources)
+    assert attempts == [], f"the scoped audit read a foreign vault: {attempts}"
+
+
+def test_a_denied_memory_read_is_a_structured_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A denied MEMORY.md read is a scan error, not a traceback (#2501)."""
+    config = _config(tmp_path)
+    personal_memory = _seed_memory_md(
+        config, "personal", "Always use rtk for shell commands."
+    )
+    _seed_memory_md(config, "work", "Always use rtk for shell commands.")
+    _deny_reads_under(
+        monkeypatch,
+        config.workspace_vault_root("personal"),
+        config.workspace_vault_root("work"),
+    )
+
+    report = _audit(config, workspace_name="personal", scope="workspace")
+
+    denied = [
+        error
+        for error in report["rule_audit"]["errors"]
+        if error["type"] == "unreadable_rule_source"
+        and Path(error["path"]) == personal_memory
+    ]
+    assert denied, report["rule_audit"]["errors"]

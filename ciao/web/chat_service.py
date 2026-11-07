@@ -25,6 +25,7 @@ from typing import Any
 from ciao import provider_registry
 from ciao.model_tiers import canonical_tier, is_tier
 from ciao.prompt_fence import fence, neutralize
+from ciao.providers.connect_errors import annotate_reauth
 from ciao.schedules import supports_auto_archive
 # The two vocabularies an `update_task` helper is checked against, taken from
 # the module that defines the tasks rather than re-spelled here: a scope or an
@@ -386,7 +387,22 @@ def _is_retryable_quota_error(text: str) -> bool:
     # chat open and press Retry manually.
     if "at capacity" in low:
         return True
-    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+    # A provider that is out of money says so in its own words. OpenRouter
+    # rejects the turn with "This request would exceed your available credits
+    # given your current balance", which is a 402 rather than a 429, and no
+    # rate-limit noun appears at all.
+    if any(
+        needle in low
+        for needle in (
+            "out of credit",
+            "out of credits",
+            "spend limit",
+            "insufficient credit",
+            "credit balance",
+            "available credit",
+            "add credits",
+        )
+    ):
         return True
     # A provider that just states the limit, with no 429 and none of the vendor
     # phrasings above — opencode/OpenAI surfaces "The usage limit has been
@@ -911,7 +927,9 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
     )
 
 
-def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | None]:
+def _schedule_dispatch_status(
+    outcome: ScheduleRunOutcome, *, provider: str = "", model: str = ""
+) -> tuple[str, str | None]:
     """Classify a scheduled turn for job-run history.
 
     A pending retry means the provider deferred the work, such as after a
@@ -920,11 +938,13 @@ def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | N
     with no synthesis turn) mean the work is not done yet either — not a
     failure to report as such, but not a healthy run either: recording "ok"
     would clear a previous error while the follow-up never completed.
+    An invalidated OAuth grant gets the provider and "sign in again" appended.
     """
     if outcome.retry_pending:
         return "skipped", None
     if outcome.stream_error or outcome.is_error:
-        return "error", (outcome.final_text or "stream error")[:1000]
+        error = (outcome.final_text or "stream error")[:1000]
+        return "error", annotate_reauth(error, provider, model)
     if outcome.permission_requested or outcome.question_requested:
         return "skipped", None
     if outcome.subagents_pending:

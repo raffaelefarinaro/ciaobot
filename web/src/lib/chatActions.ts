@@ -49,7 +49,7 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
     case 'open':
       return {
         title: `Sign in to ${server}`,
-        why: 'It is set up but not signed in. Sign in once and this chat can use it.',
+        why: `${server} is set up for this chat but not signed in. Sign in once so this chat can use its tools.`,
         primaryLabel: 'Sign in',
         meta,
       }
@@ -66,9 +66,36 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
       return { title: `${server} is connected`, why: 'This chat can use it now.', primaryLabel: 'Continue the chat', meta }
     case 'failed':
       return {
-        title: `Sign-in to ${server} didn't finish`,
+        title: `Couldn't sign in to ${server}`,
         why: action.error || 'The sign-in did not finish.',
         primaryLabel: 'Try again',
+        meta,
+      }
+  }
+}
+
+function commandCopy(action: ChatAction): ActionCopy {
+  const meta = 'Suggested command'
+  switch (action.state) {
+    case 'working':
+      return {
+        title: 'Review it, then press Enter in the terminal',
+        why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+        primaryLabel: 'I ran it',
+        meta,
+      }
+    case 'done':
+      return {
+        title: 'You ran the command',
+        why: 'Continue lets the assistant check the result.',
+        primaryLabel: 'Continue',
+        meta,
+      }
+    default:
+      return {
+        title: 'Suggested command — review before running',
+        why: action.params.note || "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+        primaryLabel: 'Type it in a terminal',
         meta,
       }
   }
@@ -139,6 +166,8 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
     case 'mcp_auth':
       return mcpAuthCopy(action)
+    case 'command':
+      return commandCopy(action)
     case 'restart':
       return restartCopy(action)
     case 'permission_mode':

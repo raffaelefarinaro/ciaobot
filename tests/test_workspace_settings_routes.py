@@ -633,6 +633,43 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     assert "work" not in profiles
 
 
+def _fake_gws_package(root, *, with_binary: bool):
+    package = root / "lib" / "node_modules" / "@googleworkspace" / "cli"
+    (package / "bin").mkdir(parents=True)
+    launcher = package / "run.js"
+    launcher.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    if with_binary:
+        (package / "bin" / ("gws.exe" if sys.platform == "win32" else "gws")).write_text("x", encoding="utf-8")
+    shim = root / "bin-shim-gws"
+    try:
+        shim.symlink_to(launcher)
+    except OSError:  # Windows without symlink rights: the launcher itself is the command
+        shim = launcher
+    return shim
+
+
+@pytest.mark.parametrize("with_binary", [False, True])
+def test_gws_integration_reports_a_package_whose_binary_is_missing(tmp_path, monkeypatch, with_binary):
+    """npm 12 blocks the postinstall that downloads gws: the launcher is on PATH, the binary is not."""
+    from ciao.web import routes_api
+
+    shim = _fake_gws_package(tmp_path, with_binary=with_binary)
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [str(shim)] if name == "gws" else [])
+    client, _config, _pcm = _client(tmp_path)
+
+    data = client.get("/api/integrations/gws").json()
+
+    assert data["installed"] is with_binary
+    assert data["cli_available"] is with_binary
+    if with_binary:
+        assert data["install_problem"] == ""
+    else:
+        assert data["install_problem"] == (
+            "The gws package is installed but its binary is missing: re-run the install command above "
+            f"({routes_api.host_terminal.GWS_INSTALL_COMMAND})."
+        )
+
+
 def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
     """A fresh install shows an empty account list, not a personal/work pair."""
     from ciao.web import routes_api

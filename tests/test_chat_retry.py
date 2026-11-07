@@ -474,6 +474,13 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_retryable_quota_error(spend_limit_err) is True
     assert _is_retryable_quota_error(rate_limit_err) is True
     assert _is_retryable_quota_error(claude_code_session_limit) is True
+    # OpenRouter rejects a turn once the balance cannot cover it, as a 402 with
+    # no rate-limit noun at all. It is still a budget error: the turn recovers
+    # on its own as soon as the account is topped up.
+    assert _is_retryable_quota_error(
+        "This request would exceed your available credits given your "
+        "current balance. Add credits to continue."
+    ) is True
 
 
 async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -> None:
@@ -1293,6 +1300,37 @@ async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
     )
 
 
+async def test_invalidated_grant_is_labelled_and_not_retried(tmp_path: Path) -> None:
+    """An invalidated OAuth grant arms no retry and names the provider and the
+    remedy in the chat's last_error (#2648)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="Encountered invalidated oauth token for user, failing request",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert "action: sign in again" in updated.last_error
+    assert f"provider: {updated.provider}" in updated.last_error
+
+
 async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     """One short of the quota cap, a rate-limit error still arms the hourly retry."""
     from ciao.web.project_chats import _MAX_QUOTA_RETRIES
@@ -1753,3 +1791,88 @@ async def test_wake_without_pending_retry_still_starts_a_turn(tmp_path: Path) ->
     assert updated is not None
     assert updated.retry_status != "pending"
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_retry_that_fails_unclassified_stops_instead_of_staying_pending(
+    tmp_path: Path,
+) -> None:
+    """A retried turn that errors with no retry classifier match must not stay pending (#2647)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_kind = "quota"
+    pcm.set_chat_retry(chat.chat_id, "do the thing", reason="usage limit", interval_seconds=7200)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="Encountered invalidated oauth token for user, failing request",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    assert chat.retry_status == "stopped"
+    assert chat.retry_next_at == ""
+
+
+async def test_retry_that_fails_with_a_quota_error_still_rearms(tmp_path: Path) -> None:
+    """A retried turn that errors with a retryable quota error still re-arms (#2647)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_kind = "quota"
+    pcm.set_chat_retry(chat.chat_id, "do the thing", reason="usage limit", interval_seconds=7200)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    assert chat.retry_status == "pending"
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_try_now_past_the_quota_cap_stops_instead_of_firing(tmp_path: Path) -> None:
+    """try_chat_retry_now refuses a quota retry at or past its cap and stops it (#2647)."""
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="quota")
+    chat.retry_kind = "quota"
+    pcm.set_chat_retry(chat.chat_id, "job", reason="usage limit")
+    chat.retry_attempts = _MAX_QUOTA_RETRIES
+    calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    assert pcm.try_chat_retry_now(chat.chat_id) is None
+    assert calls == []
+    assert chat.retry_status == "stopped"

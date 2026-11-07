@@ -4,13 +4,22 @@ The #594 experiment measured a full chat session against the one-shot insights
 extraction on 50 real conversations, and the chat won, so the pass is now an
 attended ``bypass`` chat in a per-workspace system project called ``Memory``:
 one running pass per workspace, FIFO, auto-archived when it ends cleanly, left
-open for the owner when it does not, and silent on a normal result.
+open for the owner when it does not, and silent on every notification surface,
+including when it is blocked.
 
 Everything here was inert until ``MEMORY_PASS_CHATS`` was flipped, and is live
 now. The archive pipeline reads that module attribute — never a
 ``from … import`` copy, so tests can monkeypatch it — both to suppress the
 one-shot insights / project-doc / memory-proposal stages and to enqueue the pass
 chat.
+
+The Memory project holds those passes and nothing else. The pass predicate
+falls back on the project kind — a chat there is silenced whatever its helper
+says, because a helper that failed to normalize no longer identifies its pass
+— so an ordinary chat must never land in that project, or it would lose its
+notifications without being one. The engine therefore refuses an ordinary chat
+there and refuses a move into it (:class:`MemoryProjectRefused`), and places a
+fork or a continuation of a pass in the workspace's General project instead.
 
 The project id is derived from a vault folder that is never written to disk, so
 auto-discovery cannot claim the project, the name is free to be localised, and
@@ -68,6 +77,18 @@ MEMORY_PASS_KIND = "memory_pass"
 # vault folder, and never looked up by name: a user project called "Memory"
 # must not be mistaken for this one.
 _MEMORY_VAULT_FOLDER = "__memory__"
+
+
+class MemoryProjectRefused(ValueError):
+    """Raised when a caller asks the Memory project to hold an ordinary chat.
+
+    The Memory project is app-owned: it holds the engine's own passes and
+    nothing else. The pass predicate falls back on the project kind — a chat
+    in that project is silenced whatever its helper says — so an ordinary chat
+    must never land there, or it would lose its notifications without being a
+    pass. A dedicated type lets every surface that has to refuse this say so
+    without reading the message.
+    """
 
 MEMORY_PASS_PROMPT = (
     'A conversation in this workspace just ended: "{title}". Its archived '
@@ -496,6 +517,16 @@ def is_memory_pass_chat(chat: ChatInfo, project: ProjectInfo | None) -> bool:
         chat_service._normalize_chat_helper(chat.helper).get("kind")
         == MEMORY_PASS_KIND
     )
+
+
+def is_memory_pass_project(project: ProjectInfo | None) -> bool:
+    """True for the app-owned Memory project, which holds the engine's passes.
+
+    The one place a project is judged by its kind rather than by its name: a
+    user project may legitimately be called "Memory", and only the kind is the
+    discriminator.
+    """
+    return project is not None and project.kind == MEMORY_PROJECT_KIND
 
 
 class MemoryPassCoordinator:

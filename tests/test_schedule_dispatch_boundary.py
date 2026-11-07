@@ -135,6 +135,11 @@ class _ScheduleHost:
         del stale_id, entry
         return self._projects["project-1"]
 
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str:
+        """The manager owns this rule; the stand-in has nothing to refuse."""
+        del entry
+        return ""
+
     def _rehome_interval_chat(
         self, entry: ScheduleEntry, prompt: str
     ) -> ChatInfo | None:

@@ -3,6 +3,7 @@ import { api } from '../lib/api'
 import { errorMessage } from '../lib/errorMessage'
 import { isLoopbackHostname } from '../lib/loopback'
 import { useProjectStore } from '../stores/projects'
+import { GWS_INSTALL_COMMAND } from '../lib/gwsInstall'
 import type { GwsIntegrationSettings } from '../lib/types'
 
 // Every Google account (gws profile) call and its transient state: the
@@ -49,7 +50,7 @@ export function useGwsAccounts(deps: {
         errorText:
           'The @googleworkspace/cli (gws) is not installed on this machine, so Google Workspace tools are unavailable.',
         context:
-          'Installing @googleworkspace/cli from Settings → Overview → Google account → Connect Google account. Run `npm install -g @googleworkspace/cli` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). Walk the operator through the install; Ciaobot never runs package installs on its own.',
+          'Installing @googleworkspace/cli from Settings → Overview → Google account → Connect Google account. Run `' + GWS_INSTALL_COMMAND + '` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). npm 12 blocks install scripts by default, and the postinstall is what downloads the gws binary, so keep the --allow-scripts flag; if the package installs but `gws` still does not run, the binary is missing and the install must be re-run. Walk the operator through the install; Ciaobot never runs package installs on its own.',
         title: 'Install gws',
       })
     } catch (e) {

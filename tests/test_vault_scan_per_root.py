@@ -160,7 +160,7 @@ def test_the_memory_map_no_longer_reads_the_shared_vault_root(tmp_path: Path) ->
 
     from ciao.web import routes_api
 
-    source = inspect.getsource(routes_api.vault_graph)
+    source = inspect.getsource(routes_api._vault_graph_payload)
     assert "vault_scan_targets" in source
     # Comments may still name it (one explains the bug); no CODE line may read it.
     code = [

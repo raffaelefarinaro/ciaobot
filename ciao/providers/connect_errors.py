@@ -53,6 +53,18 @@ _AUTH_MARKERS = (
     "403 forbidden",
 )
 
+# An invalidated or revoked OAuth grant cannot recover on retry; the operator
+# must sign in again. Checked before ``_AUTH_MARKERS`` because it is not a
+# missing key, and it is deliberately absent from the retry classifier (#2648).
+_REAUTH_MARKERS = (
+    "invalidated oauth token",
+    "oauth token has been revoked",
+    "token has been expired or revoked",
+    "invalid_grant",
+    "refresh token is invalid",
+    "refresh_token_reused",
+)
+
 _DNS_MARKERS = (
     "enotfound",
     "getaddrinfo",
@@ -78,7 +90,8 @@ _TIMEOUT_MARKERS = (
 def classify_connection_error(text: str) -> str | None:
     """Return a short category for a connection-error string, or ``None``.
 
-    Categories: ``dns``, ``refused``, ``timeout``, ``auth``, ``connect``
+    Categories: ``dns``, ``refused``, ``timeout``, ``auth``, ``reauth`` (an
+    OAuth grant that was invalidated or revoked: sign in again), ``connect``
     (a connection error we couldn't classify further), or ``None`` (not a
     recognised connection/auth error). DNS resolution failures, refused
     connections, and timeouts are network-side; auth failures are
@@ -88,6 +101,8 @@ def classify_connection_error(text: str) -> str | None:
     low = (text or "").lower()
     if not low:
         return None
+    if any(marker in low for marker in _REAUTH_MARKERS):
+        return "reauth"
     if any(marker in low for marker in _AUTH_MARKERS):
         return "auth"
     if any(marker in low for marker in _DNS_MARKERS):
@@ -129,3 +144,20 @@ def annotate_connection_host(text: str, host: str) -> str:
     if not parts:
         return text
     return f"{text} ({', '.join(parts)})"
+
+
+def annotate_reauth(text: str, provider: str, model: str = "") -> str:
+    """Name the provider and the remedy on an invalidated-grant error (#2648).
+
+    Only text classified as ``reauth`` changes; anything else, and text
+    already annotated, is returned as is.
+    """
+    if not text or classify_connection_error(text) != "reauth":
+        return text
+    if "action: sign in again" in text.lower():
+        return text
+    label = provider or "provider"
+    upstream, sep, _ = (model or "").partition("/")
+    if sep and upstream and provider:
+        label = f"{provider} {upstream}"
+    return f"{text} (provider: {label}, action: sign in again)"

@@ -683,27 +683,49 @@ describe('notification inbox store', () => {
       expect(vf).not.toHaveBeenCalled()
     })
 
-    it('memory_insight_rows_attention_only', () => {
+    it('memory_passes_never_reach_the_inbox_even_blocked', () => {
       const { projects, signals, inbox } = setup()
       markHealthy(projects, signals)
-      const insights = [
-        { sourceChatId: 's-need', passChatId: 'p-need', title: 'Need', phase: 'needsYou', question: 'Ok?', timestamp: '2026-10-26T09:00:00Z', blocking: true },
-        { sourceChatId: 's-att', passChatId: 'p-att', title: 'Att', phase: 'attention', question: '', timestamp: '', blocking: true },
-        { sourceChatId: 's-q', passChatId: 'p-q', title: 'Q', phase: 'queued', question: '', timestamp: '', blocking: false },
-        { sourceChatId: 's-r', passChatId: 'p-r', title: 'R', phase: 'running', question: '', timestamp: '', blocking: false },
-        { sourceChatId: 's-d', passChatId: 'p-d', title: 'D', phase: 'done', question: '', timestamp: '', blocking: false },
-        { sourceChatId: 's-a', passChatId: '', title: 'A', phase: 'archiving', question: '', timestamp: '', blocking: false },
-        { sourceChatId: 's-w', passChatId: 'p-w', title: 'W', phase: 'needsYou', question: '', timestamp: '', blocking: true },
-      ]
-      vi.spyOn(projects, 'memoryInsightRows', 'get').mockReturnValue(insights as never)
-      const inWs = (id: string) => ({ project_id: id === 'p-w' ? 'p-work' : 'p-personal' })
-      vi.spyOn(projects, 'projectFor').mockImplementation(
-        ((id: string) => (id.startsWith('p-') ? { ...inWs(id), workspace: id === 'p-w' ? 'work' : 'personal' } : null)) as never,
-      )
-      setChats(projects, [makeChat('p-need', { last_read_at: '', pending_permission: '{"tool":"Bash"}' })])
-      expect(keysOf(inbox)).toEqual(['memory:s-att', 'memory:s-need'])
-      expect(inbox.rows.find((r) => r.key === 'memory:s-need')!.reason).toBe('Ok?')
-      expect(inbox.rows.some((r) => r.key === 'chat:p-need')).toBe(false)
+      projects.projects = [
+        ...projects.projects,
+        { project_id: 'p-mem', name: 'Memory', workspace: 'personal', kind: 'memory' },
+      ] as unknown as typeof projects.projects
+      const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+      setChats(projects, [
+        makeChat('ordinary', { last_read_at: '' }),
+        makeChat('pass-declared', {
+          project_id: 'p-mem',
+          last_read_at: '',
+          pending_question: question,
+          helper: {
+            kind: 'memory_pass',
+            state: 'attention',
+            source_chat_id: 'src',
+            source_title: 'Deck figures',
+            archive_path: 'chats/src.md',
+            archive_policy: 'when_clean',
+          },
+        }),
+        makeChat('pass-fallback', {
+          project_id: 'p-mem',
+          last_read_at: '',
+          pending_question: question,
+          helper: { kind: 'legacy-memory-pass' },
+        }),
+      ])
+      expect(keysOf(inbox)).toEqual(['chat:ordinary'])
+      expect(inbox.count).toBe(1)
+      // The malformed-helper pass has no memory-insight row, so its chat row is
+      // the access path to pending input; only the notification surfaces hide it.
+      expect(projects.activeChatsAll.map((c) => c.chat_id).sort()).toEqual([
+        'ordinary',
+        'pass-fallback',
+      ])
+      expect(projects.chatNeedsInput('pass-fallback')).toBe(true)
+      // The blocked declared pass still reaches Home's memory-insight row, with
+      // its question, even though it is silent everywhere a notification goes.
+      const insight = projects.memoryInsightRows.find((r) => r.passChatId === 'pass-declared')
+      expect(insight).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
     })
 
     it('never_mutates_review', async () => {

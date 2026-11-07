@@ -81,8 +81,10 @@ async function start(): Promise<void> {
 </template>
 
 <style scoped>
+.needs-you-perm:empty { display: none; }
 .needs-you-perm {
   display: grid;
+  flex-basis: 100%;
   gap: 6px;
   justify-items: start;
 }

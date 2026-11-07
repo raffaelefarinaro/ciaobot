@@ -3,6 +3,10 @@ import { classifyError, errorQuickAction, isProviderAuthError, isUsageLimitError
 
 const OLLAMA_WEEKLY = 'you (lozioraf) have reached your weekly usage limit, upgrade for higher limits: https://ollama.com/upgrade or add usage credits: https://ollama.com/settings (ref: c95e827a-1234)'
 
+// OpenRouter's 402 body, verbatim. No 429 and no "quota"/"rate limit" noun:
+// before this shape was recognized the chat drew it as "Unknown error".
+const OPENROUTER_CREDITS = 'This request would exceed your available credits given your current balance. Add credits to continue.'
+
 describe('classifyError', () => {
   it.each([
     ['Failed to authenticate: OAuth session expired and could not be refreshed', 'auth'],
@@ -18,6 +22,7 @@ describe('classifyError', () => {
     ['OpenCode model not found', 'provider'],
     ['disk quota exceeded', 'unknown'],
     ['Google API quota exceeded for quota metric generativelanguage.googleapis.com', 'unknown'],
+    [OPENROUTER_CREDITS, 'quota'],
     ['something unexpected', 'unknown'],
   ])('classifies %s as %s', (text, kind) => {
     expect(classifyError(text).kind).toBe(kind)
@@ -42,8 +47,13 @@ describe('isUsageLimitError', () => {
     'Anthropic quota exhausted',
     'API Error: 429 Too Many Requests: rate limit',
     'HTTP 429: quota exceeded for this session',
+    OPENROUTER_CREDITS,
   ])('matches provider usage-limit phrasing: %s', (text) => {
     expect(isUsageLimitError(text)).toBe(true)
+  })
+
+  it('does not match a payment method failing for other reasons', () => {
+    expect(isUsageLimitError('Your credit card was declined')).toBe(false)
   })
 
   it('matches the OpenAI "exceeded your current quota" phrasing', () => {
@@ -62,6 +72,13 @@ describe('usage-limit copy', () => {
     const attribution = classifyError('You\'ve hit your session limit')
     expect(attribution.copy).toContain('says when it resets')
     expect(attribution.copy).not.toContain('won\'t reset')
+  })
+
+  it('names a credit-exhaustion rejection instead of promising a reset', () => {
+    const attribution = classifyError(OPENROUTER_CREDITS)
+    expect(attribution.label).toBe('Out of credits')
+    expect(attribution.copy).toContain('Add credits')
+    expect(attribution.copy).not.toContain('resets')
   })
 
   it('classifies a 429 usage limit as quota, not a remote HTTP error', () => {
@@ -89,6 +106,7 @@ describe('errorQuickAction', () => {
     ['Not logged in · Please run /login', 'sign-in'],
     [OLLAMA_WEEKLY, 'retry-hourly'],
     ['Rate limit exceeded, retry later', 'retry-hourly'],
+    [OPENROUTER_CREDITS, 'retry-hourly'],
     ['OpenCode model not found', 'switch-model'],
     ['Error: this model does not support image input', 'switch-model'],
     ['request timed out after 30s', 'fix'],

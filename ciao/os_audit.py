@@ -510,10 +510,16 @@ def audit_rules(
             getattr(config, "vault_root", workspace_dir / "memory-vault")
         )
         try:
+            # A scoped audit names one workspace; without passing the name the
+            # helper answers for every registered workspace and the audit opens
+            # vaults outside the one it was scoped to (#2501).
             memory_md_paths = [
                 path
                 for path, _title in _workspace_memory_paths(
-                    config, workspace_dir, vault_for_paths
+                    config,
+                    workspace_dir,
+                    vault_for_paths,
+                    workspace=workspace_name,
                 )
             ]
         except Exception as exc:  # noqa: BLE001 — advisory source discovery

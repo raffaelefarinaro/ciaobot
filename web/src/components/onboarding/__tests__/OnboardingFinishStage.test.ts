@@ -75,6 +75,50 @@ describe('OnboardingFinishStage', () => {
   })
 })
 
+describe('OnboardingFinishStage focus on what needs attention', () => {
+  it('lists only rows needing attention, with one fix link each', async () => {
+    payloads()
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    const rows = wrapper.findAll('.summary-row')
+    expect(rows.map(row => row.find('.summary-label').text()).sort()).toEqual(['Git and backup', 'Model'])
+    expect(rows.every(row => row.findAll('a').length === 1)).toBe(true)
+    expect(wrapper.text()).not.toContain('File access')
+    expect(wrapper.text()).not.toContain('Care timing')
+  })
+
+  it('says nothing needs attention and counts what was left for later', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
+      if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
+      if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
+      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
+      if (url === '/api/schedules') return Promise.resolve([]) as never
+      return Promise.reject(new Error('unexpected')) as never
+    })
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    expect(wrapper.find('.summary-row').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Nothing needs attention.')
+    // Rows the person left for later are counted, not called ready.
+    expect(wrapper.text()).toContain('items were left for later')
+    expect(wrapper.text()).not.toContain('looks ready')
+  })
+
+  it('keeps tools and the video behind a Tips disclosure and has no button row of its own', async () => {
+    payloads()
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    const tips = wrapper.get('details.tips')
+    expect(tips.attributes('open')).toBeUndefined()
+    expect(tips.get('summary').text()).toBe('Tips')
+    expect(tips.find('video').exists()).toBe(true)
+    expect(tips.text()).toContain('Dictation')
+    expect(wrapper.findAll('button').map(button => button.text())).toEqual(['Start task'])
+  })
+})
+
 describe('OnboardingFinishStage refusals and unknowns', () => {
   it('keeps the text when the store refuses the send without throwing', async () => {
     payloads()

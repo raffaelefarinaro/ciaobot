@@ -1,6 +1,7 @@
 import argparse
 from collections import Counter
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -1093,3 +1094,135 @@ def test_unreadable_ciaoignore_is_a_traversal_error(tmp_path: Path):
 
     with pytest.raises(vault_lint.VaultTraversalError):
         vault_lint.run_validation(vault)
+
+
+# Frozen copies of the character-by-character scanners as they stood at
+# origin/develop 34079f8, before the regex skip-ahead. The new scanners must
+# return the same values for every input.
+def _ref_matching_bracket(text: str, opening: int) -> int | None:
+    depth = 0
+    index = opening
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _ref_inline_destinations(text: str):
+    destinations: list[tuple[int, str]] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "!" and index + 1 < len(text) and text[index + 1] == "[":
+            label_opening = index + 1
+            source = index
+        elif text[index] == "[":
+            label_opening = index
+            source = index
+        else:
+            index += 1
+            continue
+        if vault_lint.is_escaped(text, source):
+            index += 1
+            continue
+
+        label_close = _ref_matching_bracket(text, label_opening)
+        if label_close is None:
+            index += 1
+            continue
+        after_label = label_close + 1
+        if after_label >= len(text) or text[after_label] != "(":
+            index = label_close + 1
+            continue
+        parsed = vault_lint._inline_destination(text, after_label)
+        if parsed is None:
+            index = label_close + 1
+            continue
+        raw, end = parsed
+        destinations.append((source, raw))
+        index = end
+
+    return destinations
+
+
+_TRICKY_INLINE_INPUTS = [
+    "",
+    "!",
+    "![",
+    "[a](b)",
+    "![img](x.png)",
+    "\\[not](link)",
+    "\\\\[yes](link)",
+    "[a [nested] b](t)",
+    "[unclosed](t",
+    "[a](<spaced target>)",
+    '[a](t "title")',
+    "[a](t (paren))",
+    "text ! [a](b) ! ![c](d)",
+    "[a]\n(b)",
+    "[a](b)[c](d)",
+]
+
+
+def _random_inline_inputs() -> list[str]:
+    rng = random.Random(0)
+    alphabet = "[]()!\\<>\"' a\n"
+    return [
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 60)))
+        for _ in range(2000)
+    ]
+
+
+def test_inline_destinations_match_the_character_scan_reference() -> None:
+    for text in [*_TRICKY_INLINE_INPUTS, *_random_inline_inputs()]:
+        assert vault_lint._inline_markdown_destinations(text) == (
+            _ref_inline_destinations(text)
+        ), text
+
+
+def test_matching_bracket_matches_the_character_scan_reference() -> None:
+    for text in [*_TRICKY_INLINE_INPUTS, *_random_inline_inputs()]:
+        for index, char in enumerate(text):
+            if char == "[":
+                assert vault_lint._matching_bracket(text, index) == (
+                    _ref_matching_bracket(text, index)
+                ), (text, index)
+
+
+def test_run_validation_parses_each_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "MEMORY.md").write_text("[A](People/A.md)\n", encoding="utf-8")
+    (vault / "People" / "A.md").write_text(_page("[B](B.md)\n"), encoding="utf-8")
+    (vault / "People" / "B.md").write_text(
+        _page("[X](Missing.md)\n"), encoding="utf-8"
+    )
+
+    unpatched = vault_lint.run_validation(vault)
+
+    real = vault_lint._markdown_destinations_in
+    calls: list[str] = []
+
+    def counting(text: str):
+        calls.append(text)
+        return real(text)
+
+    monkeypatch.setattr(vault_lint, "_markdown_destinations_in", counting)
+    patched = vault_lint.run_validation(vault)
+
+    assert len(calls) == 3
+    assert patched == unpatched
+    assert "People/A.md" not in patched["orphans"]
+    assert len(patched["broken_markdown_links"]) == 1

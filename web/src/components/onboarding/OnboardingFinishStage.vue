@@ -4,17 +4,22 @@ import { useProjectStore } from '../../stores/projects'
 import { api } from '../../lib/api'
 import { apiErrorMessage } from '../../lib/errorMessage'
 import type {
-  OnboardingStageEvents,
   OnboardingStageProps,
   OnboardingSummaryItem,
+  StageState,
 } from '../../lib/onboarding'
 import OnboardingSummary from './OnboardingSummary.vue'
+import OnboardingStack from './OnboardingStack.vue'
+import OnboardingButton from './OnboardingButton.vue'
 
 const props = defineProps<OnboardingStageProps>()
-const emit = defineEmits<OnboardingStageEvents>()
+const emit = defineEmits<{ state: [state: StageState] }>()
 const store = useProjectStore()
 
 const items = ref<OnboardingSummaryItem[]>([])
+// Only what needs a look is listed; a ready or deliberately deferred row is noise.
+const left = computed(() => items.value.filter(item => item.state === 'deferred').length)
+const attention = computed(() => items.value.filter(item => item.state === 'attention' || item.state === 'unknown'))
 const loading = ref(true)
 const readError = ref('')
 const prompt = ref('')
@@ -197,65 +202,73 @@ defineExpose({ refresh: loadSummary })
 </script>
 
 <template>
-  <div class="finish-stage">
-    <OnboardingSummary :items="items" :loading="loading" />
+  <OnboardingStack as="div" gap="2xl" class="finish-stage">
+    <OnboardingStack as="section" aria-labelledby="ready-title">
+      <h2 id="ready-title">You're set</h2>
+      <p v-if="!loading && attention.length" class="hint">These could use a look before you rely on them.</p>
+      <p v-else-if="!loading" class="hint">Nothing needs attention.<template v-if="left"> {{ left === 1 ? '1 item was' : `${left} items were` }} left for later.</template></p>
+      <OnboardingSummary :items="attention" :loading="loading" />
+    </OnboardingStack>
 
-    <section aria-labelledby="first-task-title">
+    <OnboardingStack as="section" aria-labelledby="first-task-title">
       <h2 id="first-task-title">Start with a real task</h2>
-      <p>Ask for something you actually want. It opens a new chat and sends your text as the first message.</p>
+      <p class="hint">Ask for something you actually want. It opens a new chat and sends your text as the first message.</p>
       <form @submit.prevent="submit">
         <label for="first-task">What should Ciaobot help with?</label>
         <textarea id="first-task" v-model="prompt" rows="3" :disabled="sending" />
-        <button type="submit" :disabled="sending || !prompt.trim()">{{ sending ? 'Starting…' : 'Start task' }}</button>
+        <div><OnboardingButton type="submit" variant="primary" :disabled="sending || !prompt.trim()">{{ sending ? 'Starting…' : 'Start task' }}</OnboardingButton></div>
       </form>
-      <p v-if="sendError" role="alert">{{ sendError }}</p>
+      <p v-if="sendError" class="error" role="alert">{{ sendError }}</p>
       <p v-if="sent" role="status">Task sent in a new chat.</p>
-    </section>
+    </OnboardingStack>
 
-    <section aria-labelledby="tools-title">
-      <h2 id="tools-title">Tools to pair with Ciaobot</h2>
-      <p>
-        Optional, independent tools — nothing is installed or changed here.
-        <a href="https://www.raffaelefarinaro.com/ciaobot/companions.html" target="_blank" rel="noopener noreferrer">See the guide</a>.
-      </p>
-      <ul>
-        <li><strong>Dictation</strong> — FluidVoice, on-device speech to text (macOS).</li>
-        <li><strong>Keeping the host awake</strong> — KeepingYouAwake (macOS); use the system power settings on Windows and Linux.</li>
-        <li><strong>An agent browser</strong> — ego lite, for pages without an API.</li>
-        <li><strong>Usage left</strong> — OpenUsage, to see a subscription limit coming.</li>
-      </ul>
-    </section>
+    <details class="tips">
+      <summary>Tips</summary>
+      <OnboardingStack gap="xl" class="tips-body">
+        <OnboardingStack as="section" aria-labelledby="tools-title">
+          <h3 id="tools-title">Tools to pair with Ciaobot</h3>
+          <p class="hint">
+            Optional, independent tools — nothing is installed or changed here.
+            <a href="https://www.raffaelefarinaro.com/ciaobot/companions.html" target="_blank" rel="noopener noreferrer">See the guide</a>.
+          </p>
+          <ul>
+            <li><strong>Dictation</strong> — FluidVoice, on-device speech to text (macOS).</li>
+            <li><strong>Keeping the host awake</strong> — KeepingYouAwake (macOS); use the system power settings on Windows and Linux.</li>
+            <li><strong>An agent browser</strong> — ego lite, for pages without an API.</li>
+            <li><strong>Usage left</strong> — OpenUsage, to see a subscription limit coming.</li>
+          </ul>
+        </OnboardingStack>
 
-    <section aria-labelledby="video-title">
-      <h2 id="video-title">See chat, archive and memory</h2>
-      <video
-        controls
-        preload="none"
-        poster="https://www.raffaelefarinaro.com/ciaobot/assets/img/archive-poster.webp"
-      >
-        <source src="https://www.raffaelefarinaro.com/ciaobot/assets/img/archive.mp4" type="video/mp4">
-        Your browser cannot play this video.
-      </video>
-      <p class="hint">Optional. The same flow is available from the first task above.</p>
-    </section>
-
-    <div class="actions">
-      <button type="button" :disabled="props.busy || sending" @click="emit('back')">Back</button>
-      <button type="button" class="primary" :disabled="!canContinue || props.busy" @click="emit('continue')">Finish setup</button>
-    </div>
-  </div>
+        <OnboardingStack as="section" aria-labelledby="video-title">
+          <h3 id="video-title">See chat, archive and memory</h3>
+          <video
+            controls
+            preload="none"
+            poster="https://www.raffaelefarinaro.com/ciaobot/assets/img/archive-poster.webp"
+          >
+            <source src="https://www.raffaelefarinaro.com/ciaobot/assets/img/archive.mp4" type="video/mp4">
+            Your browser cannot play this video.
+          </video>
+        </OnboardingStack>
+      </OnboardingStack>
+    </details>
+  </OnboardingStack>
 </template>
 
 <style scoped>
-.finish-stage { display: grid; gap: 24px; }
-h2 { font: 600 16px var(--font); margin: 0 0 8px; }
-form { display: grid; gap: 8px; }
-textarea { font: inherit; padding: 10px; color: var(--fg); background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--radius); }
-button { min-height: 44px; padding: 8px 14px; color: var(--fg); background: transparent; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: inherit; cursor: pointer; }
-button:disabled { opacity: .55; cursor: not-allowed; }
-.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
-.actions { display: flex; gap: 8px; justify-content: flex-end; }
-video { width: 100%; max-width: 640px; border-radius: var(--radius); background: #000; }
-ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
-.hint { color: var(--fg2); }
+.hint { color: var(--fg2); line-height: 1.5; }
+.error { color: var(--error); }
+form { display: grid; gap: var(--space-2, 8px); }
+label { font-weight: 600; }
+textarea { font: inherit; padding: var(--space-3, 12px); color: var(--fg); background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--radius); }
+textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+summary { display: flex; align-items: center; gap: var(--space-2, 8px); min-height: var(--touch, 44px); font-weight: 600; cursor: pointer; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+/* A chevron, so Tips reads as a disclosure and not a heading with nothing under it. */
+summary::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--fg2); border-bottom: 2px solid var(--fg2); transform: rotate(-45deg); transition: transform .15s; }
+details[open] > summary::before { transform: rotate(45deg); }
+.tips-body { padding-top: var(--space-3, 12px); }
+h3 { font: 600 14px var(--font); }
+video { width: 100%; max-width: 640px; border-radius: var(--radius); background: var(--bg); }
+ul { margin: 0; padding-left: var(--space-5, 24px); display: grid; gap: var(--space-2, 8px); }
 </style>

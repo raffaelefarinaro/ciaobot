@@ -686,7 +686,7 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
     # Current repo-pinned action versions, not floating ones.
     assert "actions/checkout@v7" in workflow
     assert "actions/setup-node@v7" in workflow
-    assert "astral-sh/setup-uv@v10.3.2" in workflow
+    assert "astral-sh/setup-uv@v10.3.3" in workflow
 
     # The named CI inputs only, and they are bound to the signing step alone.
     signing_step = workflow.split("      - name: Rehearse the signed server host")[1]
