@@ -1,4 +1,4 @@
-import { devices, expect, test, type Page } from '@playwright/test'
+import { devices, expect, test, type CDPSession, type Page } from '@playwright/test'
 import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
 
 /**
@@ -56,28 +56,57 @@ const POPUP_SURFACES: Array<[string, string]> = [
 ]
 
 /**
+ * A CDP session per page, created on the first repair and kept for the page's
+ * lifetime. Detaching it restores the browser's default pointer profile, which
+ * is the state the repair is undoing, so the session must stay attached.
+ */
+const touchSessions = new WeakMap<Page, CDPSession>()
+
+/**
+ * Prove the page reports a coarse pointer, or make it do so again.
+ *
+ * On macOS CI, `(pointer: coarse)` read false right after a click on the
+ * notifications bell with no navigation in between, and was true on the
+ * re-run (not reproduced in 232 local runs). The page still reported
+ * `maxTouchPoints: 1` with the desktop hover/fine profile, the fingerprint of
+ * device emulation that was half applied. Waiting longer cannot help because
+ * nothing re-applies it, so re-enable Chromium's touch emulation through CDP:
+ * the engine derives `(pointer: coarse)` and `(any-pointer: coarse)` from it.
+ * A page with no touch points is a genuine regression and still fails with
+ * what the page reports.
+ */
+async function ensureCoarsePointer(page: Page): Promise<void> {
+  const coarse = () => page.waitForFunction(() => matchMedia('(pointer: coarse)').matches, null, { timeout: 3000 })
+    .then(() => true, () => false)
+  if (await coarse()) return
+  const touchPoints = await page.evaluate(() => navigator.maxTouchPoints)
+  if (touchPoints > 0) {
+    let session = touchSessions.get(page)
+    if (!session) {
+      session = await page.context().newCDPSession(page)
+      touchSessions.set(page, session)
+    }
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    if (await coarse()) return
+  }
+  const seen = await page.evaluate(() => ({
+    anyCoarse: matchMedia('(any-pointer: coarse)').matches,
+    hover: matchMedia('(hover: hover)').matches,
+    maxTouchPoints: navigator.maxTouchPoints,
+    focused: document.activeElement?.outerHTML.slice(0, 120) ?? null,
+  }))
+  throw new Error(`page is not a coarse pointer; sizes would be fine-pointer ones: ${JSON.stringify(seen)}`)
+}
+
+/**
  * Open every <details>, then list the interactive controls under `scope`
  * that are smaller than TOUCH_MIN in either dimension.
  */
 async function measure(page: Page, scope = 'body') {
+  await ensureCoarsePointer(page)
   // Never measure a layout that is still being styled: sizes read before a
   // lazy stylesheet applies are the fine-pointer ones.
   await quiesce(page)
-  // Once on macOS CI, `(pointer: coarse)` read false right after a click on
-  // the notifications bell with no navigation in between, and was true on
-  // the re-run (not reproduced in 232 local runs). Give the emulated pointer
-  // a moment to come back; if it never does, fail with what the page reports.
-  const coarse = await page.waitForFunction(() => matchMedia('(pointer: coarse)').matches, null, { timeout: 3000 })
-    .then(() => true, () => false)
-  if (!coarse) {
-    const seen = await page.evaluate(() => ({
-      anyCoarse: matchMedia('(any-pointer: coarse)').matches,
-      hover: matchMedia('(hover: hover)').matches,
-      maxTouchPoints: navigator.maxTouchPoints,
-      focused: document.activeElement?.outerHTML.slice(0, 120) ?? null,
-    }))
-    throw new Error(`page is not a coarse pointer; sizes would be fine-pointer ones: ${JSON.stringify(seen)}`)
-  }
   return page.evaluate(({ min, scope }) => {
     if (!matchMedia('(pointer: coarse)').matches) throw new Error('page is not a coarse pointer; sizes would be fine-pointer ones')
     document.querySelectorAll('details').forEach((d) => { d.open = true })
@@ -322,6 +351,35 @@ test.describe('touch targets', () => {
 
   test('touch emulation is a coarse pointer', async ({ page }) => {
     await boot(page)
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+  })
+
+  /**
+   * The macOS CI failure in #2473: device emulation arrived half applied, so
+   * the page kept its touch points but reported the desktop hover/fine pointer
+   * profile. `measure()` must restore the profile it is measuring for instead
+   * of measuring a fine-pointer layout, both before and after the measurement.
+   */
+  test('a lost touch profile is restored before measuring', async ({ page }) => {
+    await boot(page, '/settings/providers', '.settings-main')
+    // Lose the profile the way CI did. Disabling touch emulation also zeroes
+    // `navigator.maxTouchPoints`; the CI page still reported 1, so state that
+    // half of the fingerprint (what the helper gates the repair on).
+    const session = await page.context().newCDPSession(page)
+    try {
+      await session.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    } finally {
+      await session.detach()
+    }
+    await page.evaluate(() => {
+      Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 1, configurable: true })
+    })
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(false)
+    expect(await page.evaluate(() => navigator.maxTouchPoints)).toBe(1)
+
+    const found = await measure(page)
+    expect(found.total, 'no controls measured after the profile was restored').toBeGreaterThan(0)
+    // The page's own media query, not a stub: the repair re-applied emulation.
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
   })
 
