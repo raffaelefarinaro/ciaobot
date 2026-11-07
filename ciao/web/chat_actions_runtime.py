@@ -22,7 +22,7 @@ import httpx
 
 from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_payload
 from ciao.provider_service import ProviderImpl
-from ciao.providers.claude import CLAUDEAI_PREFIX, ClaudeProvider
+from ciao.providers.claude import ClaudeProvider, is_claudeai_connector
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow
@@ -444,7 +444,7 @@ class ChatActionsRuntime:
             return
         for server, state in sorted(states.items()):
             if state == "needs_auth":
-                if isinstance(provider, ClaudeProvider) and server.startswith(CLAUDEAI_PREFIX):
+                if isinstance(provider, ClaudeProvider) and is_claudeai_connector(server):
                     # A claude.ai connector is in the account's (or the
                     # organization's) catalog whether or not the user ever
                     # connected it, and it is connected on claude.ai, not with

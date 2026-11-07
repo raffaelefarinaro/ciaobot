@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ciao.chat_actions import ActionState, ChatAction
-from ciao.providers.claude import CLAUDEAI_PREFIX, ClaudeProvider, get_bundled_claude_path
+from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path, is_claudeai_connector
 from ciao.terminal_scrape import first_https_url, last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_tool
@@ -95,7 +95,7 @@ class ClaudeMcpAuthFlow(ActionHandler):
         if not valid_server_name(server):
             self._set(ctx, action, "failed", error=BAD_NAME)
             return
-        if server.startswith(CLAUDEAI_PREFIX):
+        if is_claudeai_connector(server):
             # Connected on claude.ai, not with ``claude mcp login``.
             self._set(ctx, action, "failed", error=CLAUDEAI_CONNECTOR)
             return
