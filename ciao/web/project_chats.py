@@ -8212,6 +8212,14 @@ class ProjectChatManager:
         current = asyncio.current_task() if _has_running_loop() else None
         if task is not None and not task.done() and task is not current:
             task.cancel()
+        if status == "stopped" and _has_running_loop():
+            # A memory pass keeps its workspace slot while a retry is pending
+            # (MemoryPassService.on_turn_finished). A retry that ends without a
+            # turn must release it, or every queued pass waits for a restart (#2646).
+            self._spawn_detached(
+                self._memory_pass_turn_finished(chat.chat_id),
+                f"memory-pass-{chat.chat_id}",
+            )
 
     def _ensure_retry_tasks(self) -> None:
         for chat in self._chats.values():
