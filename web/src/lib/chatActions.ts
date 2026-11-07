@@ -202,3 +202,41 @@ export function safeExternalUrl(raw: unknown): string | null {
     return null
   }
 }
+
+/** A pasted address that could be a sign-in redirect to a listener on the engine's computer. The engine validates it fully. */
+export function looksLikeLoopbackCallback(text: string): boolean {
+  return /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}\//i.test(text.trim())
+}
+
+/** Plain-language copy for a refused paste-back. F adds its gws_auth reasons here. */
+export function callbackRefusalCopy(reason: string): string {
+  switch (reason) {
+    case 'state_mismatch':
+      return 'That address belongs to a different sign-in. Start again.'
+    case 'wrong_scheme':
+    case 'wrong_host':
+    case 'wrong_port':
+    case 'wrong_path':
+    case 'not_a_url':
+    case 'bad_query':
+      return 'That is not the address this sign-in is waiting for. Copy the address of the page that failed to load.'
+    case 'too_long':
+    case 'too_large':
+      return 'That address is too long. Copy only the address of the page that failed to load.'
+    case 'missing_code':
+      return 'That address has no sign-in code. Finish signing in first.'
+    case 'provider_error':
+      return 'The sign-in page reported an error. Start again.'
+    case 'already_used':
+      return 'This sign-in already received an address.'
+    case 'invalid_state':
+      return 'This sign-in is no longer waiting.'
+    case 'bad_authorize_url':
+    case 'unsupported_kind':
+      return 'This sign-in cannot take a pasted address. Start again.'
+    case 'chat_action_conflict':
+      return 'This card changed. The newer state is shown.'
+    default:
+      return 'That address could not be used.'
+  }
+}

@@ -8,18 +8,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import McpAuthBody from '../McpAuthBody.vue'
 import type { ChatAction } from '../../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const terminal = vi.hoisted(() => ({ open: vi.fn(), selectSession: vi.fn() }))
+const loopback = vi.hoisted(() => ({ page: false }))
 
 vi.mock('../../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn(), postForm: vi.fn() },
 }))
 vi.mock('../../../stores/terminal', () => ({ useTerminalStore: () => terminal }))
+vi.mock('../../../lib/loopback', () => ({ isLoopbackPage: () => loopback.page, isLoopbackHostname: () => false }))
 
 const CHAT_ID = 'chat-1'
 
@@ -58,6 +60,7 @@ beforeEach(() => {
   apiPost.mockReset()
   terminal.open.mockReset().mockResolvedValue(undefined)
   terminal.selectSession.mockReset().mockReturnValue(true)
+  loopback.page = false
 })
 
 afterEach(() => {
@@ -92,5 +95,49 @@ describe('McpAuthBody for a Claude chat', () => {
   it('shows the terminal button for Claude only', () => {
     const w = mountBody(action({ params: { server: 'notion', provider: 'opencode', url: 'https://x.example/a', session_id: 's1' } }))
     expect(terminalButton(w)).toBeUndefined()
+  })
+})
+
+describe('McpAuthBody paste-back field', () => {
+  function pasteInput(w: VueWrapper) {
+    return w.find('input[type=url]')
+  }
+
+  it('shows the paste field on a non-loopback page', () => {
+    const w = mountBody(action())
+    expect(pasteInput(w).exists()).toBe(true)
+    expect(w.findAll('button').some(b => b.text() === 'Finish sign-in')).toBe(true)
+  })
+
+  it('shows it for an OpenCode sign-in too', () => {
+    const w = mountBody(action({ params: { server: 'linear', provider: 'opencode', url: 'https://x.example/a' } }))
+    expect(pasteInput(w).exists()).toBe(true)
+  })
+
+  it('hides the paste field on the host', () => {
+    loopback.page = true
+    const w = mountBody(action())
+    expect(pasteInput(w).exists()).toBe(false)
+  })
+
+  it('hides it once used', () => {
+    const w = mountBody(action({ params: { server: 'notion', provider: 'claude', url: 'https://mcp.notion.com/authorize?a=1', session_id: 's1', callback_used: '1' } }))
+    expect(pasteInput(w).exists()).toBe(false)
+  })
+
+  it('hides it until the sign-in page is known', () => {
+    const w = mountBody(action({ params: { server: 'notion', provider: 'claude', session_id: 's1' } }))
+    expect(pasteInput(w).exists()).toBe(false)
+  })
+
+  it('says the address was sent', async () => {
+    apiPost.mockResolvedValueOnce({
+      action: action({ params: { server: 'notion', provider: 'claude', url: 'https://mcp.notion.com/authorize?a=1', session_id: 's1', callback_used: '1' } }),
+    })
+    const w = mountBody(action())
+    w.get('input[type=url]').setValue('http://localhost:1234/callback?code=a')
+    w.get('form').trigger('submit')
+    await flushPromises()
+    expect(w.emitted('notice')?.at(-1)).toEqual(['Address sent. This card updates when the sign-in finishes.'])
   })
 })

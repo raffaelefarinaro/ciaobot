@@ -49,7 +49,7 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
-import { isChatAction, normalizeChatActions } from '../lib/chatActions'
+import { chatActionErrorReason, isChatAction, normalizeChatActions } from '../lib/chatActions'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -2379,7 +2379,7 @@ export const useProjectStore = defineStore('projects', () => {
     return true
   }
 
-  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue'): string {
+  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback'): string {
     return `/api/chats/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(actionId)}/${verb}`
   }
 
@@ -2430,6 +2430,27 @@ export const useProjectStore = defineStore('projects', () => {
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
       return 'conflict'
+    }
+  }
+
+  /**
+   * Send a pasted sign-in address (the page that failed to load) to the
+   * engine. The engine's answer is adopted in every case; a refusal comes
+   * back as its reason word, anything else is rethrown.
+   */
+  async function submitChatActionCallback(
+    chatId: string, actionId: string, url: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const readStartedAt = chatReadStart()
+    try {
+      const res = await api.post<{ action?: unknown }>(chatActionPath(chatId, actionId, 'callback'), { url })
+      if (isChatAction(res?.action)) upsertChatAction(chatId, res.action, readStartedAt)
+      return { ok: true }
+    } catch (e) {
+      if (adoptChatActionConflict(chatId, e, readStartedAt)) return { ok: false, reason: 'chat_action_conflict' }
+      const reason = chatActionErrorReason(e)
+      if (reason) return { ok: false, reason }
+      throw e
     }
   }
 
@@ -7294,7 +7315,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, dismissChatAction, continueChatAction,
+    startChatAction, dismissChatAction, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,

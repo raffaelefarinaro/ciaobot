@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   actionCopy,
+  callbackRefusalCopy,
   chatActionErrorReason,
   isChatAction,
+  looksLikeLoopbackCallback,
   normalizeChatActions,
   restartTarget,
   safeExternalUrl,
@@ -208,5 +210,34 @@ describe('safeExternalUrl', () => {
     expect(safeExternalUrl('javascript:alert(1)')).toBeNull()
     expect(safeExternalUrl('not a url')).toBeNull()
     expect(safeExternalUrl(undefined)).toBeNull()
+  })
+})
+
+describe('looksLikeLoopbackCallback', () => {
+  it('accepts the Claude and OpenCode loopback callbacks', () => {
+    expect(looksLikeLoopbackCallback('http://localhost:62471/callback?code=a')).toBe(true)
+    expect(looksLikeLoopbackCallback('http://127.0.0.1:56446/callback?code=a')).toBe(true)
+    expect(looksLikeLoopbackCallback('  http://LOCALHOST:1234/x  ')).toBe(true)
+  })
+
+  it('refuses anything else', () => {
+    expect(looksLikeLoopbackCallback('https://localhost:1/x')).toBe(false)
+    expect(looksLikeLoopbackCallback('http://example.com:1/x')).toBe(false)
+    expect(looksLikeLoopbackCallback('http://localhost/callback')).toBe(false)
+    expect(looksLikeLoopbackCallback('')).toBe(false)
+  })
+})
+
+describe('callbackRefusalCopy', () => {
+  it('maps the refusal words', () => {
+    expect(callbackRefusalCopy('state_mismatch')).toContain('different sign-in')
+    expect(callbackRefusalCopy('wrong_port')).toContain('not the address')
+    expect(callbackRefusalCopy('invalid_state')).toContain('no longer waiting')
+    expect(callbackRefusalCopy('already_used')).toContain('already received')
+  })
+
+  it('has a default for any other reason', () => {
+    expect(callbackRefusalCopy('invalid_body')).toBe('That address could not be used.')
+    expect(callbackRefusalCopy('nonsense')).toBe('That address could not be used.')
   })
 })
