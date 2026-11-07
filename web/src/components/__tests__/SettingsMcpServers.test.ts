@@ -50,6 +50,17 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.findAll('.mcp-connection a').map(link => link.attributes('href'))).toEqual(['/chat/chat-one', '/chat/chat-two'])
     wrapper.unmount()
   })
+  it('shows one status row per state across open chats', async () => {
+    const { wrapper } = panel(status => {
+      status.providers[0]!.servers = [{ name: 'claude.ai Ahrefs', scope: 'account', source: 'provider', allowed: null, connections: ['a', 'b', 'c', 'd'].map(id => ({ chat_id: `chat-${id}`, state: 'needs_auth' as const, error: 'MCP server needs authentication.' })) }]
+    })
+    expect(wrapper.findAll('.mcp-connection')).toHaveLength(1)
+    expect(wrapper.get('.mcp-connection').text()).toContain('sign-in required')
+    expect(wrapper.get('.mcp-connection').text()).toContain('in 4 chats')
+    expect(wrapper.text().split('MCP server needs authentication.')).toHaveLength(2)
+    expect(wrapper.findAll('.mcp-connection a').map(link => link.attributes('href'))).toEqual(['/chat/chat-a'])
+    wrapper.unmount()
+  })
   it('uses grammatical provider chat instructions', async () => {
     const { wrapper } = panel(status => { status.providers[1]!.servers[0]!.connections = [] })
     expect(wrapper.text()).toContain('Start a chat with Claude Code in this workspace')

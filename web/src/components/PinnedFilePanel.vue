@@ -92,11 +92,13 @@
           </div>
         </div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
+        <div v-else-if="kind === 'image' && imageError" class="pfp-error" role="alert">{{ imageError }}</div>
         <img
           v-else-if="kind === 'image'"
           class="pfp-img"
-          :src="`/api/workspace-image?path=${encodeURIComponent(cleanPath)}&t=${imageTimestamp}`"
+          :src="imageSrc"
           :alt="basename"
+          @error="onImageError"
         />
         <div v-else-if="kind === 'pdf' && pptxNeedsLibreoffice" class="pfp-libreoffice-notice hint hint--warn">
           <strong>LibreOffice is required to preview PowerPoint files.</strong>
@@ -332,6 +334,7 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
+import { imageLoadErrorMessage } from '../lib/fileLoadError'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
@@ -466,6 +469,15 @@ const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
 
 const cleanPath = computed(() => props.filePath.replace(/:\d+$/, ''))
+const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(cleanPath.value)}&t=${imageTimestamp.value}`)
+// Why the current image URL failed to load; empty while it has not failed.
+const imageError = ref('')
+async function onImageError(): Promise<void> {
+  const src = imageSrc.value
+  const message = await imageLoadErrorMessage(src)
+  if (src === imageSrc.value) imageError.value = message
+}
+watch(imageSrc, () => { imageError.value = '' })
 const basename = computed(() => {
   const p = cleanPath.value
   const idx = p.lastIndexOf('/')

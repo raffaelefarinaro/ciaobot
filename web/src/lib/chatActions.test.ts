@@ -68,11 +68,11 @@ describe('normalizeChatActions', () => {
 
 describe('actionCopy', () => {
   it.each([
-    ['open', 'Sign in to linear', 'It is set up but not signed in. Sign in once and this chat can use it.', 'Sign in'],
+    ['open', 'Sign in to linear', 'linear is set up for this chat but not signed in. Sign in once so this chat can use its tools.', 'Sign in'],
     ['working', 'Starting the sign-in to linear…', 'Getting the sign-in page.', ''],
     ['waiting', 'Waiting for linear to connect…', 'Finish the sign-in in the page that opened. This card updates by itself.', 'Open the sign-in page again'],
     ['done', 'linear is connected', 'This chat can use it now.', 'Continue the chat'],
-    ['failed', "Sign-in to linear didn't finish", 'The sign-in did not finish.', 'Try again'],
+    ['failed', "Couldn't sign in to linear", 'The sign-in did not finish.', 'Try again'],
   ] as const)('gives the mcp_auth copy for %s', (state, title, why, primaryLabel) => {
     const copy = actionCopy(action({ state }))
     expect(copy).toEqual({ title, why, primaryLabel, meta: 'opencode · MCP' })

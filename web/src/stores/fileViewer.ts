@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { fileLoadErrorMessage } from '../lib/fileLoadError'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -241,11 +242,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       // to another file's path. Anything that no longer matches is discarded.
       if (seq !== fetchSeq) return true
       if (!resp.ok) {
-        if (resp.status === 404) error.value = 'File not found.'
-        else if (resp.status === 403) error.value = 'Forbidden — path is outside the workspace.'
-        else if (resp.status === 413) error.value = 'File is too large to preview (>2 MB).'
-        else if (resp.status === 415) error.value = 'Unsupported file type.'
-        else error.value = `Failed to load file (HTTP ${resp.status}).`
+        error.value = fileLoadErrorMessage(resp.status)
         return true
       }
       const text = await resp.text()

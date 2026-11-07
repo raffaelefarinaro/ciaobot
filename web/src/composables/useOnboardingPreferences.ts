@@ -6,7 +6,7 @@ import type { HandoverResponse, MemoryHandover } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
 
 export function useOnboardingPreferences(target: OnboardingTarget, workspace: string) {
-  const draft = reactive({ memoryHandover: 'off' as MemoryHandover, acknowledged: false })
+  const draft = reactive({ memoryHandover: 'off' as MemoryHandover })
   const savedHandover = ref<MemoryHandover>('off')
   const actingAvailable = ref(false)
   const pending = ref(false)
@@ -29,16 +29,16 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
       // an installation acting on its primary workspace as well as a new workspace.
       eligible = onboardingProgress(receipt, target)?.status === 'in_progress'
       draft.memoryHandover = eligible && handover.handover === 'off' ? 'all' : handover.handover
-      draft.acknowledged = false
       loaded.value = true
     } catch (reason) { error.value = apiErrorMessage(reason, 'Could not read memory handover settings.') }
     finally { pending.value = false }
   }
 
   async function saveMemoryHandover(): Promise<boolean> {
-    if (!loaded.value || pending.value || !draft.acknowledged || error.value) return false
+    if (!loaded.value || pending.value) return false
+    error.value = null
     if (!dirty.value) return true
-    pending.value = true; error.value = null
+    pending.value = true
     const value = draft.memoryHandover
     try {
       await store.updateWorkspace(workspace, { memory_handover: value })
@@ -47,5 +47,5 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
     } catch (reason) { error.value = apiErrorMessage(reason, 'The memory handover choice could not be saved.'); return false }
     finally { pending.value = false }
   }
-  return { load, draft, savedHandover, actingAvailable, dirty, pending, error, saveMemoryHandover }
+  return { load, loaded, draft, savedHandover, actingAvailable, dirty, pending, error, saveMemoryHandover }
 }

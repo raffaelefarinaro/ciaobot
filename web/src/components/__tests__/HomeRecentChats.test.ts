@@ -381,6 +381,39 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
+  it('keeps a malformed-helper pass reachable without counting it as attention', async () => {
+    const store = seedChats()
+    store.activeWorkspace = 'work'
+    store.projects = [
+      ...store.projects,
+      { project_id: 'work-memory', name: 'Memory', workspace: 'work', kind: 'memory' },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'fallback-pass', project_id: 'work-memory', title: 'Memory pass · Archived work chat',
+        created_at: timestamp(120), last_activity_at: timestamp(120), last_read_at: timestamp(300),
+        archived: false, local: true,
+        pending_question: JSON.stringify({ questions: [{ question: 'Which project is this?' }] }),
+        helper: { kind: 'legacy-memory-pass' },
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+
+    const workLane = wrapper.find('[data-lane-key="work"]')
+    // No helper means no insight row, so the ordinary chat row is the access path.
+    expect(workLane.findAll('.home-insight-row')).toHaveLength(0)
+    const passRow = workLane.findAll('.home-chat-item')
+      .find(row => row.find('.home-chat-title').text() === 'Memory pass · Archived work chat')
+    expect(passRow).toBeDefined()
+    // The status sentence counts only real attention; the pass never adds one.
+    expect(workLane.find('.home-lane-status-text').text())
+      .toBe('nothing needs your attention. 1 agent still working.')
+    wrapper.unmount()
+  })
+
   it('keeps the insight section visible when no active chats remain', async () => {
     const store = seedChats(false)
     store.activeWorkspace = 'work'

@@ -34,7 +34,7 @@ Not for:
 
 ### Reloading tools
 
-`/mcp`, `/reload-plugins` and the other Claude Code / opencode terminal slash commands do not exist in Ciaobot. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`.
+`/mcp`, `/reload-plugins` and the other Claude Code / opencode terminal slash commands do not exist in Ciaobot. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`. An MCP server that needs sign-in gets a sign-in card in the chat; do not ask the user to reconnect or reload for it. Raise it with `ciao chat needs-action mcp_auth --server <name>` when you see a tool fail for lack of sign-in.
 
 ### Long-running commands
 

@@ -10,8 +10,9 @@
 // - chat candidates come from `projects.activeChatsAll` filtered to the active
 //   workspace's projects, plus the existing predicates named on ChatCandidate;
 // - `activityAt` is `chat.last_activity_at`;
-// - `quietHelper` is `isMemoryPassChat(chat)`. Memory work reaches the inbox
-//   through its own source, never as a chat row.
+// - `quietHelper` is `isMemoryPassChat(chat, project)`. Memory passes never
+//   reach the inbox, blocked or not: their lifecycle lives on Home's
+//   memory-insight rows, not on a notification surface.
 //
 // `needsYou` outranks `unread`: a chat that is blocked on the owner is one row
 // in "Needs you", with the unread flag as an indicator on it. It never also
@@ -51,7 +52,6 @@ export type NotificationKind =
   | 'missed-schedules'
   | 'automation-attention'
   | 'task-review'
-  | 'memory-attention'
   | 'update-task'
 export type NotificationDestination =
   | { kind: 'chat'; chatId: string }
@@ -127,16 +127,6 @@ export interface TaskReviewCandidate {
   title: string
 }
 
-/** A blocking memory-insight row (`projects.memoryInsightRows`, blocking only). */
-export interface MemoryInsightCandidate {
-  sourceChatId: string
-  passChatId: string
-  title: string
-  phase: 'needsYou' | 'attention'
-  question: string
-  timestamp: string
-}
-
 /** An update task for the workspace on screen (`housekeeping.updateTasks`). */
 export interface UpdateTaskCandidate {
   id: string
@@ -160,7 +150,6 @@ export interface NotificationInboxInput {
   operators?: readonly OperatorCandidate[]
   schedules?: readonly ScheduleCandidate[]
   reviewTasks?: readonly TaskReviewCandidate[]
-  memoryInsights?: readonly MemoryInsightCandidate[]
   updateTasks?: readonly UpdateTaskCandidate[]
   sources: readonly SourceSnapshot[]
 }
@@ -358,30 +347,6 @@ function taskReviewRow(t: TaskReviewCandidate, ws: string, freshness: 'fresh' | 
   }
 }
 
-function memoryInsightRow(m: MemoryInsightCandidate, freshness: 'fresh' | 'stale'): NotificationRow {
-  const needsYou = m.phase === 'needsYou'
-  const row: NotificationRow = {
-    key: `memory:${m.sourceChatId}`,
-    kind: 'memory-attention',
-    section: 'needsYou',
-    urgency: needsYou ? 'input' : 'failure',
-    source: 'chats',
-    title: plainText(`Memory update: ${m.title}`, Number.MAX_SAFE_INTEGER),
-    reason: plainText(
-      needsYou
-        ? m.question || 'The memory update is waiting for your answer or approval'
-        : 'The memory update needs attention',
-      REASON_MAX,
-    ),
-    destination: { kind: 'chat', chatId: m.passChatId },
-    unread: false,
-    freshness,
-  }
-  const ts = m.timestamp.trim()
-  if (ts) row.timestamp = ts
-  return row
-}
-
 function updateTaskRow(t: UpdateTaskCandidate, freshness: 'fresh' | 'stale'): NotificationRow | null {
   if (!isVisibleUpdateTask(t)) return null
   // A live question or permission: the chat row owns it.
@@ -486,11 +451,6 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     add(taskReviewRow(t, ws, freshnessOf('chats')))
     reviewedTaskIds.add(t.taskId)
   }
-  const passChatIds = new Set<string>()
-  for (const m of input.memoryInsights ?? []) {
-    add(memoryInsightRow(m, freshnessOf('chats')))
-    passChatIds.add(m.passChatId)
-  }
 
   const updateTaskChatIds = new Set<string>()
   for (const t of input.updateTasks ?? []) {
@@ -504,7 +464,6 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     // The unread result of a delegated task is the same item as its review row.
     // A live question, a failure or a delegated wait stays.
     if (c.reviewTaskId && reviewedTaskIds.has(c.reviewTaskId) && !c.needsYou && !c.needsInput && !c.failed) continue
-    if (passChatIds.has(c.chatId)) continue
     // The failed chat of an incident, and its unread-result twin, are the same
     // problem as the schedule row. A live question or a delegated wait stays.
     if (c.scheduleId && incidentSchedules.has(c.scheduleId) && isIncidentTwin(c)) continue

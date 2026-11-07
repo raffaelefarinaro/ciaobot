@@ -203,12 +203,12 @@ describe('ChatLayout', () => {
 
     // The strip renders once per home branch. Only the no-pinned-file branch
     // is mounted here (no pinned file), so exactly one strip is on screen.
-    expect(wrapper.findAll('.housekeeping')).toHaveLength(1)
-    expect(wrapper.find('.housekeeping').text()).toContain('A condition needs you')
+    expect(wrapper.findAll('.needs-you')).toHaveLength(1)
+    expect(wrapper.find('.needs-you').text()).toContain('A condition needs you')
     wrapper.unmount()
   })
 
-  describe('Home alerts placement', () => {
+  describe('Home "Needs you" placement', () => {
     const originalObserver = globalThis.ResizeObserver
 
     afterEach(() => {
@@ -220,7 +220,6 @@ describe('ChatLayout', () => {
     async function mountHome(paneWidth: number | null) {
       disconnect.mockReset()
       if (paneWidth === null) {
-        // jsdom has none; the pane width stays unknown and `isMobile` decides.
         ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = undefined
       } else {
         globalThis.ResizeObserver = class {
@@ -289,34 +288,40 @@ describe('ChatLayout', () => {
       return wrapper
     }
 
-    it("puts Home's alerts in the rail when the pane is wide", async () => {
+    it.each([1200, 941, 940, 600, null])(
+      'lists what needs you in the main column, above the composer, at pane width %s',
+      async (width) => {
+        const wrapper = await mountHome(width)
+        expect(wrapper.find('.home-main .needs-you').exists()).toBe(true)
+        expect(wrapper.find('.home-rail .needs-you').exists()).toBe(false)
+        const main = wrapper.get('.home-main').html()
+        expect(main.indexOf('class="needs-you"')).toBeGreaterThan(-1)
+        expect(main.indexOf('class="needs-you"')).toBeLessThan(main.indexOf('home-intake'))
+        wrapper.unmount()
+      },
+    )
+
+    it('keeps only At a glance in the rail', async () => {
       const wrapper = await mountHome(1200)
-      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(true)
-      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(false)
-      const rail = wrapper.get('.home-rail').html()
-      expect(rail.indexOf('class="housekeeping"')).toBeGreaterThan(-1)
-      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-review-summary'))
+      const rail = wrapper.get('.home-rail')
+      expect(rail.find('.home-review-summary').exists()).toBe(true)
+      expect(rail.find('.needs-you').exists()).toBe(false)
+      expect(rail.find('.home-notice-reopen').exists()).toBe(false)
+      expect(rail.find('.update-tasks').exists()).toBe(false)
       wrapper.unmount()
     })
 
-    it("keeps Home's alerts under the composer when the pane is narrow", async () => {
-      const wrapper = await mountHome(600)
-      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
-      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+    it('has no "+ workspace chat" buttons, with or without chats', async () => {
+      const wrapper = await mountHome(1200)
+      expect(wrapper.find('.empty-actions').exists()).toBe(false)
+      expect(wrapper.text()).not.toMatch(/\+ \w+ chat/)
       wrapper.unmount()
     })
 
-    it('puts the alerts in the rail at 941px and under the composer at 940px', async () => {
-      // `@container chat-pane (max-width: 940px)` is inclusive.
-      const edge = await mountHome(940)
-      expect(edge.find('.home-main .housekeeping').exists()).toBe(true)
-      expect(edge.find('.home-rail .housekeeping').exists()).toBe(false)
-      edge.unmount()
-
-      const over = await mountHome(941)
-      expect(over.find('.home-rail .housekeeping').exists()).toBe(true)
-      expect(over.find('.home-main .housekeeping').exists()).toBe(false)
-      over.unmount()
+    it('is top-aligned in both states: no activity modifier decides the alignment', async () => {
+      const wrapper = await mountHome(1200)
+      expect(wrapper.get('.empty-state').classes()).toEqual(['empty-state'])
+      wrapper.unmount()
     })
 
     it('stops observing the pane on unmount', async () => {
@@ -324,14 +329,6 @@ describe('ChatLayout', () => {
       expect(disconnect).not.toHaveBeenCalled()
       wrapper.unmount()
       expect(disconnect).toHaveBeenCalled()
-    })
-
-    it('falls back to the viewport width without a ResizeObserver', async () => {
-      // beforeEach sets innerWidth to 390, so `isMobile` is true.
-      const wrapper = await mountHome(null)
-      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
-      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
-      wrapper.unmount()
     })
   })
 
@@ -2696,14 +2693,11 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  // The global "+ personal chat / + work chat" pair used to stay on screen at
-  // narrow widths, where it duplicated each lane's own "+ new" and spent a
-  // saturated fill on a non-blocking action.
-  it('drops the global new-chat buttons once any chat exists', async () => {
+  // The global "+ personal chat / + work chat" pair is gone: the composer is
+  // Home's one way to start work, and each lane has its own "+ new".
+  it('has no global new-chat buttons', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.empty-actions').exists()).toBe(false)
-    // The composer is home's one way to start work; the selected lane no
-    // longer repeats it with its own "+ new".
     expect(wrapper.find('.home-intake-new').exists()).toBe(true)
     wrapper.unmount()
   })
