@@ -388,6 +388,17 @@ export class TerminalRenderer {
   }
 
   /**
+   * True while the shell on screen accepts a bracketed paste (it sent
+   * `CSI ? 2004 h`): text wrapped in `ESC[200~` … `ESC[201~` is then
+   * inserted at the prompt, newlines included, and nothing runs. False
+   * before the screen exists and after it is disposed.
+   */
+  get bracketedPasteMode(): boolean {
+    if (this.#disposed) return false
+    return this.#terminal?.modes.bracketedPasteMode ?? false
+  }
+
+  /**
    * Tear the screen down.
    *
    * The observer is disconnected, the terminal is disposed, and every write

@@ -94,6 +94,8 @@ export interface TerminalStatus {
 export interface TerminalRenderer {
   /** A physical screen belongs to one session for its entire lifetime. */
   readonly sessionId: string
+  /** Whether the shell on screen accepts a bracketed paste (see `bracketedPasteMode()`). */
+  readonly bracketedPasteMode?: boolean
   write(bytes: Uint8Array): Promise<void>
   reset(): void
 }
@@ -1504,6 +1506,16 @@ export const useTerminalStore = defineStore('terminal', () => {
     return Promise.resolve(true)
   }
 
+  /**
+   * Whether the shell on the visible screen accepts a bracketed paste. Only
+   * the renderer drawing the active session can answer; anything else is false.
+   */
+  function bracketedPasteMode(): boolean {
+    const view = renderer
+    if (!view || view.sessionId !== activeSession.value?.session_id) return false
+    return view.bracketedPasteMode === true
+  }
+
   /** Send raw bytes to the shell. */
   function sendInput(bytes: Uint8Array): boolean {
     const ws = socket
@@ -1593,6 +1605,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     attachRenderer,
     detachRenderer,
     reconnect,
+    bracketedPasteMode,
     sendInput,
     resize,
     dispose,
