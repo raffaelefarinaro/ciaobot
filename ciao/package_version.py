@@ -42,6 +42,16 @@ def _release_page_request(url: str) -> urllib.request.Request:
     )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Decline redirects so /releases/latest answers with its 302 and Location header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 def _tag_from_url(url: str) -> str:
     """Extract the release version from a ``/releases/tag/<tag>`` URL."""
     match = re.search(r"/releases/tag/([^/?#]+)", url or "")
@@ -72,22 +82,23 @@ def package_status(
     *,
     current_version: str = __version__,
     repo: str | None = None,
-    opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
+    opener: Callable[..., AbstractContextManager[Any]] = _NO_REDIRECT_OPENER.open,
     timeout: float = 2.5,
 ) -> dict[str, object]:
     """Return installed and latest (GitHub release) package versions.
 
-    Resolves the latest version by following the public ``/releases/latest``
-    redirect on github.com rather than calling the REST API, so the recurring
-    update check is not subject to the API's unauthenticated rate limit.
+    Resolves the latest version from the public ``/releases/latest`` redirect on
+    github.com rather than calling the REST API, so the recurring update check is
+    not subject to the API's unauthenticated rate limit. The redirect is read,
+    not followed: the 302 ``Location`` already names the release tag, so the
+    release page is never downloaded.
     """
     source = latest_release_redirect_url(repo)
     latest = ""
     error = ""
     try:
         with opener(_release_page_request(source), timeout=timeout) as response:
-            # urlopen follows the 302 to /releases/tag/<tag>; the final URL
-            # carries the version, so the response body is never read.
+            # A 200 (no redirect followed) still carries the final URL.
             if hasattr(response, "geturl"):
                 final_url = response.geturl()
             else:
@@ -96,10 +107,16 @@ def package_status(
         if not latest:
             error = "Could not determine the latest release."
     except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            # The declined redirect: the tag is in its Location header.
+            location = exc.headers.get("Location", "") if exc.headers else ""
+            latest = _tag_from_url(location)
+            if not latest:
+                error = "Could not determine the latest release."
         # GitHub returns 403 (and sometimes 429) with a "rate limit exceeded"
         # reason under heavy load. Report it as a transient condition rather
         # than a raw HTTP error.
-        if exc.code in (403, 429):
+        elif exc.code in (403, 429):
             error = "GitHub rate limit reached; the update check will retry later."
         else:
             error = f"HTTP {exc.code}: {exc.reason}"
@@ -124,7 +141,7 @@ def make_cached_package_status(
     fetch: Callable[[], dict[str, object]] = package_status,
     ttl_ok: float = 6 * 3600.0,
     ttl_error: float = 300.0,
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] | None = None,
 ) -> Callable[[], dict[str, object]]:
     """Return a zero-arg callable that caches ``fetch`` results in-process.
 
@@ -135,13 +152,24 @@ def make_cached_package_status(
     result is served instead and a fresh attempt is retried after
     ``ttl_error`` seconds, so an intermittent rate limit never surfaces as an
     "Update check failed" banner once a good version has been seen.
+
+    Expiry is measured on the wall clock (``time.time``, looked up on each
+    call), not ``time.monotonic``: on macOS the monotonic clock stops while the
+    machine sleeps, so a mostly-asleep Mac would serve its first answer for
+    days. An entry also counts as expired when the clock has gone backwards
+    past its fetch time, so a backwards jump cannot freeze the cache.
     """
-    state: dict[str, Any] = {"value": None, "good": None, "expires": 0.0}
+    state: dict[str, Any] = {
+        "value": None,
+        "good": None,
+        "expires": 0.0,
+        "fetched_at": 0.0,
+    }
 
     def cached() -> dict[str, object]:
-        now = clock()
+        now = (clock or time.time)()
         current = state["value"]
-        if current is not None and now < state["expires"]:
+        if current is not None and state["fetched_at"] <= now < state["expires"]:
             return cast("dict[str, object]", current)
 
         result = fetch()
@@ -149,10 +177,12 @@ def make_cached_package_status(
             # Serve the last successful answer; retry again soon.
             state["value"] = state["good"]
             state["expires"] = now + ttl_error
+            state["fetched_at"] = now
             return cast("dict[str, object]", state["good"])
 
         state["value"] = result
         state["expires"] = now + (ttl_ok if not result.get("error") else ttl_error)
+        state["fetched_at"] = now
         if not result.get("error"):
             state["good"] = result
         return result
