@@ -161,6 +161,62 @@ function permissionModeCopy(action: ChatAction): ActionCopy {
   }
 }
 
+/** The ten macOS privacy panes a `system_setting` card may open. The same titles as the engine. */
+export const SYSTEM_SETTING_TITLES: Readonly<Record<string, string>> = {
+  full_disk_access: 'Full Disk Access',
+  calendars: 'Calendars',
+  contacts: 'Contacts',
+  reminders: 'Reminders',
+  photos: 'Photos',
+  screen_recording: 'Screen & System Audio Recording',
+  accessibility: 'Accessibility',
+  automation: 'Automation',
+  camera: 'Camera',
+  microphone: 'Microphone',
+}
+
+function systemSettingCopy(action: ChatAction): ActionCopy {
+  const setting = action.params.setting ?? ''
+  const title: string | undefined = SYSTEM_SETTING_TITLES[setting]
+  const meta = 'macOS · Privacy & Security'
+  const fda = setting === 'full_disk_access'
+  if (title === undefined) {
+    return {
+      title: 'Change a macOS privacy setting',
+      why: action.params.note || 'Ciaobot needs a macOS privacy permission for what the agent is doing.',
+      primaryLabel: action.state === 'done' ? 'Continue the chat' : '',
+      meta,
+    }
+  }
+  if (action.state === 'done') {
+    return {
+      title: 'Turn it on in System Settings, then continue',
+      why: fda
+        ? 'Ciaobot picks up Full Disk Access after it restarts. Restart it from Settings, then continue.'
+        : 'Continue tells the agent to try again.',
+      primaryLabel: 'Continue the chat',
+      meta,
+    }
+  }
+  if (action.state === 'failed') {
+    return {
+      title: 'System Settings did not open',
+      why: action.error || 'System Settings could not be opened.',
+      primaryLabel: 'Try again',
+      meta,
+    }
+  }
+  const reason = action.params.note || `Ciaobot needs ${title} permission on this Mac for what the agent is doing.`
+  return {
+    title: `Allow ${title} in System Settings`,
+    why: fda
+      ? `${reason} Turn on Ciaobot Server in the list. If it is not listed, add it with +. The change applies after Ciaobot restarts.`
+      : reason,
+    primaryLabel: 'Open System Settings',
+    meta,
+  }
+}
+
 /** The card copy for an action, or null for a kind with no copy yet. */
 export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
@@ -172,6 +228,8 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
       return restartCopy(action)
     case 'permission_mode':
       return permissionModeCopy(action)
+    case 'system_setting':
+      return systemSettingCopy(action)
     default:
       return null
   }

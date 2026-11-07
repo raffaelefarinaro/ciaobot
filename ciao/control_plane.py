@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -2929,8 +2930,9 @@ class CiaoControlPlane:
                 "invalid_action", f"The request was refused ({exc.reason})."
             ) from None
         # Kind-specific raise-time refusals, on validated params, go here:
-        # F (gws_auth: only the workspace's linked profile), J (system_setting:
-        # macOS hosts only).
+        # F (gws_auth: only the workspace's linked profile).
+        if kind == "system_setting" and sys.platform != "darwin":
+            raise ControlPlaneError("invalid_action", "System Settings panes exist only when Ciaobot runs on macOS.")
         if kind == "permission_mode" and validated["mode"] == self.chat_mode(principal):
             raise ControlPlaneError("invalid_action", f"This chat is already in {validated['mode']} mode.")
         try:

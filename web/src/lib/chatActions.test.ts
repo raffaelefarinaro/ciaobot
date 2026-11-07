@@ -5,6 +5,7 @@ import {
   isChatAction,
   normalizeChatActions,
   restartTarget,
+  SYSTEM_SETTING_TITLES,
   safeExternalUrl,
 } from './chatActions'
 import type { ChatAction } from './types'
@@ -176,6 +177,56 @@ describe('restart copy', () => {
     const copy = actionCopy(action({ kind: 'permission_mode', params: { mode: 'manual' } }))
     expect(copy?.title).toBe('Permission change requested')
     expect(copy?.primaryLabel).toBe('')
+  })
+})
+
+describe('system_setting copy', () => {
+  const setting = (over: Partial<ChatAction> = {}) =>
+    action({ kind: 'system_setting', origin: 'agent', params: { setting: 'full_disk_access' }, ...over })
+
+  it('asks for the pane on the Mac, with the host app to turn on', () => {
+    const copy = actionCopy(setting())
+    expect(copy?.title).toBe('Allow Full Disk Access in System Settings')
+    expect(copy?.why).toContain('Ciaobot Server')
+    expect(copy?.primaryLabel).toBe('Open System Settings')
+    expect(copy?.meta).toBe('macOS · Privacy & Security')
+  })
+
+  it('shows the agent note as the reason', () => {
+    const copy = actionCopy(setting({ params: { setting: 'full_disk_access', note: 'to read Mail' } }))
+    expect(copy?.why.startsWith('to read Mail')).toBe(true)
+  })
+
+  it('tells a done Full Disk Access card to restart from Settings', () => {
+    const copy = actionCopy(setting({ state: 'done' }))
+    expect(copy?.why).toContain('Restart it from Settings')
+    expect(copy?.primaryLabel).toBe('Continue the chat')
+  })
+
+  it('tells a done card for another pane to continue', () => {
+    const copy = actionCopy(setting({ state: 'done', params: { setting: 'camera' } }))
+    expect(copy?.why).toBe('Continue tells the agent to try again.')
+    expect(copy?.primaryLabel).toBe('Continue the chat')
+  })
+
+  it('shows the error of a failed open, with Try again', () => {
+    const copy = actionCopy(setting({ state: 'failed', error: 'boom', params: { setting: 'camera' } }))
+    expect(copy?.title).toBe('System Settings did not open')
+    expect(copy?.why).toBe('boom')
+    expect(copy?.primaryLabel).toBe('Try again')
+  })
+
+  it('gives no Open for a setting the PWA does not know', () => {
+    const copy = actionCopy(setting({ params: { setting: 'nope' } }))
+    expect(copy?.title).toBe('Change a macOS privacy setting')
+    expect(copy?.primaryLabel).toBe('')
+  })
+
+  it('has the ten engine titles and no others', () => {
+    expect(Object.keys(SYSTEM_SETTING_TITLES).sort()).toEqual([
+      'accessibility', 'automation', 'calendars', 'camera', 'contacts', 'full_disk_access',
+      'microphone', 'photos', 'reminders', 'screen_recording',
+    ])
   })
 })
 

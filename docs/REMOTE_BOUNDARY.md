@@ -194,7 +194,7 @@ carried by the session.
   (scheme, host and effective port);
   `GET /api/workspace-move` is session-only and reports `local: false` for a
   non-host browser;
-  `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
+  `/api/workspace-open`, and starting a `system_setting` needs-you card (which runs `open` on a constant System Settings URL), check the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
 

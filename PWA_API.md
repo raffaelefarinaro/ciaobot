@@ -1880,6 +1880,8 @@ Cards live in memory only. Archive, a new session and a handover clear them, and
 
 The OpenCode sign-in runs through OpenCode's V2 integration API. After a turn, detection checks `/api/mcp`; a server that reports `needs_auth` gets a card in state `open`. Start moves it to `waiting` with the authorize URL in `params.url`. The engine polls every 2 seconds until the server reports `connected` (the card becomes `done`), or until the attempt fails or expires (the card becomes `failed` with its first error line). After 10 minutes the card is `failed` with "Timed out waiting for sign-in". Continue on a `done` card wakes the chat once.
 
+A `system_setting` card (`params.setting`, one of the ten macOS privacy panes, plus optional `note`) opens that System Settings pane on the engine's own Mac when started and becomes `done`. Start is refused 400 `not_local` for a caller that is not a loopback peer (`is_loopback_client`), and the card is left unchanged; on a non-macOS host it becomes `failed`.
+
 Agents may raise a card with `ciao chat needs-action`, but they never start, dismiss or continue one; those are the card's own buttons, on a signed session.
 
 **WebSocket events**

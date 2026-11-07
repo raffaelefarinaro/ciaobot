@@ -239,13 +239,38 @@ def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+#: The macOS privacy panes a `system_setting` card may open. Each maps to a constant URL in the runtime.
+SYSTEM_SETTINGS: tuple[str, ...] = (
+    "full_disk_access", "calendars", "contacts", "reminders", "photos",
+    "screen_recording", "accessibility", "automation", "camera", "microphone",
+)
+
+
+def _validate_system_setting(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `system_setting` kind: a macOS Privacy & Security pane, by name from a closed set."""
+    if set(raw) - {"setting", "note"}:
+        raise ChatActionError("unknown_param")
+    if "setting" not in raw:
+        raise ChatActionError("missing_param")
+    setting = raw["setting"]
+    if not isinstance(setting, str):
+        raise ChatActionError("invalid_type")
+    if setting not in SYSTEM_SETTINGS:  # exact case, no strip
+        raise ChatActionError("invalid_param")
+    params = {"setting": setting}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    return params
+
+
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
     "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
+    "system_setting": _validate_system_setting,
 }
-_KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
+_KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",), "system_setting": ("setting",)}
 
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
