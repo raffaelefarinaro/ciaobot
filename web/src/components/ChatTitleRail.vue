@@ -17,10 +17,7 @@
       ref="strip"
       class="title-rail-strip"
       @scroll.passive="onScroll"
-      @wheel.passive="onWheel"
-      @touchstart.passive="onTouchStart"
-      @touchend.passive="onTouchEnd"
-      @touchcancel.passive="onTouchCancel"
+      @wheel="onWheel"
     >
       <button
         v-for="entry in items"
@@ -164,10 +161,7 @@ function trackPosition(): void {
   position.value = el && el.clientWidth ? el.scrollLeft / el.clientWidth : neighbours.value.index
   emit('lean', Math.max(-1, Math.min(1, position.value - neighbours.value.index)))
 }
-let touchActive = false
 let gestureSeen = false
-let nativeTouchPan = false
-let touchCanceled = false
 let timer: ReturnType<typeof setTimeout> | null = null
 
 function itemEls(): HTMLElement[] {
@@ -210,14 +204,18 @@ defineExpose({ slide })
 function settle(): void {
   timer = null
   moving.value = false
-  if (sliding || touchActive || !gestureSeen || !strip.value) return
+  if (sliding || !gestureSeen || !strip.value) return
   gestureSeen = false
   const i = settledIndex(
     strip.value.scrollLeft + strip.value.clientWidth / 2,
     itemEls().map(e => e.offsetLeft + e.offsetWidth / 2),
   )
   const target = props.items[i]
-  if (target && target.chatId !== props.currentId) emit('select', target.chatId)
+  if (target && target.chatId !== props.currentId) { emit('select', target.chatId); return }
+  // Settled on the current chat but off centre (a wheel nudge short of halfway): spring back.
+  // Without scroll-snap nothing else re-centres it.
+  const cur = itemEls()[neighbours.value.index]
+  if (cur && Math.abs(strip.value.scrollLeft - (cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2)) > 1) restoreCurrentTitle()
 }
 
 function onScroll(): void {
@@ -227,35 +225,14 @@ function onScroll(): void {
   timer = setTimeout(settle, RAIL_SETTLE_MS)
 }
 
-// Only a sideways wheel is a strip gesture; a vertical one is the page scrolling.
+// Only a sideways wheel is a strip gesture; a vertical one is the page scrolling. The strip
+// is not a native scroller, so a sideways wheel moves it here, then settles like a swipe.
 function onWheel(e: WheelEvent): void {
-  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) gestureSeen = true
-}
-
-function onTouchStart(): void {
-  if (!touchActive) touchCanceled = false
-  touchActive = true
-  if (!touchCanceled) gestureSeen = true
-}
-
-function onTouchEnd(e: TouchEvent): void {
-  if (e.touches?.length) return
-  touchActive = false
-  nativeTouchPan = false
-  if (touchCanceled) { touchCanceled = false; return }
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || !strip.value || sliding) return
+  e.preventDefault()
+  gestureSeen = true
+  strip.value.scrollLeft += e.deltaX
   onScroll()
-}
-
-function onTouchCancel(e: TouchEvent): void {
-  touchCanceled = true
-  touchActive = !!e.touches?.length
-  nativeTouchPan = touchActive
-  gestureSeen = false
-  if (timer) { clearTimeout(timer); timer = null }
-  moving.value = false
-  if (drag?.axis === 'y') emit('pullEnd', 0, 0)
-  drag = null
-  restoreCurrentTitle()
 }
 
 watch(
@@ -267,15 +244,15 @@ watch(
 /**
  * Pointer gestures on the title. After 8px the drag locks to an axis:
  * - down: the chat follows the finger (`pull`), and on release it closes or springs back (`pullEnd`);
- * - sideways with a mouse: the strip follows the pointer like a finger (touch already
- *   scrolls the strip natively), then settles on the neighbour or back.
+ * - sideways, for every pointer type: the strip follows the pointer, then settles on the
+ *   neighbour or back. The strip is not a native scroller, so touch goes through here too.
  * An upward drag does nothing, so the page keeps its own scrolling.
  */
 const PULL_LOCK_PX = 8
-let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'native-x' | 'none' | null; mouse: boolean } | null = null
+let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'none' | null } | null = null
 function onPointerDown(e: PointerEvent): void {
-  if (e.button !== 0 || sliding || drag || nativeTouchPan) return
-  drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), left0: strip.value?.scrollLeft ?? 0, axis: null, mouse: e.pointerType === 'mouse' }
+  if (e.button !== 0 || sliding || drag) return
+  drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), left0: strip.value?.scrollLeft ?? 0, axis: null }
 }
 function onPointerMove(e: PointerEvent): void {
   if (!drag || e.pointerId !== drag.id) return
@@ -283,9 +260,8 @@ function onPointerMove(e: PointerEvent): void {
   const dy = e.clientY - drag.y0
   if (!drag.axis) {
     if (Math.hypot(dx, dy) < PULL_LOCK_PX) return
-    drag.axis = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'y' : 'none') : (drag.mouse ? 'x' : 'native-x')
+    drag.axis = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'y' : 'none') : 'x'
     if (drag.axis === 'x' || drag.axis === 'y') root.value?.setPointerCapture(drag.id)
-    if (drag.axis === 'x' && strip.value) strip.value.style.scrollSnapType = 'none'
   }
   if (drag.axis === 'y') {
     emit('pull', Math.max(0, dy))
@@ -303,10 +279,6 @@ function onPointerUp(e: PointerEvent): void {
   const velocity = (d.axis === 'y' ? dy : Math.abs(dx)) / Math.max(1, performance.now() - d.t0)
   if (d.axis === 'y') emit('pullEnd', Math.max(0, dy), velocity)
   if (d.axis === 'x' && strip.value) {
-    // Snapping stays off until the slide (or the spring back) has finished: turned
-    // back on here it would snap the strip to the old title for a frame first, and
-    // the transcript would lean back with it.
-    restoreSnapAfterSlide()
     const width = strip.value.clientWidth || 1
     const passed = Math.abs(dx) > width * 0.25 || (velocity > 0.45 && Math.abs(dx) > 30)
     const direction = dx < 0 ? 1 : -1
@@ -321,13 +293,6 @@ function onPointerCancel(e: PointerEvent): void {
   if (!drag || e.pointerId !== drag.id) return
   const d = drag
   drag = null
-  // On touch, the browser cancels pointer events when it takes over the
-  // strip's native horizontal pan. Let touchend and scroll settling finish it.
-  if (!d.mouse && (d.axis === 'native-x' || (d.axis === null && touchActive))) {
-    nativeTouchPan = true
-    return
-  }
-  touchActive = false
   gestureSeen = false
   if (timer) { clearTimeout(timer); timer = null }
   moving.value = false
@@ -335,18 +300,8 @@ function onPointerCancel(e: PointerEvent): void {
   if (d.axis !== 'y') restoreCurrentTitle()
 }
 
-let snapTimer: ReturnType<typeof setTimeout> | null = null
-function restoreSnapAfterSlide(): void {
-  if (snapTimer) clearTimeout(snapTimer)
-  snapTimer = setTimeout(() => {
-    snapTimer = null
-    if (strip.value) strip.value.style.scrollSnapType = ''
-  }, RAIL_SLIDE_MS + 120)
-}
-
 function restoreCurrentTitle(): void {
   if (!strip.value) return
-  restoreSnapAfterSlide()
   const cur = itemEls()[neighbours.value.index]
   strip.value.scrollTo({ left: cur ? cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2 : 0, behavior: 'smooth' })
   emit('lean', 0)
@@ -366,8 +321,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (snapTimer) clearTimeout(snapTimer)
-  snapTimer = null
   headerObserver?.disconnect()
   headerObserver = null
   if (sliding) clearTimeout(sliding)
@@ -383,11 +336,12 @@ onBeforeUnmount(() => {
 /* The current title is centred in the space between close and the header actions,
    with its project under it. The position is a segmented track on the header's
    bottom edge, so nothing but the title and project sits on the text lines. */
-.title-rail { touch-action: pan-x; position: relative; display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
-.title-rail-strip { position: relative; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory;
-  overscroll-behavior-x: contain; touch-action: pan-x; scrollbar-width: none; min-width: 0; }
-.title-rail-strip::-webkit-scrollbar { display: none; }
-.title-rail-item { flex: 0 0 100%; scroll-snap-align: start; scroll-snap-stop: always; min-height: var(--touch); min-width: 0;
+.title-rail { touch-action: pinch-zoom; position: relative; display: flex; flex-direction: column; justify-content: center; min-width: 0; flex: 1 1 auto; }
+/* Never make this strip user-scrollable (overflow auto or scroll): on iOS 26+ a native
+   scroller near the top edge gets the system's soft scroll-edge blur over the title.
+   Swipes are handled by the pointer and wheel handlers; scrollLeft still moves it. */
+.title-rail-strip { position: relative; display: flex; overflow: hidden; touch-action: pinch-zoom; min-width: 0; }
+.title-rail-item { flex: 0 0 100%; min-height: var(--touch); min-width: 0;
   padding: 0 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 0; background: none; color: var(--fg);
   font: inherit; text-align: center; cursor: default; }
 .title-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-xs); }
