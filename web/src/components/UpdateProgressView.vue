@@ -388,10 +388,12 @@ onUnmounted(() => {
   display: none;
 }
 
-/* A panel is not a window: bound the job list so the card keeps its shape, and
-   let it scroll inside that bound rather than grow without one. */
+/* A panel is not a window: the page scrolls, so the card grows to its rows.
+   The job list is a fixed twelve phases (fifteen on a rollback), and a bound
+   on it clipped the last rows behind an inner scrollbar. */
 .update-progress-overlay--inline .update-progress-content--job {
-  max-height: 20rem;
+  max-height: none;
+  overflow: visible;
 }
 
 .update-progress-content {
@@ -414,8 +416,11 @@ onUnmounted(() => {
 }
 
 /* The app's focus ring (DESIGN: 2px accent) does not reach a region, so the
-   overlay's focus target states itself the same way a control would. */
-.update-progress-content:focus {
+   overlay's focus target states itself the same way a control would — for
+   keyboard focus only. Focus moved here after a pointer click is not a ring the
+   user asked for, and drew a frame around the whole log. */
+.update-progress-content:focus { outline: none; }
+.update-progress-content:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
