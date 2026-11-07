@@ -261,6 +261,87 @@ async def test_callback_delegates_to_the_manager() -> None:
         assert refused_pcm.updates == []
 
 
+class _ErroringRelogin(FakeRelogin):
+    """A paste is accepted, but the exchange it starts ends in an error."""
+
+    def complete_from_redirect(self, profile: str, url: str) -> dict[str, Any]:
+        self.complete_calls.append((profile, url))
+        self.status_result = {"status": "error", "error": "boom"}
+        return self.status_result
+
+
+class _ValidatingPcm(FakePcm):
+    """Applies the control plane's params check to a waiting update, as the real card does."""
+
+    def update_action(
+        self,
+        chat_id: str,
+        action_id: str,
+        *,
+        state: str,
+        params_update: dict[str, object] | None = None,
+        error: str = "",
+    ) -> dict[str, object] | None:
+        if state == "waiting":
+            validate_params(
+                "gws_auth", {"profile": self.action.params["profile"], **(params_update or {})}
+            )
+        return super().update_action(
+            chat_id, action_id, state=state, params_update=params_update, error=error
+        )
+
+
+@pytest.mark.asyncio
+async def test_callback_without_a_manager_is_no_pending_sign_in() -> None:
+    pcm = FakePcm(_action("waiting"))
+
+    with pytest.raises(ChatActionError) as exc:
+        await GwsAuthHandler().callback(
+            _ctx(pcm, None), _action("waiting"), "http://127.0.0.1:5555/?code=a&state=b"
+        )
+
+    assert exc.value.reason == "no_pending_sign_in"
+    assert pcm.updates == []
+
+
+@pytest.mark.asyncio
+async def test_a_paste_whose_exchange_errors_ends_the_card_failed() -> None:
+    url = "http://127.0.0.1:5555/?code=a&state=b"
+    relogin = _ErroringRelogin()
+    pcm = FakePcm(_action("waiting"))
+
+    await GwsAuthHandler().callback(_ctx(pcm, relogin), _action("waiting"), url)
+
+    assert relogin.complete_calls == [("work", url)]
+    assert pcm.last == ("failed", {}, "boom")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_refusal_falls_back_to_bad_callback_url() -> None:
+    relogin = FakeRelogin(complete_error=ValueError("some message nobody mapped"))
+    pcm = FakePcm(_action("waiting"))
+
+    with pytest.raises(ChatActionError) as exc:
+        await GwsAuthHandler().callback(
+            _ctx(pcm, relogin), _action("waiting"), "http://127.0.0.1:5555/?code=a&state=b"
+        )
+
+    assert exc.value.reason == "bad_callback_url"
+    assert pcm.updates == []
+
+
+@pytest.mark.asyncio
+async def test_start_with_a_non_google_url_cancels_the_manager_and_fails() -> None:
+    relogin = FakeRelogin(start_result={"ok": True, "auth_url": "https://evil.example/x"})
+    pcm = _ValidatingPcm(_action())
+
+    await GwsAuthHandler().start(_ctx(pcm, relogin), _action(), {})
+
+    assert relogin.start_calls == ["work"]
+    assert relogin.cancel_calls == ["work"]
+    assert pcm.last == ("failed", {}, FAILED_DEFAULT)
+
+
 def test_wake_prompt_names_the_profile() -> None:
     prompt = GwsAuthHandler().wake_prompt(_action("done"))
     assert "'work' Google account" in prompt

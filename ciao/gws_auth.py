@@ -1125,6 +1125,10 @@ RELOGIN_BAD_REDIRECT = (
 )
 RELOGIN_STATE_MISMATCH = "That address is from a different sign-in. Start again."
 _MAX_PASTED_REDIRECT_CHARS = 4096
+# The `error` query value comes from the redirect, so it is shown only when it
+# looks like an OAuth error code (a short token); anything else gets a fixed line.
+_GOOGLE_ERROR_CODE = re.compile(r"[a-z0-9_.-]{1,64}", re.IGNORECASE)
+RELOGIN_GOOGLE_ERROR = "Google returned an error."
 
 
 @dataclass
@@ -1365,7 +1369,11 @@ class GwsReloginManager:
         got_state = (query.get("state") or [""])[0]
         code = (query.get("code") or [""])[0]
         if error:
-            self._finish(session, error=f"Google returned error: {error}")
+            if _GOOGLE_ERROR_CODE.fullmatch(error):
+                message = f"Google returned error: {error}"
+            else:
+                message = RELOGIN_GOOGLE_ERROR
+            self._finish(session, error=message)
             return False, "Google reported an error. You can close this tab."
         if not hmac.compare_digest(got_state.encode("utf-8"), session.state.encode("utf-8")):
             return None

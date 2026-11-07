@@ -96,6 +96,22 @@ describe('GwsAuthBody', () => {
     expect(tab.close).toHaveBeenCalledTimes(1)
   })
 
+  it('does not navigate the placeholder tab to a non-Google url', async () => {
+    loopback.page = true
+    const tab = { opener: {} as unknown, location: { href: '' }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'waiting', params: { profile: 'work', url: 'https://evil.example/x' } }),
+    })
+    const w = mountBody(action())
+
+    await primaryButton(w)!.trigger('click')
+    await flushPromises()
+
+    expect(tab.location.href).toBe('')
+    expect(tab.close).toHaveBeenCalledTimes(1)
+  })
+
   it('never opens a tab off the host', async () => {
     loopback.page = false
     const open = vi.spyOn(window, 'open')
