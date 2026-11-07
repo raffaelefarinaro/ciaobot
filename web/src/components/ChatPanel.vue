@@ -14,6 +14,7 @@
          shortcut available on every other view. -->
     <PaneHeader
       :brand="false"
+      phone-overflow
       :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
     >
@@ -113,6 +114,15 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
           <span class="chat-archive-label">Archive</span>
         </button>
+        <!-- Phones only (CSS): one ⋯ control holds Chat details, Notifications,
+             Archive and Back, so the header keeps the title its width. -->
+        <ChatHeaderMoreMenu
+          ref="moreMenu"
+          class="chat-more"
+          :can-archive="!chat.archived"
+          @details="showDetailsFromMenu"
+          @archive="doArchive"
+        />
       </template>
     </PaneHeader>
     <!-- Narrow panes put the shared-pin opener here, under the header, so a pinned
@@ -893,20 +903,12 @@
       </div>
     </div>
 
-    <!-- The command the assistant suggested for this chat. A transient card
-         above the queue and the composer, so a suggestion waiting to be
-         reviewed is never buried under the transcript. It is shown, copied,
-         opened or dismissed — never run. -->
-    <TerminalOfferCard
-      v-if="terminalOffer"
-      :chat-id="chat.chat_id"
-      :offer="terminalOffer"
-    />
-
     <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer, like the suggested
-         command. Keyed by id: a replaced action is a new card. -->
-    <NeedsYouCard v-for="action in needsYouActions" :key="action.id" :chat-id="chat.chat_id" :action="action" />
+         sign-in, ...). Above the queue and the composer. Keyed by id: a
+         replaced action is a new card. The stack folds several untouched
+         sign-ins into one row and caps its height, so the transcript keeps
+         its room. -->
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
@@ -1493,13 +1495,13 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import ChatTitleRail from './ChatTitleRail.vue'
+import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
-import TerminalOfferCard from './TerminalOfferCard.vue'
-import NeedsYouCard from './NeedsYouCard.vue'
+import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
@@ -1901,22 +1903,6 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
   return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
 }
 
-/**
- * The command the assistant suggested for this chat, if it holds one.
- *
- * The offer is transient and engine-owned: the browser keeps it in memory and
- * reads it from the store's map, never from the chat row, because a row's
- * copy is the payload the list was read at and the map is the live one. An
- * archived chat holds no offer — the command died with the chat — so the
- * card is not shown for one.
- */
-const terminalOffer = computed(() => {
-  const current = chat.value
-  if (!current || current.archived) return null
-  const offer = store.terminalOffers[current.chat_id]
-  return offer ? offer : null
-})
-
 // The needs-you actions this chat holds that have a card. A kind with no copy
 // yet has no card, so a half card never renders.
 const needsYouActions = computed(() => {
@@ -1926,44 +1912,21 @@ const needsYouActions = computed(() => {
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
-// composer, like the offer card above.
+// composer.
 watch(
   () => needsYouActions.value.map(a => a.id),
   (ids) => {
     const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')
     if (!held || ids.includes(held.dataset.actionId ?? '')) return
-    void nextTick(() => {
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    })
+    void nextTick(focusComposerAfterCard)
   },
   { flush: 'pre' },
 )
 
-// When the card that holds the focus goes away — dismissed by the user, or
-// dropped by the engine over the socket — it unmounts and the focus would
-// fall to <body>. Hand it to the composer instead, the way the queue hands
-// it over when a chip disappears. The watch is on the card's own render
-// condition, so the handoff also happens when the chat is archived or gone.
-// A replacement patches the card in place, so the focus belongs to the card
-// that is still there.
-watch(
-  () => terminalOffer.value,
-  (offer, previous) => {
-    // Only a removal unmounts the card.
-    if (offer !== null || previous === null) return
-    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.terminal-offer')
-    if (!held) return
-    void nextTick(() => {
-      // The textarea would raise the soft keyboard on a phone and scroll the
-      // transcript out from under the reader, so the bar takes the focus
-      // there — the same rule the move-to-background chip follows.
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    })
-  },
-  { flush: 'pre' },
-)
+function focusComposerAfterCard(): void {
+  if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+  else composerBarEl.value?.focus()
+}
 
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
 // The memory pass this chat spawned, recorded on its own postprocess record.
@@ -2256,6 +2219,14 @@ function turnMetaText(meta: { timestamp?: string; duration_ms?: number; effectiv
 /** Chat details opened as a drawer, on a pane too narrow to show it in place. */
 const inspectorOpen = ref(false)
 const inspectorTrigger = ref<HTMLButtonElement | null>(null)
+// On a phone the header's Chat details trigger is hidden and its ⋯ menu opens
+// the drawer instead, so closing the drawer returns focus to ⋯.
+const moreMenu = ref<InstanceType<typeof ChatHeaderMoreMenu> | null>(null)
+let detailsFromMenu = false
+function showDetailsFromMenu() {
+  detailsFromMenu = true
+  toggleWorkDetails()
+}
 // One row per file name: the same note shows up under several spellings
 // (relative, workspace-prefixed, before and after a move), and the reader
 // thinks of it as one file.
@@ -2444,7 +2415,8 @@ function showDetails(target: DetailsTarget = 'close') {
 function closeDetails() {
   if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
-  void nextTick(() => inspectorTrigger.value?.focus())
+  // Opened from ⋯: the drawerShown watch below returns focus there instead.
+  if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
   showDetails()
@@ -2460,6 +2432,14 @@ function openProjectKnowledge() {
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
   onEscape: () => { inspectorOpen.value = false },
+})
+// Chat details opened from the ⋯ menu return focus to ⋯ however they close (the
+// close button or Escape). Registered after useModalFocus, so this runs after
+// its restore of the opener, which is the menu item that has already gone.
+watch(drawerShown, (open) => {
+  if (open || !detailsFromMenu) return
+  detailsFromMenu = false
+  void nextTick(() => moreMenu.value?.focusTrigger())
 })
 
 // The browser terminal takes the screen on a narrow pane, and the chat
@@ -8000,6 +7980,15 @@ details[open] > .activity-summary::before {
 @media (pointer: coarse) {
   .chat-archive-btn { min-height: var(--touch); }
   .chat-archive-btn.btn-icon.chat-archive-btn--icon { min-width: var(--touch); }
+}
+/* Phones: the ⋯ menu replaces the header's Chat details trigger and Archive,
+   which are hidden here (not removed: the drawer and the archive action stay
+   wired). Same breakpoint as the header bell. */
+.chat-more { display: none; }
+@media (max-width: 767px) {
+  .chat-more { display: inline-flex; }
+  .chat-panel .work-inspector-trigger--header { display: none; }
+  .chat-panel .chat-archive-btn { display: none; }
 }
 
 .model-picker-dropdown {

@@ -1,5 +1,5 @@
 <template>
-  <PopoverRoot :open="openedBy !== null" :modal="false" @update:open="onOpenChange">
+  <PopoverRoot :open="open" :modal="false" @update:open="onOpenChange">
   <PopoverAnchor as-child>
   <div
     ref="rootEl"
@@ -9,39 +9,23 @@
   >
     <div v-if="hasActivity" class="composer-activity-segs">
       <button
-        v-if="agentCount > 0"
         type="button"
-        class="composer-activity-seg composer-activity-seg--agents"
-        :title="agentsTitle"
-        :aria-label="agentsTitle"
+        class="composer-activity-seg"
+        :title="activityTitle"
+        :aria-label="activityTitle"
         aria-haspopup="dialog"
-        :aria-expanded="openedBy === 'agents'"
+        :aria-expanded="open"
         :aria-controls="popoverId"
-        @click="toggle('agents', $event)"
+        @click="toggle($event)"
       >
-        <ActivityGlyph kind="working" />
-        <span v-if="compact" class="composer-activity-count">{{ agentCount }}</span>
-        <span v-else class="composer-activity-label">{{ agentsLabel }}</span>
-      </button>
-      <button
-        v-if="processCount > 0"
-        type="button"
-        class="composer-activity-seg composer-activity-seg--runs"
-        :title="runsTitle"
-        :aria-label="runsTitle"
-        aria-haspopup="dialog"
-        :aria-expanded="openedBy === 'runs'"
-        :aria-controls="popoverId"
-        @click="toggle('runs', $event)"
-      >
-        <ActivityGlyph kind="run" />
-        <span v-if="compact" class="composer-activity-count">{{ processCount }}</span>
-        <span v-else class="composer-activity-label">{{ runsLabel }}</span>
+        <ActivityGlyph :kind="activityGlyph" />
+        <span v-if="compact" class="composer-activity-count">{{ totalCount }}</span>
+        <span v-else class="composer-activity-label">{{ activityLabel }}</span>
       </button>
     </div>
 
     <PopoverContent
-      v-if="openedBy !== null"
+      v-if="open"
       as-child
       side="top"
       align="end"
@@ -128,22 +112,25 @@ const COMPACT_BAR_BELOW_PX = 560
 
 const rootEl = ref<HTMLElement | null>(null)
 const compact = ref(false)
-const openedBy = ref<string | null>(null)
+const open = ref(false)
 let trigger: HTMLElement | null = null
 const popoverId = computed(() => `composer-activity-${props.chatId}`)
 
-const agentsLabel = computed(() => (props.agentCount === 1 ? '1 agent' : `${props.agentCount} agents`))
-const agentsTitle = computed(() => (props.agentCount === 1 ? '1 agent running' : `${props.agentCount} agents running`))
 const agentRows = computed(() => props.agents.filter(sub => !isShellRow(sub)))
 const shellRows = computed(() => props.agents.filter(isShellRow))
 const processCount = computed(() => shellRows.value.length)
-const runsLabel = computed(() => (processCount.value === 1 ? '1 shell' : `${processCount.value} shells`))
-const runsTitle = computed(() =>
-  processCount.value === 1
-    ? `Background run: ${subagentLabel(shellRows.value[0])}`
-    : `${processCount.value} background runs`,
-)
 const hasActivity = computed(() => props.agentCount > 0 || processCount.value > 0)
+const totalCount = computed(() => props.agentCount + processCount.value)
+const activityLabel = computed(() => `${totalCount.value} running`)
+const activityGlyph = computed((): 'working' | 'run' => (props.agentCount > 0 ? 'working' : 'run'))
+// Joins the non-zero parts: "2 agents running, 1 background run: <label>".
+const activityTitle = computed(() => {
+  const parts: string[] = []
+  if (props.agentCount > 0) parts.push(props.agentCount === 1 ? '1 agent running' : `${props.agentCount} agents running`)
+  if (processCount.value === 1) parts.push(`1 background run: ${subagentLabel(shellRows.value[0])}`)
+  else if (processCount.value > 1) parts.push(`${processCount.value} background runs`)
+  return parts.join(', ')
+})
 // "Stopping x" for as long as the store holds a pending stop, so it clears
 // itself when the row leaves.
 const stopNotice = computed(() => {
@@ -162,7 +149,7 @@ const announcement = computed(() => {
 watch(() => shellRows.value.map(r => r.agent_id), (ids, oldIds) => {
   const live = new Set(ids)
   const focusedId = document.activeElement?.getAttribute('data-stop-id')
-  if (!focusedId || live.has(focusedId) || openedBy.value === null) return
+  if (!focusedId || live.has(focusedId) || !open.value) return
   const index = (oldIds ?? []).indexOf(focusedId)
   void nextTick(() => {
     const stops = Array.from(document.querySelectorAll<HTMLElement>(`#${CSS.escape(popoverId.value)} [data-stop-id]`))
@@ -172,18 +159,18 @@ watch(() => shellRows.value.map(r => r.agent_id), (ids, oldIds) => {
   })
 }, { flush: 'pre' })
 
-function toggle(key: string, event: MouseEvent) {
-  if (openedBy.value === key) {
+function toggle(event: MouseEvent) {
+  if (open.value) {
     close(true)
     return
   }
-  openedBy.value = key
+  open.value = true
   trigger = event.currentTarget as HTMLElement
 }
 
 function close(returnFocus: boolean) {
-  if (openedBy.value === null) return
-  openedBy.value = null
+  if (!open.value) return
+  open.value = false
   if (returnFocus) trigger?.focus()
   trigger = null
 }
@@ -202,7 +189,7 @@ function onOpenChange(next: boolean) {
 // the claim has to happen here, on the element the key bubbles through first
 // (the popover renders inline, inside the cluster). ModelSelector does the same.
 function onEscape(e: KeyboardEvent) {
-  if (openedBy.value === null) return
+  if (!open.value) return
   e.preventDefault()
   e.stopPropagation()
   close(true)
@@ -218,14 +205,6 @@ function onInteractOutside(e: CustomEvent<{ originalEvent: Event }>) {
 
 watch(hasActivity, (active) => { if (!active) close(false) })
 
-// The part that opened the popover can vanish (shells ended, agents gone). Close without moving focus: there is nothing to return it to.
-const openerRendered = computed(() => {
-  const key = openedBy.value
-  if (key === null) return true
-  if (key === 'agents') return props.agentCount > 0
-  return processCount.value > 0
-})
-watch(openerRendered, (ok) => { if (!ok) close(false) })
 watch(() => props.chatId, () => close(false))
 
 let observer: ResizeObserver | null = null
@@ -300,7 +279,7 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs);
   font-weight: 700;
 }
-.composer-activity-seg--agents .composer-activity-count { color: var(--accent); }
+.composer-activity-count { color: var(--accent); }
 
 .composer-activity-popover {
   /* Popper supplies the fixed placement; this is only the surface. */

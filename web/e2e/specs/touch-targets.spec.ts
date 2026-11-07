@@ -1,5 +1,5 @@
 import { devices, expect, test, type CDPSession, type Page } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
+import { BOOTED, COMPOSER, boot, isolate, openChatDetails, quiesce } from '../support/app'
 
 /**
  * DESIGN.md requires every interactive target to be at least 44x44 CSS px on
@@ -98,17 +98,46 @@ async function ensureCoarsePointer(page: Page): Promise<void> {
   throw new Error(`page is not a coarse pointer; sizes would be fine-pointer ones: ${JSON.stringify(seen)}`)
 }
 
+const NOT_COARSE = 'page is not a coarse pointer; sizes would be fine-pointer ones'
+const MEASURE_ATTEMPTS = 3
+
 /**
- * Open every <details>, then list the interactive controls under `scope`
- * that are smaller than TOUCH_MIN in either dimension.
+ * The repair in ensureCoarsePointer only proves the pointer at that moment. On
+ * macOS CI it has flipped back to fine during the quiesce that follows (#2645,
+ * develop push run for ff16e66), so the in-page check failed after a passing
+ * repair. Repair, quiesce and measure again when that happens; the sizes from a
+ * fine-pointer read are discarded, never reported.
  */
 async function measure(page: Page, scope = 'body') {
-  await ensureCoarsePointer(page)
-  // Never measure a layout that is still being styled: sizes read before a
-  // lazy stylesheet applies are the fine-pointer ones.
-  await quiesce(page)
+  for (let attempt = 1; ; attempt += 1) {
+    await ensureCoarsePointer(page)
+    // Never measure a layout that is still being styled: sizes read before a
+    // lazy stylesheet applies are the fine-pointer ones.
+    await quiesce(page)
+    const found = await measureOnce(page, scope)
+    if (found) return found
+    // Keep the flip rate visible in the report even when a retry recovers it.
+    test.info().annotations.push({ type: 'pointer-flip', description: `fine pointer at measure attempt ${attempt}` })
+    if (attempt >= MEASURE_ATTEMPTS) {
+      const seen = await page.evaluate(() => ({
+        anyCoarse: matchMedia('(any-pointer: coarse)').matches,
+        hover: matchMedia('(hover: hover)').matches,
+        maxTouchPoints: navigator.maxTouchPoints,
+        focused: document.activeElement?.outerHTML.slice(0, 120) ?? null,
+      }))
+      throw new Error(`${NOT_COARSE} (lost after repair ${MEASURE_ATTEMPTS} times): ${JSON.stringify(seen)}`)
+    }
+  }
+}
+
+/**
+ * Open every <details>, then list the interactive controls under `scope`
+ * that are smaller than TOUCH_MIN in either dimension. Returns null, before
+ * opening anything, when the page is not a coarse pointer at that moment.
+ */
+async function measureOnce(page: Page, scope: string): Promise<{ total: number; bad: string[] } | null> {
   return page.evaluate(({ min, scope }) => {
-    if (!matchMedia('(pointer: coarse)').matches) throw new Error('page is not a coarse pointer; sizes would be fine-pointer ones')
+    if (!matchMedia('(pointer: coarse)').matches) return null
     document.querySelectorAll('details').forEach((d) => { d.open = true })
     const bad: string[] = []
     let total = 0
@@ -153,7 +182,7 @@ const TRIGGER_CAP = 80
 // cover, not just some DOM change. Keyed by the surface they live on.
 const KNOWN_TRIGGERS: Record<string, string[]> = {
   '/': ['Model for the new chat'],
-  '/chat/alpha-chat-1': ['Show chat details'],
+  '/chat/alpha-chat-1': ['More chat actions'],
   '/settings/workspace': ['New workspace', 'Actions for workspace'],
 }
 // Triggers a surface may legitimately fail to click because another element
@@ -417,7 +446,7 @@ test.describe('touch targets', () => {
   test('the Repository section is at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     // The code badge is hidden on phones; Chat details opens from the ⓘ button.
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
     const found = await measure(page, '#chat-work-rail .chat-repo-section')
     expect(found.total, 'no controls measured in the Repository section').toBeGreaterThan(0)
@@ -589,7 +618,7 @@ test.describe('touch targets', () => {
 
   test('the terminal pane and its key row are at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await page.locator('#chat-work-rail .chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
     const pane = page.locator('.terminal-pane')

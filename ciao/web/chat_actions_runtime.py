@@ -23,9 +23,10 @@ import httpx
 from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_payload
 from ciao.oauth_callback import CallbackTarget, validate_pasted_callback
 from ciao.provider_service import ProviderImpl
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.claude import ClaudeProvider, is_claudeai_connector
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
+from ciao.web.device_code_auth import DeviceCodeFlow
 from ciao.web.mcp_auth_claude import ClaudeMcpAuthFlow
 
 if TYPE_CHECKING:
@@ -280,6 +281,16 @@ class CommandActionHandler(ActionHandler):
         return COMMAND_WAKE_PROMPT
 
 
+class RestartHandler(ActionHandler):
+    """The card only navigates to Settings; the engine never restarts from it."""
+
+    async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        return None
+
+    def wake_prompt(self, action: ChatAction) -> str:
+        return "The user saw your restart request."
+
+
 MODE_WAKE_DESCRIPTIONS: dict[str, str] = {
     "plan": "read-only, propose changes",
     "normal": "ask before every action",
@@ -328,7 +339,9 @@ class PermissionModeHandler(ActionHandler):
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "mcp_auth": McpAuthHandler(),
     "command": CommandActionHandler(),
+    "restart": RestartHandler(),
     "permission_mode": PermissionModeHandler(),
+    "device_code": DeviceCodeFlow(),
 }
 
 
@@ -515,7 +528,16 @@ class ChatActionsRuntime:
             return
         for server, state in sorted(states.items()):
             if state == "needs_auth":
-                if action_key("mcp_auth", {"server": server}) in chat.dismissed_action_keys:
+                if isinstance(provider, ClaudeProvider) and is_claudeai_connector(server):
+                    # A claude.ai connector is in the account's (or the
+                    # organization's) catalog whether or not the user ever
+                    # connected it, and it is connected on claude.ai, not with
+                    # ``claude mcp login``. Raising a card for each one asked
+                    # for sign-ins to services the user does not use.
+                    continue
+                key = action_key("mcp_auth", {"server": server})
+                declined = self._pcm.mcp_auth_decline_key(chat, key)
+                if key in chat.dismissed_action_keys or declined in self._pcm.declined_mcp_auth:
                     continue
                 try:
                     self._pcm.raise_action(
@@ -528,6 +550,10 @@ class ChatActionsRuntime:
                     logger.debug("could not raise a sign-in card for chat %s", chat_id, exc_info=True)
                     continue
             elif state == "connected":
+                # Signed in after all: a later expiry should ask again.
+                self._pcm.declined_mcp_auth.discard(
+                    self._pcm.mcp_auth_decline_key(chat, action_key("mcp_auth", {"server": server}))
+                )
                 for action in list(chat.actions):
                     if (
                         action.kind == "mcp_auth"

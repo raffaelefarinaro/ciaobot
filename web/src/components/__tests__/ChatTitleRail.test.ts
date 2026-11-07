@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
@@ -141,12 +143,6 @@ describe('ChatTitleRail', () => {
     return e
   }
 
-  function touch(type: string, remaining: number): Event {
-    const event = new Event(type, { bubbles: true })
-    Object.defineProperty(event, 'touches', { value: Array.from({ length: remaining }, () => ({})) })
-    return event
-  }
-
   it('reports a downward drag on the title as a pull, and its end with distance and speed', () => {
     seed(['a', 'b'])
     const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
@@ -192,88 +188,7 @@ describe('ChatTitleRail', () => {
     root.dispatchEvent(pointer('pointercancel', 30, 10, 'mouse'))
     vi.advanceTimersByTime(RAIL_SLIDE_MS + RAIL_SETTLE_MS)
     expect(wrapper.emitted('select')).toBeUndefined()
-    expect(strip.style.scrollSnapType).not.toBe('none')
     expect(scrollTo).toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
-  it('preserves native touch swipe settling after the browser cancels pointer events for horizontal panning', () => {
-    vi.useFakeTimers()
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
-    const root = wrapper.get('.title-rail').element as HTMLElement
-    const strip = geometry(wrapper)
-    root.dispatchEvent(pointer('pointerdown', 100, 10))
-    strip.dispatchEvent(touch('touchstart', 1))
-    root.dispatchEvent(pointer('pointermove', 40, 12))
-    root.dispatchEvent(pointer('pointercancel', 40, 12))
-    strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('scroll'))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toBeUndefined()
-    strip.dispatchEvent(touch('touchend', 0))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toEqual([['c']])
-    wrapper.unmount()
-  })
-
-  it('restores the title without selection when a native touch pan is canceled', () => {
-    vi.useFakeTimers()
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
-    const root = wrapper.get('.title-rail').element as HTMLElement
-    const strip = geometry(wrapper)
-    const scrollTo = vi.fn()
-    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
-    root.dispatchEvent(pointer('pointerdown', 100, 10))
-    strip.dispatchEvent(touch('touchstart', 1))
-    root.dispatchEvent(pointer('pointermove', 40, 12))
-    root.dispatchEvent(pointer('pointercancel', 40, 12))
-    strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('scroll'))
-    strip.dispatchEvent(touch('touchcancel', 0))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS * 2)
-    expect(wrapper.emitted('select')).toBeUndefined()
-    expect(scrollTo).toHaveBeenCalledWith({ left: 100, behavior: 'smooth' })
-    wrapper.unmount()
-  })
-
-  it('does not settle a touch swipe until the last finger lifts', () => {
-    vi.useFakeTimers()
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
-    const strip = geometry(wrapper)
-    strip.dispatchEvent(touch('touchstart', 1))
-    strip.dispatchEvent(touch('touchstart', 2))
-    strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('scroll'))
-    strip.dispatchEvent(touch('touchend', 1))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS * 2)
-    expect(wrapper.emitted('select')).toBeUndefined()
-    strip.dispatchEvent(touch('touchend', 0))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toEqual([['c']])
-    wrapper.unmount()
-  })
-
-  it('keeps a partially canceled gesture canceled until every finger lifts', () => {
-    vi.useFakeTimers()
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
-    const strip = geometry(wrapper)
-    strip.scrollTo = vi.fn() as unknown as typeof strip.scrollTo
-    strip.dispatchEvent(touch('touchstart', 2))
-    strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('scroll'))
-    strip.dispatchEvent(touch('touchcancel', 1))
-    strip.dispatchEvent(touch('touchend', 0))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS * 2)
-    expect(wrapper.emitted('select')).toBeUndefined()
-    strip.dispatchEvent(touch('touchstart', 1))
-    strip.dispatchEvent(new Event('scroll'))
-    strip.dispatchEvent(touch('touchend', 0))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toEqual([['c']])
     wrapper.unmount()
   })
 
@@ -294,7 +209,60 @@ describe('ChatTitleRail', () => {
     wrapper.unmount()
   })
 
-  it('ignores an upward drag and a sideways touch drag (the strip scrolls natively)', () => {
+  it('a sideways touch drag past a quarter of the width slides to the neighbour', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const root = wrapper.get('.title-rail').element as HTMLElement
+    const strip = geometry(wrapper)
+    strip.scrollTo = vi.fn() as unknown as typeof strip.scrollTo
+    root.setPointerCapture = () => {}
+    root.dispatchEvent(pointer('pointerdown', 200, 10))
+    root.dispatchEvent(pointer('pointermove', 120, 12))
+    root.dispatchEvent(pointer('pointermove', 60, 12))
+    root.dispatchEvent(pointer('pointerup', 60, 12))
+    vi.advanceTimersByTime(RAIL_SLIDE_MS)
+    expect(wrapper.emitted('select')).toEqual([['c']])
+    wrapper.unmount()
+  })
+
+  it('a short sideways touch drag springs back without selecting', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const root = wrapper.get('.title-rail').element as HTMLElement
+    const strip = geometry(wrapper)
+    const scrollTo = vi.fn()
+    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
+    root.setPointerCapture = () => {}
+    root.dispatchEvent(pointer('pointerdown', 100, 10))
+    root.dispatchEvent(pointer('pointermove', 85, 10))
+    root.dispatchEvent(pointer('pointerup', 85, 10))
+    vi.advanceTimersByTime(RAIL_SLIDE_MS + RAIL_SETTLE_MS)
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(scrollTo).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('a canceled sideways touch drag restores the title', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const root = wrapper.get('.title-rail').element as HTMLElement
+    const strip = geometry(wrapper)
+    const scrollTo = vi.fn()
+    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
+    root.setPointerCapture = () => {}
+    root.dispatchEvent(pointer('pointerdown', 200, 10))
+    root.dispatchEvent(pointer('pointermove', 130, 10))
+    root.dispatchEvent(pointer('pointercancel', 130, 10))
+    vi.advanceTimersByTime(RAIL_SLIDE_MS + RAIL_SETTLE_MS)
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(scrollTo).toHaveBeenCalledWith({ left: 100, behavior: 'smooth' })
+    wrapper.unmount()
+  })
+
+  it('ignores an upward drag', () => {
     seed(['a', 'b'])
     const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
@@ -302,12 +270,56 @@ describe('ChatTitleRail', () => {
     root.dispatchEvent(pointer('pointerdown', 100, 100))
     root.dispatchEvent(pointer('pointermove', 100, 40))
     root.dispatchEvent(pointer('pointerup', 100, 40))
-    root.dispatchEvent(pointer('pointerdown', 100, 100))
-    root.dispatchEvent(pointer('pointermove', 20, 102))
-    root.dispatchEvent(pointer('pointerup', 20, 102))
 
     expect(wrapper.emitted('pull')).toBeUndefined()
     expect(wrapper.emitted('pullEnd')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('a horizontal wheel scrolls the strip and settles on the neighbour', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    strip.scrollTo = vi.fn() as unknown as typeof strip.scrollTo
+    strip.scrollLeft = 100
+
+    const wheel = new WheelEvent('wheel', { deltaX: 120, deltaY: 0, cancelable: true, bubbles: true })
+    strip.dispatchEvent(wheel)
+    expect(wheel.defaultPrevented).toBe(true)
+    expect(strip.scrollLeft).toBe(220)
+    vi.advanceTimersByTime(RAIL_SETTLE_MS)
+    expect(wrapper.emitted('select')).toEqual([['c']])
+
+    // A vertical wheel is the page scrolling, so it is left alone.
+    const vertical = new WheelEvent('wheel', { deltaY: 50, cancelable: true, bubbles: true })
+    strip.dispatchEvent(vertical)
+    expect(vertical.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a sideways nudge short of halfway springs back to the current title', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+    const scrollTo = vi.fn()
+    strip.scrollTo = scrollTo as unknown as typeof strip.scrollTo
+    // Centred on b at 100; a 10px nudge lands at 110, well short of halfway to c.
+    strip.scrollLeft = 100
+
+    strip.dispatchEvent(new WheelEvent('wheel', { deltaX: 10, deltaY: 0, cancelable: true, bubbles: true }))
+    expect(strip.scrollLeft).toBe(110)
+    vi.advanceTimersByTime(RAIL_SETTLE_MS)
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: 100, behavior: 'smooth' })
+    expect(wrapper.emitted('select')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -470,24 +482,12 @@ describe('ChatTitleRail', () => {
     wrapper.unmount()
   })
 
-  it('waits for the finger to lift', () => {
-    vi.useFakeTimers()
-    seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
-      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
-      attachTo: document.body,
-    })
-    const strip = geometry(wrapper)
-
-    strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('touchstart'))
-    strip.dispatchEvent(new Event('scroll'))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toBeUndefined()
-
-    strip.dispatchEvent(new Event('touchend'))
-    vi.advanceTimersByTime(RAIL_SETTLE_MS)
-    expect(wrapper.emitted('select')).toEqual([['c']])
-    wrapper.unmount()
+  // iOS 26+ gives a native scroller near the top edge the soft scroll-edge blur over the title.
+  it('the strip is never a native scroller', () => {
+    const source = readFileSync(join(__dirname, '..', 'ChatTitleRail.vue'), 'utf8')
+    const rule = source.match(/\.title-rail-strip\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rule).toContain('overflow: hidden')
+    expect(rule).not.toMatch(/overflow(-x)?:\s*(auto|scroll)/)
   })
+
 })

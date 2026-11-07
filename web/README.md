@@ -166,7 +166,7 @@ Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
 one disclosure, each row linking the vendor's own guide. It reports the reader's
 current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
-browser tab cannot know whether the app is installed on the device.
+browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the card names the Mac app and drops the address row, the notifications card says the Mac app handles notifications, and the Home setup reminder is not shown.
 
 The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
 state in `composables/useWelcome.ts`) shows the workspace folder, the generated
@@ -313,23 +313,15 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   shell. The state is per tab and in memory (`openChats` in
   `stores/terminal.ts`), and a switch moves no focus. A project's terminal
   hides on a chat change and is not restored.
-- **A suggested command is a card above the composer, not a second *Terminal*
-  section.** When the assistant suggests a command in a chat, a transient card
-  appears above the composer (`components/TerminalOfferCard.vue`; the needs-you cards are `components/NeedsYouCard.vue`): the fixed
-  title *Suggested command — review before running*, the command as literal
-  text (never markup, never markdown, never a link), and three actions —
-  **Copy** (the exact text on screen, claiming *Copied* only when the
-  clipboard took it, and a retryable error when it did not), **Open in
-  Terminal** (the same `BrowserTerminalButton` the *Terminal* section uses, for
-  that chat) and **Dismiss** (which names the suggestion it dismisses, so a
-  newer one is never dismissed by mistake, and says so when the suggestion
-  changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell and asks the engine to run
-  nothing — an already-live session attaches and shows the screen it
-  already holds, exactly like the *Terminal* section's button. The
-  *Terminal* section stays the persistent, manual way into the terminal;
-  the card is the contextual one, and it is shown only for the chat on
-  screen.
+- **A command card types the command, and never runs it.**
+  `needs-you/CommandBody.vue` types through
+  `useRunInTerminal(…).run(command, { chatId, paste: true })`, into a session
+  the composable created for that chat (key `chat:<id>`), never into a shell
+  the user opened. It wraps the text in `ESC[200~`/`ESC[201~` only when
+  `store.bracketedPasteMode()` is true, sends a single line raw otherwise, and
+  copies a multi-line command when the shell has no bracketed paste. It never
+  appends `\r`, so the user presses Enter. The engine only hears
+  `{step: 'typed'|'ran'}`.
 
 ### Side-by-side chats
 
@@ -465,29 +457,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **A suggested command is engine-owned and transient** (#1843): a chat's
-  offer is `{id, command}` in `ChatInfo.terminal_offer`, in the
-  `chat_terminal_offer_changed` event and in the `/ws/events` snapshot's
-  `chat_terminal_offers` map, and the browser keeps it in
-  `stores/projects.ts`'s `terminalOffers` — in memory only, never written to
-  `localStorage` or `sessionStorage`. The next chat read refills it under the
-  read-start watermark, and the `/ws/events` snapshot replaces the map
-  wholesale and itself becomes a watermark later reads must beat. A reload
-  therefore refills from `GET /api/chats` even with the socket blocked. The
-  card reads the map rather than a chat row, because a row's copy is only the
-  payload the list was read at, while the map is the live one. Every read
-  takes its watermark *before* the request (`terminalOfferReadStart()`) and
-  may only write when no newer change or snapshot exists, so a payload that
-  raced an offer change cannot roll it back. `dismissTerminalOffer(chatId,
-  expectedId)` sends exactly `{terminal_offer:{expected_id}}` — never a pin,
-  a title or any other update — and answers `dismissed` or `conflict`; a
-  conflict adopts the engine's newer offer and the card says the suggestion
-  changed. The card never executes the command, and *Open in Terminal* starts
-  no shell, asks for no grant and asks the engine to run nothing. It must
-  never be keyed by the offer id: a replacement patches it in place, so the
-  notice that explains the swap survives.
-
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the offers; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). ChatPanel renders them through `NeedsYouStack.vue`, which caps the region's height and folds two or more untouched sign-ins under one row (Show, Not now for all) in a single keyed list, so a card is never rebuilt when it leaves the fold. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn

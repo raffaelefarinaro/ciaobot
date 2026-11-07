@@ -14,6 +14,7 @@ const terminal = reactive({
   open: vi.fn(),
   createSession: vi.fn(),
   sendInput: vi.fn(),
+  bracketedPasteMode: vi.fn(() => false),
 })
 const projects = reactive({
   activeProject: null as { project_id: string } | null,
@@ -51,6 +52,7 @@ describe('useRunInTerminal', () => {
       return true
     })
     terminal.sendInput.mockReset().mockReturnValue(true)
+    terminal.bracketedPasteMode.mockReset().mockReturnValue(false)
     writeClipboard.mockReset().mockResolvedValue(true)
   })
 
@@ -191,5 +193,48 @@ describe('useRunInTerminal', () => {
     expect(await run('two')).toBe('failed')
     expect(await first).toBe('typed')
     expect(terminal.sendInput).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens the chat\'s terminal when given a chat', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    await run('ls', { chatId: 'c1', paste: true })
+    expect(terminal.open).toHaveBeenCalledWith({ chatId: 'c1' })
+  })
+
+  it('pastes in brackets without Enter when the shell accepts a paste', async () => {
+    terminal.bracketedPasteMode.mockReturnValue(true)
+    const { run } = useRunInTerminal(500, 50)
+    expect(await run('echo a\necho b', { chatId: 'c1', paste: true })).toBe('typed')
+    expect(decode(terminal.sendInput.mock.calls[0]![0])).toBe('\x1b[200~echo a\recho b\x1b[201~')
+  })
+
+  it('types a single line raw without Enter when the shell has no bracketed paste', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    expect(await run('ls -la', { chatId: 'c1', paste: true })).toBe('typed')
+    expect(decode(terminal.sendInput.mock.calls[0]![0])).toBe('ls -la')
+  })
+
+  it('copies a multi-line command instead of typing it when the shell has no bracketed paste', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    expect(await run('a\nb', { chatId: 'c1', paste: true })).toBe('copied_multiline')
+    expect(terminal.sendInput).not.toHaveBeenCalled()
+    expect(writeClipboard).toHaveBeenCalledWith('a\nb')
+  })
+
+  it('paste mode never presses Enter even when asked', async () => {
+    terminal.bracketedPasteMode.mockReturnValue(true)
+    const { run } = useRunInTerminal(500, 50)
+    await run('ls', { chatId: 'c1', paste: true, enter: true })
+    expect(decode(terminal.sendInput.mock.calls[0]![0])).toBe('\x1b[200~ls\x1b[201~')
+  })
+
+  it('keeps its chat session apart from a project session', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    await run('x', { chatId: 'c1', paste: true })
+    await run('y')
+    expect(terminal.createSession).toHaveBeenCalledTimes(2)
+    await run('z', { chatId: 'c1', paste: true })
+    expect(terminal.createSession).toHaveBeenCalledTimes(2)
+    expect(terminal.selectSession).toHaveBeenCalledWith('s1')
   })
 })

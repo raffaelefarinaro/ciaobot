@@ -22,6 +22,8 @@ test.describe('chat title rail, desktop', () => {
     await expect(current).toContainText('alpha first conversation')
     await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
     await expect(page.locator('.chat-code-badge')).toHaveCount(0)
+    // Never a native scroller: iOS would blur the title under the status bar.
+    expect(await page.locator('.title-rail-strip').evaluate(el => getComputedStyle(el).overflowX)).toBe('hidden')
 
     const header = page.locator('.chat-panel .pane-header')
     expect(await header.evaluate(el => el.getBoundingClientRect().height)).toBe(61)
@@ -185,43 +187,45 @@ test.describe('chat title rail, phone', () => {
     await isolate(page, `title-rail-phone-${testInfo.workerIndex}`)
   })
 
-  test('has no arrow buttons, snaps the strip, switches on a finished swipe, and never scrolls the document sideways', async ({ page }) => {
+  test('has no arrow buttons, and the strip is not a native scroller', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
     await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
-    const snap = await page.locator('.title-rail-strip').evaluate(el => getComputedStyle(el).scrollSnapType)
-    expect(snap).toContain('x mandatory')
-
-    await page.locator('.title-rail-strip').evaluate(el => {
-      el.dispatchEvent(new Event('touchstart'))
-      el.dispatchEvent(new Event('touchend'))
-      el.scrollLeft = el.scrollWidth
-    })
-    await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
-
-    const overflow = await page.evaluate(() => document.scrollingElement!.scrollWidth <= window.innerWidth)
-    expect(overflow).toBe(true)
+    // Never a native scroller: iOS would blur the title under the status bar.
+    expect(await page.locator('.title-rail-strip').evaluate(el => getComputedStyle(el).overflowX)).toBe('hidden')
   })
 
-  test('a native touch pan switches chats after browser pointer cancellation', async ({ page }) => {
+  test('a touch drag switches chats; a short one springs back', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     const strip = page.locator('.title-rail-strip')
     const box = (await strip.boundingBox())!
-    await page.locator('.title-rail').evaluate(el => {
-      el.addEventListener('pointercancel', () => el.setAttribute('data-test-pointer-canceled', 'yes'))
-    })
     const cdp = await page.context().newCDPSession(page)
     const y = box.y + box.height / 2
-    const startX = box.x + box.width * 0.85
     const point = (x: number) => ({ x, y, id: 1 })
-    try {
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point(startX)] })
-      for (let i = 1; i <= 8; i++) {
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point(startX - box.width * 0.7 * i / 8)] })
+    // A real touch drag through CDP: the rail takes it on the pointer path, not a native pan.
+    const drag = async (fromX: number, dx: number) => {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point(fromX)] })
+      for (let i = 1; i <= 10; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point(fromX + dx * i / 10)] })
       }
-      await expect(page.locator('.title-rail')).toHaveAttribute('data-test-pointer-canceled', 'yes')
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    }
+    // The strip is narrow on a phone and the touch slop is spent first, so a long pan is needed (see #2659).
+    const offCentre = () => strip.evaluate(el => {
+      const cur = el.querySelector<HTMLElement>('.title-rail-item[aria-current="page"]')!
+      return Math.abs(el.scrollLeft - (cur.offsetLeft + cur.offsetWidth / 2 - el.clientWidth / 2))
+    })
+    try {
+      await drag(box.x + box.width * 0.95, -box.width * 0.9)
       await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+      await expect(page.locator('.title-rail-item[aria-current="page"]')).toContainText('alpha second conversation')
+
+      // A short drag back toward the previous chat (about 20px) springs back to the current title.
+      await drag(box.x + box.width * 0.5, 20)
+      await expect.poll(offCentre).toBeLessThanOrEqual(2)
+      await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+      // The swipe never scrolls the document sideways.
+      expect(await page.evaluate(() => document.scrollingElement!.scrollWidth <= window.innerWidth)).toBe(true)
     } finally { await cdp.detach() }
   })
 })

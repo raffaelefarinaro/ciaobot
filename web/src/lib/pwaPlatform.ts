@@ -64,6 +64,16 @@ export function isStandalone(): boolean {
   )
 }
 
+/** The Ciaobot desktop client (Ciaobot for Mac) loads this UI in its own
+ *  window and sets `window.__CIAOBOT_DESKTOP__ = true` before the page runs.
+ *  It is the installed app and posts native notifications itself, so the
+ *  browser install and Web Push guidance does not apply there. Strict: only
+ *  the literal `true` counts. Reads `globalThis` (=== `window` in a page) so
+ *  the probe also runs under vitest's node environment. */
+export function isDesktopClient(): boolean {
+  return (globalThis as { __CIAOBOT_DESKTOP__?: unknown }).__CIAOBOT_DESKTOP__ === true
+}
+
 /** Safari (desktop or iOS), excluding Chromium-based browsers that also say
  *  "Safari" in their user agent. */
 export function isSafari(): boolean {

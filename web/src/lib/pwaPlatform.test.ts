@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   installInstructions,
   isAndroid,
+  isDesktopClient,
   isEdge,
   isGoogleChrome,
   isIos,
@@ -150,5 +151,27 @@ describe('installInstructions', () => {
   it('falls back to the browser install control elsewhere', () => {
     setUserAgent(MAC_CHROME_UA)
     expect(installInstructions()).toBe('Use your browser\'s Install option in the address bar or menu.')
+  })
+})
+
+describe('isDesktopClient', () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
+  })
+
+  it('is false when the marker is absent', () => {
+    expect(isDesktopClient()).toBe(false)
+  })
+
+  it('is true when the marker is the boolean true', () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    expect(isDesktopClient()).toBe(true)
+  })
+
+  it('is false for the string "true" and for 1', () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = 'true'
+    expect(isDesktopClient()).toBe(false)
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = 1
+    expect(isDesktopClient()).toBe(false)
   })
 })

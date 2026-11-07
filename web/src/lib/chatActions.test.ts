@@ -4,6 +4,7 @@ import {
   chatActionErrorReason,
   isChatAction,
   normalizeChatActions,
+  restartTarget,
   safeExternalUrl,
 } from './chatActions'
 import type { ChatAction } from './types'
@@ -78,14 +79,86 @@ describe('actionCopy', () => {
     expect(copy).toEqual({ title, why, primaryLabel, meta: 'opencode · MCP' })
   })
 
+  it('gives the Claude sign-in copy while waiting', () => {
+    const claude = actionCopy(action({
+      state: 'waiting',
+      params: { server: 'notion', provider: 'claude', url: 'https://x' },
+    }))
+    expect(claude?.primaryLabel).toBe('Open the sign-in page')
+    expect(claude?.why).toContain('finish there')
+    const opencode = actionCopy(action({
+      state: 'waiting',
+      params: { server: 'notion', provider: 'opencode', url: 'https://x' },
+    }))
+    expect(opencode?.primaryLabel).toBe('Open the sign-in page again')
+  })
+
+  it('says a Claude sign-in is starting a terminal', () => {
+    const copy = actionCopy(action({
+      state: 'working',
+      params: { server: 'notion', provider: 'claude' },
+    }))
+    expect(copy?.why).toBe('Starting a sign-in terminal for this chat.')
+  })
+
   it('shows the engine error for a failed sign-in, and a default without one', () => {
     expect(actionCopy(action({ state: 'failed', error: 'Timed out waiting for sign-in' }))?.why)
       .toBe('Timed out waiting for sign-in')
     expect(actionCopy(action({ state: 'failed', error: '' }))?.why).toBe('The sign-in did not finish.')
   })
 
+  it('gives the command copy for open, with the default why', () => {
+    const copy = actionCopy(action({ kind: 'command', params: { command: 'ls' } }))
+    expect(copy).toEqual({
+      title: 'Suggested command — review before running',
+      why: "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+      primaryLabel: 'Type it in a terminal',
+      meta: 'Suggested command',
+    })
+  })
+
+  it('shows the note as the why of an open command', () => {
+    const copy = actionCopy(action({ kind: 'command', params: { command: 'bq ls', note: 'Signs you in to BigQuery' } }))
+    expect(copy?.why).toBe('Signs you in to BigQuery')
+  })
+
+  it('gives the command copy for working and done', () => {
+    const working = actionCopy(action({ kind: 'command', state: 'working', params: { command: 'ls' } }))
+    expect(working).toEqual({
+      title: 'Review it, then press Enter in the terminal',
+      why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+      primaryLabel: 'I ran it',
+      meta: 'Suggested command',
+    })
+    expect(actionCopy(action({ kind: 'command', state: 'done', params: { command: 'ls' } }))?.primaryLabel).toBe('Continue')
+  })
+
   it('is null for a kind with no copy yet', () => {
-    expect(actionCopy(action({ kind: 'restart' }))).toBeNull()
+    expect(actionCopy(action({ kind: 'not_a_kind' as never }))).toBeNull()
+  })
+})
+
+describe('restart copy', () => {
+  it('sends an update to General and a setting to This host', () => {
+    expect(restartTarget('update')).toBe('/settings#updates')
+    expect(restartTarget('config')).toBe('/settings/advanced#restart-host')
+  })
+
+  it('sends an unknown reason to This host', () => {
+    expect(restartTarget('mcp')).toBe('/settings/advanced#restart-host')
+  })
+
+  it('words the config why as the app speaking, not the user', () => {
+    const copy = actionCopy(action({ kind: 'restart', params: { reason: 'config' } }))
+    expect(copy?.why).toContain('Ciao changed a setting')
+    expect(copy?.why).not.toContain('you changed')
+  })
+
+  it('says every reason waits for running chats', () => {
+    for (const reason of ['config', 'update']) {
+      const copy = actionCopy(action({ kind: 'restart', params: { reason } }))
+      expect(copy?.why).toContain('waits for running chats to finish')
+    }
   })
 
   it('gives the permission_mode copy for an open request', () => {
