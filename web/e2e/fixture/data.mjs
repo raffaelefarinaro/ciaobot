@@ -84,9 +84,6 @@ function chat(workspace, n, projectId, title, extra = {}) {
     pinned_file_path: '',
     dismissed_pin_paths: [],
     pin_revision: 0,
-    // The transient suggested command. Always present, null when the chat
-    // holds none — the wire shape the engine sends.
-    terminal_offer: null,
     code_mode: false,
     ...extra,
   }
@@ -427,10 +424,6 @@ export function snapshotFrame(activeStreams) {
     chat_pins: {
       'beta-chat-1': { path: '/synthetic/beta/pinned-report.md', dismissed_paths: [], revision: 1 },
     },
-    // The transient suggested-command map. Complete, like the pin map: a
-    // chat it does not name holds no offer. Empty in the base frame; the
-    // fixture server fills it from the session's offers before sending.
-    chat_terminal_offers: {},
     // The needs-you action map, complete the same way. Empty in the base
     // frame; the fixture server fills it from the session's actions.
     chat_actions: {},

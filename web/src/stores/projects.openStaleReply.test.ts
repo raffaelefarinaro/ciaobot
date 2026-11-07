@@ -43,7 +43,7 @@ const chat = (id: string) => ({
   chat_id: id, project_id: 'p1', title: id, model: '', provider: 'claude', mode: '', session_id: 's', created_at: '',
 })
 const snapshot = (active_streams: object[] = []) => ({
-  type: 'snapshot', active_streams, background_agents: {}, chat_pins: {}, chat_terminal_offers: {},
+  type: 'snapshot', active_streams, background_agents: {}, chat_pins: {},
 })
 
 // What GET /api/chats/<id>/messages returns right now, per chat.
