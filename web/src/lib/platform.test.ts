@@ -24,20 +24,17 @@ const SRC = join(__dirname, '..')
 const SELF = join(SRC, 'lib', 'platform.test.ts')
 
 /**
- * The retired names: the helper, the document-start marker and the command
- * bridge. They are assembled from fragments so this file does not match its own
- * scan — spelling them out would put the very references the guard forbids back
- * into `web/src`, which is the one thing the guard exists to prevent. The
- * acceptance check for #659 is a plain grep over that tree, and it has to come
- * back empty.
+ * The retired names: the helper and the command bridge. Spelled out so a plain
+ * search for either finds this guard: the scan skips this file (`SELF`), so
+ * naming them here cannot trip it.
  */
 const RETIRED: Record<string, string> = {
-  helper: 'is' + 'DesktopApp',
-  bridge: '__TAU' + 'RI__',
+  helper: 'isDesktopApp',
+  bridge: '__TAURI__',
 }
 
-/** The live marker, assembled the same way, and the one file allowed to read it. */
-const MARKER = '__CIAOBOT' + '_DESKTOP__'
+/** The live marker and the one file allowed to read it. */
+const MARKER = '__CIAOBOT_DESKTOP__'
 const MARKER_READER = join(SRC, 'lib', 'pwaPlatform.ts')
 
 /** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that uses
