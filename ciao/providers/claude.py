@@ -147,7 +147,7 @@ MCP_RECONNECT_TIMEOUT_S = 20.0
 _CLAUDEAI_CATALOG_DEADLINE_S = 30.0
 _CLAUDEAI_CATALOG_POLL_S = 2.0
 _CLAUDEAI_CATALOG_MAX_RETRIES = 2
-CLAUDEAI_PREFIX = "claude.ai "
+_CLAUDEAI_PREFIX = "claude.ai "
 _CLAUDEAI_SEEN_MARKER = "claudeai_connectors_seen"
 CLAUDEAI_CATALOG_RETRY_NOTICE = (
     "claude.ai connectors didn't load: Claude Code's connector list request "
@@ -194,6 +194,11 @@ _BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
 # Every control-request failure is a bare ``Exception``, so the message is the
 # only thing that identifies an initialize handshake that missed its deadline.
 _INITIALIZE_TIMEOUT_MESSAGE = "Control request timeout: initialize"
+
+
+def is_claudeai_connector(name: str) -> bool:
+    """A claude.ai connector: listed by the claude.ai account, connected on claude.ai, never by ``claude mcp login``."""
+    return name.startswith(_CLAUDEAI_PREFIX)
 
 
 class ClaudeInitializeTimeout(RuntimeError):
@@ -868,7 +873,7 @@ class ClaudeProvider(BaseSDKProvider):
                     states = await self.read_mcp_status()
                 except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
                     states = {}
-                if any(name.startswith(CLAUDEAI_PREFIX) for name in states):
+                if any(is_claudeai_connector(name) for name in states):
                     self._claudeai_seen_marker.parent.mkdir(parents=True, exist_ok=True)
                     self._claudeai_seen_marker.touch()
                     self._claudeai_catalog_retries = 0

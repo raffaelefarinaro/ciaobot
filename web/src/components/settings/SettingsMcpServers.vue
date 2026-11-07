@@ -41,13 +41,18 @@
           </div>
           <p v-if="server.allowed === false" class="hint">This workspace’s tool restrictions prevent access to this server.</p>
           <div v-for="group in groupMcpConnections(server.connections)" :key="group.state" class="mcp-connection">
-            <span class="badge" :class="stateClass(group.state)">{{ stateLabel(group.state) }}</span>
+            <span class="badge" :class="stateClass(group.state, server)">{{ stateLabel(group.state, server) }}</span>
             <span v-if="group.chatIds.length > 1" class="mcp-connection-count">in {{ group.chatIds.length }} chats</span>
             <a :href="`/chat/${encodeURIComponent(group.chatIds[0]!)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${group.chatIds[0]}`">Open chat</a>
-            <p v-if="group.error" class="hint">{{ group.error }}</p>
+            <p v-if="group.error && !claudeAiNotConnected(group.state, server)" class="hint">{{ group.error }}</p>
           </div>
           <p v-if="!server.connections.length" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
-          <p v-if="!manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
+          <p v-if="isClaudeAi(server)" class="hint">
+            A claude.ai connector: connect, reconnect or disconnect it on
+            <a href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer">claude.ai, Settings, Connectors</a>.
+            To hide every claude.ai connector in this workspace, turn off claude.ai connectors in <router-link to="/settings/workspace">Overview</router-link>.
+          </p>
+          <p v-else-if="!manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
           <template v-else>
             <div class="mcp-actions">
               <button
@@ -251,6 +256,16 @@ function manageable(server: McpNativeServer): boolean {
   return validServerName(server.name)
 }
 
+/** A claude.ai connector: listed by the account, connected on claude.ai. */
+function isClaudeAi(server: McpNativeServer): boolean {
+  return server.scope === 'claudeai'
+}
+
+/** Not a sign-in owed here: never connected, or its claude.ai sign-in lapsed; either way it is fixed on claude.ai. */
+function claudeAiNotConnected(state: McpConnection['state'], server: McpNativeServer): boolean {
+  return isClaudeAi(server) && state === 'needs_auth'
+}
+
 function showSignIn(server: McpNativeServer): boolean {
   return !server.connections.length || server.connections.some(c => c.state === 'needs_auth' || c.state === 'failed')
 }
@@ -264,15 +279,17 @@ function providerLabel(provider: Provider): string {
 }
 
 function scopeLabel(scope: string): string {
-  const labels: Record<string, string> = { local: 'this workspace', project: 'project', user: 'all workspaces', global: 'all workspaces', account: 'account', provider: 'provider' }
+  const labels: Record<string, string> = { local: 'this workspace', project: 'project', user: 'all workspaces', global: 'all workspaces', account: 'account', claudeai: 'claude.ai', provider: 'provider' }
   return labels[scope] || scope
 }
 
-function stateLabel(state: McpConnection['state']): string {
+function stateLabel(state: McpConnection['state'], server: McpNativeServer): string {
+  if (claudeAiNotConnected(state, server)) return 'not connected'
   return { connected: 'connected', failed: 'connection failed', disabled: 'disabled', needs_auth: 'sign-in required', unknown: 'connection not checked' }[state]
 }
 
-function stateClass(state: McpConnection['state']): string {
+function stateClass(state: McpConnection['state'], server: McpNativeServer): string {
+  if (claudeAiNotConnected(state, server)) return 'badge--muted'
   return state === 'connected' ? 'badge--success' : state === 'failed' ? 'badge--error' : 'badge--warn'
 }
 </script>
