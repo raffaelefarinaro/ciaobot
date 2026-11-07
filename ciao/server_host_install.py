@@ -953,7 +953,6 @@ def verify_process_executable(pid: int, expected: Path) -> str:
     would still pass. The listener/lock/ancestry/liveness checks above narrow that
     window but cannot eliminate it without a kernel start-time token.
     """
-    _require_kernel_pid(pid)
     actual = _kernel_executable_path(pid)
     if os.path.islink(expected):
         raise ServerHostInstallError(
@@ -2782,18 +2781,14 @@ def repair_server_host(
         if kind == _CURRENT:
             assert existing is not None
             return existing
-        if kind == _ABSENT:
-            return _install_now(path, policy, bundle, record_path, None, runner)
-        if kind == _REPLACE:
-            return _install_now(path, policy, bundle, record_path, existing, runner)
         return _install_now(
             path,
             policy,
             bundle,
             record_path,
-            None,
+            existing,
             runner,
-            replace_unproven=True,
+            replace_unproven=kind == _UNPROVEN,
         )
 
 
