@@ -40,6 +40,8 @@ test.describe('phone chat header', () => {
     // The bell and Back moved into the ⋯ menu, so the header holds ☰, the title and ⋯.
     await expect(page.locator('.header-trail .notif-bell')).toBeHidden()
     await expect(page.locator('.header-back')).toBeHidden()
+    await expect(page.locator('.work-inspector-trigger--header')).toBeHidden()
+    await expect(page.locator('.chat-archive-btn')).toBeHidden()
     const more = page.getByRole('button', { name: /^More chat actions/ })
     await expect(more).toBeVisible()
     const icon = (await more.locator('svg').boundingBox())!
@@ -126,5 +128,17 @@ test.describe('phone chat header', () => {
     expect(await header.evaluate(el => el.getBoundingClientRect().top)).toBe(plainTop)
     const headerBottom = await header.evaluate(el => el.getBoundingClientRect().bottom)
     expect(await opener.evaluate(el => el.getBoundingClientRect().top)).toBeGreaterThanOrEqual(headerBottom - 1)
+  })
+})
+
+test.describe('desktop chat header', () => {
+  test.use({ viewport: { width: 1280, height: 800 } })
+
+  test('the ⋯ menu is not rendered and Chat details keeps its own control', async ({ page }, testInfo) => {
+    await isolate(page, `desktop-header-${testInfo.workerIndex}`)
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    await expect(page.locator('.chat-more')).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Show chat details' })).toBeVisible()
   })
 })

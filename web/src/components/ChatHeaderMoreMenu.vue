@@ -25,21 +25,31 @@
         >
           <div class="chat-more-menu">
             <DropdownMenuItem as-child @select="emit('details')">
-              <button type="button">Chat details</button>
+              <button type="button">
+                <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+                <span>Chat details</span>
+              </button>
             </DropdownMenuItem>
             <DropdownMenuItem as-child @select="requestSheet">
               <button type="button">
+                <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M6 17V10a6 6 0 0 1 12 0v7" /><line x1="4" y1="17" x2="20" y2="17" /><line x1="10" y1="21" x2="14" y2="21" /></svg>
                 <span>Notifications</span>
                 <span v-if="inbox.count > 0" class="chat-more-count" aria-hidden="true">{{ inbox.badgeText }}</span>
               </button>
             </DropdownMenuItem>
             <DropdownMenuItem v-if="canArchive" as-child @select="emit('archive')">
-              <button type="button">Archive</button>
+              <button type="button">
+                <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" /></svg>
+                <span>Archive</span>
+              </button>
             </DropdownMenuItem>
             <template v-if="historyNav.canBack.value">
               <DropdownMenuSeparator class="chat-more-sep" />
               <DropdownMenuItem as-child @select="historyNav.back">
-                <button type="button">{{ historyNav.backLabel.value }}</button>
+                <button type="button">
+                  <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+                  <span>{{ historyNav.backLabel.value }}</span>
+                </button>
               </DropdownMenuItem>
             </template>
           </div>
@@ -139,6 +149,10 @@ defineExpose({ focusTrigger })
   font: inherit;
   font-size: var(--text-base);
   text-align: left;
+}
+.chat-more-icon {
+  flex-shrink: 0;
+  color: var(--fg2);
 }
 .chat-more-menu button:focus-visible {
   outline: 2px solid var(--accent);

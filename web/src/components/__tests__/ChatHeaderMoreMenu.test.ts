@@ -156,6 +156,21 @@ describe('ChatHeaderMoreMenu', () => {
     expect(trigger().getAttribute('aria-label')).toBe('More chat actions')
   })
 
+  it('Back goes back in app history', async () => {
+    nav.canBack.value = true
+    await mountMenu({ canArchive: false })
+    await openMenu()
+    itemNamed('Back to Home')!.click()
+    await settle()
+    expect(nav.back).toHaveBeenCalledTimes(1)
+  })
+
+  it('the Notifications row shows the unread count', async () => {
+    await mountMenu({ unread: 3 })
+    await openMenu()
+    expect(itemNamed('Notifications')!.querySelector('.chat-more-count')?.textContent?.trim()).toBe('3')
+  })
+
   it('Notifications opens the inbox sheet', async () => {
     await mountMenu({ unread: 2 })
     await openMenu()
