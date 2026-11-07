@@ -38,7 +38,7 @@
         <!-- Package update. The first section of General. Up to date with nothing
              in progress it is only its title and a status in the corner; every
              other state is the full card, with its copy and its controls. -->
-        <div class="card">
+        <div id="updates" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">Updates</p>
@@ -412,7 +412,7 @@
              meaning, so the two never share a label: this one is an explicit,
              bidirectional hand-off of the program, the other is an unattended
              one-way copy of the memory. -->
-        <div class="card">
+        <div id="restart-host" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">This host</p>
@@ -1887,9 +1887,11 @@ watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 // card's "How to install", #other-devices on Access & devices from "Phone
 // setup"). A link mounts the tab and sets the hash in one navigation and the
 // cards mount after the tab flips, so the scroll re-runs on either change.
+// A restart card's button lands on #updates (General) or #restart-host (Advanced).
 const TAB_ANCHORS: Record<string, string[]> = {
-  home: ['#install-app'],
+  home: ['#install-app', '#updates'],
   access: ['#other-devices'],
+  advanced: ['#restart-host'],
 }
 watch(
   [() => route.hash, currentTab],

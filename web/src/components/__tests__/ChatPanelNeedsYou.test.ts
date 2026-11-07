@@ -157,7 +157,7 @@ describe('ChatPanel needs-you card', () => {
 
   it('shows no card for a kind that has no copy yet', async () => {
     const { wrapper: panel, store } = await mountPanel()
-    store.chatActions = { [CHAT_ID]: [{ ...ACTION, kind: 'restart' } as never] }
+    store.chatActions = { [CHAT_ID]: [{ ...ACTION, kind: 'not_a_kind' } as never] }
     await flushPromises()
 
     expect(panel.find('.needs-you-card').exists()).toBe(false)
