@@ -83,6 +83,47 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
   }
 }
 
+/** The display name of a device-code tool. The engine allows only gh and az. */
+const DEVICE_TOOL_NAMES: Record<string, string> = { gh: 'GitHub CLI', az: 'Azure CLI' }
+
+function deviceCodeCopy(action: ChatAction): ActionCopy {
+  const tool = action.params.tool ?? ''
+  const name = DEVICE_TOOL_NAMES[tool] ?? tool
+  const meta = `${tool} · device code`
+  switch (action.state) {
+    case 'open':
+      return {
+        title: `Sign in to ${name}`,
+        why: `The agent needs ${tool} signed in to continue.`,
+        primaryLabel: 'Start sign-in',
+        meta,
+      }
+    case 'working':
+      return {
+        title: `Starting ${name} sign-in…`,
+        why: 'Starting a sign-in terminal for this chat.',
+        primaryLabel: '',
+        meta,
+      }
+    case 'waiting':
+      return {
+        title: `Enter the code to sign in to ${name}`,
+        why: 'Enter this code on the page, then come back. The card updates by itself.',
+        primaryLabel: '',
+        meta,
+      }
+    case 'done':
+      return { title: `Signed in to ${name}`, why: `The agent can use ${tool} now.`, primaryLabel: 'Continue the chat', meta }
+    case 'failed':
+      return {
+        title: `Couldn't sign in to ${name}`,
+        why: action.error || 'The sign-in did not finish.',
+        primaryLabel: 'Try again',
+        meta,
+      }
+  }
+}
+
 function commandCopy(action: ChatAction): ActionCopy {
   const meta = 'Suggested command'
   switch (action.state) {
@@ -181,6 +222,8 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
       return restartCopy(action)
     case 'permission_mode':
       return permissionModeCopy(action)
+    case 'device_code':
+      return deviceCodeCopy(action)
     default:
       return null
   }
