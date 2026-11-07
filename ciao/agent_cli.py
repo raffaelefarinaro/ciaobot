@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.chat_actions import AGENT_ACTION_KINDS
+from ciao.chat_actions import (
+    AGENT_ACTION_KINDS,
+    COMMAND_MAX_BYTES,
+    ChatActionError,
+    normalize_command,
+)
 from ciao.execution_modes import is_credential_adjacent
 from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
-from ciao.terminal_offer import (
-    TERMINAL_OFFER_MAX_BYTES,
-    TerminalOfferError,
-    normalize_terminal_offer,
-)
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
@@ -653,18 +653,18 @@ def _command_file_text(raw: str) -> str:
             # that is not an ordinary file.
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise UsageError("--command-file must be an ordinary file.")
-            payload = handle.read(TERMINAL_OFFER_MAX_BYTES + 1)
+            payload = handle.read(COMMAND_MAX_BYTES + 1)
     except _PATH_FAILURES:
         raise UsageError("--command-file cannot be read.") from None
-    if len(payload) > TERMINAL_OFFER_MAX_BYTES:
+    if len(payload) > COMMAND_MAX_BYTES:
         raise UsageError("--command-file holds more text than a command may.")
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
         raise UsageError("--command-file must be UTF-8 text.") from None
     try:
-        return normalize_terminal_offer(text)
-    except TerminalOfferError as exc:
+        return normalize_command(text)
+    except ChatActionError as exc:
         if exc.reason == "empty":
             raise UsageError("--command-file holds no command text.") from None
         raise UsageError("--command-file holds text a command may not contain.") from None

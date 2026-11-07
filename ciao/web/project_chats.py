@@ -77,21 +77,6 @@ class ChatPinConflictError(Exception):
         self.pin = pin
 
 
-class TerminalOfferConflictError(Exception):
-    """A dismissal quoted a terminal-offer id that is no longer current.
-
-    A chat carries at most one suggested command, and a dismissal names the
-    offer it saw. A device that raced a newer offer must not remove it
-    silently — the user is looking at a command the other device never saw
-    — so the write conflicts instead. Carries the authoritative current
-    offer so the caller can re-apply against it.
-    """
-
-    def __init__(self, terminal_offer: dict[str, str]) -> None:
-        super().__init__("Terminal offer conflict")
-        self.terminal_offer = terminal_offer
-
-
 class ChatActionConflictError(Exception):
     """An action call quoted an action id that is no longer on the chat.
 
@@ -186,11 +171,6 @@ from ciao.chat_actions import (
 )
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
-from ciao.terminal_offer import (
-    TerminalOffer,
-    new_terminal_offer,
-    terminal_offer_payload,
-)
 from ciao.web.chat_actions_runtime import ChatActionsRuntime
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
@@ -768,17 +748,7 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
-    # Transient, in memory only: the command the assistant suggests for this
-    # chat. It is guidance the user reads, copies and runs themselves — it is
-    # never executed here — and it is deliberately not persisted: a command
-    # can name a credential or a private path, so it never reaches the chat
-    # registry, its audit log or a backup of either. A provider's own
-    # tool-call transcript may still hold the arguments the model was given;
-    # that is the provider's record, not Ciaobot's state. The offer ends with
-    # the conversation it was made in (archive, new session, handover) or
-    # with an explicit dismissal, and a restart ends it with everything else.
-    terminal_offer: TerminalOffer | None = None
-    # Needs-you action cards. Transient and memory only, like the offer above:
+    # Needs-you action cards. Transient and memory only:
     # an action can name a sign-in URL or a helper session, so it never reaches
     # the chat registry. It ends with the conversation it was raised in (archive,
     # new session, handover) or with a dismissal, and a restart ends it.
@@ -935,7 +905,6 @@ class ChatInfo:
             "last_snippet": self.last_snippet,
             "last_error": self.last_error,
             "title_status": self.title_status,
-            "terminal_offer": terminal_offer_payload(self.terminal_offer),
             "actions": [action_payload(a) for a in self.actions],
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -4175,101 +4144,6 @@ class ProjectChatManager:
         })
         return chat_pin_payload(chat)
 
-    # ── Terminal offers (transient suggested commands) ───────────────────
-
-    @property
-    def chat_terminal_offer_states(self) -> dict[str, dict[str, str]]:
-        """The active terminal offer of every chat that has one, by chat id.
-
-        Sparse and complete: a chat without an offer is simply absent, and
-        the map as a whole REPLACES the client's cache. A chat missing from
-        it has no offer, which is how a stale offer is cleared.
-        """
-        states: dict[str, dict[str, str]] = {}
-        for cid, chat in self._chats.items():
-            payload = terminal_offer_payload(chat.terminal_offer)
-            if payload is not None:
-                states[cid] = payload
-        return states
-
-    def set_terminal_offer(
-        self, chat_id: str, command: str
-    ) -> dict[str, str] | None:
-        """Offer ``command`` as this chat's suggested terminal command.
-
-        Returns the new payload, or ``None`` for a chat that does not exist.
-        The command is validated and normalized first: what is stored is what
-        the card shows and what the user copies.
-
-        Offering the same text again while it is already active is not a
-        change: the id stays (a dismissal the user is holding must stay
-        valid) and nothing is published. A different text is a new offer
-        with a new id.
-
-        Nothing is saved. The offer is transient state, and the command may
-        name a credential.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        if chat.archived:
-            raise ValueError("Cannot offer a terminal command in an archived chat")
-        offer = new_terminal_offer(command)
-        current = chat.terminal_offer
-        if current is not None and current.command == offer.command:
-            return terminal_offer_payload(current)
-        chat.terminal_offer = offer
-        self._events.publish({
-            "type": "chat_terminal_offer_changed",
-            "chat_id": chat.chat_id,
-            "terminal_offer": terminal_offer_payload(offer),
-        })
-        return terminal_offer_payload(offer)
-
-    def dismiss_terminal_offer(
-        self, chat_id: str, expected_id: str
-    ) -> dict[str, str] | None:
-        """Dismiss this chat's offer when it is the one the caller saw.
-
-        Returns the payload that was dismissed, or ``None`` when there was
-        nothing to dismiss — no such chat, or no offer. A stale
-        ``expected_id`` raises :class:`TerminalOfferConflictError` and
-        changes nothing, so a device that raced a newer offer cannot remove
-        a command the user is looking at.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        current = chat.terminal_offer
-        if current is None:
-            return None
-        if current.id != expected_id:
-            raise TerminalOfferConflictError(terminal_offer_payload(current))
-        chat.terminal_offer = None
-        self._events.publish({
-            "type": "chat_terminal_offer_changed",
-            "chat_id": chat.chat_id,
-            "terminal_offer": None,
-        })
-        return terminal_offer_payload(current)
-
-    def _clear_terminal_offer(self, chat: ChatInfo) -> bool:
-        """Drop the chat's offer and publish the clear. True when there was one.
-
-        The offer belongs to the conversation it was made in, so a lifecycle
-        transition that starts a new one (archive, new session, handover)
-        ends it. Nothing is saved: the offer was never in the registry.
-        """
-        if chat.terminal_offer is None:
-            return False
-        chat.terminal_offer = None
-        self._events.publish({
-            "type": "chat_terminal_offer_changed",
-            "chat_id": chat.chat_id,
-            "terminal_offer": None,
-        })
-        return True
-
     # ── Chat actions (transient needs-you cards) ─────────────────────────
 
     def _publish_actions(self, chat: ChatInfo) -> None:
@@ -4413,8 +4287,8 @@ class ProjectChatManager:
     def chat_action_states(self) -> dict[str, list[dict[str, object]]]:
         """The action list of every chat that has one, by chat id.
 
-        Sparse and complete, like the terminal-offer map: a chat missing from it has
-        no actions, and the map replaces the client's cache.
+        Sparse and complete: a chat missing from it has no actions, and the map
+        replaces the client's cache.
         """
         states: dict[str, list[dict[str, object]]] = {}
         for cid, chat in self._chats.items():
@@ -4755,8 +4629,7 @@ class ProjectChatManager:
         if provider_service:
             asyncio.ensure_future(provider_service.disconnect())
         self._save()
-        # The offer belonged to the conversation that just ended.
-        self._clear_terminal_offer(chat)
+        # The actions belonged to the conversation that just ended.
         self._clear_chat_actions(chat)
         return chat
 
@@ -5136,8 +5009,7 @@ class ProjectChatManager:
             except ValueError:
                 chat.archive_path = str(result)
         self._save()
-        # The archived chat is read-only history: it carries no offer.
-        self._clear_terminal_offer(chat)
+        # The archived chat is read-only history: it carries no actions.
         self._clear_chat_actions(chat)
         self._events.publish({
             "type": "chat_archived",
@@ -5263,8 +5135,7 @@ class ProjectChatManager:
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
-        # The offer belonged to the session that just ended.
-        self._clear_terminal_offer(chat)
+        # The actions belonged to the session that just ended.
         self._clear_chat_actions(chat)
         return chat
 
