@@ -330,6 +330,15 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   *Terminal* section stays the persistent, manual way into the terminal;
   the card is the contextual one, and it is shown only for the chat on
   screen.
+- **A command card types the command, and never runs it.**
+  `needs-you/CommandBody.vue` types through
+  `useRunInTerminal(…).run(command, { chatId, paste: true })`, into a session
+  the composable created for that chat (key `chat:<id>`), never into a shell
+  the user opened. It wraps the text in `ESC[200~`/`ESC[201~` only when
+  `store.bracketedPasteMode()` is true, sends a single line raw otherwise, and
+  copies a multi-line command when the shell has no bracketed paste. It never
+  appends `\r`, so the user presses Enter. The engine only hears
+  `{step: 'typed'|'ran'}`.
 
 ### Side-by-side chats
 

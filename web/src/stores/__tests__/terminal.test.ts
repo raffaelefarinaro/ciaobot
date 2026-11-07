@@ -406,6 +406,22 @@ describe('primary review regressions', () => {
     expect(successor?.closed).toBe(false)
   })
 
+  it('answers bracketed paste mode only for the active session\'s screen', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s1') })
+    await store.createSession()
+    const shell = makeRenderer('s1')
+    Object.assign(shell.renderer, { bracketedPasteMode: true })
+    store.attachRenderer(shell.renderer)
+    expect(store.bracketedPasteMode()).toBe(true)
+    Object.assign(shell.renderer, { bracketedPasteMode: false })
+    expect(store.bracketedPasteMode()).toBe(false)
+    Object.assign(shell.renderer, { bracketedPasteMode: true })
+    store.detachRenderer(shell.renderer)
+    expect(store.bracketedPasteMode()).toBe(false)
+  })
+
   it('limits reconnects that open but never complete the terminal ready handshake', async () => {
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })

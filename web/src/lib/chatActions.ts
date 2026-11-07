@@ -74,6 +74,68 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
   }
 }
 
+function commandCopy(action: ChatAction): ActionCopy {
+  const meta = 'Suggested command'
+  switch (action.state) {
+    case 'working':
+      return {
+        title: 'Review it, then press Enter in the terminal',
+        why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+        primaryLabel: 'I ran it',
+        meta,
+      }
+    case 'done':
+      return {
+        title: 'You ran the command',
+        why: 'Continue lets the assistant check the result.',
+        primaryLabel: 'Continue',
+        meta,
+      }
+    default:
+      return {
+        title: 'Suggested command — review before running',
+        why: action.params.note || "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+        primaryLabel: 'Type it in a terminal',
+        meta,
+      }
+  }
+}
+
+/** Every restart card says what the restart costs, in the words Settings uses. */
+const RESTART_COST = ' Restarting waits for running chats to finish, and closes any open question or approval cards.'
+
+/** Where a restart card's button leads: the Settings control that restarts or updates. */
+export function restartTarget(reason: string): string {
+  return reason === 'update' ? '/settings#updates' : '/settings/advanced#restart-host'
+}
+
+function restartCopy(action: ChatAction): ActionCopy {
+  const meta = 'Ciaobot · Settings'
+  switch (action.params.reason) {
+    case 'config':
+      return {
+        title: 'Restart Ciaobot to apply a setting',
+        why: `Ciao changed a setting that takes effect after Ciaobot restarts.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
+        meta,
+      }
+    case 'update':
+      return {
+        title: 'Update Ciaobot',
+        why: `An update is ready. Installing it restarts Ciaobot.${RESTART_COST}`,
+        primaryLabel: 'Open Updates',
+        meta,
+      }
+    default:
+      return {
+        title: 'Restart requested',
+        why: `Ciaobot needs a restart to apply a change.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
+        meta,
+      }
+  }
+}
+
 const PERMISSION_MODE_META = 'Permission mode'
 
 function permissionModeCopy(action: ChatAction): ActionCopy {
@@ -104,6 +166,10 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
     case 'mcp_auth':
       return mcpAuthCopy(action)
+    case 'command':
+      return commandCopy(action)
+    case 'restart':
+      return restartCopy(action)
     case 'permission_mode':
       return permissionModeCopy(action)
     default:

@@ -40,7 +40,7 @@ const stubs = vi.hoisted(() => {
     disposed = false
     focused = 0
     size = { cols: 80, rows: 24 }
-    modes = { applicationCursorKeysMode: false }
+    modes = { applicationCursorKeysMode: false, bracketedPasteMode: false }
     dataListeners: Array<(data: string) => void> = []
     addons: unknown[] = []
 
@@ -477,6 +477,17 @@ describe('the screen itself', () => {
     renderer.dispose()
 
     expect(terminal.options.scrollback).toBe(1000)
+  })
+
+  it('reports bracketed paste mode from the screen', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+
+    expect(renderer.bracketedPasteMode).toBe(false)
+    terminal.modes.bracketedPasteMode = true
+    expect(renderer.bracketedPasteMode).toBe(true)
+    renderer.dispose()
+    expect(renderer.bracketedPasteMode).toBe(false)
   })
 
   it('reaches xterm only through a dynamic import', () => {
