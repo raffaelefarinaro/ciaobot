@@ -45,6 +45,8 @@ export function normalizeChatActions(value: unknown): ChatAction[] {
 function mcpAuthCopy(action: ChatAction): ActionCopy {
   const server = action.params.server ?? ''
   const meta = `${action.params.provider ?? ''} · MCP`
+  // Claude's sign-in runs in an engine helper terminal: the URL arrives a poll later.
+  const claude = action.params.provider === 'claude'
   switch (action.state) {
     case 'open':
       return {
@@ -54,12 +56,19 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
         meta,
       }
     case 'working':
-      return { title: `Starting the sign-in to ${server}…`, why: 'Getting the sign-in page.', primaryLabel: '', meta }
+      return {
+        title: `Starting the sign-in to ${server}…`,
+        why: claude ? 'Starting a sign-in terminal for this chat.' : 'Getting the sign-in page.',
+        primaryLabel: '',
+        meta,
+      }
     case 'waiting':
       return {
         title: `Waiting for ${server} to connect…`,
-        why: 'Finish the sign-in in the page that opened. This card updates by itself.',
-        primaryLabel: 'Open the sign-in page again',
+        why: claude
+          ? 'Open the sign-in page and finish there. This card updates by itself.'
+          : 'Finish the sign-in in the page that opened. This card updates by itself.',
+        primaryLabel: claude ? 'Open the sign-in page' : 'Open the sign-in page again',
         meta,
       }
     case 'done':

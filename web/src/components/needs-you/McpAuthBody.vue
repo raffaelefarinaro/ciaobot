@@ -8,6 +8,7 @@ import { computed, ref, watch } from 'vue'
 import { actionCopy, chatActionErrorReason, MCP_AUTH_STEPS, safeExternalUrl } from '../../lib/chatActions'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
+import HelperTerminalButton from './HelperTerminalButton.vue'
 
 const props = defineProps<{ chatId: string; action: ChatAction }>()
 const emit = defineEmits<{ error: [message: string]; notice: [message: string] }>()
@@ -16,6 +17,8 @@ const store = useProjectStore()
 const starting = ref(false)
 const copy = computed(() => actionCopy(props.action))
 const url = computed(() => safeExternalUrl(props.action.params.url))
+const isClaude = computed(() => props.action.params.provider === 'claude')
+const sessionId = computed(() => props.action.params.session_id ?? '')
 /** This body's root, so a focus inside it can be seen before it leaves. */
 const bodyEl = ref<HTMLElement | null>(null)
 
@@ -82,6 +85,12 @@ async function start(): Promise<void> {
       target="_blank"
       rel="noopener noreferrer"
     >{{ copy?.primaryLabel }}</a>
+
+    <HelperTerminalButton
+      v-if="isClaude && (action.state === 'working' || action.state === 'waiting')"
+      :chat-id="chatId"
+      :session-id="sessionId"
+    />
   </div>
 </template>
 
