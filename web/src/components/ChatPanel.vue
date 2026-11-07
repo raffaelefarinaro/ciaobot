@@ -878,19 +878,9 @@
       </div>
     </div>
 
-    <!-- The command the assistant suggested for this chat. A transient card
-         above the queue and the composer, so a suggestion waiting to be
-         reviewed is never buried under the transcript. It is shown, copied,
-         opened or dismissed — never run. -->
-    <TerminalOfferCard
-      v-if="terminalOffer"
-      :chat-id="chat.chat_id"
-      :offer="terminalOffer"
-    />
-
     <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer, like the suggested
-         command. Keyed by id: a replaced action is a new card. -->
+         sign-in, ...). Above the queue and the composer. Keyed by id: a
+         replaced action is a new card. -->
     <NeedsYouCard v-for="action in needsYouActions" :key="action.id" :chat-id="chat.chat_id" :action="action" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
@@ -1483,7 +1473,6 @@ import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
-import TerminalOfferCard from './TerminalOfferCard.vue'
 import NeedsYouCard from './NeedsYouCard.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1885,22 +1874,6 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
   return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
 }
 
-/**
- * The command the assistant suggested for this chat, if it holds one.
- *
- * The offer is transient and engine-owned: the browser keeps it in memory and
- * reads it from the store's map, never from the chat row, because a row's
- * copy is the payload the list was read at and the map is the live one. An
- * archived chat holds no offer — the command died with the chat — so the
- * card is not shown for one.
- */
-const terminalOffer = computed(() => {
-  const current = chat.value
-  if (!current || current.archived) return null
-  const offer = store.terminalOffers[current.chat_id]
-  return offer ? offer : null
-})
-
 // The needs-you actions this chat holds that have a card. A kind with no copy
 // yet has no card, so a half card never renders.
 const needsYouActions = computed(() => {
@@ -1910,38 +1883,13 @@ const needsYouActions = computed(() => {
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
-// composer, like the offer card above.
+// composer.
 watch(
   () => needsYouActions.value.map(a => a.id),
   (ids) => {
     const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')
     if (!held || ids.includes(held.dataset.actionId ?? '')) return
     void nextTick(() => {
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    })
-  },
-  { flush: 'pre' },
-)
-
-// When the card that holds the focus goes away — dismissed by the user, or
-// dropped by the engine over the socket — it unmounts and the focus would
-// fall to <body>. Hand it to the composer instead, the way the queue hands
-// it over when a chip disappears. The watch is on the card's own render
-// condition, so the handoff also happens when the chat is archived or gone.
-// A replacement patches the card in place, so the focus belongs to the card
-// that is still there.
-watch(
-  () => terminalOffer.value,
-  (offer, previous) => {
-    // Only a removal unmounts the card.
-    if (offer !== null || previous === null) return
-    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.terminal-offer')
-    if (!held) return
-    void nextTick(() => {
-      // The textarea would raise the soft keyboard on a phone and scroll the
-      // transcript out from under the reader, so the bar takes the focus
-      // there — the same rule the move-to-background chip follows.
       if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
       else composerBarEl.value?.focus()
     })

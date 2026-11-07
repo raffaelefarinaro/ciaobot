@@ -15,28 +15,22 @@
  */
 import { useTerminalStore } from '../stores/terminal'
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   chatId?: string
   projectId?: string
   /** `row`: a full-width rail row with the prompt glyph, for Chat details. */
   variant?: 'link' | 'row'
-  /**
-   * Start a shell when the scope has none. Off for the suggested-command
-   * card, which only opens the pane: a model-authored command never gets a
-   * shell started on its behalf.
-   */
-  startShell?: boolean
-}>(), { startShell: true })
+}>()
 
 const store = useTerminalStore()
 
 async function open(): Promise<void> {
   if (props.chatId) {
-    await store.open({ chatId: props.chatId }, { ensureSession: props.startShell })
+    await store.open({ chatId: props.chatId }, { ensureSession: true })
     return
   }
   if (props.projectId) {
-    await store.open({ projectId: props.projectId }, { ensureSession: props.startShell })
+    await store.open({ projectId: props.projectId }, { ensureSession: true })
   }
 }
 </script>
