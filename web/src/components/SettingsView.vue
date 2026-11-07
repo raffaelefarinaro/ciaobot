@@ -3525,7 +3525,8 @@ onUnmounted(stopUpdatePoll)
 /* The card's own focus target, for the run that leaves it with nothing to
    click: the app's focus ring (DESIGN: 2px accent) does not reach a region, so
    the panel states one exactly as the overlay's status region does. */
-.engine-update-panel:focus {
+.engine-update-panel:focus { outline: none; }
+.engine-update-panel:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
