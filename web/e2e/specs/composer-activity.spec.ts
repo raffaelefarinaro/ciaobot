@@ -39,9 +39,9 @@ test('a long agent name truncates inside the agents popover', async ({ page }) =
     })
   }, CHAT_ID)
 
-  const agents = page.locator('.composer-activity-seg')
-  await expect(agents).toBeVisible({ timeout: 8_000 })
-  await agents.click()
+  const seg = page.locator('.composer-activity-seg')
+  await expect(seg).toBeVisible({ timeout: 8_000 })
+  await seg.click()
 
   const pop = await page.locator('.composer-activity-popover').boundingBox()
   const item = page.locator('.composer-activity-pop-item').first()

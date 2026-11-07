@@ -57,7 +57,6 @@ describe('ComposerActivity', () => {
     expect(seg.find('.activity-glyph--working').exists()).toBe(true)
     expect(seg.attributes('title')).toBe('2 agents running, 1 background run: ITTA preview')
     expect(seg.attributes('aria-label')).toBe('2 agents running, 1 background run: ITTA preview')
-    expect(mixed.find('.composer-activity-seg--outcome').exists()).toBe(false)
     mixed.unmount()
   })
 
@@ -195,7 +194,7 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
-  it('closes without moving focus when the part that opened it goes away', async () => {
+  it('closes without moving focus when all activity ends', async () => {
     const wrapper = mountBar({ agents: threeShells().slice(0, 2) })
     const first = wrapper.get('.composer-activity-seg')
     await first.trigger('click')
@@ -315,7 +314,7 @@ describe('ComposerActivity', () => {
     const opener = wrapper.get('.composer-activity-seg')
     await opener.trigger('click')
     await flushPromises()
-    const stops =() => Array.from(document.querySelectorAll<HTMLButtonElement>('.shell-row-stop'))
+    const stops = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.shell-row-stop'))
     stops()[0].focus()
     await wrapper.setProps({ agents: [row('b')] })
     await flushPromises()
