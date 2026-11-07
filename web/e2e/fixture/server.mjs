@@ -1063,9 +1063,11 @@ const server = http.createServer(async (req, res) => {
       // What the synthetic shell currently believes: the sessions this
       // browser context owns, and the size it was last told about. A spec
       // reads it to prove a resize actually reached the engine.
+      // `pending` is the input the shell has not yet seen a newline for: a
+      // command typed but not run stays here, so a spec can prove nothing ran.
       const terminals = terminalSessions(state)
       return sendJson(res, {
-        sessions: [...terminals.values()].map(terminalInfo),
+        sessions: [...terminals.values()].map(session => ({ ...terminalInfo(session), pending: session.pending })),
       })
     }
     if (pathname === '/__fixture__/terminal-repo') {
