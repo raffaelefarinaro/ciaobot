@@ -40,8 +40,8 @@ const RETIRED: Record<string, string> = {
 const MARKER = '__CIAOBOT' + '_DESKTOP__'
 const MARKER_READER = join(SRC, 'lib', 'pwaPlatform.ts')
 
-/** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that sets
- * the marker is a test asserting a branch that can no longer be taken. */
+/** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that uses
+ * the retired helper or bridge asserts a branch that can no longer be taken. */
 function sourceFiles(): string[] {
   const out: string[] = []
   const walk = (dir: string) => {
