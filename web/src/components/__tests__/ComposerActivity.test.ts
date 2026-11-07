@@ -23,8 +23,8 @@ function mountBar(props: Record<string, unknown> = {}) {
 const popover = () => document.querySelector<HTMLElement>('.composer-activity-popover')
 const texts = (sel: string) => Array.from(document.querySelectorAll(sel)).map(el => el.textContent?.trim())
 
-async function openAgents(wrapper: ReturnType<typeof mountBar>) {
-  await wrapper.get('.composer-activity-seg--agents').trigger('click')
+async function openPopover(wrapper: ReturnType<typeof mountBar>) {
+  await wrapper.get('.composer-activity-seg').trigger('click')
   await flushPromises()
 }
 
@@ -42,30 +42,41 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
-  it('counts agents and shells, naming a single shell only in its tooltip', () => {
+  it('shows one combined count, with the working glyph while an agent runs', () => {
     const one = mountBar({ agentCount: 1 })
-    expect(one.get('.composer-activity-seg--agents').text()).toBe('1 agent')
-    expect(one.get('.composer-activity-seg--agents').find('.activity-glyph--working').exists()).toBe(true)
+    expect(one.findAll('.composer-activity-seg')).toHaveLength(1)
+    expect(one.get('.composer-activity-seg').get('.composer-activity-label').text()).toBe('1 running')
+    expect(one.get('.composer-activity-seg').find('.activity-glyph--working').exists()).toBe(true)
+    expect(one.get('.composer-activity-seg').attributes('title')).toBe('1 agent running')
     one.unmount()
 
-    const two = mountBar({ agentCount: 2, agents: [SHELL] })
-    expect(two.get('.composer-activity-seg--agents').text()).toBe('2 agents')
-    const seg = two.get('.composer-activity-seg--runs')
-    expect(seg.get('.composer-activity-label').text()).toBe('1 shell')
-    expect(seg.attributes('title')).toBe('Background run: ITTA preview')
+    const mixed = mountBar({ agentCount: 2, agents: [SHELL] })
+    expect(mixed.findAll('.composer-activity-seg')).toHaveLength(1)
+    const seg = mixed.get('.composer-activity-seg')
+    expect(seg.get('.composer-activity-label').text()).toBe('3 running')
+    expect(seg.find('.activity-glyph--working').exists()).toBe(true)
+    expect(seg.attributes('title')).toBe('2 agents running, 1 background run: ITTA preview')
+    expect(seg.attributes('aria-label')).toBe('2 agents running, 1 background run: ITTA preview')
+    mixed.unmount()
+  })
+
+  it('uses the run glyph and a background-run tooltip when only shells run', () => {
+    const wrapper = mountBar({ agents: [SHELL] })
+    const seg = wrapper.get('.composer-activity-seg')
+    expect(seg.get('.composer-activity-label').text()).toBe('1 running')
     expect(seg.find('.activity-glyph--run').exists()).toBe(true)
-    expect(two.find('.composer-activity-seg--outcome').exists()).toBe(false)
-    two.unmount()
+    expect(seg.find('.activity-glyph--working').exists()).toBe(false)
+    expect(seg.attributes('title')).toBe('1 background run: ITTA preview')
+    wrapper.unmount()
   })
 
   it('opens one popover listing agents and processes', async () => {
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT, SHELL] })
-    await openAgents(wrapper)
+    await openPopover(wrapper)
 
-    const agents = wrapper.get('.composer-activity-seg--agents')
+    const agents = wrapper.get('.composer-activity-seg')
     expect(agents.attributes('aria-expanded')).toBe('true')
     expect(agents.attributes('aria-haspopup')).toBe('dialog')
-    expect(wrapper.get('.composer-activity-seg--runs').attributes('aria-expanded')).toBe('false')
 
     const pop = popover()
     expect(pop).not.toBeNull()
@@ -79,20 +90,33 @@ describe('ComposerActivity', () => {
 
   it('shows a loading note when the count is ahead of the poll', async () => {
     const wrapper = mountBar({ agentCount: 2, agents: [] })
-    await openAgents(wrapper)
+    await openPopover(wrapper)
     expect(document.querySelector('.composer-activity-pop-note')?.textContent?.trim()).toBe('Details loading…')
+    wrapper.unmount()
+  })
+
+  it('toggles the popover from the one combined button', async () => {
+    const wrapper = mountBar({ agentCount: 1, agents: [AGENT, SHELL] })
+    await openPopover(wrapper)
+    expect(wrapper.get('.composer-activity-seg').attributes('aria-expanded')).toBe('true')
+    expect(popover()).not.toBeNull()
+
+    await wrapper.get('.composer-activity-seg').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.composer-activity-seg').attributes('aria-expanded')).toBe('false')
+    expect(popover()).toBeNull()
     wrapper.unmount()
   })
 
   it('opens Chat details from a process row and the footer, closing the popover', async () => {
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT, SHELL] })
-    await openAgents(wrapper)
+    await openPopover(wrapper)
     document.querySelector<HTMLElement>('button.shell-row-main')?.click()
     await flushPromises()
     expect(wrapper.emitted('open-details')).toHaveLength(1)
     expect(popover()).toBeNull()
 
-    await openAgents(wrapper)
+    await openPopover(wrapper)
     document.querySelector<HTMLElement>('.composer-activity-pop-foot')?.click()
     await flushPromises()
     expect(wrapper.emitted('open-details')).toHaveLength(2)
@@ -104,14 +128,14 @@ describe('ComposerActivity', () => {
     const onKey = (e: KeyboardEvent) => recorded.push(e.defaultPrevented)
     window.addEventListener('keydown', onKey)
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT] })
-    await openAgents(wrapper)
+    await openPopover(wrapper)
     expect(popover()).not.toBeNull()
 
     popover()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await flushPromises()
 
     expect(popover()).toBeNull()
-    expect(document.activeElement).toBe(wrapper.get('.composer-activity-seg--agents').element)
+    expect(document.activeElement).toBe(wrapper.get('.composer-activity-seg').element)
     // Either the window listener never fired (propagation stopped) or it saw a
     // claimed event: ChatLayout must not close the chat.
     expect(recorded.every(Boolean)).toBe(true)
@@ -121,14 +145,14 @@ describe('ComposerActivity', () => {
 
   it('closes on a pointerdown outside without stealing focus', async () => {
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT] })
-    await openAgents(wrapper)
+    await openPopover(wrapper)
     expect(popover()).not.toBeNull()
 
     document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
     await flushPromises()
     await nextTick()
     expect(popover()).toBeNull()
-    expect(document.activeElement).not.toBe(wrapper.get('.composer-activity-seg--agents').element)
+    expect(document.activeElement).not.toBe(wrapper.get('.composer-activity-seg').element)
     wrapper.unmount()
   })
 
@@ -155,8 +179,8 @@ describe('ComposerActivity', () => {
     await nextTick()
     expect(observed[0]).toBe(wrapper.get('.composer-activity').element.parentElement)
     expect(wrapper.find('.composer-activity-label').exists()).toBe(false)
-    expect(wrapper.findAll('.composer-activity-count').map(c => c.text())).toEqual(['2', '3'])
-    expect(wrapper.get('.composer-activity-seg--runs').attributes('title')).toBe('3 background runs')
+    expect(wrapper.findAll('.composer-activity-count').map(c => c.text())).toEqual(['5'])
+    expect(wrapper.get('.composer-activity-seg').attributes('title')).toBe('2 agents running, 3 background runs')
     expect(wrapper.get('.composer-activity').classes()).toContain('composer-activity--compact')
     wrapper.unmount()
   })
@@ -166,14 +190,13 @@ describe('ComposerActivity', () => {
     const wrapper = mountBar({ agentCount: 2, agents: threeShells() })
     await nextTick()
     expect(wrapper.get('.composer-activity').classes()).not.toContain('composer-activity--compact')
-    expect(wrapper.get('.composer-activity-seg--runs .composer-activity-label').text()).toBe('3 shells')
-    expect(wrapper.get('.composer-activity-seg--agents .composer-activity-label').text()).toBe('2 agents')
+    expect(wrapper.get('.composer-activity-seg .composer-activity-label').text()).toBe('5 running')
     wrapper.unmount()
   })
 
-  it('closes without moving focus when the part that opened it goes away', async () => {
+  it('closes without moving focus when all activity ends', async () => {
     const wrapper = mountBar({ agents: threeShells().slice(0, 2) })
-    const first = wrapper.get('.composer-activity-seg--runs')
+    const first = wrapper.get('.composer-activity-seg')
     await first.trigger('click')
     await flushPromises()
     expect(popover()).not.toBeNull()
@@ -211,9 +234,8 @@ describe('ComposerActivity', () => {
   it('lists a shell row under Processes, as a non-link, and keeps it out of the agent count', async () => {
     const shell: RunningSubagent = { agent_id: 'shell:sh1', description: 'sleep 20', subagent_type: 'shell' }
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT, shell] })
-    expect(wrapper.get('.composer-activity-seg--agents').text()).toBe('1 agent')
-    expect(wrapper.get('.composer-activity-seg--runs').text()).toBe('1 shell')
-    await openAgents(wrapper)
+    expect(wrapper.get('.composer-activity-seg').text()).toBe('2 running')
+    await openPopover(wrapper)
     expect(texts('.composer-activity-pop-head')).toEqual(['Agents', 'Processes'])
     expect(texts('a.composer-activity-pop-item .composer-activity-pop-label')).toEqual(['Explore repo layout'])
     const shellItem = Array.from(document.querySelectorAll<HTMLElement>('.shell-row-main'))
@@ -229,8 +251,8 @@ describe('ComposerActivity', () => {
     }
     const stopTask = vi.fn()
     const wrapper = mountBar({ agents: [monitor], stopTask })
-    expect(wrapper.get('.composer-activity-seg--runs').text()).toBe('1 shell')
-    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    expect(wrapper.get('.composer-activity-seg').text()).toBe('1 running')
+    await wrapper.get('.composer-activity-seg').trigger('click')
     await flushPromises()
     expect(texts('.composer-activity-pop-head')).toEqual(['Processes'])
     expect(texts('.shell-row-label')).toEqual(['tail -f app.log'])
@@ -251,7 +273,7 @@ describe('ComposerActivity', () => {
       started_at: new Date(NOW - 3_725_000).toISOString(), stoppable: false,
     }
     const wrapper = mountBar({ agents: [shell], stopTask: vi.fn() })
-    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await wrapper.get('.composer-activity-seg').trigger('click')
     await flushPromises()
     expect(document.querySelector('.shell-row-stop')).toBeNull()
     expect(texts('.shell-row-age')).toEqual(['1h 2m'])
@@ -264,7 +286,7 @@ describe('ComposerActivity', () => {
       started_at: new Date(NOW).toISOString(), stoppable: true,
     }
     const wrapper = mountBar({ agents: [shell], stopTask: vi.fn(), stopErrors: { b1: 'Could not stop this process. Try again.' } })
-    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await wrapper.get('.composer-activity-seg').trigger('click')
     await flushPromises()
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('Could not stop')
     expect(document.querySelector('.shell-row-stop')?.getAttribute('aria-disabled')).toBeNull()
@@ -289,7 +311,7 @@ describe('ComposerActivity', () => {
       started_at: new Date(NOW).toISOString(), stoppable: true,
     })
     const wrapper = mountBar({ agents: [row('a'), row('b')], stopTask: vi.fn().mockResolvedValue(undefined) })
-    const opener = wrapper.get('.composer-activity-seg--runs')
+    const opener = wrapper.get('.composer-activity-seg')
     await opener.trigger('click')
     await flushPromises()
     const stops = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.shell-row-stop'))
