@@ -25,7 +25,12 @@ from ciao.provider_versions import make_cached_checks
 from ciao.terminal_auth import TerminalGrantStore
 from ciao.terminal_sessions import TerminalSessionManager
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
-from ciao.web.routes_chat_actions import chat_action_continue, chat_action_dismiss, chat_action_start
+from ciao.web.routes_chat_actions import (
+    chat_action_callback,
+    chat_action_continue,
+    chat_action_dismiss,
+    chat_action_start,
+)
 from ciao.web.routes_mcp import (
     mcp_status_endpoint,
     mcp_usage_endpoint,
@@ -481,6 +486,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/actions/{action_id}/start", chat_action_start, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/dismiss", chat_action_dismiss, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/continue", chat_action_continue, methods=["POST"]),
+        Route("/api/chats/{chat_id}/actions/{action_id}/callback", chat_action_callback, methods=["POST"]),
         Route(
             "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
             chat_background_task_stop,

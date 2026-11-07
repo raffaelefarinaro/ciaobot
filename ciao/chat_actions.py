@@ -140,7 +140,7 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
-    if set(raw) - {"server", "provider", "url", "session_id"}:
+    if set(raw) - {"server", "provider", "url", "session_id", "callback_used"}:
         raise ChatActionError("unknown_param")
     server = _text(raw, "server", required=True, limit=_SERVER_MAX)
     provider = _text(raw, "provider", required=True, limit=_PROVIDER_MAX)
@@ -160,6 +160,14 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
         if not _SESSION_ID_RE.match(session_id):
             raise ChatActionError("invalid_param")
         validated["session_id"] = session_id
+    if "callback_used" in raw:
+        # The engine's single-use mark for a pasted sign-in callback: "1" once used, "0" after a restart.
+        used = raw["callback_used"]
+        if not isinstance(used, str):
+            raise ChatActionError("invalid_type")
+        if used not in ("0", "1"):
+            raise ChatActionError("invalid_param")
+        validated["callback_used"] = used
     return validated
 
 
@@ -300,7 +308,7 @@ _KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",), "device_code
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
 ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
-    "mcp_auth": frozenset({"url", "session_id"}),
+    "mcp_auth": frozenset({"url", "session_id", "callback_used"}),
     "device_code": frozenset({"session_id", "code", "url", "entered"}),
 }
 
