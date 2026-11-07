@@ -166,7 +166,7 @@ Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
 one disclosure, each row linking the vendor's own guide. It reports the reader's
 current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
-browser tab cannot know whether the app is installed on the device.
+browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the card names the Mac app and drops the address row, the notifications card says the Mac app handles notifications, and the Home setup reminder is not shown.
 
 The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
 state in `composables/useWelcome.ts`) shows the workspace folder, the generated
@@ -457,7 +457,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). ChatPanel renders them through `components/NeedsYouStack.vue`, which lays out the cards. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn

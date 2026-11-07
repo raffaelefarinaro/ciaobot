@@ -195,6 +195,19 @@ export const INBOX_DIALOG = '[role="dialog"][aria-label="Notifications"]'
 export const ROWS = '.notif-row'
 
 /**
+ * Open Chat details the way the viewport offers it: from the ⋯ menu below
+ * 768px, where the header trigger is hidden, and from the header button above.
+ */
+export async function openChatDetails(page: Page): Promise<void> {
+  if (page.viewportSize()!.width < 768) {
+    await page.getByRole('button', { name: /^More chat actions/ }).click()
+    await page.getByRole('menuitem', { name: 'Chat details' }).click()
+    return
+  }
+  await page.getByRole('button', { name: 'Show chat details' }).click()
+}
+
+/**
  * Open the inbox from the bell the viewport shows, and wait for its dialog.
  * Pass `bell` to name one: at phone width the header bell is the visible one.
  */

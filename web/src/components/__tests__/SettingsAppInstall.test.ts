@@ -121,6 +121,7 @@ afterEach(() => {
   wrapper = null
   document.body.innerHTML = ''
   localStorage.clear()
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
   restore()
 })
 
@@ -324,5 +325,18 @@ describe('SettingsAppInstall', () => {
     expect(mountCard({ expandSteps: true }).get('details').element.open).toBe(true)
     wrapper?.unmount()
     expect(mountCard().get('details').element.open).toBe(false)
+  })
+})
+
+describe('SettingsAppInstall in the desktop client', () => {
+  it('names the Mac app in the desktop client', () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    const view = mountCard()
+
+    expect(view.text()).toContain('Ciaobot for Mac')
+    expect(view.text()).not.toContain('A browser tab')
+    expect(view.text()).not.toContain('This address')
+    expect(currentRouteNames(view)).toEqual([])
+    expect(view.findAll('.install-route')).toHaveLength(5)
   })
 })

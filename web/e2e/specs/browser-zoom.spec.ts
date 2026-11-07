@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { BOOTED, COMPOSER, boot, horizontalOverflow, isolate, openChatDetails } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -75,7 +75,7 @@ test.describe('zoom and text scaling', () => {
     await page.setViewportSize({ width: 640, height: 450 })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     // 640px is a phone layout: the code badge is hidden, so open Chat details from ⓘ.
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await expect(page.locator('.chat-repo-section')).toBeVisible()
     const sideways = await page.locator('#chat-work-rail').evaluate((el) => el.scrollWidth - el.clientWidth)
     expect(sideways, 'Chat details scrolls sideways').toBeLessThanOrEqual(0)

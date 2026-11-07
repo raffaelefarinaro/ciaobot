@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -101,7 +101,7 @@ test.describe('narrow viewport', () => {
   test('the Repository section fits the Chat details drawer at 390px', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     // The header's code badge is hidden on phones; Chat details opens from the ⓘ button.
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     const rail = page.locator('#chat-work-rail')
     await expect(rail).toBeVisible()
     const sideways = await rail.evaluate((el) => el.scrollWidth - el.clientWidth)
@@ -239,8 +239,11 @@ test.describe('narrow viewport', () => {
       }),
     )
     // Without this the test would keep passing if a refactor renamed the
-    // utilities and the selector started matching nothing at all.
-    expect(boxes.length, 'no touch targets were measured').toBeGreaterThanOrEqual(4)
+    // utilities and the selector started matching nothing at all. At 390px the
+    // open chat shows two of them (☰ and the ⋯ menu); Back, Chat details, Archive
+    // and the bell sit in the ⋯ menu or are hidden there.
+    expect(boxes.length, 'no touch targets were measured').toBeGreaterThanOrEqual(2)
+    expect(boxes.some((box) => box.cls.includes('chat-more-btn')), 'the ⋯ trigger is not measured').toBe(true)
 
     const small = boxes.filter((box) => box.w < 44 || box.h < 44)
     expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])

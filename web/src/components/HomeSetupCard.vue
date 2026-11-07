@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
-import { installInstructions, isAndroid, isIos, isIpadDesktopMode, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
+import { installInstructions, isAndroid, isDesktopClient, isIos, isIpadDesktopMode, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, installedAppProbed, installedOnDevice, promptInstall } from '../lib/installPrompt'
 import { isLoopbackPage } from '../lib/loopback'
 import { errorMessage } from '../lib/errorMessage'
@@ -63,7 +63,10 @@ watch(() => touched.value && complete.value, done => {
 })
 onBeforeUnmount(() => clearTimeout(finishTimer))
 
+const desktop = isDesktopClient()
 const visible = computed(() => {
+  // Ciaobot for Mac is the installed app and notifies natively; phone setup lives in Settings.
+  if (desktop) return false
   if (dismissed.value || finished.value) return false
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.

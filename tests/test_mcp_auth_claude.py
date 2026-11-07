@@ -19,6 +19,7 @@ from ciao.web.chat_actions_runtime import ACTION_HANDLERS, MCP_AUTH_FLOWS, McpAu
 from ciao.web.mcp_auth_claude import (
     BAD_NAME,
     CAPACITY,
+    CLAUDEAI_CONNECTOR,
     CLOSED,
     NOT_CONFIGURED,
     NOT_CONNECTED,
@@ -205,6 +206,21 @@ async def test_start_refuses_a_server_the_chat_does_not_have(tmp_path: Path, bin
 
 
 @pytest.mark.asyncio
+async def test_start_refuses_a_claude_ai_connector(tmp_path: Path, binary: str) -> None:
+    """A claude.ai connector is connected on claude.ai: no login terminal is started."""
+    server = "claude.ai Salesloft"
+    provider = FakeClaude(tmp_path, states={server: "needs_auth"})
+    terminals = FakeTerminals()
+    pcm = FakePcm(_action(server))
+
+    await ClaudeMcpAuthFlow().start(_ctx(pcm, provider, terminals), pcm.action, {})
+
+    assert pcm.last[0] == "failed"
+    assert pcm.last[2] == CLAUDEAI_CONNECTOR
+    assert terminals.created == []
+
+
+@pytest.mark.asyncio
 async def test_start_refuses_option_like_and_control_names(tmp_path: Path, binary: str) -> None:
     provider = FakeClaude(tmp_path, states={"--help": "needs_auth"})
     for name in ("--help", "a\x1b[2J", "", "x" * 129):
@@ -357,6 +373,30 @@ async def test_claude_chat_with_needs_auth_raises_a_claude_card(tmp_path: Path) 
     cards = [a for a in manager.get_chat(chat.chat_id).actions if a.kind == "mcp_auth"]
     assert len(cards) == 1
     assert dict(cards[0].params) == {"server": "notion", "provider": "claude"}
+
+
+@pytest.mark.asyncio
+async def test_claude_ai_connectors_do_not_raise_sign_in_cards(tmp_path: Path) -> None:
+    """A claude.ai connector the user never connected is not asked about.
+
+    The organization's catalog lists every connector as needs-auth until the
+    user connects it on claude.ai; a card per connector asked for sign-ins to
+    services the user does not use.
+    """
+    manager = make_manager(tmp_path)
+    project = manager.create_project("Claude", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Claude", provider="claude")
+    provider = FakeClaude(
+        tmp_path,
+        states={"claude.ai Salesloft": "needs_auth", "claude.ai incident.io": "needs_auth", "notion": "needs_auth"},
+    )
+    manager._providers[chat.chat_id] = cast(Any, SimpleNamespace(provider=provider))
+    runtime = make_runtime(manager)
+
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    cards = [a for a in manager.get_chat(chat.chat_id).actions if a.kind == "mcp_auth"]
+    assert [c.params["server"] for c in cards] == ["notion"]
 
 
 @pytest.mark.asyncio

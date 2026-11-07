@@ -8,6 +8,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from ciao.providers.claude import is_claudeai_connector
+
 
 def _jsonc_to_json(text: str) -> str:
     """Remove JSONC comments and trailing commas without touching strings."""
@@ -180,6 +182,18 @@ def _server_kind(provider: str, config: dict[str, Any]) -> str:
     return "remote" if config.get("url") else "local"
 
 
+def _runtime_scope(provider: str, name: str) -> str:
+    """The scope of a server seen only in a live chat.
+
+    A Claude ``claude.ai …`` connector comes from the claude.ai account (or its
+    organization's catalog) and is connected there, so it gets its own scope:
+    the page must not offer it a sign-in or call it unmanageable.
+    """
+    if provider != "claude":
+        return "runtime"
+    return "claudeai" if is_claudeai_connector(name) else "account"
+
+
 def _provider_inventory(
     *,
     provider: str,
@@ -266,7 +280,7 @@ def _provider_inventory(
         if row is None:
             row = {
                 "name": name,
-                "scope": "account" if provider == "claude" else "runtime",
+                "scope": _runtime_scope(provider, name),
                 "source": "provider",
                 "kind": "remote",
                 "enabled": True,
