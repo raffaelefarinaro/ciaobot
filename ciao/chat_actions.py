@@ -217,16 +217,69 @@ def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+#: The device-code tools the card may sign in (a closed set; exact match).
+_DEVICE_TOOLS = ("gh", "az")
+_DEVICE_CODE_RE = re.compile(r"^[A-Z0-9-]{4,16}$")
+_DEVICE_URL_MAX = 200
+
+
+def _validate_device_code(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `device_code` kind: a CLI sign-in the user finishes on any device.
+
+    ``tool`` is a closed set; the command and its arguments come from the
+    engine's table, never from here. The engine-only keys are checked too,
+    because ``update_action`` revalidates the merged params.
+    """
+    if set(raw) - {"tool", "note", "session_id", "code", "url", "entered"}:
+        raise ChatActionError("unknown_param")
+    if "tool" not in raw:
+        raise ChatActionError("missing_param")
+    tool = raw["tool"]
+    if not isinstance(tool, str):
+        raise ChatActionError("invalid_type")
+    if tool not in _DEVICE_TOOLS:
+        raise ChatActionError("invalid_param")
+    params = {"tool": tool}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
+    if session_id is not None:
+        if not _SESSION_ID_RE.match(session_id):
+            raise ChatActionError("invalid_param")
+        params["session_id"] = session_id
+    code = _text(raw, "code", required=False, limit=16)
+    if code is not None:
+        if not _DEVICE_CODE_RE.match(code):
+            raise ChatActionError("invalid_param")
+        params["code"] = code
+    url = _text(raw, "url", required=False, limit=_DEVICE_URL_MAX)
+    if url is not None:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.netloc:
+            raise ChatActionError("invalid_url")
+        params["url"] = url
+    entered = _text(raw, "entered", required=False, limit=1)
+    if entered is not None:
+        if entered != "1":
+            raise ChatActionError("invalid_param")
+        params["entered"] = entered
+    return params
+
+
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
     "permission_mode": _validate_permission_mode,
+    "device_code": _validate_device_code,
 }
-_KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",)}
+_KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",), "device_code": ("tool",)}
 
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
-ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {"mcp_auth": frozenset({"url", "session_id"})}
+ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
+    "mcp_auth": frozenset({"url", "session_id"}),
+    "device_code": frozenset({"session_id", "code", "url", "entered"}),
+}
 
 
 def check_agent_params(kind: str, raw: Mapping[str, object]) -> None:
