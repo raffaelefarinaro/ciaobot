@@ -41,6 +41,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.provider_service import ProviderService, capabilities_for
+from ciao.providers.connect_errors import annotate_reauth
 from ciao.providers.opencode import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
@@ -1306,7 +1307,11 @@ class ChatStreaming:
                     else "empty"
                 )
                 chat_meta.last_error = (
-                    self._host._result_snippet(last_error_text or "The turn failed.")
+                    annotate_reauth(
+                        self._host._result_snippet(last_error_text or "The turn failed."),
+                        chat_meta.provider,
+                        chat_meta.model,
+                    )
                     if had_error
                     else ""
                 )

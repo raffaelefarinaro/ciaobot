@@ -980,7 +980,9 @@ class ScheduleDispatcher:
                     target_id,
                 )
 
-        _sched_status, _sched_error = chat_service._schedule_dispatch_status(outcome)
+        _sched_status, _sched_error = chat_service._schedule_dispatch_status(
+            outcome, provider=provider or "claude", model=model or ""
+        )
         # Interval entries surface their own last_status in the UI, so hand the
         # classification back. "skipped" (a permission prompt or a deferred
         # retry) is not an error, but it is not a completed run either -- report
