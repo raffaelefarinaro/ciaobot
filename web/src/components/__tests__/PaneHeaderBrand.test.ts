@@ -138,6 +138,16 @@ describe('PaneHeader brand and page tag', () => {
     titled.unmount()
   })
 
+  it('phone-overflow adds the overflow class', () => {
+    const plain = mount(PaneHeader)
+    expect(plain.classes()).not.toContain('pane-header--overflow')
+    plain.unmount()
+
+    const overflow = mount(PaneHeader, { props: { phoneOverflow: true } })
+    expect(overflow.classes()).toContain('pane-header--overflow')
+    overflow.unmount()
+  })
+
   it('drops the brand where a second mark would duplicate the main pane', () => {
     const wrapper = mount(PaneHeader, { props: { brand: false } })
     expect(wrapper.find('.brand').exists()).toBe(false)
