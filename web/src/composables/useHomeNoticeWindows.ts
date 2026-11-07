@@ -1,4 +1,4 @@
-import { computed, reactive, readonly, ref } from 'vue'
+import { computed, nextTick, reactive, readonly, ref } from 'vue'
 
 // Presentation only. Durable dismissals still belong to the housekeeping and
 // device-setup owners. Keeping this in memory lets a closed window stay closed
@@ -27,6 +27,16 @@ export function useHomeNoticeWindows() {
     setAvailable: (owner: string, keys: string[]) => { available.set(owner, keys) },
     clearAvailable: (owner: string) => { available.delete(owner) },
   }
+}
+
+/** Closing a notice removes the control that was focused. Leave keyboard users
+ *  at the explicit recovery control instead of sending the next Tab to the page
+ *  start. */
+export async function focusAfterNoticeClose(): Promise<void> {
+  await nextTick()
+  const recovery = document.querySelector<HTMLButtonElement>('[data-home-notices-reopen]')
+  if (recovery) recovery.focus()
+  else document.querySelector<HTMLElement>('.home-main textarea, .home-main .home-chat-item')?.focus()
 }
 
 /** Test isolation for the module-local, per-tab presentation state. */

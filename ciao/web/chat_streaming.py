@@ -41,6 +41,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.provider_service import ProviderService, capabilities_for
+from ciao.providers.connect_errors import annotate_reauth
 from ciao.providers.opencode import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
@@ -508,13 +509,17 @@ class ChatStreaming:
         await self._host._await_between_turns_drain(chat_id)
 
         hidden_turn = False
+        retry_armed = False
 
         def _arm_retry(*args: Any, **kwargs: Any) -> bool:
             # A compaction is a command, and a hidden continuation is not a
             # user prompt: neither is replayed on a retry.
+            nonlocal retry_armed
             if compact or hidden_turn:
                 return False
-            return self._host._arm_retry(*args, **kwargs)
+            armed = bool(self._host._arm_retry(*args, **kwargs))
+            retry_armed = retry_armed or armed
+            return armed
 
         try:
             while True:
@@ -1306,7 +1311,11 @@ class ChatStreaming:
                     else "empty"
                 )
                 chat_meta.last_error = (
-                    self._host._result_snippet(last_error_text or "The turn failed.")
+                    annotate_reauth(
+                        self._host._result_snippet(last_error_text or "The turn failed."),
+                        chat_meta.provider,
+                        chat_meta.model,
+                    )
                     if had_error
                     else ""
                 )
@@ -1399,6 +1408,20 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
+            # A retried turn that failed with an error no classifier re-armed would
+            # otherwise stay pending and re-fire on its old interval forever, never
+            # reaching a cap (#2647). Stop it; the chat's last_error keeps the reason.
+            if (
+                is_retry
+                and had_error
+                and not began_compact
+                and not retry_armed
+                and not stream.network_retry_armed
+            ):
+                chat_unsettled = self._host._chats.get(chat_id)
+                if chat_unsettled is not None and chat_unsettled.retry_status == "pending":
+                    logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
+                    self._host._clear_chat_retry(chat_unsettled, status="stopped")
             if (stream.network_retry_turn or is_retry) and not began_compact:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
@@ -2079,8 +2102,13 @@ class ChatStreaming:
                     settled = self._host._background_count_now(chat_id) == 0
                     if settled:
                         self._last_drain_result[chat_id] = (text, is_error)
+                    chat_now = self._host._chats.get(chat_id)
                     last_error = (
-                        self._host._result_snippet(text or "The turn failed.")
+                        annotate_reauth(
+                            self._host._result_snippet(text or "The turn failed."),
+                            chat_now.provider if chat_now is not None else "",
+                            chat_now.model if chat_now is not None else "",
+                        )
                         if is_error
                         else ""
                     )
@@ -2089,7 +2117,6 @@ class ChatStreaming:
                         # The wake launched more background work; the watcher
                         # that counted the first batch has already exited.
                         self._host._start_subagent_watcher(chat_id, project_id)
-                    chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error
                         and answer_text

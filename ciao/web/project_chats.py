@@ -329,6 +329,21 @@ def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
 
 
+def _retry_cap(kind: str) -> int | None:
+    """Attempts allowed for an automatic retry of *kind*; None when uncapped here.
+
+    The network kind keeps its own cap (_MAX_NETWORK_RETRIES) and branch, and a
+    manual retry has no kind.
+    """
+    if kind == "quota":
+        return _MAX_QUOTA_RETRIES
+    if kind == "quota_terminal":
+        return _MAX_TERMINAL_QUOTA_RETRIES
+    if kind in {"connection", "startup", "auth"}:
+        return _MAX_CONNECTION_DROP_RETRIES
+    return None
+
+
 def _quota_retry_interval(attempts: int) -> int:
     """Delay before quota retry number ``attempts + 1``: 1h, 2h, 4h, then capped."""
     return min(_RETRY_INTERVAL_SECONDS << min(attempts, 8), _MAX_QUOTA_RETRY_INTERVAL_SECONDS)
@@ -1081,6 +1096,22 @@ def _append_project_closure(
     lines.append(_CLOSURE_CLOSE)
     lines.append("")
     target.write_text(text.rstrip() + "\n".join(lines), encoding="utf-8", newline="")
+
+
+def validate_configured_model(model: str | None, provider: str | None) -> None:
+    """Reject a free-text model id that is not in the configured set."""
+    if not model:
+        return
+    if provider and capabilities_for(provider).dynamic_models:
+        return
+    if is_tier(model):
+        return
+    if model in CLAUDE_MODELS:
+        return
+    raise UnknownModelError(
+        f"Unknown model '{model}' for provider '{provider or 'default'}' "
+        f"(configured models: {', '.join(CLAUDE_MODELS)})"
+    )
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -6484,18 +6515,7 @@ class ProjectChatManager:
         name so a future dynamic-catalog provider is not measured against the
         Claude model list, which does not describe it.
         """
-        if not model:
-            return
-        if provider and capabilities_for(provider).dynamic_models:
-            return
-        if is_tier(model):
-            return
-        if model in CLAUDE_MODELS:
-            return
-        raise UnknownModelError(
-            f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {', '.join(CLAUDE_MODELS)})"
-        )
+        validate_configured_model(model, provider)
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.
@@ -7913,11 +7933,8 @@ class ProjectChatManager:
         # Every kind is capped: the connection/startup/auth cap guards against
         # a transient-looking local failure looping forever, and the quota caps
         # stop retries against a limit that is not clearing.
-        if kind == "quota":
-            cap = _MAX_QUOTA_RETRIES
-        elif kind == "quota_terminal":
-            cap = _MAX_TERMINAL_QUOTA_RETRIES
-        else:
+        cap = _retry_cap(kind)
+        if cap is None:
             cap = _MAX_CONNECTION_DROP_RETRIES
         if chat is not None and chat.retry_kind != kind:
             # Each kind gets its own budget: a run of connection retries must
@@ -8124,6 +8141,15 @@ class ProjectChatManager:
         network = chat.retry_kind == _NETWORK_RETRY_KIND
         if network and chat.retry_attempts >= _MAX_NETWORK_RETRIES:
             self._exhaust_network_retry(chat)
+            return None
+        cap = None if network else _retry_cap(chat.retry_kind)
+        if cap is not None and chat.retry_attempts >= cap:
+            logger.warning(
+                "chat %s reached the %s retry cap (%d) before firing; stopping the retry",
+                chat_id, chat.retry_kind, cap,
+            )
+            self._clear_chat_retry(chat, status="stopped")
+            self._settle_schedule_retry(chat_id, succeeded=False)
             return None
         images = self._resolve_retry_images(chat)
         chat.retry_attempts += 1

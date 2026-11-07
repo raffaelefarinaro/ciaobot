@@ -2,6 +2,7 @@
 
 from ciao.providers.connect_errors import (
     annotate_connection_host,
+    annotate_reauth,
     classify_connection_error,
 )
 
@@ -81,3 +82,35 @@ def test_annotate_does_not_double_add_host_when_already_present() -> None:
     )
     assert out == "getaddrinfo ENOTFOUND api.anthropic.com (category: dns)"
     assert out.count("api.anthropic.com") == 1
+
+
+def test_invalidated_oauth_grant_is_reauth_not_auth() -> None:
+    """An invalidated or revoked grant is a sign-in-again failure, not a
+    missing key, so it gets its own category ahead of ``auth`` (#2648)."""
+    assert classify_connection_error(
+        "Encountered invalidated oauth token for user, failing request"
+    ) == "reauth"
+    assert classify_connection_error("invalid_grant: refresh token is invalid") == "reauth"
+    assert classify_connection_error("Token has been expired or revoked.") == "reauth"
+    assert classify_connection_error("Invalid API key provided") == "auth"
+    assert classify_connection_error("Not logged in. Please run /login") == "auth"
+
+
+def test_annotate_reauth_names_provider_upstream_and_action() -> None:
+    """The operator sees which provider account to reconnect (#2648)."""
+    raw = "Encountered invalidated oauth token for user, failing request"
+    assert annotate_reauth(raw, "opencode", "openai/gpt-6.1-terra") == (
+        f"{raw} (provider: opencode openai, action: sign in again)"
+    )
+    assert annotate_reauth(raw, "claude", "claude-sonnet-5-5") == (
+        f"{raw} (provider: claude, action: sign in again)"
+    )
+
+
+def test_annotate_reauth_leaves_other_errors_and_is_idempotent() -> None:
+    """Only reauth text changes, and a second pass adds nothing (#2648)."""
+    raw = "Encountered invalidated oauth token for user, failing request"
+    assert annotate_reauth("Invalid API key provided", "claude") == "Invalid API key provided"
+    assert annotate_reauth("", "claude") == ""
+    once = annotate_reauth(raw, "claude")
+    assert annotate_reauth(once, "claude") == once

@@ -42,6 +42,7 @@ from starlette.responses import JSONResponse
 from ciao.control_plane import ControlPlaneError
 from ciao.provider_service import supported_providers
 from ciao.task_decisions import MAX_REASON
+from ciao.web.project_chats import UnknownModelError, validate_configured_model
 
 #: One status per application error the task service can raise. The codes are
 #: the contract; this table is the only place one becomes a status, so a new
@@ -448,6 +449,14 @@ async def task_delegate(request: Request) -> JSONResponse:
             f"The delegation model must be text of at most {MAX_DELEGATE_MODEL} characters.",
             400,
         )
+    if model is not None:
+        resolved_provider = (
+            provider or plane.config.default_provider_for_workspace(workspace)
+        )
+        try:
+            validate_configured_model(model, resolved_provider)
+        except UnknownModelError as exc:
+            return _refusal("invalid_task_field", str(exc), 400)
     try:
         outcome = plane.workspace_task_delegate(
             workspace,
