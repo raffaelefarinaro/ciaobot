@@ -797,7 +797,7 @@ Failure codes:
 | `verification_failed` | shell | The manifest signature, the wheel or host digest, or the server host entry does not match the signed release. |
 | `install_failed` | shell | A system tool is missing, the OS is not macOS 13 or newer, or the private coordinator environment could not be built. |
 | `cancelled` | shell | SIGINT, SIGTERM or SIGHUP arrived before the handover. |
-| `wizard_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error` | coordinator | See `ciao.native_installer.FAILURE_CODES`. The shell never emits `event_channel_failed` or `internal_error`. |
+| `wizard_failed`, `wizard_exited_before_bind`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error` | coordinator | See `ciao.native_installer.FAILURE_CODES`. The shell never emits `event_channel_failed` or `internal_error`. |
 
 Exit semantics: exit 0 means `service_ready` was emitted, and any other exit is a failure. End of file on the events descriptor without a terminal event is a failure too; this is part of the client contract.
 

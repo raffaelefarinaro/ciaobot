@@ -4281,6 +4281,12 @@ def test_an_unexpected_child_cleanup_error_retains_the_lock_and_emits_terminal(
     class BadChild:
         pid = 424242
 
+        def poll(self) -> None:
+            return None
+
+        def wait_for_exit(self, deadline: object, cancellation: object) -> int:
+            raise native._TimedOut
+
         def terminate_and_reap(self) -> None:
             raise RuntimeError("cleanup failed unexpectedly")
 
@@ -4728,6 +4734,78 @@ def test_an_activation_result_mismatch_is_refused_after_the_attempt(
     assert events[-1]["code"] == "activation_refused"
     fields = set(native._CoordinatorDeps.__dataclass_fields__)
     assert not fields & {"stop", "stop_service", "reload", "quiesce", "rollback"}
+
+
+def test_a_transient_spawn_failure_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    real_popen = subprocess.Popen
+    attempts: list[int] = []
+
+    def flaky_popen(*args: object, **kwargs: object) -> object:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError(
+                errno.EAGAIN, "fork: resource temporarily unavailable"
+            )
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(native.subprocess, "Popen", flaky_popen)
+    script = (
+        "import os, sys\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "raise SystemExit(7)\n"
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert len(attempts) == 2
+    assert "wizard_ready" in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_child_that_exits_before_binding_is_its_own_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = "raise SystemExit(3)\n"
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_exited_before_bind"
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "wizard_exited_before_bind"
+
+
+def test_a_child_that_closes_the_pipe_but_stays_alive_is_a_wizard_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # The reader waits out BIND_EXIT_GRACE_SECONDS for an exit after EOF. This
+    # child keeps running for longer than that grace and well under the bind
+    # timeout, so the grace expires and the verdict stays wizard_failed.
+    script = (
+        "import os, sys, time\n"
+        "os.close(int(sys.argv[1]))\n"
+        "time.sleep(10)\n"
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
+    assert events[-1]["code"] == "wizard_failed"
 
 
 def test_a_child_that_exits_nonzero_after_binding_is_a_wizard_failure(
