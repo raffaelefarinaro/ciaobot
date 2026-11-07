@@ -673,6 +673,19 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     return NO_MATCH_KEY_PREFIX if prefix is None else prefix
 
 
+def _forget_prefix(conn: sqlite3.Connection, prefix: str, table: str) -> int:
+    """Delete ``prefix`` rows from ``<table>_fts`` and ``<table>_meta``."""
+    if not prefix or prefix == NO_MATCH_KEY_PREFIX:
+        return 0
+    pattern = _like_prefix_pattern(prefix)
+    removed = conn.execute(
+        f"DELETE FROM {table}_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
+    ).rowcount
+    conn.execute(f"DELETE FROM {table}_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
+    conn.commit()
+    return int(removed or 0)
+
+
 def forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     """Drop every vault row stored under ``prefix``; return how many went.
 
@@ -685,15 +698,7 @@ def forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     and :data:`NO_MATCH_KEY_PREFIX` (a vault outside the key base, whose rows
     this prefix cannot identify).
     """
-    if not prefix or prefix == NO_MATCH_KEY_PREFIX:
-        return 0
-    pattern = _like_prefix_pattern(prefix)
-    removed = conn.execute(
-        "DELETE FROM vault_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
-    ).rowcount
-    conn.execute("DELETE FROM vault_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
-    conn.commit()
-    return int(removed or 0)
+    return _forget_prefix(conn, prefix, "vault")
 
 
 def forget_transcript_subtree(conn: sqlite3.Connection, prefix: str) -> int:
@@ -703,15 +708,7 @@ def forget_transcript_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     ``transcript_meta``, with the same two refused prefixes. Used when a
     workspace's own ``Logs`` leaves the install's live tree.
     """
-    if not prefix or prefix == NO_MATCH_KEY_PREFIX:
-        return 0
-    pattern = _like_prefix_pattern(prefix)
-    removed = conn.execute(
-        "DELETE FROM transcript_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
-    ).rowcount
-    conn.execute("DELETE FROM transcript_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
-    conn.commit()
-    return int(removed or 0)
+    return _forget_prefix(conn, prefix, "transcript")
 
 
 def index_file(

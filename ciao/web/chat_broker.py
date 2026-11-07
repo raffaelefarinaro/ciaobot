@@ -74,21 +74,17 @@ def edit_pending_list(
     return False
 
 
-def remove_pending_list(items: list[dict], entry_id: str) -> bool:
-    """Remove the entry with ``entry_id`` from ``items``."""
-    for i, item in enumerate(items):
-        if item.get("id") == entry_id:
-            items.pop(i)
-            return True
-    return False
-
-
 def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
     """Remove and return a pending entry by id."""
     for i, item in enumerate(items):
         if item.get("id") == entry_id:
             return items.pop(i)
     return None
+
+
+def remove_pending_list(items: list[dict], entry_id: str) -> bool:
+    """Remove the entry with ``entry_id`` from ``items``."""
+    return take_pending_list(items, entry_id) is not None
 
 
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
@@ -884,9 +880,7 @@ class ChatStream:
 
     def remove_pending(self, entry_id: str) -> bool:
         """Remove the queued entry with ``entry_id`` (not one in flight)."""
-        if self._is_steering(entry_id):
-            return False
-        return remove_pending_list(self._pending, entry_id)
+        return self.take_pending(entry_id) is not None
 
     def take_pending(self, entry_id: str) -> dict | None:
         """Take an entry only if it has not been handed to a provider."""

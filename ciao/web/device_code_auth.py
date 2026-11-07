@@ -11,18 +11,17 @@ reaches the command line. Nothing here logs the code, the URL or the output.
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from ciao.chat_actions import ActionState, ChatAction
+from ciao.chat_actions import ChatAction
 from ciao.terminal_scrape import last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_command
-from ciao.web.chat_actions_base import ActionContext, ActionHandler
+from ciao.web.chat_actions_base import ActionContext, HelperTerminalFlow
 from ciao.web.mcp_auth_claude import CAPACITY, CLOSED, NO_TERMINAL
 
 __all__ = [
@@ -33,8 +32,6 @@ __all__ = [
     "DeviceCodeFlow",
     "DeviceToolSpec",
 ]
-
-logger = logging.getLogger(__name__)
 
 # Error copy. The engine composes these; no model text and no terminal output.
 UNKNOWN_TOOL = "That tool has no sign-in card."
@@ -77,32 +74,11 @@ DEVICE_TOOLS: Mapping[str, DeviceToolSpec] = MappingProxyType(
 )
 
 
-class DeviceCodeFlow(ActionHandler):
+class DeviceCodeFlow(HelperTerminalFlow):
     """The device-code sign-in: a helper terminal running a fixed gh or az login."""
 
+    log_label = "device_code"
     poll_states = frozenset({"working", "waiting"})
-
-    def _set(
-        self,
-        ctx: ActionContext,
-        action: ChatAction,
-        state: ActionState,
-        *,
-        error: str = "",
-        params_update: dict[str, object] | None = None,
-    ) -> None:
-        ctx.pcm.update_action(
-            ctx.chat.chat_id, action.id, state=state, params_update=params_update, error=error
-        )
-        logger.info("device_code %s: %s", action.id, state)
-
-    async def _end(self, ctx: ActionContext, session_id: str) -> None:
-        if ctx.terminals is None:
-            return
-        try:
-            await ctx.terminals.end(session_id)
-        except TerminalSessionError:
-            pass
 
     @staticmethod
     def _spec(action: ChatAction) -> DeviceToolSpec | None:
@@ -124,10 +100,9 @@ class DeviceCodeFlow(ActionHandler):
         # A bare executable must be the tool itself. A Windows wrapper that unwraps to
         # an unrelated interpreter (az.cmd -> python.exe) would run the wrong program.
         # The [node, script] form from an npm shim is accepted as resolved.
-        if len(prefix) == 1 and Path(prefix[0]).stem.lower() != spec.binary:
-            self._set(ctx, action, "failed", error=CANNOT_RUN.format(tool=spec.binary))
-            return
-        if len(prefix) not in (1, 2):
+        if len(prefix) not in (1, 2) or (
+            len(prefix) == 1 and Path(prefix[0]).stem.lower() != spec.binary
+        ):
             self._set(ctx, action, "failed", error=CANNOT_RUN.format(tool=spec.binary))
             return
         folder = ctx.agent_root

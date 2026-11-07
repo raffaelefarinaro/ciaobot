@@ -27,6 +27,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.execution_modes import opencode_credential_deny_rules
+from ciao.web.project_chats import UnknownModelError, validate_configured_model
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
@@ -3841,7 +3842,7 @@ def test_status_rejects_opencode_v1_with_an_update_message(monkeypatch):
 def test_dynamic_catalog_providers_skip_the_configured_model_check():
     """Regression: selecting an opencode model returned a 400.
 
-    `_validate_configured_model` checks a free-text id against the
+    `validate_configured_model` checks a free-text id against the
     Claude/Ollama/OpenRouter lists. Those do not describe a provider that
     serves its own catalog, so `opencode/hy3-free` was rejected with
     "Unknown model ... (configured models: opus, sonnet, haiku, ...)". The
@@ -3857,41 +3858,16 @@ def test_dynamic_catalog_providers_skip_the_configured_model_check():
     assert capabilities_for("nope").dynamic_models is False
 
 
-def _chat_manager(tmp_path: Path):
-    from ciao.config import CiaoConfig
-    from ciao.sessions import StateStore
-    from ciao.transcripts import TranscriptStore
-    from ciao.web.project_chats import ProjectChatManager
 
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(exist_ok=True)
-    config = CiaoConfig(
-        pwa_auth_token="test",
-        workspace_root=tmp_path,
-        state_path=runtime / "state.json",
-        media_root=runtime / "media",
-    )
-    return ProjectChatManager(
-        config,
-        state_store=StateStore(config.state_path, tmp_path, config.media_root),
-        transcript_store=TranscriptStore(runtime, tmp_path / "archives"),
-        path=runtime / "web_projects.json",
-    )
-
-
-def test_an_opencode_model_id_is_accepted(tmp_path):
+def test_an_opencode_model_id_is_accepted():
     """`opencode/hy3-free` must not be rejected against the Claude model list."""
-    manager = _chat_manager(tmp_path)
-    manager._validate_configured_model("opencode/hy3-free", "opencode")
+    validate_configured_model("opencode/hy3-free", "opencode")
 
 
-def test_an_unconfigured_claude_model_is_still_rejected(tmp_path):
+def test_an_unconfigured_claude_model_is_still_rejected():
     """The exemption must not disable validation for configured-catalog providers."""
-    from ciao.web.project_chats import UnknownModelError
-
-    manager = _chat_manager(tmp_path)
     with pytest.raises(UnknownModelError):
-        manager._validate_configured_model("totally-made-up-model", "claude")
+        validate_configured_model("totally-made-up-model", "claude")
 
 
 # ── catalog caching ─────────────────────────────────────────────────────

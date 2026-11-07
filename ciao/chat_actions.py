@@ -42,7 +42,6 @@ ActionState = Literal["open", "working", "waiting", "done", "failed"]
 ActionOrigin = Literal["engine", "agent"]
 
 ACTION_KINDS: tuple[str, ...] = get_args(ActionKind)
-ACTION_STATES: tuple[str, ...] = get_args(ActionState)
 
 #: The kinds an agent may raise with `ciao chat needs-action`. `limit` is the
 #: engine's own and is never agent-raisable.
@@ -139,6 +138,13 @@ def _text(
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def _session_id(raw: Mapping[str, object]) -> str | None:
+    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
+    if session_id is not None and not _SESSION_ID_RE.match(session_id):
+        raise ChatActionError("invalid_param")
+    return session_id
+
+
 def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
     if set(raw) - {"server", "provider", "url", "session_id"}:
         raise ChatActionError("unknown_param")
@@ -155,21 +161,10 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
         if parts.scheme not in ("https", "http") or not parts.netloc:
             raise ChatActionError("invalid_url")
         validated["url"] = url
-    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
-    if session_id is not None:
-        if not _SESSION_ID_RE.match(session_id):
-            raise ChatActionError("invalid_param")
-        validated["session_id"] = session_id
+    sid = _session_id(raw)
+    if sid is not None:
+        validated["session_id"] = sid
     return validated
-
-
-_COMMAND_REASONS: dict[str, ChatActionErrorReason] = {
-    "invalid_type": "invalid_type",
-    "invalid_encoding": "invalid_encoding",
-    "too_long": "too_long",
-    "empty": "empty",
-    "invalid_characters": "invalid_characters",
-}
 
 
 def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
@@ -188,7 +183,7 @@ def _validate_command(raw: Mapping[str, object]) -> dict[str, str]:
     try:
         command = normalize_terminal_offer(value)
     except TerminalOfferError as exc:
-        raise ChatActionError(_COMMAND_REASONS[exc.reason]) from None
+        raise ChatActionError(exc.reason) from None
     params = {"command": command}
     if raw.get("note") is not None:
         params["note"] = normalize_note(raw["note"])
@@ -264,11 +259,9 @@ def _validate_device_code(raw: Mapping[str, object]) -> dict[str, str]:
     params = {"tool": tool}
     if raw.get("note") is not None:
         params["note"] = normalize_note(raw["note"])
-    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
-    if session_id is not None:
-        if not _SESSION_ID_RE.match(session_id):
-            raise ChatActionError("invalid_param")
-        params["session_id"] = session_id
+    sid = _session_id(raw)
+    if sid is not None:
+        params["session_id"] = sid
     code = _text(raw, "code", required=False, limit=16)
     if code is not None:
         if not _DEVICE_CODE_RE.match(code):

@@ -7,13 +7,16 @@ runtime can import it for registration without an import cycle.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from ciao.chat_actions import ChatAction, ChatActionError
+from ciao.chat_actions import ActionState, ChatAction, ChatActionError
 from ciao.provider_service import ProviderImpl
+from ciao.terminal_sessions import TerminalSessionError
+
 
 if TYPE_CHECKING:
     from ciao.terminal_sessions import TerminalSessionManager
@@ -60,3 +63,33 @@ class ActionHandler:
 
     def wake_prompt(self, action: ChatAction) -> str:
         raise NotImplementedError
+
+
+class HelperTerminalFlow(ActionHandler):
+    """An action run as a helper terminal; ``log_label`` names it in the state log."""
+
+    log_label: ClassVar[str]
+
+    def _set(
+        self,
+        ctx: ActionContext,
+        action: ChatAction,
+        state: ActionState,
+        *,
+        error: str = "",
+        params_update: dict[str, object] | None = None,
+    ) -> None:
+        ctx.pcm.update_action(
+            ctx.chat.chat_id, action.id, state=state, params_update=params_update, error=error
+        )
+        logging.getLogger(type(self).__module__).info(
+            "%s %s: %s", self.log_label, action.id, state
+        )
+
+    async def _end(self, ctx: ActionContext, session_id: str) -> None:
+        if ctx.terminals is None:
+            return
+        try:
+            await ctx.terminals.end(session_id)
+        except TerminalSessionError:
+            pass

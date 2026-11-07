@@ -55,7 +55,7 @@ class AgentSurfaceUnavailableError(RuntimeError):
 class UnknownModelError(ValueError):
     """A model id that is not in the configured set.
 
-    Raised by ``ProjectChatManager._validate_configured_model``. Distinct
+    Raised by ``validate_configured_model``. Distinct
     from the other ``ValueError``s ``create_chat`` raises (unknown provider,
     bucket, control surface) so the MCP tool boundary can translate only
     the model failure to ``invalid_model`` and leave the rest as
@@ -1099,7 +1099,19 @@ def _append_project_closure(
 
 
 def validate_configured_model(model: str | None, provider: str | None) -> None:
-    """Reject a free-text model id that is not in the configured set."""
+    """Reject a free-text model id that is not in the configured set.
+
+    A valid id is a tier alias (``haiku``/``sonnet``/``opus``/``fable``),
+    which every provider resolves against its own catalog, or a member of
+    ``ciao.config.CLAUDE_MODELS``.
+
+    Providers that discover their own catalog (opencode) are exempt:
+    that catalog is async, so this synchronous validator has nothing to
+    check against, and those CLIs reject an unknown id with a clear error on
+    the first turn anyway. Keyed on the capability rather than a provider
+    name so a future dynamic-catalog provider is not measured against the
+    Claude model list, which does not describe it.
+    """
     if not model:
         return
     if provider and capabilities_for(provider).dynamic_models:
@@ -4316,25 +4328,6 @@ class ProjectChatManager:
             check_agent_params(kind, params)
         validated = validate_params(kind, params)
         key = action_key(kind, validated)
-        for index, current in enumerate(chat.actions):
-            if action_key(current.kind, current.params) != key:
-                continue
-            if all(current.params.get(name) == value for name, value in validated.items()):
-                return action_payload(current)
-            new = ChatAction(
-                id=new_action_id(),
-                kind=kind,
-                origin=origin,
-                state="open",
-                params=MappingProxyType(validated),
-                error="",
-                created_at=time.time(),
-            )
-            # The replaced card's attempt, if any, must not outlive it.
-            self.actions_runtime.cancel_removed(chat_id, [current])
-            chat.actions[index] = new
-            self._publish_actions(chat)
-            return action_payload(new)
         new = ChatAction(
             id=new_action_id(),
             kind=kind,
@@ -4344,6 +4337,16 @@ class ProjectChatManager:
             error="",
             created_at=time.time(),
         )
+        for index, current in enumerate(chat.actions):
+            if action_key(current.kind, current.params) != key:
+                continue
+            if all(current.params.get(name) == value for name, value in validated.items()):
+                return action_payload(current)
+            # The replaced card's attempt, if any, must not outlive it.
+            self.actions_runtime.cancel_removed(chat_id, [current])
+            chat.actions[index] = new
+            self._publish_actions(chat)
+            return action_payload(new)
         chat.actions.append(new)
         self._publish_actions(chat)
         return action_payload(new)
@@ -6503,7 +6506,7 @@ class ProjectChatManager:
         resolved_model = self._model_for_provider(
             model, provider, project.workspace if project else None
         )
-        self._validate_configured_model(resolved_model, provider)
+        validate_configured_model(resolved_model, provider)
         return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
@@ -6512,24 +6515,6 @@ class ProjectChatManager:
         return self._model_for_provider(
             chat.model, chat.provider, project.workspace if project else None
         )
-
-    def _validate_configured_model(
-        self, model: str | None, provider: str | None
-    ) -> None:
-        """Reject a free-text model id that is not in the configured set.
-
-        A valid id is a tier alias (``haiku``/``sonnet``/``opus``/``fable``),
-        which every provider resolves against its own catalog, or a member of
-        ``ciao.config.CLAUDE_MODELS``.
-
-        Providers that discover their own catalog (opencode) are exempt:
-        that catalog is async, so this synchronous validator has nothing to
-        check against, and those CLIs reject an unknown id with a clear error on
-        the first turn anyway. Keyed on the capability rather than a provider
-        name so a future dynamic-catalog provider is not measured against the
-        Claude model list, which does not describe it.
-        """
-        validate_configured_model(model, provider)
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.

@@ -107,14 +107,6 @@ def _run_command(args: argparse.Namespace) -> int:
             print("--installer-native-fd requires --installer-run-id", file=sys.stderr)
             return 2
         return _resume_installer_bootstrap(args.installer_suggest_workspace)
-    if args.installer_native_fd is None:
-        # The legacy call shape, unchanged; the exact-kwargs tests pin it.
-        return _run_server(
-            supervised=args.supervised,
-            installer_bootstrap=True,
-            installer_run_id=args.installer_run_id,
-            installer_suggest_workspace=args.installer_suggest_workspace,
-        )
     return _run_server(
         supervised=args.supervised,
         installer_bootstrap=True,
@@ -191,15 +183,7 @@ def _run_server(
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap and installer_native_fd is None:
-            # The legacy bootstrap keeps its exact call shape.
-            server_main(
-                supervised=supervised,
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            )
-        elif installer_bootstrap:
+        if installer_bootstrap:
             server_main(
                 supervised=supervised,
                 installer_bootstrap=True,
@@ -2154,15 +2138,20 @@ def _vault_search_command(args: argparse.Namespace) -> int:
             print(f"Error dropping index database: {exc}", file=sys.stderr)
 
     conn = sqlite3.connect(db_path)
+
+    def index_all_logs() -> tuple[int, int]:
+        indexed = removed = 0
+        for logs_root in all_logs_roots:
+            part_indexed, part_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
+            indexed += part_indexed
+            removed += part_removed
+        return indexed, removed
+
     try:
         fts_search.init_db(conn)
         if not args.query:
             vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
-            logs_indexed = logs_removed = 0
-            for logs_root in all_logs_roots:
-                indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
-                logs_indexed += indexed
-                logs_removed += removed
+            logs_indexed, logs_removed = index_all_logs()
             if vault_indexed or vault_removed or logs_indexed or logs_removed:
                 print(
                     "FTS Index updated: "
@@ -2174,11 +2163,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
         try:
             if args.logs:
-                indexed = removed = 0
-                for logs_root in all_logs_roots:
-                    part_indexed, part_removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
-                    indexed += part_indexed
-                    removed += part_removed
+                indexed, removed = index_all_logs()
                 if indexed or removed:
                     print(
                         f"Transcripts index: {indexed} indexed, {removed} removed.",

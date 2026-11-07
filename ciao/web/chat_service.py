@@ -395,7 +395,6 @@ def _is_retryable_quota_error(text: str) -> bool:
         needle in low
         for needle in (
             "out of credit",
-            "out of credits",
             "spend limit",
             "insufficient credit",
             "credit balance",

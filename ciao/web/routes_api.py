@@ -5846,14 +5846,6 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     """Trigger a schedule immediately."""
     schedule_id = request.path_params["schedule_id"]
     sm = request.app.state.schedule_manager
-    # A routine whose target the app will not run in is refused here, with the
-    # reason, rather than silently doing nothing: the run would otherwise be
-    # skipped by the dispatch and the click would look like it worked.
-    entry = sm._store.get(schedule_id)
-    if entry is not None:
-        refusal = request.app.state.project_chat_manager.schedule_target_refusal(entry)
-        if refusal:
-            return JSONResponse({"error": refusal}, status_code=400)
     try:
         result = await sm.dispatch_now(schedule_id)
     except MemoryProjectRefused as exc:

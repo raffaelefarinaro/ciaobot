@@ -405,6 +405,7 @@ def _client(manager: ProjectChatManager, tmp_path: Path) -> TestClient:
         store=store,
         dispatch_to_web=_dispatch,
         prepare_chat=lambda entry, prompt, model, mode, provider: entry.web_chat_id,
+        target_refusal=manager.schedule_target_refusal,
     )
     app = Starlette(
         routes=[
