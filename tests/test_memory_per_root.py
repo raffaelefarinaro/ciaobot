@@ -337,8 +337,8 @@ def test_a_named_workspace_reads_only_its_own_memory_md(
         for clash in report["rule_audit"]["clashes"]
         for source in clash["sources"]
     ]
-    assert any(personal_memory.as_posix() in source for source in sources)
-    assert not any(work_memory.as_posix() in source for source in sources)
+    assert any(f"MEMORY.md ({personal_memory})" in source for source in sources)
+    assert not any(f"MEMORY.md ({work_memory})" in source for source in sources)
     assert attempts == [], f"the scoped audit read a foreign vault: {attempts}"
 
 
