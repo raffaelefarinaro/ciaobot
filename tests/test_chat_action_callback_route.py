@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,9 +22,10 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.chat_actions import ChatActionError
+from ciao.chat_actions import ChatAction, ChatActionError
 from ciao.oauth_callback import CallbackTarget
 from ciao.web import chat_actions_runtime
+from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_chat_actions import (
@@ -33,7 +34,7 @@ from ciao.web.routes_chat_actions import (
     chat_action_dismiss,
     chat_action_start,
 )
-from tests.test_chat_actions_runtime import make_manager
+from tests.test_chat_actions_runtime import make_manager, make_runtime
 
 _ORIGIN = "https://ciao.example"
 _HEADERS = {"Origin": _ORIGIN}
@@ -356,3 +357,125 @@ def test_an_agent_cannot_raise_callback_used(manager: ProjectChatManager) -> Non
     with pytest.raises(ChatActionError) as invalid:
         manager.update_action(chat.chat_id, aid, state="waiting", params_update={"callback_used": "2"})
     assert invalid.value.reason == "invalid_param"
+
+
+def test_callback_used_accepts_zero_and_one(manager: ProjectChatManager) -> None:
+    project = manager.create_project("Mark", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Mark", provider="claude")
+    aid = str(
+        manager.raise_action(
+            chat.chat_id, "mcp_auth", {"server": "notion", "provider": "claude"}, origin="engine"
+        )["id"]
+    )
+    for mark in ("0", "1"):
+        payload = manager.update_action(
+            chat.chat_id, aid, state="waiting", params_update={"callback_used": mark}
+        )
+        assert payload is not None
+        assert payload["params"]["callback_used"] == mark  # type: ignore[index]
+    with pytest.raises(ChatActionError) as invalid:
+        manager.update_action(chat.chat_id, aid, state="waiting", params_update={"callback_used": "2"})
+    assert invalid.value.reason == "invalid_param"
+
+
+@pytest.mark.asyncio
+async def test_a_new_sign_in_start_clears_the_single_use_mark(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed card keeps its mark; starting again must re-arm paste-back."""
+    calls = _recorder(monkeypatch)
+    authorize_url = (
+        "https://mcp.notion.com/authorize?response_type=code"
+        "&redirect_uri=http%3A%2F%2Flocalhost%3A62471%2Fcallback&state=S2"
+    )
+
+    class RestartFlow(ActionHandler):
+        async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+            del body
+            ctx.pcm.update_action(
+                ctx.chat.chat_id, action.id, state="waiting", params_update={"url": authorize_url}
+            )
+
+    monkeypatch.setitem(chat_actions_runtime.MCP_AUTH_FLOWS, "claude", RestartFlow())
+    project = manager.create_project("Restart", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Restart", provider="claude")
+    aid = str(
+        manager.raise_action(
+            chat.chat_id, "mcp_auth", {"server": "notion", "provider": "claude"}, origin="engine"
+        )["id"]
+    )
+    manager.update_action(
+        chat.chat_id,
+        aid,
+        state="failed",
+        params_update={"url": authorize_url, "callback_used": "1"},
+        error=chat_actions_runtime.UNREACHABLE_ERROR,
+    )
+    runtime = make_runtime(manager, poll_deadline_s=600.0)
+
+    await runtime.start(chat.chat_id, aid, {}, is_loopback=True)
+    action = manager.get_action(chat.chat_id, aid)
+    assert action is not None
+    assert action.state == "waiting"
+    assert action.params["callback_used"] == "0"
+
+    await runtime.callback(chat.chat_id, aid, "http://localhost:62471/callback?code=abc&state=S2", is_loopback=True)
+    assert len(calls) == 1
+    action = manager.get_action(chat.chat_id, aid)
+    assert action is not None
+    assert action.params["callback_used"] == "1"
+    for task in runtime._polls.values():
+        task.cancel()
+
+
+@pytest.mark.parametrize("status", [0, 400])
+def test_a_late_replay_error_does_not_overwrite_a_done_card(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    cid, aid = _waiting_card(manager, 62471)
+
+    async def finish_then_refuse(target: CallbackTarget) -> int:
+        del target
+        # The flow's own poll sees the exchange finish while the replay is in flight.
+        manager.update_action(cid, aid, state="done")
+        return status
+
+    monkeypatch.setattr(chat_actions_runtime, "replay_callback", finish_then_refuse)
+    response = _post(_client(manager), cid, aid, {"url": "http://localhost:62471/callback?code=a&state=S1"})
+    assert response.status_code == 200
+    assert response.json()["action"]["state"] == "done"
+    action = manager.get_action(cid, aid)
+    assert action is not None
+    assert action.state == "done"
+
+
+def test_a_waiting_card_without_an_authorize_url_is_invalid_state(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recorder(monkeypatch)
+    project = manager.create_project("No url", workspace="work")
+    chat = manager.create_chat(project.project_id, title="No url", provider="claude")
+    aid = str(
+        manager.raise_action(
+            chat.chat_id, "mcp_auth", {"server": "notion", "provider": "claude"}, origin="engine"
+        )["id"]
+    )
+    manager.update_action(chat.chat_id, aid, state="waiting")
+    response = _post(_client(manager), chat.chat_id, aid, {"url": "http://localhost:62471/callback?code=a&state=S1"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_state"
+    assert calls == []
+
+
+def test_a_second_paste_with_a_bad_state_is_already_used(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recorder(monkeypatch)
+    cid, aid = _waiting_card(manager, 62471)
+    client = _client(manager)
+    good = {"url": "http://localhost:62471/callback?code=abc&state=S1"}
+    assert _post(client, cid, aid, good).status_code == 200
+    second = _post(client, cid, aid, {"url": "http://localhost:62471/callback?code=abc&state=S9"})
+    assert second.status_code == 400
+    assert second.json()["error"] == "already_used"
+    assert len(calls) == 1

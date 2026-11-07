@@ -161,13 +161,13 @@ def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
             raise ChatActionError("invalid_param")
         validated["session_id"] = session_id
     if "callback_used" in raw:
-        # The engine's single-use mark for a pasted sign-in callback. Only "1" exists.
+        # The engine's single-use mark for a pasted sign-in callback: "1" once used, "0" after a restart.
         used = raw["callback_used"]
         if not isinstance(used, str):
             raise ChatActionError("invalid_type")
-        if used != "1":
+        if used not in ("0", "1"):
             raise ChatActionError("invalid_param")
-        validated["callback_used"] = "1"
+        validated["callback_used"] = used
     return validated
 
 

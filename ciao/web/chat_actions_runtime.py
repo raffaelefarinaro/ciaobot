@@ -97,6 +97,11 @@ class McpAuthHandler(ActionHandler):
         return MCP_AUTH_FLOWS.get(action.params.get("provider", ""))
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        # A new sign-in has a new authorize URL, so a paste-back mark from the last attempt no longer applies.
+        if action.params.get("callback_used") == "1":
+            ctx.pcm.update_action(
+                ctx.chat.chat_id, action.id, state=action.state, params_update={"callback_used": "0"}
+            )
         await MCP_AUTH_FLOWS[action.params["provider"]].start(ctx, action, body)
 
     async def poll(self, ctx: ActionContext, action: ChatAction) -> None:
@@ -125,10 +130,13 @@ class McpAuthHandler(ActionHandler):
         cid = ctx.chat.chat_id
         ctx.pcm.update_action(cid, action.id, state="waiting", params_update={"callback_used": "1"})
         status = await replay_callback(target)
-        if status == 0:
-            ctx.pcm.update_action(cid, action.id, state="failed", error=UNREACHABLE_ERROR)
-        elif status >= 400:
-            ctx.pcm.update_action(cid, action.id, state="failed", error=REFUSED_ERROR)
+        # The flow's poll may have finished the sign-in while the replay was in flight: keep a done card.
+        current = ctx.pcm.get_action(cid, action.id)
+        if current is not None and current.state == "waiting":
+            if status == 0:
+                ctx.pcm.update_action(cid, action.id, state="failed", error=UNREACHABLE_ERROR)
+            elif status >= 400:
+                ctx.pcm.update_action(cid, action.id, state="failed", error=REFUSED_ERROR)
         logger.info("chat action %s callback replayed (status %d)", action.id, status)
 
     def wake_prompt(self, action: ChatAction) -> str:
