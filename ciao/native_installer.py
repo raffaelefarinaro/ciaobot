@@ -254,6 +254,7 @@ FAILURE_CODES: Final[tuple[str, ...]] = (
     "verification_failed",
     "install_failed",
     "wizard_failed",
+    "wizard_exited_before_bind",
     "activation_refused",
     "service_not_ready",
     "cancelled",
@@ -910,6 +911,8 @@ MAX_BIND_NOTIFICATION_BYTES: Final[int] = 128
 COORDINATOR_RUN_TIMEOUT_SECONDS: Final[float] = 3600.0
 #: How long the wizard may take to report its successful bind.
 COORDINATOR_BIND_TIMEOUT_SECONDS: Final[float] = 120.0
+#: Attempts at spawning the wizard when the fork itself is transiently refused.
+SPAWN_TRANSIENT_RETRIES: Final[int] = 3
 #: How long the wizard may keep running after it bound (user interaction).
 COORDINATOR_WIZARD_EXIT_TIMEOUT_SECONDS: Final[float] = 1800.0
 #: SIGTERM grace before an owned child is killed.
@@ -1480,20 +1483,31 @@ def _spawn_owned_child(
         os.set_inheritable(public_fd, False)
     except OSError:
         raise NativeCoordinatorError("invalid_child_fd", "internal_error") from None
-    try:
-        process = subprocess.Popen(
-            list(argv),
-            stdin=subprocess.DEVNULL,
-            pass_fds=(notification_fd,),
-            close_fds=True,
-            start_new_session=True,
-            env=dict(env),
-            cwd=cwd,
-        )
-    except (OSError, ValueError):
-        raise NativeCoordinatorError(
-            "child_spawn_failed", "wizard_failed"
-        ) from None
+    for attempt in range(SPAWN_TRANSIENT_RETRIES):
+        try:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                pass_fds=(notification_fd,),
+                close_fds=True,
+                start_new_session=True,
+                env=dict(env),
+                cwd=cwd,
+            )
+            break
+        except OSError as exc:
+            if (
+                exc.errno != errno.EAGAIN
+                or attempt == SPAWN_TRANSIENT_RETRIES - 1
+            ):
+                raise NativeCoordinatorError(
+                    "child_spawn_failed", "wizard_failed"
+                ) from None
+            time.sleep(policy.poll_interval)
+        except ValueError:
+            raise NativeCoordinatorError(
+                "child_spawn_failed", "wizard_failed"
+            ) from None
     return _OwnedChild(
         process,
         term_grace=policy.term_grace,
@@ -1556,6 +1570,7 @@ def _read_bind_notification(
     deadline: _Deadline,
     cancellation: NativeCancellation,
     poll_interval: float,
+    child: _OwnedChild,
 ) -> int:
     """Read one bounded bind record and require the producer to close the pipe.
 
@@ -1565,7 +1580,8 @@ def _read_bind_notification(
     reading until EOF, so a record followed by a delayed second record, trailing
     bytes or a descriptor left open is a refusal, not a silent success. The
     deadline is the caller's bind deadline, already clamped to the whole-run
-    budget.
+    budget. EOF before a record is ``wizard_failed`` when the child is still
+    running and ``wizard_exited_before_bind`` when it has already exited.
     """
     buffer = bytearray()
     record: bytes | None = None
@@ -1599,6 +1615,10 @@ def _read_bind_notification(
         if not chunk:
             if record is None:
                 # The child closed the private pipe without reporting a bind.
+                if child.poll() is not None:
+                    raise NativeCoordinatorError(
+                        "bind_record_missing", "wizard_exited_before_bind"
+                    )
                 raise NativeCoordinatorError(
                     "bind_record_missing", "wizard_failed"
                 )
@@ -3639,6 +3659,7 @@ def _run_native_install(
                             _sub_deadline(deadline, policy.bind_timeout),
                             cancellation,
                             policy.poll_interval,
+                            child,
                         )
                     except _TimedOut:
                         raise _Refusal("wizard_failed") from None
