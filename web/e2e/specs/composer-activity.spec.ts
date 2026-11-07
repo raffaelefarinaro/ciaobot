@@ -39,7 +39,7 @@ test('a long agent name truncates inside the agents popover', async ({ page }) =
     })
   }, CHAT_ID)
 
-  const agents = page.locator('.composer-activity-seg--agents')
+  const agents = page.locator('.composer-activity-seg')
   await expect(agents).toBeVisible({ timeout: 8_000 })
   await agents.click()
 
@@ -67,7 +67,7 @@ test('marks a chat with a running native shell in the sidebar row', async ({ pag
   }))
   await boot(page, CHAT_PATH, COMPOSER)
 
-  await expect(page.locator('.composer-activity-seg--runs')).toBeVisible({ timeout: 8_000 })
+  await expect(page.locator('.composer-activity-seg')).toBeVisible({ timeout: 8_000 })
   await expect(page.locator('.chat-signal--runs .activity-glyph--run').first()).toBeVisible()
   await expect(page.locator('.chat-signal--runs').first()).toHaveAttribute('aria-label', 'Background run: npm run dev')
   await page.screenshot({ path: test.info().outputPath('sidebar-shell-mark.png') })
@@ -103,7 +103,7 @@ test.describe('native shell row', () => {
     })
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const seg = page.locator('.composer-activity-seg--runs')
+    const seg = page.locator('.composer-activity-seg')
     await expect(seg).toBeVisible({ timeout: 8_000 })
     await seg.click()
     const row = page.locator('.shell-row').first()
@@ -141,7 +141,7 @@ test.describe('native shell row', () => {
     })
     await boot(page, CHAT_PATH, COMPOSER)
 
-    await page.locator('.composer-activity-seg--runs').click()
+    await page.locator('.composer-activity-seg').click()
     await page.locator('.composer-activity-pop-foot').click()
     const rail = page.locator('.chat-rail-running')
     await expect(rail).toBeVisible()
