@@ -315,7 +315,7 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   hides on a chat change and is not restored.
 - **A suggested command is a card above the composer, not a second *Terminal*
   section.** When the assistant suggests a command in a chat, a transient card
-  appears above the composer (`components/TerminalOfferCard.vue`; the needs-you cards are `components/NeedsYouCard.vue`): the fixed
+  appears above the composer (`components/TerminalOfferCard.vue`; the needs-you cards are `components/NeedsYouCard.vue`, laid out by `components/NeedsYouStack.vue`): the fixed
   title *Suggested command — review before running*, the command as literal
   text (never markup, never markdown, never a link), and three actions —
   **Copy** (the exact text on screen, claiming *Copied* only when the
@@ -496,7 +496,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   never be keyed by the offer id: a replacement patches it in place, so the
   notice that explains the swap survives.
 
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the offers; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the offers; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). ChatPanel renders them through `NeedsYouStack.vue`, which caps the region's height and folds two or more untouched sign-ins under one row (Show, Not now for all) in a single keyed list, so a card is never rebuilt when it leaves the fold. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn

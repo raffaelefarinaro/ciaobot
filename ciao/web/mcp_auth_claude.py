@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ciao.chat_actions import ActionState, ChatAction
-from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path
+from ciao.providers.claude import CLAUDEAI_PREFIX, ClaudeProvider, get_bundled_claude_path
 from ciao.terminal_scrape import first_https_url, last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_tool
@@ -41,6 +41,7 @@ NO_CLI = "Claude Code CLI not found."
 CAPACITY = "Too many terminal sessions are open. Close one in the terminal pane and try again."
 NO_TERMINAL = "The sign-in terminal could not be started."
 CLOSED = "The sign-in terminal was closed before sign-in finished."
+CLAUDEAI_CONNECTOR = "This is a claude.ai connector. Connect it on claude.ai in Settings, Connectors."
 NOT_CONNECTED = "Signed in, but the server did not reconnect. Ask the agent to run ciao chat reload."
 
 
@@ -93,6 +94,10 @@ class ClaudeMcpAuthFlow(ActionHandler):
         server = action.params.get("server", "")
         if not valid_server_name(server):
             self._set(ctx, action, "failed", error=BAD_NAME)
+            return
+        if server.startswith(CLAUDEAI_PREFIX):
+            # Connected on claude.ai, not with ``claude mcp login``.
+            self._set(ctx, action, "failed", error=CLAUDEAI_CONNECTOR)
             return
         provider = ctx.provider
         if not isinstance(provider, ClaudeProvider) or not provider._connected:

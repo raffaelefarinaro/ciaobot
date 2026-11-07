@@ -1134,6 +1134,14 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
+        #: Engine-detected MCP sign-ins the user turned down with Not now, by
+        #: workspace, provider and dedupe key. Detection runs after every turn
+        #: of every chat and a provider can list every connector of the
+        #: account, so a per-chat memory raised the same cards again in each
+        #: new chat. Workspaces configure their own servers, so a decline in
+        #: one does not silence a same-named server in another. The set lives
+        #: as long as the engine, like the cards themselves.
+        self.declined_mcp_auth: set[tuple[str, str, str]] = set()
         self._file_refs: dict[str, tuple[str, str, float]] = {}
         # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
         # (name, context)). Vault discovery re-reads every project doc on each
@@ -4393,8 +4401,14 @@ class ProjectChatManager:
         del chat.actions[index]
         if remember:
             chat.dismissed_action_keys.add(action_key(action.kind, action.params))
+            if action.kind == "mcp_auth" and action.origin == "engine":
+                self.declined_mcp_auth.add(self.mcp_auth_decline_key(chat, action_key(action.kind, action.params)))
         self._publish_actions(chat)
         return action_payload(action)
+
+    def mcp_auth_decline_key(self, chat: ChatInfo, key: str) -> tuple[str, str, str]:
+        """Where a Not now on a detected sign-in applies: the chat's workspace and provider."""
+        return (self._workspace_for_chat(chat.chat_id), chat.provider, key)
 
     def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
         chat = self._chats.get(chat_id)

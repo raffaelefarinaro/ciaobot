@@ -147,7 +147,7 @@ MCP_RECONNECT_TIMEOUT_S = 20.0
 _CLAUDEAI_CATALOG_DEADLINE_S = 30.0
 _CLAUDEAI_CATALOG_POLL_S = 2.0
 _CLAUDEAI_CATALOG_MAX_RETRIES = 2
-_CLAUDEAI_PREFIX = "claude.ai "
+CLAUDEAI_PREFIX = "claude.ai "
 _CLAUDEAI_SEEN_MARKER = "claudeai_connectors_seen"
 CLAUDEAI_CATALOG_RETRY_NOTICE = (
     "claude.ai connectors didn't load: Claude Code's connector list request "
@@ -868,7 +868,7 @@ class ClaudeProvider(BaseSDKProvider):
                     states = await self.read_mcp_status()
                 except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
                     states = {}
-                if any(name.startswith(_CLAUDEAI_PREFIX) for name in states):
+                if any(name.startswith(CLAUDEAI_PREFIX) for name in states):
                     self._claudeai_seen_marker.parent.mkdir(parents=True, exist_ok=True)
                     self._claudeai_seen_marker.touch()
                     self._claudeai_catalog_retries = 0
