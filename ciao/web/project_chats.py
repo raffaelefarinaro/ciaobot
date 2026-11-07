@@ -1083,6 +1083,22 @@ def _append_project_closure(
     target.write_text(text.rstrip() + "\n".join(lines), encoding="utf-8", newline="")
 
 
+def validate_configured_model(model: str | None, provider: str | None) -> None:
+    """Reject a free-text model id that is not in the configured set."""
+    if not model:
+        return
+    if provider and capabilities_for(provider).dynamic_models:
+        return
+    if is_tier(model):
+        return
+    if model in CLAUDE_MODELS:
+        return
+    raise UnknownModelError(
+        f"Unknown model '{model}' for provider '{provider or 'default'}' "
+        f"(configured models: {', '.join(CLAUDE_MODELS)})"
+    )
+
+
 # ── Manager ──────────────────────────────────────────────────────────────
 
 
@@ -6484,18 +6500,7 @@ class ProjectChatManager:
         name so a future dynamic-catalog provider is not measured against the
         Claude model list, which does not describe it.
         """
-        if not model:
-            return
-        if provider and capabilities_for(provider).dynamic_models:
-            return
-        if is_tier(model):
-            return
-        if model in CLAUDE_MODELS:
-            return
-        raise UnknownModelError(
-            f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {', '.join(CLAUDE_MODELS)})"
-        )
+        validate_configured_model(model, provider)
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.

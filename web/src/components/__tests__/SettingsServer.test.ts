@@ -21,6 +21,11 @@ function mountCard(extra: Partial<RoutineSettings> | null, saveRoutines = vi.fn(
   return { wrapper, saveRoutines }
 }
 
+/** Developer is a closed disclosure; its fields exist only once it is open. */
+async function expandDeveloper(wrapper: ReturnType<typeof mountCard>['wrapper']) {
+  await wrapper.get('button.developer-toggle').trigger('click')
+}
+
 describe('SettingsServer', () => {
   it('saves loopback-only as the bind address', async () => {
     const { wrapper, saveRoutines } = mountCard({ pwa_host: '' })
@@ -48,6 +53,7 @@ describe('SettingsServer', () => {
 
   it('toggles developer mode', async () => {
     const { wrapper, saveRoutines } = mountCard({ dev_mode: false })
+    await expandDeveloper(wrapper)
     const toggle = wrapper.get('[role="switch"]')
     expect(toggle.attributes('aria-checked')).toBe('false')
 
@@ -57,6 +63,7 @@ describe('SettingsServer', () => {
 
   it('saves the source checkout and the log level', async () => {
     const { wrapper, saveRoutines } = mountCard({ app_repo: '' })
+    await expandDeveloper(wrapper)
     await wrapper.get('input[type="text"]').setValue('/src/ciaobot')
     await wrapper.get('.checkout-row button').trigger('click')
     expect(saveRoutines).toHaveBeenCalledWith({ app_repo: '/src/ciaobot' })
@@ -65,8 +72,9 @@ describe('SettingsServer', () => {
     expect(saveRoutines).toHaveBeenCalledWith({ log_level: 'debug' })
   })
 
-  it('is disabled until the settings have loaded', () => {
+  it('is disabled until the settings have loaded', async () => {
     const { wrapper } = mountCard(null)
+    await expandDeveloper(wrapper)
     expect(wrapper.get('[role="switch"]').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('select')[0].attributes('disabled')).toBeDefined()
   })

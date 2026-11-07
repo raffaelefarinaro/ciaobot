@@ -528,7 +528,7 @@
                 <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
               </div>
             </div>
-            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
+            <div v-if="workspaceHealth.status !== 'ok'" class="action-row action-row--spaced">
               <button
                 id="workspace-health-fix"
                 class="btn-primary"

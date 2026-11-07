@@ -52,6 +52,33 @@ const FORWARD_TRACK = [
 const ROLLBACK_TRACK = ['rolling_back', 'rolled_back', 'rollback_failed']
 const TRACK = [...FORWARD_TRACK, ...ROLLBACK_TRACK]
 
+describe('progress bar', () => {
+  // The bar is a fraction of its container, never a run of characters with an
+  // intrinsic width: that width pushed the panel past its column under the
+  // settings rail.
+  it('fills the percentage the label states and carries no text', () => {
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'swapping', inline: true } })
+    const fill = wrapper.get('.update-progress-fill')
+    expect((fill.element as HTMLElement).style.width).toBe(`${percent(wrapper)}%`)
+    expect(wrapper.get('.update-progress-track').text()).toBe('')
+  })
+
+  it('is a progressbar with a value while running and a valueless status once failed', () => {
+    const running = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'swapping' } })
+    const bar = running.get('.update-progress')
+    expect(bar.attributes('role')).toBe('progressbar')
+    expect(bar.attributes('aria-valuemin')).toBe('0')
+    expect(bar.attributes('aria-valuemax')).toBe('100')
+    expect(bar.attributes('aria-valuenow')).toBe(String(percent(running)))
+    expect(bar.attributes('aria-label')).toBeTruthy()
+
+    const failed = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'rolled_back', error: 'boom' } })
+    const status = failed.get('.update-progress')
+    expect(status.attributes('role')).toBe('status')
+    expect(status.attributes('aria-valuenow')).toBeUndefined()
+  })
+})
+
 describe('with a real phase', () => {
   it('drives the rows off the record instead of a timer', async () => {
     vi.useFakeTimers()

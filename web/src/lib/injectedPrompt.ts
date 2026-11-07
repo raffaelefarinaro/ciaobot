@@ -29,7 +29,7 @@ export type InjectedPrompt =
   | { kind: 'retry' }
   | { kind: 'restart_resume' }
   | { kind: 'chat_action' }
-  | { kind: 'error'; label: string; copy: string; text: string }
+  | { kind: 'error'; label: string; copy: string; text: string; retried: boolean }
   | { kind: 'handover'; from: string; to: string; sent: string }
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
@@ -209,10 +209,12 @@ function parseHandover(content: string, sentContext: string | undefined): Inject
   return { kind: 'handover', from: m[1], to: m[2], sent: sentContext ?? '' }
 }
 
-/** A failed turn's error, drawn as a notice labelled with its cause. */
-export function errorNoticePrompt(text: string): InjectedPrompt {
+/** A failed turn's error, drawn as a notice labelled with its cause. `retried`
+ *  marks a failure that came from a retry attempt, so the card says so instead
+ *  of a separate "Retry started" row. */
+export function errorNoticePrompt(text: string, retried = false): InjectedPrompt {
   const { label, copy } = classifyError(text)
-  return { kind: 'error', label, copy, text }
+  return { kind: 'error', label, copy, text, retried }
 }
 
 const ERROR_HINT_MAX = 200
@@ -294,7 +296,7 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
     case 'chat_action':
       return { label: 'Continue after your action', facts: 'You finished what this chat needed', tone: null }
     case 'error':
-      return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
+      return { label: prompt.label, facts: prompt.retried ? 'Retry failed' : '', tone: null, hint: errorHint(prompt.text) }
     case 'handover':
       return { label: 'Handed over', facts: `${prompt.from} → ${prompt.to}`, tone: null }
   }

@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { nextTick } from 'vue'
-import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+import { focusAfterNoticeClose, useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
 defineProps<{ title: string; noticeKey: string; blocking?: boolean; closeLabel?: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -9,12 +8,7 @@ const notices = useHomeNoticeWindows()
 async function close(key: string) {
   emit('close')
   notices.close(key)
-  await nextTick()
-  // Closing removes the focused button. Leave keyboard users at the explicit
-  // recovery control instead of sending the next Tab to the page start.
-  const recovery = document.querySelector<HTMLButtonElement>('[data-home-notices-reopen]')
-  if (recovery) recovery.focus()
-  else document.querySelector<HTMLElement>('.home-main textarea, .home-main .home-chat-item')?.focus()
+  await focusAfterNoticeClose()
 }
 </script>
 
