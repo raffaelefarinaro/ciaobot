@@ -86,13 +86,11 @@ async function start(): Promise<void> {
 </template>
 
 <style scoped>
-.needs-you-mcp {
-  display: grid;
-  gap: 10px;
-  justify-items: start;
-}
+/* The root has no box: its button is a flex item of the card's controls row. */
+.needs-you-mcp { display: contents; }
 .needs-you-steps {
   display: grid;
+  flex-basis: 100%;
   gap: 6px;
   margin: 0;
   padding: 0;

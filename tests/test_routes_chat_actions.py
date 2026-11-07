@@ -116,22 +116,6 @@ def test_start_of_an_unknown_action_is_a_conflict_with_the_current_list(tmp_path
     assert body["actions"] == [current]
 
 
-def test_start_of_a_claude_action_is_400_unsupported_provider(tmp_path: Path) -> None:
-    manager = make_manager(tmp_path)
-    project = manager.create_project("Claude", workspace="work")
-    chat = manager.create_chat(project.project_id, title="Claude", provider="claude")
-    action = _raise(manager, chat.chat_id, provider="claude")
-
-    response = _client(manager).post(
-        f"/api/chats/{chat.chat_id}/actions/{action['id']}/start", headers=_HEADERS, json={}
-    )
-
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"] == "unsupported_provider"
-    assert body["action"]["state"] == "open"
-
-
 def test_a_start_body_that_is_not_an_object_is_400(tmp_path: Path) -> None:
     with _live_chat(tmp_path) as (manager, cid):
         action = _raise(manager, cid)

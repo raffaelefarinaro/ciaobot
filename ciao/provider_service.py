@@ -87,6 +87,10 @@ class ProviderService:
             self._provider = factory(root, config=self._config)
         return self._provider
 
+    def ensure_provider(self, provider: str) -> ProviderImpl:
+        """The provider instance, created on first use (see ``_ensure_provider``)."""
+        return self._ensure_provider(provider)
+
     def _register_handle(self, handle: ActiveHandle | None) -> None:
         self._active_handle = handle
 

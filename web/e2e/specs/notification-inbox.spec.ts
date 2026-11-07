@@ -28,9 +28,10 @@ import {
  * between the projection and the click. jsdom has no shell, no socket and no
  * layout, so it can say none of that.
  *
- * Alpha is not empty by default (alpha-chat-7's memory pass is blocking;
- * memory suggestions and notes to revisit are not inbox content), so alpha assertions are relative to a baseline or name a
- * row by its key. Gamma has no default rows and hosts the zero-state tests.
+ * Alpha has no default chat rows now: its memory pass, blocked or not, is not
+ * inbox content, and memory suggestions and notes to revisit are not either, so
+ * alpha assertions either seed the row they name or use a baseline. Gamma has no
+ * default rows and hosts the zero-state tests.
  */
 test.use({ viewport: { width: 1440, height: 900 } })
 
@@ -45,6 +46,12 @@ async function writes(page: Page) {
   return (await fixtureWrites(page)).filter(
     (w) => !(w.method === 'PATCH' && w.path === '/api/settings/appearance'),
   )
+}
+
+/** Hide a "Needs you" row for now, through its ⋯ menu. */
+async function hideRow(page: Page, rowLocator: ReturnType<Page['locator']>) {
+  await rowLocator.getByRole('button', { name: /More actions/ }).click()
+  await page.getByRole('menuitem', { name: 'Hide for now' }).click()
 }
 
 const session = (ti: TestInfo) => `inbox-${ti.workerIndex}-${ti.title}`
@@ -413,8 +420,8 @@ test.describe('notification inbox', () => {
     await expect(action).toBeVisible()
     await expect(update).toBeVisible()
 
-    await action.locator('.home-notice-close').click()
-    await update.locator('.home-notice-close').click()
+    await hideRow(page, action)
+    await hideRow(page, update)
     await expect(action).toHaveCount(0)
     await expect(update).toHaveCount(0)
 
@@ -439,7 +446,7 @@ test.describe('notification inbox', () => {
     expect(await writes(page)).toEqual([])
 
     // A key that names nothing says so and reveals nothing.
-    await action.locator('.home-notice-close').click()
+    await hideRow(page, action)
     await page.evaluate(() => {
       history.pushState({}, '', '/?notice=action%3Ashared%3Agone')
       window.dispatchEvent(new PopStateEvent('popstate'))

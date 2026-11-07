@@ -25,9 +25,18 @@
            path, which is an animation and has no record behind it. -->
       <p v-if="phaseName" class="update-progress-phase">{{ phaseName }}</p>
 
-      <!-- Mono progress bar: filled █, empty ░ -->
-      <div class="update-progress" :aria-label="progressLabel">
-        <span class="update-progress-track">{{ progressTrack }}</span>
+      <!-- Progress bar: a filled fraction of the available width -->
+      <!-- A running bar is a progressbar with a value. A failed run is not
+           progress: it is a status naming the failure, with no value to claim. -->
+      <div
+        class="update-progress"
+        :role="failureText ? 'status' : 'progressbar'"
+        :aria-valuemin="failureText ? undefined : 0"
+        :aria-valuemax="failureText ? undefined : 100"
+        :aria-valuenow="failureText ? undefined : progressPercent"
+        :aria-label="progressLabel"
+      >
+        <span class="update-progress-track" aria-hidden="true"><span class="update-progress-fill" :style="{ width: `${progressPercent}%` }"></span></span>
         <span class="update-progress-pct">{{ progressPercent.toString().padStart(3, ' ') }}%</span>
       </div>
 
@@ -146,7 +155,6 @@ const ROLLBACK_ROWS: readonly string[] = ['rolling_back', 'rolled_back', 'rollba
 /** The phase of a run that stopped, naming no phase it stopped at. */
 const FAILED_PHASE = 'failed'
 
-const PROGRESS_WIDTH = 28
 const DOTS_TARGET = 28
 
 interface Row {
@@ -245,11 +253,6 @@ const progressPercent = computed(() => {
   const total = PHASE_ROWS.length - 1
   const steps = Math.min(Math.max(rowsBehind.value, 0), total)
   return Math.round((steps / total) * 100)
-})
-
-const progressTrack = computed(() => {
-  const filled = Math.round((progressPercent.value / 100) * PROGRESS_WIDTH)
-  return '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled)
 })
 
 /**
@@ -369,7 +372,10 @@ onUnmounted(() => {
 /* The same screen inside a panel, for a run that is not a takeover. Only the
    full-window layer is undone — the record's rows, bar, phase line and footer
    are the same ones, so a staged run reads the same either way. */
+.update-progress-overlay--inline .update-progress-content { max-width: none; }
 .update-progress-overlay--inline {
+  display: block;
+  min-width: 0;
   position: static;
   inset: auto;
   z-index: auto;
@@ -382,14 +388,18 @@ onUnmounted(() => {
   display: none;
 }
 
-/* A panel is not a window: bound the job list so the card keeps its shape, and
-   let it scroll inside that bound rather than grow without one. */
+/* A panel is not a window: the page scrolls, so the card grows to its rows.
+   The job list is a fixed twelve phases (fifteen on a rollback), and a bound
+   on it clipped the last rows behind an inner scrollbar. */
 .update-progress-overlay--inline .update-progress-content--job {
-  max-height: 20rem;
+  max-height: none;
+  overflow: visible;
 }
 
 .update-progress-content {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   max-width: 560px;
   display: flex;
   flex-direction: column;
@@ -406,8 +416,11 @@ onUnmounted(() => {
 }
 
 /* The app's focus ring (DESIGN: 2px accent) does not reach a region, so the
-   overlay's focus target states itself the same way a control would. */
-.update-progress-content:focus {
+   overlay's focus target states itself the same way a control would — for
+   keyboard focus only. Focus moved here after a pointer click is not a ring the
+   user asked for, and drew a frame around the whole log. */
+.update-progress-content:focus { outline: none; }
+.update-progress-content:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -442,10 +455,23 @@ onUnmounted(() => {
   font-size: 14px;
   line-height: 1;
 }
+/* A bar that is a fraction of its container, not a fixed run of characters:
+   text has an intrinsic width, which is what pushed the panel past its
+   column and under the page rail. min-width: 0 lets the flex item shrink. */
 .update-progress-track {
-  color: var(--accent);
-  letter-spacing: -1px;
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  height: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  overflow: hidden;
+}
+.update-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms var(--ease);
 }
 .update-progress-pct {
   color: var(--fg2);

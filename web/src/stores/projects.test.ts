@@ -2878,6 +2878,16 @@ describe('needs-you chat actions', () => {
     expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c-1/actions/a1/start', {})
   })
 
+  test('a permission_mode start that is done updates the cached chat mode', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', { mode: 'auto' })]
+    apiPost.mockResolvedValueOnce({
+      action: action('a1', { kind: 'permission_mode', state: 'done', params: { mode: 'plan' } }),
+    })
+    await store.startChatAction('c-1', 'a1')
+    expect(store.chats[0]?.mode).toBe('plan')
+  })
+
   test('a 400 start adopts the current action and rethrows', async () => {
     const store = useProjectStore()
     apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), {
@@ -5355,23 +5365,117 @@ describe('memoryInsightRows', () => {
     expect(store.chatIsAttentionItem(store.chats[1])).toBe(false)
   })
 
-  test('counts a pass as attention only once it is blocked on the owner', () => {
+  test('a blocked pass is not an attention item but its memory insight row says needs you', () => {
     const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+    ] as unknown as typeof store.projects
     const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
     const blocked = passChat({ chat_id: 'blocked', pending_question: question })
+    // A pass whose helper failed closed: the registry loader normalises the
+    // helper away, so what the server sends is a chat with no helper at all —
+    // the project kind is the only thing that still identifies it.
+    const fallback = passChat({
+      chat_id: 'fallback-blocked',
+      pending_question: question,
+      helper: {},
+    })
     store.chats = [
       sourceChat(),
       blocked,
       sourceChat({ chat_id: 'src-2' }),
       passChat({ chat_id: 'plain' }, 'src-2'),
+      fallback,
     ] as unknown as typeof store.chats
 
-    expect(store.chatIsAttentionItem(blocked as unknown as ChatInfo)).toBe(true)
+    // Badges and the bell stay silent even while the pass is blocked; Home's
+    // memory-insight row is the one place that surfaces it.
+    expect(store.chatIsAttentionItem(blocked as unknown as ChatInfo)).toBe(false)
+    expect(store.chatIsAttentionItem(fallback as unknown as ChatInfo)).toBe(false)
     expect(store.chatIsAttentionItem(store.chats[3] as unknown as ChatInfo)).toBe(false)
-    expect(store.attentionChatCount).toBe(1)
+    expect(store.attentionChatCount).toBe(0)
+    expect(store.chatUnread('blocked')).toBe(0)
+    expect(store.chatUnread('fallback-blocked')).toBe(0)
     // The row says the same thing out loud, with the question on it.
     const row = store.memoryInsightRows.find(r => r.passChatId === 'blocked')
     expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
+  })
+
+  test('a project-kind fallback pass stays reachable but silent', () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+    ] as unknown as typeof store.projects
+    const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+    // The loader normalises a malformed helper away, so a failed-closed pass
+    // reaches the PWA with no helper: only the project kind still names it.
+    const fallback = passChat({
+      chat_id: 'fallback-blocked',
+      helper: {},
+      pending_question: question,
+      last_activity_at: '2026-08-27T02:00:00Z',
+      last_read_at: '2026-08-27T01:00:00Z',
+    })
+    store.chats = [fallback] as unknown as typeof store.chats
+
+    // No helper means no memory-insight row, so the ordinary chat row is the
+    // only way back to the pending question. It must stay discoverable.
+    expect(store.memoryInsightRows).toEqual([])
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['fallback-blocked'])
+    expect(store.projectChats('p-mem').map(c => c.chat_id)).toEqual(['fallback-blocked'])
+    expect(store.chatNeedsInput('fallback-blocked')).toBe(true)
+    expect(store.chatPendingQuestion('fallback-blocked')).toBe('Which project?')
+    expect(store.chatNeedsYou('fallback-blocked')).toBe(false)
+
+    // Every notification surface stays silent: no unread, attention, project
+    // needs-you count or workspace needs-you count for the fallback pass.
+    expect(store.chatUnread('fallback-blocked')).toBe(0)
+    expect(store.chatIsAttentionItem(fallback as unknown as ChatInfo)).toBe(false)
+    expect(store.attentionChatCount).toBe(0)
+    expect(store.projectUnread('p-mem')).toBe(0)
+    expect(store.projectNeedsInput('p-mem')).toBe(0)
+    expect(store.workspaceUnread('personal')).toBe(0)
+    expect(store.workspaceNeedsInput('personal')).toBe(0)
+    expect(store.totalUnread).toBe(0)
+  })
+
+  test('a pass never enters the service worker unread map', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: {
+        controller: { postMessage },
+        ready: Promise.resolve(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      configurable: true,
+    })
+    try {
+      const store = useProjectStore()
+      store.projects = [
+        { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+        { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+      ] as unknown as typeof store.projects
+      store.chats = [
+        { chat_id: 'ordinary', project_id: 'p1', title: 'Unread', archived: false, local: true, last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' },
+        passChat({ chat_id: 'declared', last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' }),
+        passChat({
+          chat_id: 'fallback',
+          helper: {},
+          last_activity_at: '2026-08-24T10:00:00Z',
+          last_read_at: '2026-08-24T09:00:00Z',
+        }),
+      ] as unknown as typeof store.chats
+      await nextTick()
+      await Promise.resolve()
+
+      const syncs = postMessage.mock.calls
+        .map(([message]) => message as { type?: string; state?: Record<string, number> })
+        .filter(message => message.type === 'sync-unread')
+      expect(syncs.at(-1)?.state).toEqual({ ordinary: 1 })
+    } finally {
+      Reflect.deleteProperty(navigator, 'serviceWorker')
+    }
   })
 
   // Archiving a chat spawns a pass, and the pass ends as an ordinary turn, so
@@ -5382,42 +5486,106 @@ describe('memoryInsightRows', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    store.chats = [passChat()] as unknown as typeof store.chats
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+    ] as unknown as typeof store.projects
+    const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+    store.chats = [
+      passChat(),
+      passChat({ chat_id: 'blocked', pending_question: question }),
+      passChat({ chat_id: 'fallback', helper: {} }),
+    ] as unknown as typeof store.chats
     // The archived source closed the pane it was archived from, so nothing is
     // focused: the exact state the toast used to fire in.
     store.activeChatId = null
 
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const resultReady = (chatId: string, title: string) =>
+    const resultReady = (chatId: string, title: string, projectId = 'p-mem') =>
       sock.onmessage?.({
         data: JSON.stringify({
           type: 'chat_result_ready',
           chat_id: chatId,
-          project_id: 'p-mem',
+          project_id: projectId,
           title,
           snippet: 'Stamped the pricing note.',
         }),
       })
 
     resultReady('pass-1', 'Memory pass · Deck figures')
+    resultReady('blocked', 'Memory pass · Needs an answer')
+    resultReady('fallback', 'Memory pass · Pricing rework')
     expect(store.toasts).toHaveLength(0)
+    expect(store.chatUnread('pass-1')).toBe(0)
+    expect(store.chatUnread('blocked')).toBe(0)
+    expect(store.chatUnread('fallback')).toBe(0)
 
     // An ordinary chat in the same state still notifies, or the guard is
     // swallowing real results too.
     store.chats = [
       { chat_id: 'plain', project_id: 'p1', title: 'Pricing rework', archived: false, local: true, created_at: '', last_activity_at: '' },
     ] as unknown as typeof store.chats
-    resultReady('plain', 'Pricing rework')
+    resultReady('plain', 'Pricing rework', 'p1')
     expect(store.toasts.map(t => t.title)).toEqual(['Pricing rework'])
+  })
+
+  test('a pass never toasts its question or permission', () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      passChat({ chat_id: 'declared' }),
+      passChat({ chat_id: 'fallback', helper: {} }),
+      { chat_id: 'plain', project_id: 'p1', title: 'Pricing rework', archived: false, local: true, created_at: '', last_activity_at: '' },
+    ] as unknown as typeof store.chats
+    store.activeChatId = null
+
+    const send = (chatId: string, event: Record<string, unknown>) => {
+      store.connectWs(chatId)
+      const sock = fakeSockets[fakeSockets.length - 1]
+      sock.onmessage?.({ data: JSON.stringify(event) })
+    }
+    const question = {
+      type: 'tool_use',
+      tool_name: 'AskUserQuestion',
+      request_id: 'q1',
+      tool_input: JSON.stringify({ questions: [{ question: 'Which project?' }] }),
+    }
+    const permission = {
+      type: 'permission_request',
+      request_id: 'req-1',
+      tool_name: 'Bash',
+      message: 'Approve use of Bash?',
+    }
+
+    send('declared', question)
+    send('declared', permission)
+    send('fallback', question)
+    send('fallback', permission)
+    expect(store.toasts).toHaveLength(0)
+
+    // The ordinary controls still nudge, so the guard only hides passes.
+    send('plain', question)
+    send('plain', permission)
+    expect(store.toasts.map(t => t.title)).toEqual([
+      'ciaobot has a question',
+      'ciaobot needs approval',
+    ])
   })
 
   test('a pass title alone does not suppress a real result', () => {
     // A user project may legitimately be called "Memory", and a user may
-    // retitle anything. Only the helper kind is a discriminator.
+    // retitle anything. Only the kind is a discriminator.
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Memory', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
     store.chats = [
       { chat_id: 'c-mem', project_id: 'p1', title: 'Memory pass · my own notes', archived: false, local: true, created_at: '', last_activity_at: '' },
     ] as unknown as typeof store.chats

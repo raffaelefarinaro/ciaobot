@@ -390,3 +390,65 @@ def test_an_unchecked_note_still_reports_no_check_at_all(client, tmp_path):
 
     assert node["check"] is None
     assert node["stale"] is True
+
+
+def _spy_entry_coverage(monkeypatch, record):
+    """Wrap note_entry_coverage, recording the call's kwargs and whether an
+    event loop is running on the calling thread."""
+    import asyncio
+
+    from ciao import memory_audit
+
+    real = memory_audit.note_entry_coverage
+
+    def spy(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        record.append((on_loop, kw))
+        return real(*a, **kw)
+
+    monkeypatch.setattr("ciao.memory_audit.note_entry_coverage", spy)
+
+
+def test_vault_graph_builds_nodes_off_the_event_loop(client, monkeypatch):
+    calls: list[tuple[bool, dict]] = []
+    _spy_entry_coverage(monkeypatch, calls)
+
+    resp = client.get("/api/vault/graph")
+
+    assert resp.status_code == 200
+    assert calls, "expected per-note entry coverage to run"
+    assert all(not on_loop for on_loop, _kw in calls)
+
+
+def test_vault_graph_skips_coverage_for_notes_the_queue_never_lists(
+    client, tmp_path, monkeypatch
+):
+    vault = tmp_path / "memory-vault" / "personal"
+    queue = vault / "Workspace" / "Queue.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "---\ntype: note\nupdated: 2020-01-01\n---\n# Queue\n", encoding="utf-8", newline=""
+    )
+    calls: list[tuple[bool, dict]] = []
+    _spy_entry_coverage(monkeypatch, calls)
+
+    data = client.get("/api/vault/graph").json()
+
+    assert _node(data, "Queue")["entry_coverage"] is None
+    rendered = [kw.get("rendered", "") for _on_loop, kw in calls]
+    assert not any(r.endswith("Workspace/Queue.md") for r in rendered)
+    assert any(r.endswith(("A.md", "B.md", "C.md")) for r in rendered)
+
+
+def test_vault_graph_payload_matches_the_route(client):
+    from ciao.web import routes_api
+
+    cfg = client.app.state.config
+
+    payload = routes_api._vault_graph_payload(cfg, None)
+
+    assert payload == client.get("/api/vault/graph").json()

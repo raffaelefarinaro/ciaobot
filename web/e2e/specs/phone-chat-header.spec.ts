@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, isolate } from '../support/app'
+import { COMPOSER, boot, isolate, seedInbox } from '../support/app'
 
 /**
  * Layout claims about the phone chat header need a real engine: jsdom lays
@@ -16,6 +16,17 @@ test.describe('phone chat header', () => {
   })
 
   test('drops the close X and code badge, widens the title, and anchors the bell badge to the icon', async ({ page }) => {
+    // A memory pass never reaches the inbox, so seed the ordinary unread chat
+    // this layout claim needs (the same way notification-inbox.spec.ts does).
+    await seedInbox(page, {
+      chats: {
+        'alpha-chat-2': {
+          last_activity_at: '2026-01-02T10:00:00Z',
+          last_read_at: '2026-01-01T09:05:00Z',
+          last_snippet: 'Done',
+        },
+      },
+    })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
     await expect(page.locator('.chat-title-row .close-btn')).toBeHidden()

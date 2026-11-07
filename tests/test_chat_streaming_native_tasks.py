@@ -58,3 +58,40 @@ async def test_wake_turn_rearms_watcher_for_claude_native_tasks(tmp_path: Path) 
     await streaming.drain_between_turns("chat-1", "project-1")
 
     assert started == [("chat-1", "project-1")]
+
+
+@pytest.mark.asyncio
+async def test_invalidated_grant_on_a_wake_turn_is_labelled(tmp_path: Path) -> None:
+    """An invalidated grant on a wake turn names the provider and the remedy in
+    the chat's last_error (#2648)."""
+    host: _RecordingDriveHost = _RecordingDriveHost([], tmp_path)
+    host.chat.provider = "opencode"
+    host.chat.model = "openai/gpt-6.1-terra"
+    host._background_count_now = lambda _c: 0  # type: ignore[attr-defined]
+
+    service = ProviderService(
+        CiaoConfig(
+            pwa_auth_token="t",
+            workspace_root=tmp_path,
+            state_path=tmp_path / "state.json",
+            media_root=tmp_path / "media",
+        ),
+        provider="claude",
+    )
+
+    async def drain_events():
+        yield ResultEvent(
+            type="result",
+            result="Encountered invalidated oauth token for user, failing request",
+            session_id="s",
+            is_error=True,
+        )
+
+    service.drain_events = drain_events  # type: ignore[method-assign]
+    host._providers = {"chat-1": service}  # type: ignore[assignment]
+    streaming = ChatStreaming(host)  # type: ignore[arg-type]
+
+    await streaming.drain_between_turns("chat-1", "project-1")
+
+    assert "action: sign in again" in host.chat.last_error
+    assert "provider: opencode openai" in host.chat.last_error

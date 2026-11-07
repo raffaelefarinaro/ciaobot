@@ -1175,9 +1175,10 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 // what each page shows. They replace the per-workspace badge in the scope
 // menu: the number sits next to the place that resolves it.
 //
-// The one rule is the store's: a memory pass is not ordinary attention (its
-// activity moves while it works), so it counts only when it is blocked on the
-// owner — and then its row on Home says the same thing out loud.
+// The one rule is the store's: a memory pass is never ordinary attention (its
+// activity moves while it works). A declared pass reports a blocked state on
+// its Home memory-insight row; a malformed-helper fallback stays reachable but
+// never counts here or on any badge.
 const todayCount = computed(() => store.chats.reduce((sum, chat) => {
   if (chat.archived) return sum
   if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum

@@ -172,7 +172,6 @@ def test_the_reason_set_is_the_whole_run() -> None:
         "invalid_url",
         "invalid_body",
         "invalid_state",
-        "unsupported_provider",
         "not_local",
         "already_used",
         "no_pending_sign_in",

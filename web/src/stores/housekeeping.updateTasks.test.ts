@@ -27,7 +27,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
-import { useHousekeepingStore } from './housekeeping'
+import { INITIAL_LOAD_GATE_MS, useHousekeepingStore } from './housekeeping'
 import { useProjectStore } from './projects'
 import type { UpdateTaskRow, UpdateTasksResponse } from '../lib/types'
 
@@ -787,7 +787,11 @@ describe('source health', () => {
       const interval = vi.spyOn(window, 'setInterval')
       const listen = vi.spyOn(window, 'addEventListener').mockImplementation(() => {})
       vi.mocked(api.get).mockImplementation(((path: string) =>
-        Promise.resolve(path === '/api/housekeeping' ? { actions: [] } : { tasks: [] })) as never)
+        Promise.resolve(
+          path === '/api/housekeeping' ? { actions: [] }
+            : path === '/api/workspace-health' ? { status: 'ok', checks: [] }
+              : { tasks: [] },
+        )) as never)
       const store = useHousekeepingStore()
       store.init()
       store.init()
@@ -795,10 +799,32 @@ describe('source health', () => {
 
       expect(interval).toHaveBeenCalledTimes(1)
       expect(listen.mock.calls.filter(([type]) => type === 'focus')).toHaveLength(1)
-      expect(api.get).toHaveBeenCalledTimes(2)
+      // Actions, update tasks and the workspace-health report, once each.
+      expect(api.get).toHaveBeenCalledTimes(3)
+      expect(vi.mocked(api.get).mock.calls.map(([path]) => path)).toContain('/api/workspace-health')
 
       await vi.advanceTimersByTimeAsync(60_000)
-      expect(api.get).toHaveBeenCalledTimes(4)
+      expect(api.get).toHaveBeenCalledTimes(6)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('init: a never-settling read does not hold the first-load gate past the bound', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(api.get).mockImplementation(((path: string) =>
+        path === '/api/workspace-health'
+          ? new Promise(() => {})
+          : Promise.resolve(path === '/api/housekeeping' ? { actions: [] } : { tasks: [] })) as never)
+      vi.spyOn(window, 'setInterval').mockImplementation((() => 0) as never)
+      vi.spyOn(window, 'addEventListener').mockImplementation(() => {})
+      const store = useHousekeepingStore()
+      store.init()
+      await vi.advanceTimersByTimeAsync(INITIAL_LOAD_GATE_MS - 1)
+      expect(store.initialLoadPending).toBe(true)
+      await vi.advanceTimersByTimeAsync(2)
+      expect(store.initialLoadPending).toBe(false)
     } finally {
       vi.useRealTimers()
     }

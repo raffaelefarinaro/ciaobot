@@ -221,7 +221,10 @@ from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
 from ciao.web.memory_pass import (
     CLOSURE_FENCE_CLOSE,
+    MEMORY_PASS_KIND,
+    MEMORY_PROJECT_KIND,
     MemoryPassCoordinator,
+    MemoryProjectRefused,
     is_memory_pass_chat,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher
@@ -324,6 +327,21 @@ _NETWORK_RETRY_REASON = "network unreachable"
 
 def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
+
+
+def _retry_cap(kind: str) -> int | None:
+    """Attempts allowed for an automatic retry of *kind*; None when uncapped here.
+
+    The network kind keeps its own cap (_MAX_NETWORK_RETRIES) and branch, and a
+    manual retry has no kind.
+    """
+    if kind == "quota":
+        return _MAX_QUOTA_RETRIES
+    if kind == "quota_terminal":
+        return _MAX_TERMINAL_QUOTA_RETRIES
+    if kind in {"connection", "startup", "auth"}:
+        return _MAX_CONNECTION_DROP_RETRIES
+    return None
 
 
 def _quota_retry_interval(attempts: int) -> int:
@@ -1078,6 +1096,22 @@ def _append_project_closure(
     lines.append(_CLOSURE_CLOSE)
     lines.append("")
     target.write_text(text.rstrip() + "\n".join(lines), encoding="utf-8", newline="")
+
+
+def validate_configured_model(model: str | None, provider: str | None) -> None:
+    """Reject a free-text model id that is not in the configured set."""
+    if not model:
+        return
+    if provider and capabilities_for(provider).dynamic_models:
+        return
+    if is_tier(model):
+        return
+    if model in CLAUDE_MODELS:
+        return
+    raise UnknownModelError(
+        f"Unknown model '{model}' for provider '{provider or 'default'}' "
+        f"(configured models: {', '.join(CLAUDE_MODELS)})"
+    )
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -2817,6 +2851,26 @@ class ProjectChatManager:
                 return project
         return None
 
+    def _ordinary_project_for(self, chat: ChatInfo) -> str:
+        """The project an ordinary chat derived from *chat* belongs in.
+
+        A fork or a continuation of a memory pass is the owner's own
+        conversation, not a pass. It must live outside the app-owned Memory
+        project, or the project-kind half of the pass predicate would silence
+        a chat the app itself has just created. The workspace's General
+        project is where every other ad-hoc conversation lives.
+        """
+        project = self._projects.get(chat.project_id)
+        if project is None or project.kind != MEMORY_PROJECT_KIND:
+            return chat.project_id
+        general = self._general_project_for(project.workspace)
+        if general is None:
+            raise ValueError(
+                f"The {project.workspace} workspace has no General project "
+                "to host this chat."
+            )
+        return general.project_id
+
     def _rehome_orphaned_chats(self) -> None:
         """Re-parent chats whose project no longer exists onto a valid General.
 
@@ -3712,6 +3766,16 @@ class ProjectChatManager:
         # Resolve the effective model/provider before any side effects, so a
         # rejected model can't leave unrelated empty chats deleted (#259).
         project = self._projects.get(project_id)
+        # The Memory project is app-owned: it holds the engine's own passes and
+        # nothing else. The pass predicate falls back on the project kind (a
+        # pass whose helper failed closed must stay silent), so an ordinary
+        # chat created here would be silenced without being one. Only a pass
+        # helper opens a chat in this project.
+        if project is not None and project.kind == MEMORY_PROJECT_KIND:
+            if chat_service._normalize_chat_helper(helper).get("kind") != MEMORY_PASS_KIND:
+                raise MemoryProjectRefused(
+                    "The Memory project holds memory passes only."
+                )
         workspace = project.workspace if project else None
         chat_provider = provider
         if not chat_provider:
@@ -3882,6 +3946,14 @@ class ProjectChatManager:
             target = self._projects.get(project_id)
             if target is None:
                 raise ValueError(f"Project '{project_id}' not found")
+            if target.kind == MEMORY_PROJECT_KIND:
+                # The Memory project holds the engine's own passes. A chat
+                # moved in there is silenced by the project-kind half of the
+                # pass predicate without being a pass, so the move is refused
+                # rather than the chat quietly losing its notifications.
+                raise MemoryProjectRefused(
+                    "Cannot move a chat into the Memory project."
+                )
             current = self._projects.get(chat.project_id)
             if current is not None and target.workspace != current.workspace:
                 raise ValueError(
@@ -4362,7 +4434,7 @@ class ProjectChatManager:
         return had
 
     def _schedule_action_detection(self, chat_id: str) -> None:
-        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode chat."""
+        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode server or a connected Claude session."""
         if self.actions_runtime.detection_provider(chat_id) is None:
             return
         self._spawn_detached(
@@ -4462,7 +4534,7 @@ class ProjectChatManager:
             
         # Create a new active chat in the same project, title, model, and provider
         new_chat = self.create_chat(
-            project_id=chat.project_id,
+            project_id=self._ordinary_project_for(chat),
             title=chat.title,
             model=chat.model,
             mode=chat.mode,
@@ -4557,7 +4629,7 @@ class ProjectChatManager:
 
         fork = ChatInfo(
             chat_id=f"chat-{chat_service._uuid8()}",
-            project_id=source.project_id,
+            project_id=self._ordinary_project_for(source),
             title=f"{base_title} · Fork {next_index}",
             model=source.model,
             mode=source.mode,
@@ -5233,6 +5305,41 @@ class ProjectChatManager:
         self._provider_kind.pop(chat_id, None)
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
+
+    async def ensure_opencode_server(self, chat_id: str) -> OpencodeProvider:
+        """Start an OpenCode chat's server without a turn, or return the live one.
+
+        The MCP sign-in card needs the server a turn would start; the idle sweep
+        may have stopped it (``_PROVIDER_IDLE_TIMEOUT_SECONDS``). The request is
+        built exactly as a turn builds it, so the next turn reuses this server.
+        ``compact=True`` only skips the capsule and prefix, whose builder mutates
+        chat state. The provider is registered and freshly stamped, so the sweep
+        keeps it for the whole sign-in wait (``POLL_DEADLINE_S`` < the timeout).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived or chat.provider != "opencode":
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        existing = self._providers.get(chat_id)
+        live = existing.provider if existing is not None else None
+        if isinstance(live, OpencodeProvider) and live.has_live_server:
+            self._provider_last_used[chat_id] = time.monotonic()
+            return live
+        service = self._get_provider(chat_id)
+        provider = service.ensure_provider(chat.provider)
+        if not isinstance(provider, OpencodeProvider):
+            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
+        await self.warm_gh_token(chat)
+        request = self.build_agent_request(
+            chat, prompt="", resume_session=chat.session_id or None, compact=True
+        )
+        await provider.ensure_server(request)
+        if self._providers.get(chat_id) is not service:
+            # Archive, new session, handover or reload dropped this service while
+            # the server started; nothing else holds it, so stop it here.
+            await service.disconnect()
+            raise RuntimeError(f"chat {chat_id} changed while its OpenCode server started")
+        self._provider_last_used[chat_id] = time.monotonic()
+        return provider
 
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.
@@ -6408,18 +6515,7 @@ class ProjectChatManager:
         name so a future dynamic-catalog provider is not measured against the
         Claude model list, which does not describe it.
         """
-        if not model:
-            return
-        if provider and capabilities_for(provider).dynamic_models:
-            return
-        if is_tier(model):
-            return
-        if model in CLAUDE_MODELS:
-            return
-        raise UnknownModelError(
-            f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {', '.join(CLAUDE_MODELS)})"
-        )
+        validate_configured_model(model, provider)
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.
@@ -7837,11 +7933,8 @@ class ProjectChatManager:
         # Every kind is capped: the connection/startup/auth cap guards against
         # a transient-looking local failure looping forever, and the quota caps
         # stop retries against a limit that is not clearing.
-        if kind == "quota":
-            cap = _MAX_QUOTA_RETRIES
-        elif kind == "quota_terminal":
-            cap = _MAX_TERMINAL_QUOTA_RETRIES
-        else:
+        cap = _retry_cap(kind)
+        if cap is None:
             cap = _MAX_CONNECTION_DROP_RETRIES
         if chat is not None and chat.retry_kind != kind:
             # Each kind gets its own budget: a run of connection retries must
@@ -8049,6 +8142,15 @@ class ProjectChatManager:
         if network and chat.retry_attempts >= _MAX_NETWORK_RETRIES:
             self._exhaust_network_retry(chat)
             return None
+        cap = None if network else _retry_cap(chat.retry_kind)
+        if cap is not None and chat.retry_attempts >= cap:
+            logger.warning(
+                "chat %s reached the %s retry cap (%d) before firing; stopping the retry",
+                chat_id, chat.retry_kind, cap,
+            )
+            self._clear_chat_retry(chat, status="stopped")
+            self._settle_schedule_retry(chat_id, succeeded=False)
+            return None
         images = self._resolve_retry_images(chat)
         chat.retry_attempts += 1
         if network:
@@ -8110,6 +8212,14 @@ class ProjectChatManager:
         current = asyncio.current_task() if _has_running_loop() else None
         if task is not None and not task.done() and task is not current:
             task.cancel()
+        if status == "stopped" and _has_running_loop():
+            # A memory pass keeps its workspace slot while a retry is pending
+            # (MemoryPassService.on_turn_finished). A retry that ends without a
+            # turn must release it, or every queued pass waits for a restart (#2646).
+            self._spawn_detached(
+                self._memory_pass_turn_finished(chat.chat_id),
+                f"memory-pass-{chat.chat_id}",
+            )
 
     def _ensure_retry_tasks(self) -> None:
         for chat in self._chats.values():
@@ -8669,6 +8779,10 @@ class ProjectChatManager:
 
     # ── Delayed push scheduler ───────────────────────────────────────────
 
+    def _is_memory_pass(self, chat: ChatInfo) -> bool:
+        """True for this app-owned pass, including the project-kind fallback."""
+        return is_memory_pass_chat(chat, self.get_project(chat.project_id))
+
     def _cancel_pending_push(self, chat_id: str) -> None:
         task = self._pending_push.pop(chat_id, None)
         if task is not None and not task.done():
@@ -8693,15 +8807,11 @@ class ProjectChatManager:
         single push fired after the last reply settles.
         """
         chat = self._chats.get(chat_id)
-        if (
-            chat is not None
-            and chat_service._normalize_chat_helper(chat.helper).get("kind")
-            == "memory_pass"
-        ):
+        if chat is not None and self._is_memory_pass(chat):
             # The pass is the app updating its own memory, not a conversation
-            # the owner started: a normal result there is not worth waking them
-            # for. Permission and question pushes travel their own paths and are
-            # still delivered — that is exactly when a pass needs the owner.
+            # the owner started. No result, question or permission push may
+            # reach them; the pass and its pending input stay inspectable from
+            # its memory-insight row and the chat itself.
             return
         if (
             chat is not None
@@ -8724,6 +8834,11 @@ class ProjectChatManager:
             chat = self._chats.get(chat_id)
             # Chat deleted during the window, or already read on some device.
             if chat is None:
+                return
+            if self._is_memory_pass(chat):
+                # The classification is re-checked at fire time: a pass queued
+                # before this guard existed, or one whose helper/project the
+                # registry has since rewritten, must still never wake the owner.
                 return
             if chat.archived:
                 # The chat was archived during the delay window — e.g. an
@@ -9097,6 +9212,11 @@ class ProjectChatManager:
             if chat.pending_permission != payload:
                 chat.pending_permission = payload
                 self._save()
+        if chat is not None and self._is_memory_pass(chat):
+            # Keep the persisted card and the turn's lifecycle state; only the
+            # external notification is silent. The owner reaches the pass from
+            # its memory-insight row, where a blocked pass says "needs you".
+            return
         cb = self.notify_permission_cb
         if cb is None:
             return
@@ -9192,8 +9312,12 @@ class ProjectChatManager:
 
         Called when the model uses AskUserQuestion. The headless CLI
         auto-cancels with empty answers, so the user may not notice the
-        question unless we nudge them.
+        question unless we nudge them. A memory pass never nudges: its question
+        stays on the chat and on its memory-insight row.
         """
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._is_memory_pass(chat):
+            return
         cb = self.notify_question_cb
         if cb is None:
             return
@@ -10128,6 +10252,15 @@ class ProjectChatManager:
                 "unresolvable, skipping", chat_id,
             )
             return None
+        if project.kind == MEMORY_PROJECT_KIND:
+            # The Memory project is app-owned: it holds the engine's own
+            # memory passes, so a routine cannot run in it. Refused rather
+            # than skipped: the caller has to record that the run never
+            # happened, and a one-shot entry that never ran must not be
+            # consumed.
+            raise MemoryProjectRefused(
+                "the Memory project holds the engine's own memory passes"
+            )
         fresh = self.create_chat(
             project.project_id,
             title=title or f"Every run: {prompt[:30]}",
@@ -10150,23 +10283,67 @@ class ProjectChatManager:
             entry, prompt, model, mode, provider, target_chat_id=target_chat_id
         )
 
+    def schedule_target_refusal(self, entry: ScheduleEntry) -> str:
+        """Why this entry's target is the app's memory machinery, or ''.
+
+        The Memory project is app-owned: it holds the engine's own memory
+        passes, and a routine run there would put an ordinary chat in a
+        project where every chat is silenced. A pass is the app's own turn: a
+        routine posted into it runs under the pass's restrictions and never
+        reaches the owner.
+
+        The re-home of a deleted target counts too: that project is where the
+        run's chat would be opened.
+        """
+        project_id = getattr(entry, "web_project_id", "") or ""
+        if project_id:
+            project = self._projects.get(project_id)
+            if project is None:
+                # A stale id: the recorded name is what survives it. Looked up
+                # without repairing the entry — a quiet command must not
+                # resolve or repair a target.
+                project = self.find_project(
+                    getattr(entry, "web_project_name", "") or "",
+                    getattr(entry, "workspace", "") or "",
+                )
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        chat_id = getattr(entry, "web_chat_id", "") or ""
+        if chat_id:
+            chat = self._chats.get(chat_id)
+            if chat is not None and is_memory_pass_chat(
+                chat, self._projects.get(chat.project_id)
+            ):
+                return "a memory pass is not a target for a schedule"
+        fallback_id = getattr(entry, "fallback_project_id", "") or ""
+        if fallback_id:
+            project = self._projects.get(fallback_id)
+            if project is not None and project.kind == MEMORY_PROJECT_KIND:
+                return "the Memory project holds the engine's own memory passes"
+        return ""
+
     def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
         """The project with this name in this workspace, or None.
 
         Names are unique per workspace, which is what lets a schedule survive
         the per-instance id regeneration that strands ``web_project_id``.
+
+        The app-owned Memory project shares its name with any user project
+        called "Memory", and a routine means the user's project: the app's own
+        is only returned when it is the only one with that name.
         """
         wanted = (name or "").strip()
         if not wanted:
             return None
-        return next(
-            (
-                project
-                for project in self._projects.values()
-                if project.workspace == workspace and project.name == wanted
-            ),
-            None,
-        )
+        matches = [
+            project
+            for project in self._projects.values()
+            if project.workspace == workspace and project.name == wanted
+        ]
+        for project in matches:
+            if project.kind != MEMORY_PROJECT_KIND:
+                return project
+        return matches[0] if matches else None
 
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
@@ -10257,7 +10434,10 @@ class ProjectChatManager:
                 if p.workspace == workspace and p.name == "General":
                     return p
             for p in self._projects.values():
-                if p.workspace == workspace:
+                # The app's own Memory project is never a re-home target: a
+                # run there would open an ordinary chat in a project where
+                # every chat is silenced.
+                if p.workspace == workspace and p.kind != MEMORY_PROJECT_KIND:
                     return p
         return None
 

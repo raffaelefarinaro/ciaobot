@@ -72,6 +72,28 @@ def test_quota_retry_is_recorded_as_skipped_not_error() -> None:
     assert error is None
 
 
+def test_invalidated_grant_error_names_the_provider_and_remedy() -> None:
+    """An invalidated OAuth grant is recorded as an error that names the
+    provider account and says to sign in again, not the raw sentence (#2648)."""
+    from ciao.web.chat_service import _schedule_dispatch_status
+
+    status, error = _schedule_dispatch_status(
+        ScheduleRunOutcome(
+            completed=True,
+            is_error=True,
+            final_text="Encountered invalidated oauth token for user, failing request",
+        ),
+        provider="opencode",
+        model="openai/gpt-6.1-terra",
+    )
+
+    assert status == "error"
+    assert error == (
+        "Encountered invalidated oauth token for user, failing request "
+        "(provider: opencode openai, action: sign in again)"
+    )
+
+
 def test_unsettled_subagents_are_recorded_as_skipped_not_ok() -> None:
     """A parent turn that finished while its background subagents did not
     settle is an unfinished run: recording "ok" would clear a previous error

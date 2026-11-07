@@ -28,66 +28,82 @@
     </p>
   </div>
 
+  <!-- Developer is a disclosure, closed until asked for: three fields for
+       working on Ciaobot itself should not sit on every Advanced visit. The
+       fields are not in the page at all while it is closed. -->
   <div v-if="section === 'developer'" class="card">
     <div class="settings-card-header">
-      <h2 class="section-title">Developer</h2>
+      <h2 class="section-title developer-title">
+        <button
+          type="button"
+          class="developer-toggle"
+          :aria-expanded="developerOpen ? 'true' : 'false'"
+          aria-controls="developer-panel"
+          @click="developerOpen = !developerOpen"
+        >
+          <svg class="developer-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+          <span>Developer</span>
+        </button>
+      </h2>
       <p class="hint">
         For working on Ciaobot itself. Developer mode shows the Debug card and lets Restart
         deploy from a source checkout.
       </p>
     </div>
-    <div class="settings-switch-row">
-      <span class="hint">Developer mode</span>
-      <button
-        class="settings-switch"
-        type="button"
-        role="switch"
-        :aria-checked="devMode"
-        aria-label="Developer mode"
-        :disabled="!routines || routinesSaving"
-        @click="saveRoutines({ dev_mode: !devMode })"
-      >
-        <span class="switch-word">{{ devMode ? 'On' : 'Off' }}</span>
-        <span class="switch-track" aria-hidden="true"></span>
-      </button>
-    </div>
-    <div class="checkout-row">
-      <label class="settings-field checkout-field">
-        <span class="ws-label">Source checkout</span>
-        <input
-          v-model="appRepoDraft"
-          type="text"
-          class="routine-input"
-          placeholder="/absolute/path/to/ciaobot"
-          spellcheck="false"
-          autocomplete="off"
+    <div v-if="developerOpen" id="developer-panel" class="developer-panel">
+      <div class="settings-switch-row">
+        <span class="hint">Developer mode</span>
+        <button
+          class="settings-switch"
+          type="button"
+          role="switch"
+          :aria-checked="devMode"
+          aria-label="Developer mode"
           :disabled="!routines || routinesSaving"
-          @keydown.enter.prevent="saveAppRepo"
-        />
+          @click="saveRoutines({ dev_mode: !devMode })"
+        >
+          <span class="switch-word">{{ devMode ? 'On' : 'Off' }}</span>
+          <span class="switch-track" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div class="checkout-row">
+        <label class="settings-field checkout-field">
+          <span class="ws-label">Source checkout</span>
+          <input
+            v-model="appRepoDraft"
+            type="text"
+            class="routine-input"
+            placeholder="/absolute/path/to/ciaobot"
+            spellcheck="false"
+            autocomplete="off"
+            :disabled="!routines || routinesSaving"
+            @keydown.enter.prevent="saveAppRepo"
+          />
+        </label>
+        <button
+          class="btn-secondary btn-small"
+          type="button"
+          :disabled="!routines || routinesSaving || appRepoDraft.trim() === (routines?.app_repo || '')"
+          @click="saveAppRepo"
+        >Save</button>
+      </div>
+      <label class="settings-field">
+        <span class="ws-label">Log level</span>
+        <select
+          class="routine-select"
+          :value="logLevelChoice"
+          :disabled="!routines || routinesSaving"
+          @change="saveRoutines({ log_level: ($event.target as HTMLSelectElement).value })"
+        >
+          <option v-for="level in logLevels" :key="level" :value="level === defaultLogLevel ? '' : level">
+            {{ levelLabel(level) }}
+          </option>
+        </select>
       </label>
-      <button
-        class="btn-secondary btn-small"
-        type="button"
-        :disabled="!routines || routinesSaving || appRepoDraft.trim() === (routines?.app_repo || '')"
-        @click="saveAppRepo"
-      >Save</button>
+      <p v-if="logLevelPending" class="hint hint--warn" role="status">
+        Saved. Restart Ciaobot to log at {{ effectiveLogLevel }}.
+      </p>
     </div>
-    <label class="settings-field">
-      <span class="ws-label">Log level</span>
-      <select
-        class="routine-select"
-        :value="logLevelChoice"
-        :disabled="!routines || routinesSaving"
-        @change="saveRoutines({ log_level: ($event.target as HTMLSelectElement).value })"
-      >
-        <option v-for="level in logLevels" :key="level" :value="level === defaultLogLevel ? '' : level">
-          {{ levelLabel(level) }}
-        </option>
-      </select>
-    </label>
-    <p v-if="logLevelPending" class="hint hint--warn" role="status">
-      Saved. Restart Ciaobot to log at {{ effectiveLogLevel }}.
-    </p>
   </div>
 </template>
 
@@ -135,6 +151,9 @@ const logLevelPending = computed(
   () => !!props.routines?.server_running && props.routines.server_running.log_level !== effectiveLogLevel.value,
 )
 
+/** Closed on every visit; nothing here is worth remembering open. */
+const developerOpen = ref(false)
+
 const devMode = computed(() => props.routines?.dev_mode === true)
 
 const appRepoDraft = ref('')
@@ -178,6 +197,34 @@ function saveAppRepo() {
 .checkout-row .btn-small {
   flex: 0 0 auto;
   min-height: var(--touch);
+}
+
+.developer-title { margin: 0; }
+.developer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 var(--space-2) 0 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.developer-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.developer-chevron { transition: transform 120ms var(--ease); }
+.developer-toggle[aria-expanded='true'] .developer-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .developer-chevron { transition: none; } }
+.developer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .settings-switch-row .hint {
