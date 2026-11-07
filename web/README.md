@@ -166,7 +166,7 @@ Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
 one disclosure, each row linking the vendor's own guide. It reports the reader's
 current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
-browser tab cannot know whether the app is installed on the device.
+browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the card names the Mac app and drops the address row, the notifications card says the Mac app handles notifications, and the Home setup reminder is not shown.
 
 The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
 state in `composables/useWelcome.ts`) shows the workspace folder, the generated

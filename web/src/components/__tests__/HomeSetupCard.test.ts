@@ -76,6 +76,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   _resetInstallPromptForTests()
   delete (navigator as unknown as Record<string, unknown>).userAgent
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
 })
 
 describe('HomeSetupCard', () => {
@@ -384,6 +385,15 @@ describe('HomeSetupCard', () => {
   it('the phone row does not keep a finished card up', async () => {
     installedOnDevice.value = true
     state.pushEnabled = true
+    const view = await mountCard()
+
+    expect(view.find('.home-setup').exists()).toBe(false)
+  })
+})
+
+describe('HomeSetupCard in the desktop client', () => {
+  it('renders nothing in the desktop client', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
     const view = await mountCard()
 
     expect(view.find('.home-setup').exists()).toBe(false)

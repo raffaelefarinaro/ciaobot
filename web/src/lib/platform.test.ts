@@ -3,11 +3,14 @@
  * browser or installed PWA served by the engine.
  *
  * The retired Tauri shell injected a document-start marker on `window` and
- * exposed a command bridge beside it. Nothing sets either now that the app
- * tree is gone, so the helper that read them was permanently false and every
- * branch it guarded took the browser path while still reading as live
- * behaviour. This guard keeps them gone: a marker that nothing sets is not a
- * feature, and a call site that tests for it looks like it is doing something.
+ * exposed a command bridge beside it. The bridge is gone for good, and so is
+ * the helper that read both: a call site testing for something nothing sets
+ * looks like it is doing something. This guard keeps them gone.
+ *
+ * The marker itself is live again (#2656): Ciaobot for Mac, a separate client
+ * repository, sets it before the page runs. It has exactly one reader,
+ * `isDesktopClient()` in `lib/pwaPlatform.ts`; every surface asks that probe
+ * instead of reading the global, so there is one place to find and change.
  *
  * `isApplePlatform()` stays — that one is about the user's keyboard, not about
  * which app is running.
@@ -30,12 +33,15 @@ const SELF = join(SRC, 'lib', 'platform.test.ts')
  */
 const RETIRED: Record<string, string> = {
   helper: 'is' + 'DesktopApp',
-  marker: '__CIAOBOT' + '_DESKTOP__',
   bridge: '__TAU' + 'RI__',
 }
 
-/** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that sets
- * the marker is a test asserting a branch that can no longer be taken. */
+/** The live marker, assembled the same way, and the one file allowed to read it. */
+const MARKER = '__CIAOBOT' + '_DESKTOP__'
+const MARKER_READER = join(SRC, 'lib', 'pwaPlatform.ts')
+
+/** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that uses
+ * the retired helper or bridge asserts a branch that can no longer be taken. */
 function sourceFiles(): string[] {
   const out: string[] = []
   const walk = (dir: string) => {
@@ -65,5 +71,12 @@ describe('app-presence abstraction', () => {
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it('reads the desktop marker only in lib/pwaPlatform.ts', () => {
+    const readers = sourceFiles()
+      .filter(file => !file.includes('__tests__') && !file.endsWith('.test.ts'))
+      .filter(file => readFileSync(file, 'utf8').includes(MARKER))
+    expect(readers).toEqual([MARKER_READER])
   })
 })

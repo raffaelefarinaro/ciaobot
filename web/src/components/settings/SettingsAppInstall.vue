@@ -2,7 +2,15 @@
   <div id="install-app" class="card">
     <div class="settings-card-header">
       <h2 class="section-title">Use Ciaobot as an app</h2>
-      <p class="hint">
+      <p v-if="desktop" class="hint">
+        This window is Ciaobot for Mac, the native app for the engine on your host. The engine
+        does the work and has to stay running — the app is the front end, not a copy of your
+        chats. To use Ciaobot on another device, install it there as a web app.
+        <a class="set-link settings-help-link install-link" :href="REMOTE_GUIDE_URL" target="_blank" rel="noopener noreferrer">
+          Reach Ciaobot over HTTPS from another device
+        </a>
+      </p>
+      <p v-else class="hint">
         Ciaobot is a web app: this browser tab already reaches the engine on your host, and
         installing is optional. It adds an icon and a window of its own at this same address,
         and changes nothing else about how Ciaobot behaves. The engine on your host does the
@@ -16,11 +24,11 @@
       <div class="install-row">
         <span class="install-key">This window</span>
         <span class="install-value">
-          <span class="install-state">{{ standalone ? 'Running as the installed app' : 'A browser tab' }}</span>
+          <span class="install-state">{{ desktop ? 'Ciaobot for Mac' : (standalone ? 'Running as the installed app' : 'A browser tab') }}</span>
           <span class="install-detail">{{ standaloneDetail }}</span>
         </span>
       </div>
-      <div class="install-row">
+      <div v-if="!desktop" class="install-row">
         <span class="install-key">This address</span>
         <span class="install-value">
           <span class="install-state">{{ originState }}</span>
@@ -60,6 +68,7 @@ import {
   isEdge,
   isGoogleChrome,
   isIos,
+  isDesktopClient,
   isIpadDesktopMode,
   isMacDesktop,
   isSafari,
@@ -149,7 +158,9 @@ function currentInstallRoute(): string | null {
   return null
 }
 
-const currentRoute = currentInstallRoute()
+/** The Mac app is the installed app, so no browser row applies in it. */
+const desktop = isDesktopClient()
+const currentRoute = desktop ? null : currentInstallRoute()
 
 /** Opens the platform steps when the Home setup card linked here. */
 defineProps<{ expandSteps?: boolean }>()
@@ -159,6 +170,7 @@ defineProps<{ expandSteps?: boolean }>()
  *  and must never claim that it is installed. */
 const standalone = isStandalone()
 const standaloneDetail = computed(() => {
+  if (desktop) return 'The native app. Notifications, the menu bar and the Dock icon come from it; nothing here needs installing.'
   if (standalone) return 'Only this window can tell. Another tab, or another device, may still be the browser.'
   if (installedOnDevice.value) return 'The app is installed on this device too. Open it from its icon for its own window.'
   return 'Everything already works here. Installing is what adds the icon and the separate window.'
