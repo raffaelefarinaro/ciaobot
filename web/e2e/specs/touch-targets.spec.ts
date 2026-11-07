@@ -1,5 +1,5 @@
 import { devices, expect, test, type CDPSession, type Page } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
+import { BOOTED, COMPOSER, boot, isolate, openChatDetails, quiesce } from '../support/app'
 
 /**
  * DESIGN.md requires every interactive target to be at least 44x44 CSS px on
@@ -182,7 +182,7 @@ const TRIGGER_CAP = 80
 // cover, not just some DOM change. Keyed by the surface they live on.
 const KNOWN_TRIGGERS: Record<string, string[]> = {
   '/': ['Model for the new chat'],
-  '/chat/alpha-chat-1': ['Show chat details'],
+  '/chat/alpha-chat-1': ['More chat actions'],
   '/settings/workspace': ['New workspace', 'Actions for workspace'],
 }
 // Triggers a surface may legitimately fail to click because another element
@@ -446,7 +446,7 @@ test.describe('touch targets', () => {
   test('the Repository section is at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     // The code badge is hidden on phones; Chat details opens from the ⓘ button.
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
     const found = await measure(page, '#chat-work-rail .chat-repo-section')
     expect(found.total, 'no controls measured in the Repository section').toBeGreaterThan(0)
@@ -618,7 +618,7 @@ test.describe('touch targets', () => {
 
   test('the terminal pane and its key row are at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await page.locator('#chat-work-rail .chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
     const pane = page.locator('.terminal-pane')

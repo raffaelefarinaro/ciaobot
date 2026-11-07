@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { COMPOSER, activeWorkspaceButton, boot, isolate, settled } from '../support/app'
+import { COMPOSER, activeWorkspaceButton, boot, isolate, openChatDetails, settled } from '../support/app'
 
 /**
  * The browser terminal's pane, in a real browser.
@@ -493,7 +493,7 @@ test.describe('on a phone', () => {
 
     // On a narrow pane the chat details are a drawer, and the terminal's
     // button lives in it.
-    await page.locator('.work-inspector-trigger').click()
+    await openChatDetails(page)
     const details = page.locator('#chat-work-rail')
     await expect(details).toBeVisible()
     await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
@@ -507,7 +507,7 @@ test.describe('on a phone', () => {
     // chat details tab — because the button that was pressed left with it.
     // The terminal takes the keyboard only once it has a screen, which is
     // when a session starts; the desktop journey covers that.
-    await expect(page.locator('.work-inspector-trigger')).toBeFocused()
+    await expect(page.getByRole('button', { name: /^More chat actions/ })).toBeFocused()
     // A drawer, not a strip: the pane covers the page it is on.
     const box = (await pane.boundingBox())!
     expect(box.height).toBeGreaterThanOrEqual(600)

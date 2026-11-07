@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import { flushPromises, mount, type DOMWrapper } from '@vue/test-utils'
+import { flushPromises, mount, RouterLinkStub, type DOMWrapper } from '@vue/test-utils'
 import SettingsMcpServers from '../settings/SettingsMcpServers.vue'
 import { useMcpServers } from '../../composables/useMcpServers'
 import type { McpStatus } from '../../lib/types'
@@ -26,7 +26,7 @@ function panel(change?: (status: McpStatus) => void, props: { defaultProvider?: 
   const get = vi.fn().mockResolvedValue(status)
   const mcp = useMcpServers({ api: { get } })
   mcp.status.value = status
-  return { wrapper: mount(SettingsMcpServers, { props: { mcp, ...props }, attachTo: document.body }), get }
+  return { wrapper: mount(SettingsMcpServers, { props: { mcp, ...props }, attachTo: document.body, global: { stubs: { RouterLink: RouterLinkStub } } }), get }
 }
 
 const tab = (wrapper: ReturnType<typeof panel>['wrapper'], label: string) => wrapper.findAll('[role="tab"]').find(t => t.text().startsWith(label))!
@@ -52,7 +52,7 @@ describe('Settings MCP native inventory', () => {
   })
   it('shows one status row per state across open chats', async () => {
     const { wrapper } = panel(status => {
-      status.providers[0]!.servers = [{ name: 'claude.ai Ahrefs', scope: 'account', source: 'provider', allowed: null, connections: ['a', 'b', 'c', 'd'].map(id => ({ chat_id: `chat-${id}`, state: 'needs_auth' as const, error: 'MCP server needs authentication.' })) }]
+      status.providers[0]!.servers = [{ name: 'session-only', scope: 'account', source: 'provider', allowed: null, connections: ['a', 'b', 'c', 'd'].map(id => ({ chat_id: `chat-${id}`, state: 'needs_auth' as const, error: 'MCP server needs authentication.' })) }]
     })
     expect(wrapper.findAll('.mcp-connection')).toHaveLength(1)
     expect(wrapper.get('.mcp-connection').text()).toContain('sign-in required')
@@ -231,11 +231,44 @@ describe('Settings MCP native inventory', () => {
   })
   it('explains servers whose names cannot be used in a command', () => {
     const { wrapper } = panel(status => {
-      status.providers[0]!.servers = [{ name: 'claude.ai Gmail', scope: 'account', source: 'provider', allowed: null, connections: [] }]
+      status.providers[0]!.servers = [{ name: 'odd name', scope: 'account', source: 'provider', allowed: null, connections: [] }]
     })
     expect(wrapper.text()).toContain('This server can’t be managed with a command here; use Claude Code directly.')
     expect(wrapper.findAll('.mcp-signin')).toHaveLength(0)
-    expect(wrapper.find('[aria-label="More actions for claude.ai Gmail"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="More actions for odd name"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('shows a claude.ai connector as not connected, managed on claude.ai', () => {
+    const { wrapper } = panel(status => {
+      status.providers[0]!.servers = [{ name: 'claude.ai Salesloft', scope: 'claudeai', source: 'provider', allowed: null, connections: ['a', 'b'].map(id => ({ chat_id: `chat-${id}`, state: 'needs_auth' as const, error: 'MCP server needs authentication.' })) }]
+    })
+    const server = wrapper.get('.mcp-server')
+    expect(server.get('.mcp-server-heading .badge').text()).toBe('claude.ai')
+    expect(server.get('.mcp-connection .badge').text()).toBe('not connected')
+    expect(server.get('.mcp-connection .badge').classes()).toContain('badge--muted')
+    expect(server.text()).not.toContain('sign-in required')
+    expect(server.text()).not.toContain('MCP server needs authentication.')
+    expect(server.text()).not.toContain('use Claude Code directly')
+    expect(server.get('a[href="https://claude.ai/settings/connectors"]').attributes('rel')).toContain('noopener')
+    expect(server.getComponent(RouterLinkStub).props('to')).toBe('/settings/workspace')
+    expect(server.findAll('.mcp-signin')).toHaveLength(0)
+    wrapper.unmount()
+  })
+  it('shows a connected or failed claude.ai connector with its real state, still without a sign-in', () => {
+    const { wrapper } = panel(status => {
+      status.providers[0]!.servers = [{ name: 'claude.ai Slack', scope: 'claudeai', source: 'provider', allowed: null, connections: [
+        { chat_id: 'chat-a', state: 'connected' as const },
+        { chat_id: 'chat-b', state: 'failed' as const, error: 'Connection refused' },
+      ] }]
+    })
+    const server = wrapper.get('.mcp-server')
+    expect(server.findAll('.mcp-connection .badge').map(b => b.text())).toEqual(['connected', 'connection failed'])
+    expect(server.find('.badge--success').exists()).toBe(true)
+    expect(server.find('.badge--error').exists()).toBe(true)
+    expect(server.text()).toContain('Connection refused')
+    expect(server.text()).toContain('claude.ai, Settings, Connectors')
+    expect(server.findAll('.mcp-signin')).toHaveLength(0)
+    expect(server.find('[aria-label="More actions for claude.ai Slack"]').exists()).toBe(false)
     wrapper.unmount()
   })
   it('explains a url the Windows terminal cannot pass safely', async () => {

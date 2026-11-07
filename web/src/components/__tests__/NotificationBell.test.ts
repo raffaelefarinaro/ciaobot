@@ -39,7 +39,7 @@ function chat(id: string) {
 
 let wrapper: VueWrapper | null = null
 
-async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?: 'popover' | 'sheet' } = {}, host?: HTMLElement) {
+async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?: 'popover' | 'sheet'; trigger?: boolean } = {}, host?: HTMLElement) {
   const projects = useProjectStore()
   const taskSignals = useTaskSignalsStore()
   projects.projects = [{ project_id: 'p1', name: 'General', workspace: 'personal' }] as never
@@ -71,7 +71,7 @@ async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?
   })
   await router.push('/')
   wrapper = mount(NotificationBell, {
-    props: opts.variant ? { variant: opts.variant } : {},
+    props: { ...(opts.variant ? { variant: opts.variant } : {}), ...(opts.trigger === undefined ? {} : { trigger: opts.trigger }) },
     attachTo: host ?? document.body,
     global: { plugins: [router] },
   })
@@ -251,6 +251,21 @@ describe('NotificationBell', () => {
     window.dispatchEvent(new Event('resize'))
     await flushPromises()
     expect(dialog()).toBeNull()
+  })
+
+  it('renders no button without a trigger and opens anchored to the given element', async () => {
+    await mountBell({ chats: 1, variant: 'sheet', trigger: false })
+    expect(document.body.querySelector('button.notif-bell')).toBeNull()
+    const anchor = document.createElement('button')
+    document.body.appendChild(anchor)
+    ;(wrapper!.vm as unknown as { open: (a?: HTMLElement) => void }).open(anchor)
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
+    expect(document.body.querySelector('.notif-backdrop')).not.toBeNull()
+    ;(wrapper!.vm as unknown as { close: (r?: boolean) => void }).close(true)
+    await flushPromises()
+    expect(dialog()).toBeNull()
+    expect(document.activeElement).toBe(anchor)
   })
 
   it('badge_and_ring_sit_inside_the_icon_wrapper', async () => {

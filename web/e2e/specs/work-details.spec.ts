@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate } from '../support/app'
+import { boot, COMPOSER, isolate, openChatDetails } from '../support/app'
 
 for (const mobile of [false, true]) {
   test.describe(mobile ? 'Chat details drawer' : 'Chat details window', () => {
@@ -18,7 +18,7 @@ for (const mobile of [false, true]) {
       })
       await boot(page, '/chat/alpha-chat-2', COMPOSER)
       const surface = page.locator('#chat-work-rail')
-      if (mobile) await page.locator('.work-inspector-trigger').click()
+      if (mobile) await openChatDetails(page)
       await expect(surface).toBeVisible()
       // Always loaded starts closed; its summary opens it.
       const loaded = surface.locator('details.agent-context-loaded')
@@ -47,9 +47,19 @@ for (const mobile of [false, true]) {
       await page.screenshot({ path: testInfo.outputPath('light.png'), animations: 'disabled' })
       await close.click()
       await expect(surface).toHaveCount(0)
-      const opener = page.locator('.work-inspector-trigger')
+      // At phone width the drawer was opened from the ⋯ menu, so ⋯ gets focus back.
+      const opener = mobile
+        ? page.getByRole('button', { name: /^More chat actions/ })
+        : page.locator('.work-inspector-trigger')
       await expect(opener).toBeFocused()
-      await opener.press('Enter')
+      if (mobile) {
+        // ⋯ opens its menu; Chat details is the first item, so Enter there opens the drawer.
+        await opener.press('Enter')
+        await expect(page.getByRole('menuitem', { name: 'Chat details' })).toBeFocused()
+        await page.keyboard.press('Enter')
+      } else {
+        await opener.press('Enter')
+      }
       await expect(surface).toBeVisible()
       await expect(close).toBeFocused()
       const overflow = await surface.evaluate(el => el.scrollWidth - el.clientWidth)
