@@ -4054,6 +4054,24 @@ def test_the_engine_bind_probe_sees_a_held_port_only_until_it_is_closed() -> Non
     assert port_is_available(port, native.DEFAULT_PWA_HOST) is True
 
 
+def test_the_port_probe_uses_the_host_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, str]] = []
+
+    def probe(port: int, host: str) -> bool:
+        calls.append((port, host))
+        return len(calls) == 1
+
+    monkeypatch.setattr(native, "port_is_available", probe)
+    assert native._service_port_bindable(8443, "127.0.0.1") is True
+    assert native._service_port_bindable(8443) is False
+    assert calls == [
+        (8443, "127.0.0.1"),
+        (8443, native.DEFAULT_PWA_HOST),
+    ]
+
+
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:
     parameters = inspect.signature(native.run_native_install).parameters
     assert list(parameters) == ["request", "artifacts", "cancellation"]
