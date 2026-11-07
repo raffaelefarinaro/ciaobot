@@ -98,10 +98,6 @@ async function ensureCoarsePointer(page: Page): Promise<void> {
   throw new Error(`page is not a coarse pointer; sizes would be fine-pointer ones: ${JSON.stringify(seen)}`)
 }
 
-/**
- * Open every <details>, then list the interactive controls under `scope`
- * that are smaller than TOUCH_MIN in either dimension.
- */
 const NOT_COARSE = 'page is not a coarse pointer; sizes would be fine-pointer ones'
 const MEASURE_ATTEMPTS = 3
 
@@ -120,18 +116,25 @@ async function measure(page: Page, scope = 'body') {
     await quiesce(page)
     const found = await measureOnce(page, scope)
     if (found) return found
+    // Keep the flip rate visible in the report even when a retry recovers it.
+    test.info().annotations.push({ type: 'pointer-flip', description: `fine pointer at measure attempt ${attempt}` })
     if (attempt >= MEASURE_ATTEMPTS) {
       const seen = await page.evaluate(() => ({
         anyCoarse: matchMedia('(any-pointer: coarse)').matches,
         hover: matchMedia('(hover: hover)').matches,
         maxTouchPoints: navigator.maxTouchPoints,
+        focused: document.activeElement?.outerHTML.slice(0, 120) ?? null,
       }))
       throw new Error(`${NOT_COARSE} (lost after repair ${MEASURE_ATTEMPTS} times): ${JSON.stringify(seen)}`)
     }
   }
 }
 
-/** One measurement, or null when the page is not a coarse pointer at that moment. */
+/**
+ * Open every <details>, then list the interactive controls under `scope`
+ * that are smaller than TOUCH_MIN in either dimension. Returns null, before
+ * opening anything, when the page is not a coarse pointer at that moment.
+ */
 async function measureOnce(page: Page, scope: string): Promise<{ total: number; bad: string[] } | null> {
   return page.evaluate(({ min, scope }) => {
     if (!matchMedia('(pointer: coarse)').matches) return null
