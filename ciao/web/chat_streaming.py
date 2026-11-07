@@ -2084,8 +2084,13 @@ class ChatStreaming:
                     settled = self._host._background_count_now(chat_id) == 0
                     if settled:
                         self._last_drain_result[chat_id] = (text, is_error)
+                    chat_now = self._host._chats.get(chat_id)
                     last_error = (
-                        self._host._result_snippet(text or "The turn failed.")
+                        annotate_reauth(
+                            self._host._result_snippet(text or "The turn failed."),
+                            chat_now.provider if chat_now is not None else "",
+                            chat_now.model if chat_now is not None else "",
+                        )
                         if is_error
                         else ""
                     )
@@ -2094,7 +2099,6 @@ class ChatStreaming:
                         # The wake launched more background work; the watcher
                         # that counted the first batch has already exited.
                         self._host._start_subagent_watcher(chat_id, project_id)
-                    chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error
                         and answer_text
