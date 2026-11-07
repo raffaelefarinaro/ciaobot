@@ -1300,6 +1300,37 @@ async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
     )
 
 
+async def test_invalidated_grant_is_labelled_and_not_retried(tmp_path: Path) -> None:
+    """An invalidated OAuth grant arms no retry and names the provider and the
+    remedy in the chat's last_error (#2648)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="Encountered invalidated oauth token for user, failing request",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert "action: sign in again" in updated.last_error
+    assert f"provider: {updated.provider}" in updated.last_error
+
+
 async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     """One short of the quota cap, a rate-limit error still arms the hourly retry."""
     from ciao.web.project_chats import _MAX_QUOTA_RETRIES
