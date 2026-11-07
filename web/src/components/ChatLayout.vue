@@ -31,7 +31,6 @@
            and a second chat — and whichever wins it, the divider and the
            remembered ratio are the same. -->
       <div
-        ref="chatBodyEl"
         class="chat-body"
         :class="{
           'chat-body--split': sideSlotOccupied,
@@ -96,36 +95,18 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
+            <div class="empty-state">
               <div class="home-workbench">
                 <div class="home-main">
+                  <HousekeepingStrip />
+                  <HomeNoticeReopen />
                   <HomeIntake />
-                  <template v-if="!homeAlertsInRail">
-                    <HomeNoticeReopen />
-                    <HousekeepingStrip />
-                  </template>
                   <HomeOnboardingResume />
                   <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
-                  <div v-if="showGlobalNewChatActions" class="empty-actions">
-                    <button
-                      v-for="action in generalWorkspaceActions"
-                      :key="action.workspace"
-                      class="btn-primary"
-                      :data-workspace-color="action.color"
-                      :disabled="action.isCreating"
-                      @click="chooseNewChat(action.workspace)"
-                    >
-                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                    </button>
-                  </div>
                 </div>
                 <div class="home-rail">
-                  <template v-if="homeAlertsInRail">
-                    <HomeNoticeReopen />
-                    <HousekeepingStrip />
-                  </template>
                   <HomeReviewSummary />
                 </div>
               </div>
@@ -228,36 +209,18 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-            <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
+            <div class="empty-state">
               <div class="home-workbench">
                 <div class="home-main">
+                  <HousekeepingStrip />
+                  <HomeNoticeReopen />
                   <HomeIntake />
-                  <template v-if="!homeAlertsInRail">
-                    <HomeNoticeReopen />
-                    <HousekeepingStrip />
-                  </template>
                   <HomeOnboardingResume />
                   <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
-                  <div v-if="showGlobalNewChatActions" class="empty-actions">
-                    <button
-                      v-for="action in generalWorkspaceActions"
-                      :key="action.workspace"
-                      class="btn-primary"
-                      :data-workspace-color="action.color"
-                      :disabled="action.isCreating"
-                      @click="chooseNewChat(action.workspace)"
-                    >
-                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                    </button>
-                  </div>
                 </div>
                 <div class="home-rail">
-                  <template v-if="homeAlertsInRail">
-                    <HomeNoticeReopen />
-                    <HousekeepingStrip />
-                  </template>
                   <HomeReviewSummary />
                 </div>
               </div>
@@ -388,7 +351,6 @@ import HomeSetupCard from './HomeSetupCard.vue'
 import HomeOnboardingResume from './HomeOnboardingResume.vue'
 import HomeWelcomeCard from './HomeWelcomeCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
-import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
@@ -752,19 +714,8 @@ watch(sidebarCollapsed, (collapsed, was) => {
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 
-/** Mirrors `@container chat-pane (max-width: 940px)` in the styles below: the
- *  same element (.chat-body), the same box (content inline size), the same
- *  threshold. Home's alerts sit in the rail only while the rail is beside the
- *  column; stacked, they stay under the composer instead of below every chat. */
-const HOME_RAIL_MIN_PANE_PX = 940
-/** The chat column: the route's content, and the box the panes answer to. */
-const chatBodyEl = ref<HTMLElement | null>(null)
 /** The pane: the chat column and the terminal's dock, side by side. */
 const chatMainEl = ref<HTMLElement | null>(null)
-const chatPaneWidth = ref<number | null>(null)
-const homeAlertsInRail = computed(() => chatPaneWidth.value === null
-  ? !isMobile.value
-  : chatPaneWidth.value > HOME_RAIL_MIN_PANE_PX)
 
 // The terminal's shape is decided by the room the pane actually has, not by
 // the window: a dock takes its own width, and a chat squeezed to a sliver
@@ -786,50 +737,8 @@ const terminalDockFits = computed(() => chatMainWidth.value !== null
   && chatMainWidth.value >= TERMINAL_DOCK_MIN_PANE_PX)
 /** Whether the terminal is on screen. The pane owns that, and says so. */
 const terminalOpen = ref(false)
-let chatPaneObserver: ResizeObserver | null = null
 let chatMainObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
-
-// Only for the true empty state. Every lane carries its own "+ new" and lanes
-// no longer collapse at narrow widths, so on a phone with chats these were a
-// second, louder copy of an action already on screen — and a saturated fill
-// spent on something non-blocking, which the design system reserves for
-// "needs the user".
-//
-// A memory-insight row counts as activity: a workspace whose only thing
-// happening is a memory pass is not empty — post-archive work is not part of
-// `activeChatsAll`, but it is still something this surface reports before the
-// user starts a new chat.
-const hasHomeActivity = computed(
-  () => store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0,
-)
-const showGlobalNewChatActions = computed(() => !hasHomeActivity.value)
-
-const generalWorkspaceActions = computed(() => {
-  return store.workspaceOptions
-    .map(workspace => {
-      const projectId = store.projects.find(
-        p => p.name === 'General' && p.workspace === workspace.name,
-      )?.project_id || ''
-      return {
-        workspace: workspace.name,
-        label: workspaceLabel(workspace.name),
-        projectId,
-        color: normalizeWorkspaceColor(workspace.color),
-        isCreating: Boolean(projectId && store.creatingChatProjectIds[projectId]),
-      }
-    })
-    .filter(action => action.projectId)
-})
-
-function workspaceLabel(name: string): string {
-  if (!name) return 'workspace'
-  return name
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-}
 
 const pageDocumentTitle = computed(() => {
   if (viewMode.value === 'settings') {
@@ -1686,16 +1595,7 @@ function onTouchEnd(e: TouchEvent) {
 
 onMounted(() => {
   if (typeof ResizeObserver !== 'undefined') {
-    // Two observers, one per box: the chat column and the pane that holds
-    // it. The column's width decides where Home's alerts sit; the pane's
-    // decides whether the terminal can dock beside the chat at all.
-    if (chatBodyEl.value) {
-      chatPaneObserver = new ResizeObserver(entries => {
-        const entry = entries[entries.length - 1]
-        if (entry) chatPaneWidth.value = entry.contentRect.width
-      })
-      chatPaneObserver.observe(chatBodyEl.value)
-    }
+    // The pane's width decides whether the terminal can dock beside the chat.
     if (chatMainEl.value) {
       chatMainObserver = new ResizeObserver(entries => {
         const entry = entries[entries.length - 1]
@@ -1714,7 +1614,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   pullContext++
-  chatPaneObserver?.disconnect()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()
   notificationInbox.dispose()
@@ -1970,65 +1869,28 @@ onBeforeUnmount(() => {
   }
 }
 
+/* Home is top-aligned: nothing here is vertically centred, so the composer and
+   the lists under it do not move when a row of "Needs you" appears, resolves or
+   is hidden. The workbench carries the page gutter itself (--page-gutter), so
+   the shell only keeps the device safe-area insets. */
 .empty-state {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  color: var(--fg2);
-  /* PaneHeader already owns the top safe-area inset. Adding it here again
-     creates a large empty band above the home status row on mobile. */
-  padding: var(--space-4)
-           calc(var(--space-4) + var(--safe-right))
-           calc(var(--space-4) + var(--safe-bottom))
-           calc(var(--space-4) + var(--safe-left));
-  text-align: center;
-  /* `safe center` centers short content but falls back to start-alignment
-     (scrollable) when the full jump-back-in list overflows the viewport. */
-  justify-content: safe center;
-  overflow-y: auto;
-}
-
-.empty-state--active {
   align-items: stretch;
   justify-content: flex-start;
-  padding-top: var(--space-2);
-  /* The workbench carries the page gutter itself (--page-gutter), so the
-     shell only keeps the device safe-area insets. */
-  padding-left: var(--safe-left);
-  padding-right: var(--safe-right);
+  gap: var(--space-3);
+  color: var(--fg2);
+  padding: var(--space-2) var(--safe-right) 0 var(--safe-left);
   text-align: left;
-}
-
-.empty-state > .home-intake {
-  order: -1;
-}
-
-.empty-state .empty-hint {
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  max-width: 100%;
-}
-
-.empty-actions {
-  /* Keep the genuine empty state aligned with the lane container. */
-  width: 100%;
-  max-width: 1040px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 8px;
-}
-.empty-actions .btn-primary {
-  width: 100%;
+  overflow-y: auto;
 }
 
 /* Workbench composition (prototype A): the request column keeps the readable
    measure, and the memory pulse sits in a quiet side rail on wide panes
    instead of stacking another full-width band under the prompt. The rail holds
-   Home's alerts (operator notices, update tasks) above At a glance. */
+   At a glance only; the single "Needs you" list sits in the main column above
+   the composer. */
 .home-workbench {
   box-sizing: border-box;
   width: 100%;
@@ -2061,20 +1923,15 @@ onBeforeUnmount(() => {
    `:deep()` because these are other components' root elements (and
    HousekeepingStrip's are a fragment, which inherits no scope id). Card,
    heading and row spacing inside each section is untouched. */
-.home-main > :deep(.housekeeping),
-.home-main > :deep(.update-tasks),
+.home-main > :deep(.needs-you),
 .home-main > :deep(.home-welcome),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
-.home-main > :deep(.home-recent),
-.home-rail > :deep(.housekeeping),
-.home-rail > :deep(.update-tasks),
-.home-rail > :deep(.home-notice-reopen) {
+.home-main > :deep(.home-recent) {
   margin-block: 0;
 }
 
-.home-workbench .home-main > .home-intake,
-.home-workbench .home-main > .empty-actions {
+.home-workbench .home-main > .home-intake {
   width: 100%;
   max-width: none;
 }
@@ -2092,7 +1949,7 @@ onBeforeUnmount(() => {
   gap: var(--space-5);
 }
 
-/* Notices scroll away, the glance stays. */
+/* The glance stays in view while the page scrolls. */
 .home-rail > :deep(.home-review-summary) {
   position: sticky;
   top: var(--space-2);
@@ -2100,13 +1957,11 @@ onBeforeUnmount(() => {
 
 /* Keyed to the pane, not the viewport: with the resizable sidebar open, a
    1280px window leaves the pane well under 980px, and a viewport query kept
-   the rail beside a request column too narrow for its own chips. The 940px
-   here and HOME_RAIL_MIN_PANE_PX in the script decide together where Home's
-   alerts live: keep them in sync. */
+   the rail beside a request column too narrow for its own chips. */
 @container chat-pane (max-width: 940px) {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
-    gap: 25px;
+    gap: var(--space-5);
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 

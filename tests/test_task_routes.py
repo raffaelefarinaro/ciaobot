@@ -1073,6 +1073,46 @@ async def test_an_unknown_delegation_provider_is_refused_before_anything_starts(
     assert pcm.start_stream_calls == []
 
 
+async def test_an_unknown_delegation_model_is_refused_before_anything_starts(
+    world,
+) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Bad model", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm, provider="claude", model="gpt-5")
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_task_field"
+    assert error["retryable"] is False
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+    history = client.get(
+        f"/api/tasks/{task['id']}/attempts?workspace=personal", cookies=cookies
+    ).json()["attempts"]
+    assert history == []
+
+
+async def test_an_unknown_delegation_model_is_refused_on_the_default_provider(
+    world,
+) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Bad model on the default", body="Steps.")
+
+    response = _delegate(client, cookies, task, pcm, model="gpt-5")
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_task_field"
+    assert error["retryable"] is False
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+    history = client.get(
+        f"/api/tasks/{task['id']}/attempts?workspace=personal", cookies=cookies
+    ).json()["attempts"]
+    assert history == []
+
+
 def test_a_vague_delegation_is_refused_with_the_sentence_to_describe_it(world) -> None:
     """The PWA's delegate call shows the engine's refusal rather than handing a vague task over."""
     client, cookies, _config, pcm = world

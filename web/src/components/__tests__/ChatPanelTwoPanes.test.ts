@@ -116,6 +116,19 @@ describe('two ChatPanels on screen', () => {
     expect(a.findAll('.file-chip')).toHaveLength(0)
   })
 
+  it('a staged file chip names the full file on hover and has a labelled remove control', async () => {
+    const { b, store } = mountTwoPanes()
+    const longName = `${'quarterly-planning-notes-'.repeat(4)}final.pdf`
+    store.addPendingFiles('chat-2', [{ ref: `drop_${'b'.repeat(32)}`, name: longName }])
+    await flushPromises()
+
+    const chip = b.get('.file-chip')
+    expect(chip.attributes('title')).toBe(longName)
+    expect(chip.get('button').attributes('aria-label')).toBe(`Remove ${longName}`)
+    await chip.get('button').trigger('click')
+    expect(b.findAll('.file-chip')).toHaveLength(0)
+  })
+
   it('a sent message lists its files as chips, not tokens or paths', async () => {
     const { a, store } = mountTwoPanes()
     store.messages['chat-1'] = [{

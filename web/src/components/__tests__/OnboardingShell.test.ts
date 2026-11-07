@@ -19,6 +19,15 @@ describe('OnboardingShell', () => {
     expect(wrapper.emitted('complete')).toBeUndefined()
   })
 
+  it('has one footer row, no kicker and no focus outline rule for the heading', () => {
+    const wrapper = mount(OnboardingShell, { props: { context, step: 'finish', busy: false, error: null, conflict: false, canContinue: true } })
+    expect(wrapper.findAll('footer')).toHaveLength(1)
+    expect(wrapper.findAll('footer button')).toHaveLength(3)
+    expect(wrapper.get('button.continue').text()).toBe('Finish setup')
+    expect(wrapper.find('.onboarding-kicker').exists()).toBe(false)
+    expect(wrapper.get('h1').attributes('tabindex')).toBe('-1')
+  })
+
   it('announces errors and disables navigation while pending', () => {
     const wrapper = mount(OnboardingShell, { props: { context, step: 'access_memory', busy: true, error: 'Save failed', conflict: true, canContinue: false } })
     expect(wrapper.get('[role="alert"]').text()).toContain('Save failed')
