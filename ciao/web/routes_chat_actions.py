@@ -1,4 +1,4 @@
-"""Browser-only routes for a chat's needs-you cards: start, dismiss and continue.
+"""Browser-only routes for a chat's needs-you cards: start, dismiss, continue and callback.
 
 These routes sit behind the signed session cookie and are not loopback-only. An
 agent can raise an action (``ciao chat needs-action``) but can never start,
@@ -19,8 +19,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.chat_actions import ChatActionError, action_payload
+from ciao.oauth_callback import CallbackRefused
 from ciao.web.auth import is_loopback_client
 from ciao.web.project_chats import ChatActionConflictError, ProjectChatManager
+
+CALLBACK_BODY_MAX_BYTES = 8192
 
 
 def _action_error_response(
@@ -90,3 +93,40 @@ async def chat_action_continue(request: Request) -> JSONResponse:
     except (ChatActionConflictError, ChatActionError) as exc:
         return _action_error_response(pcm, chat_id, action_id, exc)
     return JSONResponse({"actions": remaining, "delivery": delivery})
+
+
+async def chat_action_callback(request: Request) -> JSONResponse:
+    """Replay a pasted sign-in address. Body exactly ``{"url": "<pasted address>"}``.
+
+    A refused address is 400 with a closed refusal word, and the action is untouched.
+    """
+    pcm: ProjectChatManager = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    action_id = request.path_params["action_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    raw = await request.body()
+    if len(raw) > CALLBACK_BODY_MAX_BYTES:
+        return JSONResponse({"error": "too_large", "action": None}, status_code=413)
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return JSONResponse({"error": "invalid_body", "action": None}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"url"} or not isinstance(body["url"], str):
+        return JSONResponse({"error": "invalid_body", "action": None}, status_code=400)
+    try:
+        payload = await pcm.actions_runtime.callback(
+            chat_id, action_id, body["url"], is_loopback=is_loopback_client(request)
+        )
+    except CallbackRefused as exc:
+        current = pcm.get_action(chat_id, action_id)
+        return JSONResponse(
+            {
+                "error": exc.reason,
+                "action": action_payload(current) if current is not None else None,
+            },
+            status_code=400,
+        )
+    except (ChatActionConflictError, ChatActionError) as exc:
+        return _action_error_response(pcm, chat_id, action_id, exc)
+    return JSONResponse({"action": payload})
