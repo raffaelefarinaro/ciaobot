@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import CallbackPasteField from '../CallbackPasteField.vue'
 
@@ -109,6 +110,20 @@ describe('CallbackPasteField', () => {
     w.get('input').setValue(URL_OK)
     await flushPromises()
     expect(w.get('button[type=submit]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('is read-only while the send is in flight, so typing cannot be wiped by the clear', async () => {
+    let resolvePost: (value: unknown) => void = () => {}
+    apiPost.mockReturnValueOnce(new Promise(resolve => { resolvePost = resolve }))
+    const w = mountField()
+    w.get('input').setValue(URL_OK)
+    w.get('form').trigger('submit')
+    await nextTick()
+    expect(input(w).hasAttribute('readonly')).toBe(true)
+
+    resolvePost({ action: null })
+    await flushPromises()
+    expect(input(w).hasAttribute('readonly')).toBe(false)
   })
 
   it('never stores the pasted address', async () => {

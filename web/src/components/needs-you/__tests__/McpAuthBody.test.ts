@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import McpAuthBody from '../McpAuthBody.vue'
 import type { ChatAction } from '../../../lib/types'
@@ -128,6 +129,36 @@ describe('McpAuthBody paste-back field', () => {
   it('hides it until the sign-in page is known', () => {
     const w = mountBody(action({ params: { server: 'notion', provider: 'claude', session_id: 's1' } }))
     expect(pasteInput(w).exists()).toBe(false)
+  })
+
+  it('keeps the focus on the card when the field goes away after the send', async () => {
+    // A focusable card in the document, so the focus has somewhere to rest.
+    const card = document.createElement('div')
+    card.className = 'needs-you-card'
+    card.tabIndex = -1
+    document.body.appendChild(card)
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    wrapper = mount(McpAuthBody, {
+      props: { chatId: CHAT_ID, action: action() },
+      attachTo: card,
+      global: { plugins: [pinia] },
+    })
+    const input = pasteInput(wrapper).element as HTMLInputElement
+    input.focus()
+    expect(document.activeElement).toBe(input)
+
+    await wrapper.setProps({
+      action: action({ params: { server: 'notion', provider: 'claude', url: 'https://mcp.notion.com/authorize?a=1', session_id: 's1', callback_used: '1' } }),
+    })
+    await nextTick()
+    await flushPromises()
+
+    expect(pasteInput(wrapper).exists()).toBe(false)
+    expect(document.activeElement).not.toBe(document.body)
+    wrapper.unmount()
+    wrapper = null
+    card.remove()
   })
 
   it('says the address was sent', async () => {

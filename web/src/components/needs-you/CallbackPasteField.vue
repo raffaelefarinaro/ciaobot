@@ -50,6 +50,7 @@ async function submit(): Promise<void> {
         v-model="text"
         class="needs-you-paste-input"
         type="url"
+        :readonly="busy"
         inputmode="url"
         autocomplete="off"
         autocapitalize="off"
