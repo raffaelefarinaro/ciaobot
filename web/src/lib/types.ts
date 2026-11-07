@@ -350,7 +350,6 @@ export interface ChatPinState {
   revision: number
 }
 
-
 /** A needs-you kind the engine can raise on a chat. */
 export type ChatActionKind = 'mcp_auth' | 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
