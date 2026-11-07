@@ -4,8 +4,9 @@
  * its steps. The card owns Not now and Continue the chat / Done; this body
  * never renders them.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { actionCopy, chatActionErrorReason, MCP_AUTH_STEPS, safeExternalUrl } from '../../lib/chatActions'
+import { useNeedsYouCardFocus } from '../../composables/useNeedsYouCardFocus'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
 
@@ -16,19 +17,7 @@ const store = useProjectStore()
 const starting = ref(false)
 const copy = computed(() => actionCopy(props.action))
 const url = computed(() => safeExternalUrl(props.action.params.url))
-/** This body's root, so a focus inside it can be seen before it leaves. */
-const bodyEl = ref<HTMLElement | null>(null)
-
-// The focus rests on the card while the sign-in moves on. A disabled button or
-// a link that is about to be removed would otherwise drop it onto the page.
-function focusCard(): void {
-  (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')?.focus()
-}
-
-// Runs before the DOM is patched, so the link still holds the focus here.
-watch(() => props.action.state, () => {
-  if (bodyEl.value?.contains(document.activeElement)) focusCard()
-})
+const { bodyEl, focusCard } = useNeedsYouCardFocus(() => props.action.state)
 
 async function start(): Promise<void> {
   if (starting.value) return

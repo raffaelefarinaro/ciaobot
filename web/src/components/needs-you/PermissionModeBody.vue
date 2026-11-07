@@ -5,9 +5,10 @@
  * Continue the chat / Done; this body never renders them. Start sends an empty
  * body: the engine applies the mode the request carried, never one sent here.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { actionCopy, chatActionErrorReason } from '../../lib/chatActions'
 import { isBridgeMode, modeLabel } from '../../lib/permissionModes'
+import { useNeedsYouCardFocus } from '../../composables/useNeedsYouCardFocus'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
 
@@ -18,8 +19,7 @@ const store = useProjectStore()
 const starting = ref(false)
 const copy = computed(() => actionCopy(props.action))
 const chat = computed(() => store.chats.find(c => c.chat_id === props.chatId))
-/** This body's root, so a focus inside it can be seen before it leaves. */
-const bodyEl = ref<HTMLElement | null>(null)
+const { bodyEl, focusCard } = useNeedsYouCardFocus(() => props.action.state)
 
 function labelFor(mode: unknown): string {
   return isBridgeMode(mode) ? modeLabel(mode) : 'unknown'
@@ -28,17 +28,6 @@ const nowLabel = computed(() => labelFor(chat.value?.mode))
 const requestedLabel = computed(() => labelFor(props.action.params.mode))
 const isBypass = computed(() => props.action.params.mode === 'bypass')
 const note = computed(() => props.action.params.note ?? '')
-
-// The focus rests on the card while the change moves on. A disabled button
-// would otherwise drop it onto the page.
-function focusCard(): void {
-  (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')?.focus()
-}
-
-// Runs before the DOM is patched, so the button still holds the focus here.
-watch(() => props.action.state, () => {
-  if (bodyEl.value?.contains(document.activeElement)) focusCard()
-})
 
 async function start(): Promise<void> {
   if (starting.value) return

@@ -278,8 +278,8 @@ onBeforeUnmount(() => {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 700;
+  color: var(--accent);
 }
-.composer-activity-count { color: var(--accent); }
 
 .composer-activity-popover {
   /* Popper supplies the fixed placement; this is only the surface. */

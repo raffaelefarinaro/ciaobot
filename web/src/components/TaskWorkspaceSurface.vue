@@ -4089,11 +4089,9 @@ defineExpose({ requestClose })
   .task-chips {
     flex-wrap: nowrap;
     overflow-x: auto;
-    scrollbar-width: none;
     margin-inline: calc(-1 * var(--space-1));
     padding: 2px var(--space-1);
   }
-  .task-chips::-webkit-scrollbar { display: none; }
   /* Grow to fill the row when they fit; never shrink, so a narrow phone
      scrolls the row instead of squeezing the labels. */
   .task-chips .task-chip { flex: 1 0 auto; justify-content: center; }
