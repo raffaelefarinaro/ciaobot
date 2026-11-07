@@ -4,6 +4,7 @@
     :class="{
       'pane-header--no-center': !hasCenter,
       'pane-header--tag-title': !hasTitle && !!pageTag,
+      'pane-header--overflow': phoneOverflow,
     }"
   >
     <!-- Phones only (the sidebar is a drawer there, so its back / forward
@@ -69,7 +70,10 @@ const props = withDefaults(defineProps<{
   pageTag?: string
   /** Off only where a second mark would duplicate the main pane's (split view). */
   brand?: boolean
-}>(), { brand: true })
+  /** Phones only: Back and the bell move into the view's own overflow menu, so
+   *  this header hides them. Other views keep both. */
+  phoneOverflow?: boolean
+}>(), { brand: true, phoneOverflow: false })
 defineEmits<{ 'open-sidebar': [] }>()
 
 const slots = useSlots()
@@ -274,6 +278,11 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 .header-trail :deep(.header-bell) { display: none; }
 @media (max-width: 767px) {
   .header-trail :deep(.header-bell) { display: inline-flex; }
+  /* Phones, opted in by the view (ChatPanel): Back and the bell live in the
+     view's ⋯ menu instead. Hidden, not removed, so the DOM and the bell's
+     anchoring stay as they are. */
+  .pane-header.pane-header--overflow .header-back { display: none; }
+  .pane-header--overflow .header-trail :deep(.header-bell) { display: none; }
 }
 .header-back,
 .header-hamburger {
