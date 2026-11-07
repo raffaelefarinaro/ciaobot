@@ -137,6 +137,7 @@ def test_not_installed_is_the_last_failure_code() -> None:
         "verification_failed",
         "install_failed",
         "wizard_failed",
+        "wizard_exited_before_bind",
         "activation_refused",
         "service_not_ready",
         "cancelled",
