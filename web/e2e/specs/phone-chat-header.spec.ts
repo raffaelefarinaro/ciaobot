@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, isolate, seedInbox } from '../support/app'
+import { COMPOSER, INBOX_DIALOG, boot, isolate, openChatDetails, openInbox, seedInbox } from '../support/app'
 
 /**
  * Layout claims about the phone chat header need a real engine: jsdom lays
@@ -34,22 +34,79 @@ test.describe('phone chat header', () => {
     await expect(page.locator('.chat-title-row .chat-title')).toBeVisible()
 
     const rail = (await page.locator('.chat-title-row .title-rail').boundingBox())!
-    expect(rail.width).toBeGreaterThan(150)
+    expect(rail.width).toBeGreaterThan(220)
     await expect(page.getByRole('button', { name: 'Next chat' })).toHaveCount(0)
 
-    const bell = page.locator('.header-trail .notif-bell')
-    await expect(bell).toBeVisible()
-    const icon = (await bell.locator('svg').boundingBox())!
-    const count = bell.locator('.notif-bell-count')
-    await expect(count).toBeVisible()
-    const badge = (await count.boundingBox())!
+    // The bell and Back moved into the ⋯ menu, so the header holds ☰, the title and ⋯.
+    await expect(page.locator('.header-trail .notif-bell')).toBeHidden()
+    await expect(page.locator('.header-back')).toBeHidden()
+    await expect(page.locator('.work-inspector-trigger--header')).toBeHidden()
+    await expect(page.locator('.chat-archive-btn')).toBeHidden()
+    const more = page.getByRole('button', { name: /^More chat actions/ })
+    await expect(more).toBeVisible()
+    const icon = (await more.locator('svg').boundingBox())!
+    const dot = page.locator('.chat-more-dot')
+    await expect(dot).toBeVisible()
+    const badge = (await dot.boundingBox())!
     const overlaps = badge.x < icon.x + icon.width && badge.x + badge.width > icon.x
       && badge.y < icon.y + icon.height && badge.y + badge.height > icon.y
-    expect(overlaps, `badge ${JSON.stringify(badge)} floats off icon ${JSON.stringify(icon)}`).toBe(true)
+    expect(overlaps, `dot ${JSON.stringify(badge)} floats off the ⋯ icon ${JSON.stringify(icon)}`).toBe(true)
 
-    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await openChatDetails(page)
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
     await expect(page.locator('#chat-work-rail .chat-repo-section').getByText('Code mode', { exact: true })).toBeVisible()
+  })
+
+  test('the ⋯ menu holds Chat details, Notifications, Archive and Back', async ({ page }) => {
+    // Back needs in-app history, so reach the chat from Home through the inbox
+    // (its row navigates), not by a full load.
+    await seedInbox(page, {
+      chats: {
+        'alpha-chat-2': {
+          last_activity_at: '2026-01-02T10:00:00Z',
+          last_read_at: '2026-01-01T09:05:00Z',
+          last_snippet: 'Done',
+        },
+      },
+    })
+    await boot(page)
+    const inbox = await openInbox(page, '.header-trail .notif-bell')
+    await inbox.locator('.notif-row').first().click()
+    await expect(page.locator('.chat-panel .pane-header')).toBeVisible()
+
+    const more = page.getByRole('button', { name: /^More chat actions/ })
+    await more.click()
+    const menu = page.getByRole('menu')
+    const names = menu.getByRole('menuitem')
+    await expect(names.filter({ hasText: 'Chat details' })).toBeVisible()
+    await expect(names.filter({ hasText: 'Notifications' })).toBeVisible()
+    await expect(names.filter({ hasText: 'Archive' })).toBeVisible()
+    await expect(names.filter({ hasText: /^Back to/ })).toBeVisible()
+    for (const item of await names.all()) {
+      expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    }
+
+    await names.filter({ hasText: 'Notifications' }).click()
+    await expect(page.locator(INBOX_DIALOG)).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator(INBOX_DIALOG)).toBeHidden()
+    await expect(more).toBeFocused()
+
+    // Chat details opened from the menu return focus to ⋯ however they close.
+    const details = page.locator('#chat-work-rail')
+    await more.click()
+    await page.getByRole('menuitem', { name: 'Chat details' }).click()
+    await expect(details).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(details).toBeHidden()
+    await expect(more).toBeFocused()
+
+    await more.click()
+    await page.getByRole('menuitem', { name: 'Chat details' }).click()
+    await expect(details).toBeVisible()
+    await page.getByRole('button', { name: 'Hide chat details' }).click()
+    await expect(details).toBeHidden()
+    await expect(more).toBeFocused()
   })
 
   test('a pinned file never moves the header: its opener sits under the header, not above it', async ({ page }) => {
@@ -71,5 +128,17 @@ test.describe('phone chat header', () => {
     expect(await header.evaluate(el => el.getBoundingClientRect().top)).toBe(plainTop)
     const headerBottom = await header.evaluate(el => el.getBoundingClientRect().bottom)
     expect(await opener.evaluate(el => el.getBoundingClientRect().top)).toBeGreaterThanOrEqual(headerBottom - 1)
+  })
+})
+
+test.describe('desktop chat header', () => {
+  test.use({ viewport: { width: 1280, height: 800 } })
+
+  test('the ⋯ menu is not rendered and Chat details keeps its own control', async ({ page }, testInfo) => {
+    await isolate(page, `desktop-header-${testInfo.workerIndex}`)
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    await expect(page.locator('.chat-more')).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Show chat details' })).toBeVisible()
   })
 })

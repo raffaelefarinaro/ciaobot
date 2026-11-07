@@ -98,6 +98,10 @@ class FakeProcess:
         self.written = bytearray()
         self.closed = False
         self.exit_code: int | None = None
+        #: When set, ``poll`` reports ``None`` until the close has reaped
+        #: the shell, as a pty can reach end of file a moment before the
+        #: kernel hands over the exit status.
+        self.status_after_close = False
         self.eof = False
         #: How many bytes one write takes. ``None`` means "all of them",
         #: ``0`` means "none right now".
@@ -178,6 +182,8 @@ class FakeProcess:
         self.resizes.append((cols, rows))
 
     def poll(self) -> int | None:
+        if self.status_after_close and not self.closed:
+            return None
         return self.exit_code
 
     def close(self) -> None:
@@ -1453,6 +1459,33 @@ async def test_natural_exit_drains_final_output_reaps_process_and_retains_status
 
     # The record is retained: the output and the status are still there.
     assert manager.retained_count() == 1
+
+    await manager.shutdown()
+
+
+async def test_an_exit_status_that_lags_the_end_of_output_is_kept(
+    tmp_path: Path,
+) -> None:
+    """A shell whose status is not ready at end of file still reports it.
+
+    The pty reaches end of file as the shell exits, which can be a
+    moment before the kernel will hand the status over. The code is
+    read again once the close has reaped the shell, so a program that
+    exited 0 is not reported as "exit code None" (the MCP sign-in read
+    that as a failed sign-in).
+    """
+    factory = FakeFactory()
+    manager = _manager(factory)
+
+    info = await manager.create(tmp_path, "chat", "chat-1")
+    factory.process.status_after_close = True
+    factory.process.finish(exit_code=0)
+    await _wait_until(
+        lambda: manager.get(info.session_id).exited, what="the shell to end"
+    )
+
+    assert factory.process.closed is True
+    assert manager.get(info.session_id).exit_code == 0
 
     await manager.shutdown()
 

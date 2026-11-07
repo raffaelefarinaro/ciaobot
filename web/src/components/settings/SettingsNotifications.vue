@@ -3,7 +3,9 @@
     <div class="settings-card-header">
       <p class="section-title">Notifications</p>
       <p class="hint">
-        Ciaobot notifies you when a chat replies and the browser tab is in the background.
+        {{ desktop
+          ? 'Ciaobot for Mac shows a macOS notification when a chat replies.'
+          : 'Ciaobot notifies you when a chat replies and the browser tab is in the background.' }}
         <a
           class="settings-help-link"
           href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
@@ -52,8 +54,11 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
-import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
+import { isDesktopClient, isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
 
+/** Ciaobot for Mac sends its own native notifications, so no Web Push state
+ *  or enable control applies inside it. */
+const desktop = isDesktopClient()
 const pushSupportedFlag = ref(false)
 const pushEnabledFlag = ref(false)
 const pushPending = ref(false)
@@ -62,12 +67,19 @@ const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
 
 const showToggle = computed(
-  () => !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
+  () => !desktop && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
 )
 
 type Tone = 'ok' | 'warn' | 'off'
 // Static strings only (no user data), so v-html is safe for the arrows/strong.
 const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
+  if (desktop) {
+    return {
+      label: 'Handled by the Mac app',
+      tone: 'off',
+      detail: 'Ciaobot for Mac sends notifications itself. Turn them on or off in System Settings &rarr; Notifications &rarr; Ciaobot.',
+    }
+  }
   if (needsIosInstall.value) {
     return {
       label: 'Needs the Home Screen app',
@@ -94,6 +106,7 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
 })
 
 onMounted(async () => {
+  if (desktop) return
   pushSupportedFlag.value = pushSupported()
   if (isIos() && !isStandalone()) {
     needsIosInstall.value = true

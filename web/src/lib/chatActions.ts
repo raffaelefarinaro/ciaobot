@@ -45,6 +45,8 @@ export function normalizeChatActions(value: unknown): ChatAction[] {
 function mcpAuthCopy(action: ChatAction): ActionCopy {
   const server = action.params.server ?? ''
   const meta = `${action.params.provider ?? ''} · MCP`
+  // Claude's sign-in runs in an engine helper terminal: the URL arrives a poll later.
+  const claude = action.params.provider === 'claude'
   switch (action.state) {
     case 'open':
       return {
@@ -54,12 +56,19 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
         meta,
       }
     case 'working':
-      return { title: `Starting the sign-in to ${server}…`, why: 'Getting the sign-in page.', primaryLabel: '', meta }
+      return {
+        title: `Starting the sign-in to ${server}…`,
+        why: claude ? 'Starting a sign-in terminal for this chat.' : 'Getting the sign-in page.',
+        primaryLabel: '',
+        meta,
+      }
     case 'waiting':
       return {
         title: `Waiting for ${server} to connect…`,
-        why: 'Finish the sign-in in the page that opened. This card updates by itself.',
-        primaryLabel: 'Open the sign-in page again',
+        why: claude
+          ? 'Open the sign-in page and finish there. This card updates by itself.'
+          : 'Finish the sign-in in the page that opened. This card updates by itself.',
+        primaryLabel: claude ? 'Open the sign-in page' : 'Open the sign-in page again',
         meta,
       }
     case 'done':
@@ -69,6 +78,68 @@ function mcpAuthCopy(action: ChatAction): ActionCopy {
         title: `Couldn't sign in to ${server}`,
         why: action.error || 'The sign-in did not finish.',
         primaryLabel: 'Try again',
+        meta,
+      }
+  }
+}
+
+function commandCopy(action: ChatAction): ActionCopy {
+  const meta = 'Suggested command'
+  switch (action.state) {
+    case 'working':
+      return {
+        title: 'Review it, then press Enter in the terminal',
+        why: 'The command is typed at the prompt. Edit it if you want. Nothing has run.',
+        primaryLabel: 'I ran it',
+        meta,
+      }
+    case 'done':
+      return {
+        title: 'You ran the command',
+        why: 'Continue lets the assistant check the result.',
+        primaryLabel: 'Continue',
+        meta,
+      }
+    default:
+      return {
+        title: 'Suggested command — review before running',
+        why: action.params.note || "The assistant suggested this. Ciao has not checked it and won't run it for you.",
+        primaryLabel: 'Type it in a terminal',
+        meta,
+      }
+  }
+}
+
+/** Every restart card says what the restart costs, in the words Settings uses. */
+const RESTART_COST = ' Restarting waits for running chats to finish, and closes any open question or approval cards.'
+
+/** Where a restart card's button leads: the Settings control that restarts or updates. */
+export function restartTarget(reason: string): string {
+  return reason === 'update' ? '/settings#updates' : '/settings/advanced#restart-host'
+}
+
+function restartCopy(action: ChatAction): ActionCopy {
+  const meta = 'Ciaobot · Settings'
+  switch (action.params.reason) {
+    case 'config':
+      return {
+        title: 'Restart Ciaobot to apply a setting',
+        why: `Ciao changed a setting that takes effect after Ciaobot restarts.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
+        meta,
+      }
+    case 'update':
+      return {
+        title: 'Update Ciaobot',
+        why: `An update is ready. Installing it restarts Ciaobot.${RESTART_COST}`,
+        primaryLabel: 'Open Updates',
+        meta,
+      }
+    default:
+      return {
+        title: 'Restart requested',
+        why: `Ciaobot needs a restart to apply a change.${RESTART_COST}`,
+        primaryLabel: 'Open Settings',
         meta,
       }
   }
@@ -104,6 +175,10 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
     case 'mcp_auth':
       return mcpAuthCopy(action)
+    case 'command':
+      return commandCopy(action)
+    case 'restart':
+      return restartCopy(action)
     case 'permission_mode':
       return permissionModeCopy(action)
     default:

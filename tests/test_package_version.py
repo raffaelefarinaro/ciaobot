@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import email.message
 import json
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -14,6 +16,7 @@ from ciao.package_version import (
     latest_release_redirect_url,
     make_cached_package_status,
     package_changelog,
+    _NoRedirectHandler,
     package_status,
     running_install_present,
 )
@@ -114,6 +117,43 @@ def test_package_status_non_ratelimit_http_error_keeps_code() -> None:
     assert "500" in str(data["error"])
 
 
+def test_package_status_reads_tag_from_redirect_location(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
+    hdrs = email.message.Message()
+    hdrs["Location"] = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/tag/v0.3.0"
+
+    def opener(request, timeout: float):
+        # The 302 is declined, so it surfaces as an HTTPError carrying Location.
+        raise HTTPError(request.full_url, 302, "Found", hdrs, None)
+
+    data = package_status(current_version="0.2.0", opener=opener)
+
+    assert data["latest_version"] == "0.3.0"
+    assert data["update_available"] is True
+    assert data["error"] == ""
+
+
+def test_package_status_redirect_without_location_reports_error() -> None:
+    def opener(request, timeout: float):
+        raise HTTPError(request.full_url, 302, "Found", email.message.Message(), None)
+
+    data = package_status(current_version="0.2.0", opener=opener)
+
+    assert data["latest_version"] == ""
+    assert data["error"] == "Could not determine the latest release."
+
+
+def test_no_redirect_handler_declines_redirects() -> None:
+    handler = _NoRedirectHandler()
+    assert (
+        handler.redirect_request(Request("https://x"), None, 302, "Found", {}, "https://y")
+        is None
+    )
+    # The default opener is the one built on the no-redirect handler.
+    opener = package_status.__kwdefaults__["opener"].__self__
+    assert any(isinstance(h, _NoRedirectHandler) for h in opener.handlers)
+
+
 def test_github_request_never_sends_an_auth_header(monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
 
@@ -163,6 +203,47 @@ def test_cached_package_status_serves_last_good_on_error() -> None:
     served = cached()
     assert served["latest_version"] == "0.3.0"  # last good served through the error
     assert served["error"] == ""
+
+
+def test_cached_package_status_default_clock_is_wall_clock(monkeypatch) -> None:
+    wall = {"t": 1000.0}
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return {"latest_version": "0.3.0", "error": ""}
+
+    # A monotonic clock that never moves models a Mac asleep: it must not gate the TTL.
+    monkeypatch.setattr("ciao.package_version.time.time", lambda: wall["t"])
+    monkeypatch.setattr("ciao.package_version.time.monotonic", lambda: 0.0)
+
+    cached = make_cached_package_status(fetch=fetch)
+
+    cached()
+    wall["t"] = 1000.0 + 60
+    cached()
+    assert calls["n"] == 1  # well within ttl_ok on the wall clock: served from cache
+    wall["t"] = 1000.0 + 6 * 3600 + 1  # past ttl_ok of wall time
+    cached()
+    assert calls["n"] == 2
+
+
+def test_cached_package_status_backwards_clock_refetches() -> None:
+    now = {"t": 1000.0}
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return {"latest_version": "0.3.0", "error": ""}
+
+    cached = make_cached_package_status(
+        fetch=fetch, ttl_ok=100.0, clock=lambda: now["t"]
+    )
+
+    cached()
+    now["t"] = 500.0  # the wall clock jumped backwards
+    cached()
+    assert calls["n"] == 2
 
 
 def test_package_changelog_lists_commits_newest_first() -> None:
