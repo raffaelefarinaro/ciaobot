@@ -78,6 +78,28 @@ describe('actionCopy', () => {
     expect(copy).toEqual({ title, why, primaryLabel, meta: 'opencode · MCP' })
   })
 
+  it('gives the Claude sign-in copy while waiting', () => {
+    const claude = actionCopy(action({
+      state: 'waiting',
+      params: { server: 'notion', provider: 'claude', url: 'https://x' },
+    }))
+    expect(claude?.primaryLabel).toBe('Open the sign-in page')
+    expect(claude?.why).toContain('finish there')
+    const opencode = actionCopy(action({
+      state: 'waiting',
+      params: { server: 'notion', provider: 'opencode', url: 'https://x' },
+    }))
+    expect(opencode?.primaryLabel).toBe('Open the sign-in page again')
+  })
+
+  it('says a Claude sign-in is starting a terminal', () => {
+    const copy = actionCopy(action({
+      state: 'working',
+      params: { server: 'notion', provider: 'claude' },
+    }))
+    expect(copy?.why).toBe('Starting a sign-in terminal for this chat.')
+  })
+
   it('shows the engine error for a failed sign-in, and a default without one', () => {
     expect(actionCopy(action({ state: 'failed', error: 'Timed out waiting for sign-in' }))?.why)
       .toBe('Timed out waiting for sign-in')
