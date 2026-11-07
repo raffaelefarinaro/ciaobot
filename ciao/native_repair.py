@@ -44,6 +44,7 @@ from ciao import (
     server_host,
     server_host_install,
 )
+from ciao.app_settings import DEFAULT_PWA_HOST, read_app_settings
 from ciao.native_installer import (
     EventError,
     EventWriter,
@@ -132,6 +133,7 @@ class RepairTarget:
 
     workspace: Path
     port: int
+    host: str
     definition: Path
     definition_present: bool
     service_path: str
@@ -183,7 +185,7 @@ class _RepairDeps:
     ensure_receipt: Callable[[], None]
     render_definition: Callable[[RepairTarget, HostOwnership], bytes]
     write_definition: Callable[[RepairTarget, bytes], str]
-    port_bindable: Callable[[int], bool]
+    port_bindable: Callable[[int, str], bool]
     bootstrap: Callable[[Path, str], None]
     prove_ready: Callable[[RepairTarget, HostOwnership, float], NativeReadinessProof]
 
@@ -219,6 +221,24 @@ def _configured_port(workspace: Path) -> int:
     if not 1 <= port <= 65535:
         raise _Refusal("unknown_state")
     return port
+
+
+def _configured_host(workspace: Path) -> str:
+    """The workspace's bind host, or the engine's default when unset or invalid.
+
+    The bind address lives in Settings (``app_settings.json``), not ``.env``.
+    ``read_app_settings`` is the pure read: it never writes, and degrades an
+    unreadable file to the defaults, so this has no new refusal path.
+    """
+    settings = read_app_settings(workspace / ".runtime" / "app_settings.json")
+    return settings.pwa_host or DEFAULT_PWA_HOST
+
+
+def _install_mode_path() -> str:
+    """The PATH setup bakes into a fresh definition: the user's login shell."""
+    from ciao.tool_path import login_shell_path  # noqa: PLC0415
+
+    return login_shell_path() or os.environ.get("PATH", "")
 
 
 def _live_definition(
@@ -263,7 +283,7 @@ def _live_definition(
     if isinstance(path_value, str) and path_value:
         service_path = path_value
     else:
-        service_path = os.environ.get("PATH", "")
+        service_path = _install_mode_path()
     return Path(workspace_text), service_path
 
 
@@ -339,7 +359,7 @@ def _classify_repair(
         if registered:
             raise _Refusal("unknown_state")
         workspace = Path.home() / "Ciaobot"
-        service_path = os.environ.get("PATH", "")
+        service_path = _install_mode_path()
     workspace = Path(os.path.realpath(workspace))
     try:
         set_up = native_handoff.workspace_is_set_up(workspace)
@@ -354,6 +374,7 @@ def _classify_repair(
         # A workspace and a shim alone could be a user's own uv install; never reinstall that.
         raise _Refusal("not_installed")
     port = _configured_port(workspace)
+    host = _configured_host(workspace)
 
     shim = bin_dir / "ciao"
     shim_info = _lstat_or_none(shim)
@@ -387,6 +408,7 @@ def _classify_repair(
     return RepairTarget(
         workspace=workspace,
         port=port,
+        host=host,
         definition=definition,
         definition_present=present,
         service_path=service_path,
@@ -601,6 +623,58 @@ def _ensure_receipt(
         raise NativeCoordinatorError("receipt_write_failed", "install_failed")
 
 
+def _carry_receipt_history(previous: install_receipt.InstallReceipt) -> None:
+    """Keep installed_at and previous_* on the receipt a reinstall just wrote.
+
+    Only a real update may rewrite those fields; a repair that reinstalls the
+    same release must not erase the history the updater's rollback reads. The
+    fresh install keeps ownership of version, executable, python and uv.
+    """
+    current = install_receipt.read_receipt()
+    if current is None:
+        raise NativeCoordinatorError("receipt_write_failed", "install_failed")
+    carried = dataclasses.replace(
+        current,
+        installed_at=previous.installed_at,
+        previous_version=previous.previous_version,
+        previous_executable=previous.previous_executable,
+    )
+    try:
+        install_receipt.write_receipt(carried)
+        written = install_receipt.read_receipt()
+    except (OSError, ValueError):
+        raise NativeCoordinatorError("receipt_write_failed", "install_failed") from None
+    if written != carried:
+        raise NativeCoordinatorError("receipt_write_failed", "install_failed")
+
+
+def _reinstall_engine_preserving_history(
+    previous: install_receipt.InstallReceipt | None,
+    staged: NativeInstallArtifacts,
+    tool_dir: Path,
+    bin_dir: Path,
+    remaining: float,
+    *,
+    cancellation: NativeCancellation,
+    env: Mapping[str, str],
+    cwd: Path,
+) -> native_installer._EngineInstall:
+    """Reinstall with ``--force``, then keep the receipt history it replaced."""
+    installed = native_installer._install_engine(
+        staged,
+        tool_dir,
+        bin_dir,
+        remaining,
+        cancellation=cancellation,
+        env=env,
+        cwd=cwd,
+        force=True,
+    )
+    if previous is not None:
+        _carry_receipt_history(previous)
+    return installed
+
+
 def _render_definition(target: RepairTarget, host: HostOwnership, tool_python: Path) -> bytes:
     from ciao.cli import _render_launchd_plist
 
@@ -780,6 +854,7 @@ def _activating(step: Callable[[], _T]) -> _T:
 def _await_repair_port(
     deps: _RepairDeps,
     port: int,
+    host: str,
     policy: _RepairPolicy,
     deadline: _Deadline,
     cancellation: NativeCancellation,
@@ -789,7 +864,7 @@ def _await_repair_port(
     while True:
         _check_stage(deadline, cancellation)
         try:
-            bindable = deps.port_bindable(port)
+            bindable = deps.port_bindable(port, host)
         except (_Cancelled, _TimedOut):
             raise
         except Exception:
@@ -918,7 +993,7 @@ def _run_native_repair(
                 digest = _mutating(lambda: deps.write_definition(target, rendered))
                 held.assert_held(run_id=request.run_id)
                 _check_stage(deadline, cancellation)
-                _await_repair_port(deps, target.port, policy, deadline, cancellation)
+                _await_repair_port(deps, target.port, target.host, policy, deadline, cancellation)
 
                 writer.phase("activation")
                 activation_attempted = True
@@ -1104,8 +1179,10 @@ def _repair_production_deps(
             uv=native_installer._required(private.uv),
             wheel=native_installer._required(private.wheel),
         )
+        previous = install_receipt.read_receipt()
         try:
-            private.engine = native_installer._install_engine(
+            private.engine = _reinstall_engine_preserving_history(
+                previous,
                 staged,
                 tool_dir,
                 bin_dir,
@@ -1113,7 +1190,6 @@ def _repair_production_deps(
                 cancellation=cancellation,
                 env=native_installer._scrubbed_env(keep_user_path=False),
                 cwd=native_installer._required(private.cwd),
-                force=True,
             )
         except native_installer._ChildCleanupFailed:
             private.retained = True

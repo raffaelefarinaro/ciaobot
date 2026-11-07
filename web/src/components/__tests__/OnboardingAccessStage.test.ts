@@ -19,7 +19,7 @@ function responses({ scope = 'workspace' as string | null, platform = 'darwin', 
 
 async function mounted(options = {}) {
   responses(options)
-  const wrapper = mount(OnboardingAccessStage, { props: { context, busy: false } })
+  const wrapper = mount(OnboardingAccessStage, { props: { context, busy: false }, attachTo: document.body })
   await vi.waitFor(() => expect(wrapper.text()).toContain('Filesystem scope'))
   await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
   return wrapper
@@ -28,13 +28,32 @@ async function mounted(options = {}) {
 beforeEach(() => { vi.resetAllMocks() })
 
 describe('OnboardingAccessStage', () => {
-  it('keeps Continue disabled when no scope is stored yet', async () => {
+  it('keeps Continue disabled until a scope is chosen, then saves it on the tap', async () => {
     const wrapper = await mounted({ scope: null })
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
     expect(api.patch).not.toHaveBeenCalled()
+    vi.mocked(api.patch).mockResolvedValue({})
     await wrapper.find('input[value="workspace"]').setValue()
-    expect(api.patch).not.toHaveBeenCalled()
-    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false, dirty: true }))
+    expect(api.patch).toHaveBeenCalledWith('/api/workspaces/personal', { agent_fs_scope: 'workspace' })
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, pending: false }))
+  })
+
+  it('has no save step, refresh or acknowledgement control', async () => {
+    const wrapper = await mounted()
+    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
+  })
+
+  it('states the consequence of Whole machine inline and can undo it', async () => {
+    const wrapper = await mounted()
+    vi.mocked(api.patch).mockResolvedValue({})
+    expect(wrapper.find('.consequence').exists()).toBe(false)
+    await wrapper.find('input[value="machine"]').setValue()
+    await vi.waitFor(() => expect(wrapper.find('.consequence').exists()).toBe(true))
+    expect(wrapper.get('.consequence').text()).toContain('any file this user can read')
+    await vi.waitFor(() => expect(wrapper.get('button.undo').attributes('disabled')).toBeUndefined())
+    await wrapper.get('button.undo').trigger('click')
+    expect(api.patch).toHaveBeenLastCalledWith('/api/workspaces/personal', { agent_fs_scope: 'workspace' })
   })
 
   it('states that scope is not a safety guarantee', async () => {
@@ -62,9 +81,9 @@ describe('OnboardingAccessStage', () => {
 
   it('shows an explicit stored approval mode and the engine default separately', async () => {
     const wrapper = await mounted({ overrides: { claude: { permission_mode: 'manual', model: 'opus' } } })
-    const select = wrapper.get('select').element as HTMLSelectElement
-    expect(select.value).toBe('manual')
+    expect((wrapper.get('input[name="approval"][value="manual"]').element as HTMLInputElement).checked).toBe(true)
     expect(wrapper.text()).toContain('Engine default (auto)')
+    expect(api.patch).not.toHaveBeenCalled()
   })
 
   it('disables workspace-only scope on Windows and explains why', async () => {
@@ -78,27 +97,49 @@ describe('OnboardingAccessStage', () => {
     expect(wrapper.text()).toContain('platform was not reported')
   })
 
-  it('disables every control while a save is in flight', async () => {
+  it('saves an approval mode on the tap, keeping other provider overrides', async () => {
+    const wrapper = await mounted({ overrides: { claude: { model: 'opus' } } })
+    vi.mocked(api.patch).mockResolvedValue({})
+    await wrapper.get('input[name="approval"][value="manual"]').setValue()
+    expect(api.patch).toHaveBeenCalledWith('/api/workspaces/personal', { provider_overrides: { claude: { model: 'opus', permission_mode: 'manual' } } })
+  })
+
+  it('ignores a second tap during a save and keeps focus on the checked radio', async () => {
     const wrapper = await mounted()
     let resolvePatch: (value: unknown) => void = () => {}
     vi.mocked(api.patch).mockReturnValue(new Promise(resolve => { resolvePatch = resolve }) as never)
-    await wrapper.findAll('input[type="radio"]')[1].setValue()
-    await wrapper.get('button').trigger('click')
-
-    expect((wrapper.get('select').element as HTMLSelectElement).disabled).toBe(true)
-    expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).disabled).toBe(true)
+    const machine = wrapper.find('input[value="machine"]')
+    ;(machine.element as HTMLInputElement).focus()
+    await machine.setValue()
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false, pending: true })
+    // Not disabled, so focus is not dropped mid-save.
+    expect((machine.element as HTMLInputElement).disabled).toBe(false)
+    expect(document.activeElement).toBe(machine.element)
+    await wrapper.get('input[name="approval"][value="manual"]').setValue()
+    await wrapper.find('input[value="workspace"]').setValue()
+    expect(api.patch).toHaveBeenCalledTimes(1)
 
     resolvePatch({})
     await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
-    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, dirty: false })
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+    expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).checked).toBe(true)
   })
 
-  it('blocks Continue after a failed save', async () => {
+  it('blocks Continue after a failed save, puts the choice back, and recovers by tapping the saved value', async () => {
     const wrapper = await mounted()
-    vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
-    await wrapper.findAll('input[type="radio"]')[1].setValue()
-    await wrapper.get('button').trigger('click')
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({})
+    await wrapper.find('input[value="machine"]').setValue()
     await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+    expect((wrapper.find('input[value="workspace"]').element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.find('input[value="workspace"]').trigger('click')
+    expect(wrapper.text()).not.toContain('offline')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, error: null })
+    expect(api.patch).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('input[value="machine"]').setValue()
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, pending: false }))
   })
 })

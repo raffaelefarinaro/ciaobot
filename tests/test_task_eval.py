@@ -3322,6 +3322,29 @@ def test_abstains_still_rejects_an_answer(tmp_path: Path) -> None:
     assert not te.CHECKS["abstains"](_ctx(tmp_path, answer="His number is 079 555 01 00."), {"kind": "abstains"}).ok
 
 
+def test_abstains_rejects_a_decline_followed_by_the_invented_value(tmp_path: Path) -> None:
+    # A hedge that then answers the asked question is not an abstention, but the
+    # regex alone cannot tell; the check vetoes a value of the asked kind (#2508).
+    answer = "I don't have a newer one saved, but his number is +41 79 123 45 67"
+
+    assert not te.CHECKS["abstains"](
+        _ctx(tmp_path, answer=answer), {"kind": "abstains", "forbid_values": ["phone"]}
+    ).ok
+    assert te.CHECKS["abstains"](_ctx(tmp_path, answer=answer), {"kind": "abstains"}).ok
+
+
+def test_abstains_rejects_you_dont_have_to(tmp_path: Path) -> None:
+    assert not te.CHECKS["abstains"](_ctx(tmp_path, answer="You don't have to tell me."), {"kind": "abstains"}).ok
+
+
+def test_abstains_fails_closed_on_an_unknown_forbidden_value_kind(tmp_path: Path) -> None:
+    result = te.CHECKS["abstains"](
+        _ctx(tmp_path, answer="I don't know that one."), {"kind": "abstains", "forbid_values": ["fax"]}
+    )
+    assert not result.ok
+    assert "fax" in result.detail
+
+
 def test_h10_accepts_the_doesnt_have_disambiguation(tmp_path: Path) -> None:
     answer = (
         'The climbing note lists "Tomas: 3 May." That note describes Tomas as Ana Ruiz\'s cousin visiting '

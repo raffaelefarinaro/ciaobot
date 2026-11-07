@@ -40,10 +40,11 @@
             <span v-if="server.allowed === false" class="badge badge--warn">blocked in workspace</span>
           </div>
           <p v-if="server.allowed === false" class="hint">This workspace’s tool restrictions prevent access to this server.</p>
-          <div v-for="connection in server.connections" :key="connection.chat_id" class="mcp-connection">
-            <span class="badge" :class="stateClass(connection.state)">{{ stateLabel(connection.state) }}</span>
-            <a :href="`/chat/${encodeURIComponent(connection.chat_id)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${connection.chat_id}`">Open chat</a>
-            <p v-if="connection.error" class="hint">{{ connection.error }}</p>
+          <div v-for="group in groupMcpConnections(server.connections)" :key="group.state" class="mcp-connection">
+            <span class="badge" :class="stateClass(group.state)">{{ stateLabel(group.state) }}</span>
+            <span v-if="group.chatIds.length > 1" class="mcp-connection-count">in {{ group.chatIds.length }} chats</span>
+            <a :href="`/chat/${encodeURIComponent(group.chatIds[0]!)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${group.chatIds[0]}`">Open chat</a>
+            <p v-if="group.error" class="hint">{{ group.error }}</p>
           </div>
           <p v-if="!server.connections.length" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
           <p v-if="!manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
@@ -116,6 +117,7 @@ import TabBar from '../TabBar.vue'
 import type { McpServersController } from '../../composables/useMcpServers'
 import { useRunInTerminal } from '../../composables/useRunInTerminal'
 import { writeClipboard } from '../../lib/codeCopy'
+import { groupMcpConnections } from '../../lib/mcpConnections'
 import { mcpCommand, serverUrlError, validServerName, type McpAction } from '../../lib/shellQuote'
 import type { McpConnection, McpNativeServer, McpProviderInventory } from '../../lib/types'
 
@@ -290,6 +292,7 @@ function stateClass(state: McpConnection['state']): string {
 .mcp-server .hint { margin: var(--space-2) 0 0; }
 .mcp-connection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
 .mcp-connection .hint { flex-basis: 100%; }
+.mcp-connection-count { color: var(--fg2); font-size: var(--text-sm); }
 .mcp-connection a, .mcp-doc-link { color: var(--accent); font-size: var(--text-sm); }
 .mcp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
 .mcp-more { position: relative; }
