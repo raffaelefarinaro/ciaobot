@@ -355,11 +355,10 @@ onBeforeUnmount(() => {
    61px desktop header with the rail centred in it. */
 .title-rail-track { --gap: 3px; position: absolute; left: calc(var(--pad-l, 0px) + (100% - var(--pad-l, 0px) - var(--pad-r, 0px)) / 2); bottom: calc((var(--touch) - 61px) / 2); transform: translateX(-50%);
   width: min(60%, calc(var(--n) * 31px)); height: 2px; display: flex; gap: var(--gap); pointer-events: none; }
-.title-rail-seg { flex: 1 1 0; min-width: 4px; height: 2px; border-radius: 1px; background: var(--border-strong); }
+.title-rail-seg { flex: 1 1 0; min-width: 4px; height: 2px; border-radius: 1px; background: var(--border-strong); position: relative; }
 .title-rail-seg-current { position: absolute; top: 0; left: 0; height: 2px; border-radius: 1px; background: var(--fg);
   width: calc((100% - (var(--n) - 1) * var(--gap)) / var(--n));
   transform: translateX(calc(var(--pos) * (100% + var(--gap)))); }
-.title-rail-seg { position: relative; }
 /* Marks sit just above their segment, inside the header's bottom padding, at most 4px tall, clear of the project line. */
 .title-rail-seg--unread::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%; background: var(--fg2); }
 .title-rail-seg--needs::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 0; height: 0; margin-left: -3px;

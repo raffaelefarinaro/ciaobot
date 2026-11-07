@@ -4917,9 +4917,7 @@ const retryOwnerIdx = computed(() => {
   for (let k = items.length - 1; k >= 0; k--) {
     const it = items[k]
     if (it.kind === 'trace') continue
-    const isError = (it.kind === 'assistant' && it.msg.is_error)
-      || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return isError ? k : -1
+    return isErrorItem(k) ? k : -1
   }
   return -1
 })

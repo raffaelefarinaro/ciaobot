@@ -91,30 +91,21 @@ async function load(): Promise<void> {
 
 onMounted(load)
 
+const committers = {
+  runtime: runtimeStage,
+  // Memory proposes a default that is written only here, on Continue.
+  access_memory: memoryStage,
+  // Care writes only a timing the person changed; an unchanged one writes nothing.
+  care: careStage,
+} as const
+
 async function advance(): Promise<void> {
   if (!readyToAdvance(step.value, state.value, accessState.value, memoryState.value) || busy.value || !contextReady.value) return
-  if (step.value === 'runtime') {
+  const stage = committers[step.value as keyof typeof committers]
+  if (stage) {
     committing.value = true
     try {
-      if (!await runtimeStage.value?.save()) return
-    } finally {
-      committing.value = false
-    }
-  }
-  if (step.value === 'access_memory') {
-    // Memory proposes a default that is written only here, on Continue.
-    committing.value = true
-    try {
-      if (!await memoryStage.value?.save()) return
-    } finally {
-      committing.value = false
-    }
-  }
-  if (step.value === 'care') {
-    // Care writes only a timing the person changed; an unchanged one writes nothing.
-    committing.value = true
-    try {
-      if (!await careStage.value?.save()) return
+      if (!await stage.value?.save()) return
     } finally {
       committing.value = false
     }

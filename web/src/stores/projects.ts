@@ -117,6 +117,15 @@ async function unrecoverableOrphans(candidates: OrphanDraft[]): Promise<OrphanDr
   return candidates.filter(orphan => !known.has(orphan.chatId))
 }
 
+// Keep rows through the newest user row at or after `matchedIdx`.
+function sliceThroughNewestUserRow<T extends { role?: string }>(rows: T[], matchedIdx: number): T[] {
+  let newestUserIdx = matchedIdx
+  for (let i = rows.length - 1; i > matchedIdx; i--) {
+    if (rows[i].role === 'user') { newestUserIdx = i; break }
+  }
+  return rows.slice(0, newestUserIdx + 1)
+}
+
 export const useProjectStore = defineStore('projects', () => {
   // Every one-shot timer the store schedules for itself (retries, debounces,
   // expiries). A bare setTimeout outlives the store: dispose cannot reach it,
@@ -1048,9 +1057,7 @@ export const useProjectStore = defineStore('projects', () => {
     ]
   })
 
-  const activeChat = computed(() =>
-    chats.value.find(c => c.chat_id === activeChatId.value) || null
-  )
+  const activeChat = computed(() => chatById(activeChatId.value || ''))
 
   function chatById(chatId: string): ChatInfo | null { return chats.value.find(c => c.chat_id === chatId) || null }
   function messagesFor(chatId: string): ChatMessage[] { return messages.value[chatId] || [] }
@@ -1077,11 +1084,7 @@ export const useProjectStore = defineStore('projects', () => {
     return [...new Set(ids)]
   }
 
-  const activeProject = computed(() => {
-    const chat = activeChat.value
-    if (!chat) return null
-    return projects.value.find(p => p.project_id === chat.project_id) || null
-  })
+  const activeProject = computed(() => projectFor(activeChatId.value || ''))
 
   const activeMessages = computed(() => messagesFor(activeChatId.value || ''))
 
@@ -2487,32 +2490,27 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
+  // Returns true when the server answered with a conflict that was adopted.
+  async function postChatActionList(chatId: string, actionId: string, verb: 'dismiss' | 'continue'): Promise<boolean> {
     const readStartedAt = terminalOfferReadStart()
     try {
-      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'dismiss'), {})
+      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, verb), {})
       if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
         chatActionsChatClock[chatId] = nextTerminalOfferClock()
       }
-      return 'dismissed'
+      return false
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
-      return 'conflict'
+      return true
     }
   }
 
+  async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
+    return (await postChatActionList(chatId, actionId, 'dismiss')) ? 'conflict' : 'dismissed'
+  }
+
   async function continueChatAction(chatId: string, actionId: string): Promise<'continued' | 'conflict'> {
-    const readStartedAt = terminalOfferReadStart()
-    try {
-      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'continue'), {})
-      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
-        chatActionsChatClock[chatId] = nextTerminalOfferClock()
-      }
-      return 'continued'
-    } catch (e) {
-      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
-      return 'conflict'
-    }
+    return (await postChatActionList(chatId, actionId, 'continue')) ? 'conflict' : 'continued'
   }
 
   function reconcileChatList(nextChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
@@ -3720,11 +3718,7 @@ export const useProjectStore = defineStore('projects', () => {
                 // task wake, a drained queued follow-up). Cut after the newest
                 // server user row instead: the in-flight turn is that row, so
                 // its progress is still cut, and earlier settled replies stay.
-                let newestUserIdx = serverLastUserIdx
-                for (let i = windowRows.length - 1; i > serverLastUserIdx; i--) {
-                  if (windowRows[i].role === 'user') { newestUserIdx = i; break }
-                }
-                windowRows = windowRows.slice(0, newestUserIdx + 1)
+                windowRows = sliceThroughNewestUserRow(windowRows, serverLastUserIdx)
               }
             }
           }
@@ -3983,11 +3977,7 @@ export const useProjectStore = defineStore('projects', () => {
               // one: an engine-started turn (a background task wake, a drained
               // queued follow-up) is not in the local cache yet, so the matched
               // bubble can be an older turn whose finished reply must stay.
-              let newestUserIdx = serverLastUserIdx
-              for (let i = normalizedServer.length - 1; i > serverLastUserIdx; i--) {
-                if (normalizedServer[i].role === 'user') { newestUserIdx = i; break }
-              }
-              normalizedServer = normalizedServer.slice(0, newestUserIdx + 1)
+              normalizedServer = sliceThroughNewestUserRow(normalizedServer, serverLastUserIdx)
             }
           }
         }

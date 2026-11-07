@@ -74,41 +74,35 @@ async function restoreFocusTo(control: HTMLElement | null): Promise<void> {
   if (shouldRestoreFocus(rootEl.value, document.activeElement)) control?.focus()
 }
 
-async function dismiss(): Promise<void> {
+async function runRequest(call: () => Promise<string>, conflictNotice: string, failure: string): Promise<void> {
   if (pending.value) return
   holdFocus()
   pending.value = true
   errorMessage.value = ''
   try {
-    const result = await store.dismissChatAction(props.chatId, props.action.id)
+    const result = await call()
     if (disposed) return
-    if (result === 'conflict') notice.value = 'Not dismissed: this card changed. The newer state is shown.'
+    if (result === 'conflict') notice.value = conflictNotice
   } catch {
     if (disposed) return
-    errorMessage.value = 'This card could not be dismissed. Try again.'
+    errorMessage.value = failure
   }
   if (disposed) return
   pending.value = false
   await restoreFocusTo(dismissEl.value)
 }
 
-async function continueChat(): Promise<void> {
-  if (pending.value) return
-  holdFocus()
-  pending.value = true
-  errorMessage.value = ''
-  try {
-    const result = await store.continueChatAction(props.chatId, props.action.id)
-    if (disposed) return
-    if (result === 'conflict') notice.value = 'This card changed. The newer state is shown.'
-  } catch {
-    if (disposed) return
-    errorMessage.value = 'The chat could not be continued. Try again.'
-  }
-  if (disposed) return
-  pending.value = false
-  await restoreFocusTo(dismissEl.value)
-}
+const dismiss = () => runRequest(
+  () => store.dismissChatAction(props.chatId, props.action.id),
+  'Not dismissed: this card changed. The newer state is shown.',
+  'This card could not be dismissed. Try again.',
+)
+
+const continueChat = () => runRequest(
+  () => store.continueChatAction(props.chatId, props.action.id),
+  'This card changed. The newer state is shown.',
+  'The chat could not be continued. Try again.',
+)
 
 onBeforeUnmount(() => {
   disposed = true
