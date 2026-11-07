@@ -42,6 +42,7 @@ afterEach(() => {
   wrapper = null
   document.body.innerHTML = ''
   vi.unstubAllGlobals()
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
 })
 
 describe('SettingsNotifications push controls', () => {
@@ -50,5 +51,22 @@ describe('SettingsNotifications push controls', () => {
     expect(view.text()).not.toContain('Delivery')
     expect(view.text()).not.toContain('Push to every device')
     expect(api.patch).not.toHaveBeenCalled()
+  })
+})
+
+describe('SettingsNotifications in the desktop client', () => {
+  it('says the Mac app handles notifications in the desktop client', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    const view = await mountCard()
+
+    expect(view.text()).toContain('Handled by the Mac app')
+    expect(view.text()).toContain('System Settings')
+    expect(view.text()).not.toContain('Not available in this browser')
+    const toggles = view.findAll('button').filter(b => {
+      const text = b.text()
+      return text === 'Enable on this device' || text === 'Disable on this device'
+    })
+    expect(toggles).toHaveLength(0)
+    expect(api.get).not.toHaveBeenCalled()
   })
 })

@@ -3,9 +3,15 @@ import { useTerminalStore } from '../stores/terminal'
 import { useProjectStore } from '../stores/projects'
 import { writeClipboard } from '../lib/codeCopy'
 
-export type RunInTerminalResult = 'typed' | 'copied' | 'failed'
+export type RunInTerminalResult = 'typed' | 'copied' | 'copied_multiline' | 'failed'
 
 const LIVE_TIMEOUT_MS = 8000
+// A fresh shell turns bracketed paste on when it draws its first prompt, so the
+// paste mode is polled for this long after the shell goes live.
+const PASTE_MODE_WAIT_MS = 2000
+const PASTE_POLL_MS = 100
+const PASTE_START = '\x1b[200~'
+const PASTE_END = '\x1b[201~'
 // The session this composable created for each project scope, kept across remounts. A command is only
 // ever typed into this one, never into a shell the user may have left running
 // ssh, a REPL or a TUI in; it is reused while it lives so repeated runs do not
@@ -19,12 +25,21 @@ export function resetRunInTerminalSession(): void { ownSessions.clear() }
 
 /**
  * Type a command into the in-app terminal the user is watching. The terminal
- * cannot be opened with a command, so this opens it on a project, makes sure
- * a session exists, waits for the shell to go live and sends the keystrokes.
- * Whenever that is not possible the command is copied instead, never dropped.
+ * cannot be opened with a command, so this opens it on a project or a chat,
+ * makes sure a session exists, waits for the shell to go live and sends the
+ * keystrokes. Whenever that is not possible the command is copied instead,
+ * never dropped.
+ *
+ * Paste mode types without pressing Enter: the text is wrapped in a bracketed
+ * paste when the shell accepts one, so the shell inserts it at the prompt and
+ * runs nothing. A multi-line command is copied instead when the shell does not
+ * take a paste, because each of its newlines would run a line.
  */
-export function useRunInTerminal(liveTimeoutMs: number = LIVE_TIMEOUT_MS): {
-  run: (command: string, opts?: { enter?: boolean }) => Promise<RunInTerminalResult>
+export function useRunInTerminal(
+  liveTimeoutMs: number = LIVE_TIMEOUT_MS,
+  pasteModeWaitMs: number = PASTE_MODE_WAIT_MS,
+): {
+  run: (command: string, opts?: { enter?: boolean; chatId?: string; paste?: boolean }) => Promise<RunInTerminalResult>
   busy: Ref<boolean>
 } {
   const store = useTerminalStore()
@@ -51,17 +66,45 @@ export function useRunInTerminal(liveTimeoutMs: number = LIVE_TIMEOUT_MS): {
     })
   }
 
-  async function run(command: string, opts?: { enter?: boolean }): Promise<RunInTerminalResult> {
+  /** Resolves true once the shell on screen accepts a paste; false after the wait or if the session changes. */
+  function waitBracketedPaste(ownId: string): Promise<boolean> {
+    const deadline = Date.now() + pasteModeWaitMs
+    return new Promise((resolve) => {
+      const check = (): void => {
+        if (store.activeSession?.session_id !== ownId) return resolve(false)
+        if (store.bracketedPasteMode()) return resolve(true)
+        if (Date.now() >= deadline) return resolve(false)
+        setTimeout(check, PASTE_POLL_MS)
+      }
+      check()
+    })
+  }
+
+  async function run(
+    command: string,
+    opts?: { enter?: boolean; chatId?: string; paste?: boolean },
+  ): Promise<RunInTerminalResult> {
     if (busy.value) return 'failed'
     busy.value = true
     try {
-      const projectId = projectStore.activeProject?.project_id
-        || projectStore.workspaceProjects[0]?.project_id
-        || projectStore.projects[0]?.project_id
-      if (!projectId) return await copy(command)
-      await store.open({ projectId })
+      // A chat gets its own remembered session, apart from the project's.
+      const chatId = opts?.chatId
+      let key: string
+      let target: { chatId: string } | { projectId: string }
+      if (chatId) {
+        key = `chat:${chatId}`
+        target = { chatId }
+      } else {
+        const projectId = projectStore.activeProject?.project_id
+          || projectStore.workspaceProjects[0]?.project_id
+          || projectStore.projects[0]?.project_id
+        if (!projectId) return await copy(command)
+        key = projectId
+        target = { projectId }
+      }
+      await store.open(target)
       if (store.phase === 'locked' || store.phase === 'error') return await copy(command)
-      const remembered = ownSessions.get(projectId)
+      const remembered = ownSessions.get(key)
       const own = remembered ? store.sessions.find(entry => entry.session_id === remembered) : undefined
       let ownId: string
       if (own && !own.exited) {
@@ -74,12 +117,26 @@ export function useRunInTerminal(liveTimeoutMs: number = LIVE_TIMEOUT_MS): {
         const created = store.sessions.find(entry => !before.has(entry.session_id))
         if (!created || store.activeSession?.session_id !== created.session_id) return await copy(command)
         ownId = created.session_id
-        ownSessions.set(projectId, ownId)
+        ownSessions.set(key, ownId)
       }
       if (!(await waitLive(ownId))) return await copy(command)
       // The user may have switched tabs between the last check and now.
       if (store.activeSession?.session_id !== ownId) return await copy(command)
-      const bytes = new TextEncoder().encode(command + (opts?.enter === false ? '' : '\r'))
+      let text: string
+      if (opts?.paste) {
+        if (await waitBracketedPaste(ownId)) {
+          text = PASTE_START + command.replace(/\r?\n/g, '\r') + PASTE_END
+        } else if (/[\r\n]/.test(command)) {
+          // Each newline would run a line in a shell without bracketed paste.
+          return (await writeClipboard(command)) ? 'copied_multiline' : 'failed'
+        } else {
+          text = command
+        }
+        if (store.activeSession?.session_id !== ownId) return await copy(command)
+      } else {
+        text = command + (opts?.enter === false ? '' : '\r')
+      }
+      const bytes = new TextEncoder().encode(text)
       return store.sendInput(bytes) ? 'typed' : await copy(command)
     } finally {
       busy.value = false

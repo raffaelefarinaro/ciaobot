@@ -166,7 +166,7 @@ Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
 one disclosure, each row linking the vendor's own guide. It reports the reader's
 current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
-browser tab cannot know whether the app is installed on the device.
+browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the card names the Mac app and drops the address row, the notifications card says the Mac app handles notifications, and the Home setup reminder is not shown.
 
 The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
 state in `composables/useWelcome.ts`) shows the workspace folder, the generated
@@ -330,6 +330,15 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   *Terminal* section stays the persistent, manual way into the terminal;
   the card is the contextual one, and it is shown only for the chat on
   screen.
+- **A command card types the command, and never runs it.**
+  `needs-you/CommandBody.vue` types through
+  `useRunInTerminal(…).run(command, { chatId, paste: true })`, into a session
+  the composable created for that chat (key `chat:<id>`), never into a shell
+  the user opened. It wraps the text in `ESC[200~`/`ESC[201~` only when
+  `store.bracketedPasteMode()` is true, sends a single line raw otherwise, and
+  copies a multi-line command when the shell has no bracketed paste. It never
+  appends `\r`, so the user presses Enter. The engine only hears
+  `{step: 'typed'|'ran'}`.
 
 ### Side-by-side chats
 
