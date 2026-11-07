@@ -1243,6 +1243,66 @@ async def test_pending_work_keeps_the_slot(
     assert streams.chat_ids == [ids[0]]
 
 
+async def test_a_stopped_retry_releases_the_slot(
+    tmp_path: Path,
+    passes_enabled: None,
+    streams: _FakeStreams,
+) -> None:
+    manager = _make_manager(tmp_path)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    ids = [
+        manager.enqueue_memory_pass(_source(manager, name), None, archive, "")
+        for name in ("First", "Second")
+    ]
+    first, second = (manager.get_chat(cid) for cid in ids)
+    _replied(first, "Encountered invalidated oauth token", status="error")
+    manager.set_chat_retry(first.chat_id, "pass prompt", reason="usage limit")
+
+    # A pending retry keeps the slot while it may still succeed.
+    assert await manager._memory_pass.on_turn_finished(first.chat_id) is False
+    assert first.helper["state"] == "running"
+
+    # Stopping the retry ends it without a turn: the pass must settle and
+    # the queued pass must start, without a restart.
+    manager.stop_chat_retry(first.chat_id)
+    await _await_detached(manager)
+
+    assert first.helper["state"] == "attention"
+    assert second.helper["state"] == "running"
+    assert streams.chat_ids == ids
+
+
+async def test_a_retry_exhausted_before_firing_releases_the_slot(
+    tmp_path: Path,
+    passes_enabled: None,
+    streams: _FakeStreams,
+) -> None:
+    manager = _make_manager(tmp_path)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    ids = [
+        manager.enqueue_memory_pass(_source(manager, name), None, archive, "")
+        for name in ("First", "Second")
+    ]
+    first, second = (manager.get_chat(cid) for cid in ids)
+    _replied(first, "Encountered invalidated oauth token", status="error")
+    assert manager.arm_network_retry(first.chat_id, "pass prompt") == "armed"
+    assert await manager._memory_pass.on_turn_finished(first.chat_id) is False
+    assert first.helper["state"] == "running"
+
+    # The retry cap is reached before it fires: the retry is stopped
+    # without a turn and the pass must release the slot.
+    first.retry_attempts = 3
+    assert manager.try_chat_retry_now(first.chat_id) is None
+    await _await_detached(manager)
+
+    assert first.retry_status == "stopped"
+    assert first.helper["state"] == "attention"
+    assert second.helper["state"] == "running"
+    assert streams.chat_ids == ids
+
+
 async def test_resume_after_restart(
     tmp_path: Path, passes_enabled: None, streams: _FakeStreams
 ) -> None:
