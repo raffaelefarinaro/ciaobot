@@ -102,13 +102,39 @@ async function ensureCoarsePointer(page: Page): Promise<void> {
  * Open every <details>, then list the interactive controls under `scope`
  * that are smaller than TOUCH_MIN in either dimension.
  */
+const NOT_COARSE = 'page is not a coarse pointer; sizes would be fine-pointer ones'
+const MEASURE_ATTEMPTS = 3
+
+/**
+ * The repair in ensureCoarsePointer only proves the pointer at that moment. On
+ * macOS CI it has flipped back to fine during the quiesce that follows (#2645,
+ * develop push run for ff16e66), so the in-page check failed after a passing
+ * repair. Repair, quiesce and measure again when that happens; the sizes from a
+ * fine-pointer read are discarded, never reported.
+ */
 async function measure(page: Page, scope = 'body') {
-  await ensureCoarsePointer(page)
-  // Never measure a layout that is still being styled: sizes read before a
-  // lazy stylesheet applies are the fine-pointer ones.
-  await quiesce(page)
+  for (let attempt = 1; ; attempt += 1) {
+    await ensureCoarsePointer(page)
+    // Never measure a layout that is still being styled: sizes read before a
+    // lazy stylesheet applies are the fine-pointer ones.
+    await quiesce(page)
+    const found = await measureOnce(page, scope)
+    if (found) return found
+    if (attempt >= MEASURE_ATTEMPTS) {
+      const seen = await page.evaluate(() => ({
+        anyCoarse: matchMedia('(any-pointer: coarse)').matches,
+        hover: matchMedia('(hover: hover)').matches,
+        maxTouchPoints: navigator.maxTouchPoints,
+      }))
+      throw new Error(`${NOT_COARSE} (lost after repair ${MEASURE_ATTEMPTS} times): ${JSON.stringify(seen)}`)
+    }
+  }
+}
+
+/** One measurement, or null when the page is not a coarse pointer at that moment. */
+async function measureOnce(page: Page, scope: string): Promise<{ total: number; bad: string[] } | null> {
   return page.evaluate(({ min, scope }) => {
-    if (!matchMedia('(pointer: coarse)').matches) throw new Error('page is not a coarse pointer; sizes would be fine-pointer ones')
+    if (!matchMedia('(pointer: coarse)').matches) return null
     document.querySelectorAll('details').forEach((d) => { d.open = true })
     const bad: string[] = []
     let total = 0
