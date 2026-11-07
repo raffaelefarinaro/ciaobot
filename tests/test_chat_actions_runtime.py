@@ -766,6 +766,68 @@ async def test_detection_skips_a_dismissed_server(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_not_now_on_a_detected_sign_in_holds_for_every_chat(tmp_path: Path) -> None:
+    """Not now on a detected sign-in is not asked again in another chat.
+
+    Detection runs after each turn and a provider can list every connector
+    of the account, so remembering the answer per chat raised the same cards
+    again in every new chat.
+    """
+    client = _detection_routes([("linear", "needs_auth"), ("sentry", "needs_auth")])
+    manager = make_manager(tmp_path)
+    first = opencode_chat(manager, live_opencode(tmp_path, client))
+    project = manager.create_project("Other", workspace="work")
+    second = manager.create_chat(project.project_id, title="Later", provider="opencode")
+    manager._providers[second.chat_id] = cast(Any, SimpleNamespace(provider=live_opencode(tmp_path, client)))
+    action_id = raise_sign_in(manager, first)
+    runtime = make_runtime(manager)
+
+    manager.dismiss_action(first.chat_id, action_id)
+    await runtime.detect_mcp_auth(second.chat_id)
+
+    assert [a.params["server"] for a in second.actions] == ["sentry"]
+
+
+@pytest.mark.asyncio
+async def test_not_now_on_a_detected_sign_in_is_per_provider(tmp_path: Path) -> None:
+    client = _detection_routes([("linear", "needs_auth")])
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    manager.declined_mcp_auth.add((manager._workspace_for_chat(chat.chat_id), "claude", "mcp_auth:linear"))
+    runtime = make_runtime(manager)
+
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert [a.params["server"] for a in chat.actions] == ["linear"]
+
+
+@pytest.mark.asyncio
+async def test_not_now_on_a_detected_sign_in_is_per_workspace(tmp_path: Path) -> None:
+    client = _detection_routes([("linear", "needs_auth")])
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    manager.declined_mcp_auth.add(("another-workspace", "opencode", "mcp_auth:linear"))
+    runtime = make_runtime(manager)
+
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert [a.params["server"] for a in chat.actions] == ["linear"]
+
+
+@pytest.mark.asyncio
+async def test_a_connected_server_clears_its_not_now(tmp_path: Path) -> None:
+    client = _detection_routes([("linear", "connected")])
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, client))
+    manager.declined_mcp_auth.add(manager.mcp_auth_decline_key(chat, "mcp_auth:linear"))
+    runtime = make_runtime(manager)
+
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert manager.declined_mcp_auth == set()
+
+
+@pytest.mark.asyncio
 async def test_detection_marks_an_open_action_done_when_its_server_connects(
     tmp_path: Path,
 ) -> None:
