@@ -913,6 +913,8 @@ COORDINATOR_RUN_TIMEOUT_SECONDS: Final[float] = 3600.0
 COORDINATOR_BIND_TIMEOUT_SECONDS: Final[float] = 120.0
 #: Attempts at spawning the wizard when the fork itself is transiently refused.
 SPAWN_TRANSIENT_RETRIES: Final[int] = 3
+#: How long an unwritten bind pipe may wait for its producer to exit.
+BIND_EXIT_GRACE_SECONDS: Final[float] = 2.0
 #: How long the wizard may keep running after it bound (user interaction).
 COORDINATOR_WIZARD_EXIT_TIMEOUT_SECONDS: Final[float] = 1800.0
 #: SIGTERM grace before an owned child is killed.
@@ -1581,7 +1583,12 @@ def _read_bind_notification(
     bytes or a descriptor left open is a refusal, not a silent success. The
     deadline is the caller's bind deadline, already clamped to the whole-run
     budget. EOF before a record is ``wizard_failed`` when the child is still
-    running and ``wizard_exited_before_bind`` when it has already exited.
+    running or closed the pipe and exited 0; it is
+    ``wizard_exited_before_bind`` when the child exited nonzero before writing.
+    The short exit grace makes that verdict deterministic for a child that is
+    already dying: it closed the descriptor during its own exit, so a single
+    non-blocking check could still see it running. A child that closed the
+    descriptor and keeps running still times out to ``wizard_failed``.
     """
     buffer = bytearray()
     record: bytes | None = None
@@ -1615,13 +1622,26 @@ def _read_bind_notification(
         if not chunk:
             if record is None:
                 # The child closed the private pipe without reporting a bind.
-                if child.poll() is not None:
+                # It may have closed it while exiting, so give the exit a
+                # bounded grace rather than racing a single poll. Only a
+                # nonzero exit before writing is its own verdict; a clean exit
+                # or a still-running child stays a plain wizard failure.
+                try:
+                    code = child.wait_for_exit(
+                        _sub_deadline(deadline, BIND_EXIT_GRACE_SECONDS),
+                        cancellation,
+                    )
+                except _TimedOut:
+                    raise NativeCoordinatorError(
+                        "bind_record_missing", "wizard_failed"
+                    ) from None
+                if code != 0:
                     raise NativeCoordinatorError(
                         "bind_record_missing", "wizard_exited_before_bind"
-                    )
+                    ) from None
                 raise NativeCoordinatorError(
                     "bind_record_missing", "wizard_failed"
-                )
+                ) from None
             return _parse_bind_notification(record)
         if record is not None:
             # A second record or any trailing byte after the first line.

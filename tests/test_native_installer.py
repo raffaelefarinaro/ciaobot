@@ -4266,6 +4266,9 @@ def test_an_unexpected_child_cleanup_error_retains_the_lock_and_emits_terminal(
         def poll(self) -> None:
             return None
 
+        def wait_for_exit(self, deadline: object, cancellation: object) -> int:
+            raise native._TimedOut
+
         def terminate_and_reap(self) -> None:
             raise RuntimeError("cleanup failed unexpectedly")
 
@@ -4769,6 +4772,9 @@ def test_a_child_that_closes_the_pipe_but_stays_alive_is_a_wizard_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The reader waits out BIND_EXIT_GRACE_SECONDS for an exit after EOF. This
+    # child keeps running for longer than that grace and well under the bind
+    # timeout, so the grace expires and the verdict stays wizard_failed.
     script = (
         "import os, sys, time\n"
         "os.close(int(sys.argv[1]))\n"
