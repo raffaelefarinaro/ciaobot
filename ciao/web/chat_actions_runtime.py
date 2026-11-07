@@ -128,11 +128,17 @@ class McpAuthHandler(ActionHandler):
             raise ChatActionError("already_used")
         target = validate_pasted_callback(authorize, url)
         cid = ctx.chat.chat_id
+        attempt_url = action.params.get("url", "")
         ctx.pcm.update_action(cid, action.id, state="waiting", params_update={"callback_used": "1"})
         status = await replay_callback(target)
-        # The flow's poll may have finished the sign-in while the replay was in flight: keep a done card.
+        # The flow's poll may have finished the sign-in, or the user restarted it (a new authorize URL),
+        # while the replay was in flight: only fail the same attempt that is still waiting.
         current = ctx.pcm.get_action(cid, action.id)
-        if current is not None and current.state == "waiting":
+        if (
+            current is not None
+            and current.state == "waiting"
+            and current.params.get("url", "") == attempt_url
+        ):
             if status == 0:
                 ctx.pcm.update_action(cid, action.id, state="failed", error=UNREACHABLE_ERROR)
             elif status >= 400:

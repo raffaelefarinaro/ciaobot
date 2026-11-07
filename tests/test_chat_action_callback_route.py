@@ -413,19 +413,23 @@ async def test_a_new_sign_in_start_clears_the_single_use_mark(
     )
     runtime = make_runtime(manager, poll_deadline_s=600.0)
 
-    await runtime.start(chat.chat_id, aid, {}, is_loopback=True)
-    action = manager.get_action(chat.chat_id, aid)
-    assert action is not None
-    assert action.state == "waiting"
-    assert action.params["callback_used"] == "0"
+    try:
+        await runtime.start(chat.chat_id, aid, {}, is_loopback=True)
+        action = manager.get_action(chat.chat_id, aid)
+        assert action is not None
+        assert action.state == "waiting"
+        assert action.params["callback_used"] == "0"
 
-    await runtime.callback(chat.chat_id, aid, "http://localhost:62471/callback?code=abc&state=S2", is_loopback=True)
-    assert len(calls) == 1
-    action = manager.get_action(chat.chat_id, aid)
-    assert action is not None
-    assert action.params["callback_used"] == "1"
-    for task in runtime._polls.values():
-        task.cancel()
+        await runtime.callback(
+            chat.chat_id, aid, "http://localhost:62471/callback?code=abc&state=S2", is_loopback=True
+        )
+        assert len(calls) == 1
+        action = manager.get_action(chat.chat_id, aid)
+        assert action is not None
+        assert action.params["callback_used"] == "1"
+    finally:
+        for task in runtime._polls.values():
+            task.cancel()
 
 
 @pytest.mark.parametrize("status", [0, 400])
@@ -447,6 +451,31 @@ def test_a_late_replay_error_does_not_overwrite_a_done_card(
     action = manager.get_action(cid, aid)
     assert action is not None
     assert action.state == "done"
+
+
+def test_a_late_replay_error_does_not_fail_a_restarted_sign_in(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cid, aid = _waiting_card(manager, 62471)
+    restarted_url = (
+        "https://mcp.notion.com/authorize?response_type=code"
+        "&redirect_uri=http%3A%2F%2Flocalhost%3A62471%2Fcallback&state=S2"
+    )
+
+    async def restart_then_refuse(target: CallbackTarget) -> int:
+        del target
+        # The poll failed the card, then the user restarted: a new authorize URL, still waiting.
+        manager.update_action(cid, aid, state="waiting", params_update={"url": restarted_url})
+        return 400
+
+    monkeypatch.setattr(chat_actions_runtime, "replay_callback", restart_then_refuse)
+    response = _post(_client(manager), cid, aid, {"url": "http://localhost:62471/callback?code=a&state=S1"})
+    assert response.status_code == 200
+    action = manager.get_action(cid, aid)
+    assert action is not None
+    assert action.state == "waiting"
+    assert action.error == ""
+    assert action.params["url"] == restarted_url
 
 
 def test_a_waiting_card_without_an_authorize_url_is_invalid_state(
