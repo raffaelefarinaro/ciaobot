@@ -89,10 +89,15 @@ ABSTAIN_RE = re.compile(
     r"|no (record|information|mention)|couldn[’']t find|could not find|can[’']t find"
     r"|cannot find|doesn[’']t (say|mention|record|include)"
     r"|does not (say|mention|record|include)|isn[’']t (recorded|mentioned|saved)"
-    r"|don[’']t have|do not have|doesn[’']t have|does not have"
+    r"|(?:don[’']t|do not|doesn[’']t|does not) have (?:a|an|the|any|his|her|their|its|our|your|my|no)\b"
     r"|no [\w' -]{1,40}? (is |was )?(recorded|saved|stored|on file)",
     re.IGNORECASE,
 )
+# Values whose presence turns a decline into an answer anyway: a reply that hedges
+# and then hands over a value of the asked kind did not abstain (#2508).
+_FORBIDDEN_VALUE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "phone": re.compile(r"\+?\d[\d ()-]{6,}\d"),
+}
 _MD_LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 WEEKDAY_NAMES: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -520,7 +525,15 @@ def _check_answer_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResu
 
 def _check_abstains(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     matched = ABSTAIN_RE.search(ctx.answer) is not None
-    return CheckResult("abstains", matched, "declined" if matched else "answered")
+    if not matched:
+        return CheckResult("abstains", False, "answered")
+    for kind in spec.get("forbid_values") or []:
+        pattern = _FORBIDDEN_VALUE_PATTERNS.get(str(kind))
+        if pattern is None:
+            return _fail("abstains", f"unknown forbidden value kind {kind!r}")
+        if pattern.search(ctx.answer):
+            return CheckResult("abstains", False, f"declined-then-answered:{kind}")
+    return CheckResult("abstains", True, "declined")
 
 
 def _tasks_in_workspace(ctx: GradeContext) -> list[dict[str, Any]]:
