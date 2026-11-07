@@ -287,7 +287,7 @@ def workspace_from_request(
 def _check_override_models(overrides: dict[str, dict[str, str]]) -> None:
     """Reject a model override a new chat could not start with.
 
-    Mirrors ``ProjectChatManager._validate_configured_model``: an invalid saved
+    Mirrors ``ciao.web.project_chats.validate_configured_model``: an invalid saved
     Claude model would make every new chat in the workspace fail at creation.
     Dynamic-catalog providers (opencode) are exempt; their catalog is async.
     """

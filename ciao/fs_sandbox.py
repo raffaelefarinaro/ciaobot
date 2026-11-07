@@ -476,6 +476,21 @@ def _static_prefix(value: str) -> str:
     return "/".join(parts) or ("/" if value.startswith("/") else ".")
 
 
+def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
+    """The path a tool argument names, resolved as ``path_outside_roots`` resolves it.
+
+    None when it cannot be resolved (a NUL byte, an unknown ``~user``).
+    """
+    text = _static_prefix(value.strip())
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        return candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
 def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
     """Whether a tool path argument escapes every workspace root.
 
@@ -485,12 +500,10 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
     be resolved (a NUL byte, an unknown ``~user``) counts as outside, so the guard
     denies it rather than raising: a hook that raises is not a deny.
     """
-    text = _static_prefix(value.strip())
+    resolved = _resolved_tool_path(value, cwd=cwd)
+    if resolved is None:
+        return True
     try:
-        candidate = Path(text).expanduser()
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        resolved = candidate.resolve()
         resolved_roots = [root.resolve() for root in roots]
     except (ValueError, OSError, RuntimeError):
         return True
@@ -540,21 +553,6 @@ def claude_task_output_path_allowed(
     except OSError:
         return False
     return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-
-
-def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
-    """The path a tool argument names, resolved as ``path_outside_roots`` resolves it.
-
-    None when it cannot be resolved (a NUL byte, an unknown ``~user``).
-    """
-    text = _static_prefix(value.strip())
-    try:
-        candidate = Path(text).expanduser()
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        return candidate.resolve()
-    except (ValueError, OSError, RuntimeError):
-        return None
 
 
 def _case_key(path: Path) -> tuple[str, ...]:

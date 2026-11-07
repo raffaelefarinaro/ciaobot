@@ -17,12 +17,12 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from ciao.chat_actions import ActionState, ChatAction
+from ciao.chat_actions import ChatAction
 from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path, is_claudeai_connector
 from ciao.terminal_scrape import first_https_url, last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_tool
-from ciao.web.chat_actions_base import ActionContext, ActionHandler
+from ciao.web.chat_actions_base import ActionContext, HelperTerminalFlow
 
 __all__ = ["ClaudeMcpAuthFlow", "claude_login_argv", "valid_server_name"]
 
@@ -65,30 +65,10 @@ def _claude_binary() -> str | None:
         return None
 
 
-class ClaudeMcpAuthFlow(ActionHandler):
+class ClaudeMcpAuthFlow(HelperTerminalFlow):
     """The Claude MCP sign-in: a helper terminal running ``claude mcp login``."""
 
-    def _set(
-        self,
-        ctx: ActionContext,
-        action: ChatAction,
-        state: ActionState,
-        *,
-        error: str = "",
-        params_update: dict[str, object] | None = None,
-    ) -> None:
-        ctx.pcm.update_action(
-            ctx.chat.chat_id, action.id, state=state, params_update=params_update, error=error
-        )
-        logger.info("mcp_auth claude %s: %s", action.id, state)
-
-    async def _end(self, ctx: ActionContext, session_id: str) -> None:
-        if ctx.terminals is None:
-            return
-        try:
-            await ctx.terminals.end(session_id)
-        except TerminalSessionError:
-            pass
+    log_label = "mcp_auth claude"
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
         server = action.params.get("server", "")

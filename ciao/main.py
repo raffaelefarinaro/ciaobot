@@ -629,15 +629,6 @@ async def _async_main(
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        if installer_bootstrap and installer_native_fd is None:
-            return await _run_server_locked(
-                config,
-                supervised=supervised,
-                startup_id=lock.startup_id,
-                engine_pid=os.getpid(),
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-            )
         if installer_bootstrap:
             return await _run_server_locked(
                 config,
@@ -1783,22 +1774,14 @@ def main(
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        if installer_native_fd is None:
-            code = asyncio.run(_async_main(
-                supervised=supervised,
-                installer_bootstrap=installer_bootstrap,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            ))
-        else:
-            code = asyncio.run(_async_main(
-                supervised=supervised,
-                installer_bootstrap=installer_bootstrap,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-                installer_native_fd=installer_native_fd,
-                installer_native_workspace=installer_native_workspace,
-            ))
+        code = asyncio.run(_async_main(
+            supervised=supervised,
+            installer_bootstrap=installer_bootstrap,
+            installer_run_id=installer_run_id,
+            installer_suggest_workspace=installer_suggest_workspace,
+            installer_native_fd=installer_native_fd,
+            installer_native_workspace=installer_native_workspace,
+        ))
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2

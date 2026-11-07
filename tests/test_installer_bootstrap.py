@@ -49,6 +49,8 @@ def test_run_parser_forwards_installer_mode_and_run_id(monkeypatch) -> None:
         "installer_bootstrap": True,
         "installer_run_id": run_id,
         "installer_suggest_workspace": None,
+        "installer_native_fd": None,
+        "installer_native_workspace": None,
     }
 
 

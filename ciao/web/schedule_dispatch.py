@@ -587,14 +587,6 @@ class ScheduleDispatcher:
         logger.warning("Schedule has no web target, skipping")
         return None
 
-    def _target_refusal(self, entry: ScheduleEntry) -> str:
-        """Why this entry's target is the app's memory machinery, or ''.
-
-        The manager owns the rule: it knows the projects and the chats, and it
-        is the same answer the scheduler gets before it dispatches.
-        """
-        return self._host.schedule_target_refusal(entry)
-
     def _supersede_earlier_runs(self, chat: ChatInfo) -> None:
         """Retire the earlier runs' retries and errors when a routine runs again.
 
@@ -651,7 +643,7 @@ class ScheduleDispatcher:
         # The target is checked before the command runs: a routine the app will
         # not dispatch into must not run its command either, and a quiet command
         # would otherwise report success for work that never happened.
-        refusal = self._target_refusal(entry)
+        refusal = self._host.schedule_target_refusal(entry)
         if refusal:
             logger.warning(
                 "Schedule %s cannot run in its target: %s", _sched_schedule_id, refusal
