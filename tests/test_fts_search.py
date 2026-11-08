@@ -1038,3 +1038,22 @@ def test_path_prefixes_treat_underscore_and_percent_as_literals(
         "a%b/Logs/chat-0.md",
         "my_work/Logs/chat-0.md",
     ]
+
+
+def test_failed_or_top_up_keeps_the_and_hits() -> None:
+    """A top-up that raises must not discard the AND hits already found."""
+    real = sqlite3.connect(":memory:")
+    fts_search.init_db(real)
+    real.execute(
+        "INSERT INTO vault_fts (path, title, body) VALUES (?, ?, ?)",
+        ("Notes/heron.md", "Heron", "marsh with a heron"),
+    )
+
+    class _OrFails:
+        def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+            if params and isinstance(params[0], str) and " OR " in params[0]:
+                raise sqlite3.OperationalError("fts5: syntax error")
+            return real.execute(sql, params)
+
+    rows = fts_search.search(_OrFails(), "vault_fts", "heron marsh", limit=5)  # type: ignore[arg-type]
+    assert [row["path"] for row in rows] == ["Notes/heron.md"]

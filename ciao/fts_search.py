@@ -851,8 +851,16 @@ def search(
             # already returned. AND hits keep the lead; zero AND hits is just
             # the case where the whole page comes from OR.
             seen = {row[0] for row in rows}
-            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit + len(rows)))
-            rows += [row for row in cursor.fetchall() if row[0] not in seen][: limit - len(rows)]
+            try:
+                or_rows = conn.execute(sql, (" OR ".join(words), *scope_args, limit + len(rows))).fetchall()
+            except sqlite3.OperationalError:
+                # A top-up must never cost the AND hits already found: keep
+                # them and skip the backfill (only zero AND hits falls through
+                # to the literal match below).
+                if not rows:
+                    raise
+                or_rows = []
+            rows += [row for row in or_rows if row[0] not in seen][: limit - len(rows)]
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
