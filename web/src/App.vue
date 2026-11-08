@@ -246,14 +246,12 @@ watch(shouldPollStartup, (shouldPoll) => {
   --page-gutter: 32px;
   --page-rail: 280px;
   --page-inset: max(var(--page-gutter), calc((100% - var(--page-max)) / 2 + var(--page-gutter)));
-  /* Safe area passthrough. In browser mode we zero out --safe-bottom because
-     the browser's own bottom UI (Safari toolbar) already occupies that zone;
-     adding our own safe-inset on top creates dead space below the input bar.
-     Only in standalone/fullscreen PWA does the home indicator actually need
-     the inset, so we re-enable it via the media query below. */
+  /* Safe area passthrough. The platform owns the insets: without
+     viewport-fit=cover the viewport is already inset, so these are env()
+     passthroughs for platforms that report them and 0 otherwise. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
-  --safe-bottom: 0px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
   /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
   --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
@@ -391,22 +389,6 @@ watch(shouldPollStartup, (shouldPoll) => {
 :root.theme-light [data-workspace-color="fuchsia"] {
   --accent: #a21caf;
   --accent-strong: #86198f;
-}
-
-/* In standalone/fullscreen PWA the home indicator is live, so restore the
-   safe-area inset. Browser mode stays at 0 (set in :root above) to avoid
-   double-counting with Safari's own bottom toolbar. */
-@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
-  :root {
-    --safe-bottom: env(safe-area-inset-bottom, 0px);
-  }
-}
-
-/* When the on-screen keyboard is open, it covers the home indicator,
-   so collapse the bottom safe-area inset to avoid an empty gap
-   between the input bar and the keyboard. */
-html.keyboard-open {
-  --safe-bottom: 0px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
