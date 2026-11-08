@@ -777,6 +777,52 @@ def test_multiword_query_degrades_to_or_when_and_finds_nothing(
     assert fts_search.search_vault(db_conn, "nonexistentterm") == []
 
 
+def test_partial_and_hits_are_topped_up_with_or_hits_inside_the_scope(
+    db_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """AND hits come first; OR hits fill the rest of `limit`, once each, in scope.
+
+    The OR fallback used to fire only when AND matched nothing, so a query
+    whose AND matched one note returned that one note and dropped every note
+    holding most, but not all, of its words.
+    """
+    install = tmp_path / "install"
+    for root in ("personal", "work"):
+        (install / root / "memory-vault" / "Notes").mkdir(parents=True)
+    notes = install / "personal" / "memory-vault" / "Notes"
+    (notes / "Both.md").write_text("# Both\nheron marsh survey\n", encoding="utf-8")
+    (notes / "HeronOnly.md").write_text(
+        "# Heron only\nheron heron heron sighting\n", encoding="utf-8"
+    )
+    (notes / "MarshOnly.md").write_text("# Marsh only\nmarsh walk\n", encoding="utf-8")
+    (install / "work" / "memory-vault" / "Notes" / "Foreign.md").write_text(
+        "# Foreign\nheron heron marsh marsh\n", encoding="utf-8"
+    )
+    personal = install / "personal" / "memory-vault"
+    fts_search.index_vault(db_conn, personal, path_base=install)
+    fts_search.index_vault(db_conn, install / "work" / "memory-vault", path_base=install)
+    prefix = fts_search.vault_key_prefix(personal, install)
+
+    rows = fts_search.search_vault(db_conn, "heron marsh", limit=10, path_prefix=prefix)
+    paths = [row["path"] for row in rows]
+
+    # The only AND hit leads; Both.md also matches the OR query and must not
+    # appear twice; the other root's note matches both words and must not leak.
+    assert paths[0] == "personal/memory-vault/Notes/Both.md"
+    assert len(paths) == len(set(paths))
+    assert set(paths) == {
+        "personal/memory-vault/Notes/Both.md",
+        "personal/memory-vault/Notes/HeronOnly.md",
+        "personal/memory-vault/Notes/MarshOnly.md",
+    }
+
+    # The top-up stops at `limit`.
+    assert len(fts_search.search_vault(db_conn, "heron marsh", limit=2, path_prefix=prefix)) == 2
+    # A full AND page is not topped up: the precision of AND-first is kept.
+    full = fts_search.search_vault(db_conn, "heron marsh", limit=1, path_prefix=prefix)
+    assert [row["path"] for row in full] == ["personal/memory-vault/Notes/Both.md"]
+
+
 def test_search_hit_telemetry_round_trip(tmp_path: Path) -> None:
     runtime = tmp_path / ".runtime"
     # No log yet: no evidence, not "never retrieved".
@@ -992,3 +1038,22 @@ def test_path_prefixes_treat_underscore_and_percent_as_literals(
         "a%b/Logs/chat-0.md",
         "my_work/Logs/chat-0.md",
     ]
+
+
+def test_failed_or_top_up_keeps_the_and_hits() -> None:
+    """A top-up that raises must not discard the AND hits already found."""
+    real = sqlite3.connect(":memory:")
+    fts_search.init_db(real)
+    real.execute(
+        "INSERT INTO vault_fts (path, title, body) VALUES (?, ?, ?)",
+        ("Notes/heron.md", "Heron", "marsh with a heron"),
+    )
+
+    class _OrFails:
+        def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+            if params and isinstance(params[0], str) and " OR " in params[0]:
+                raise sqlite3.OperationalError("fts5: syntax error")
+            return real.execute(sql, params)
+
+    rows = fts_search.search(_OrFails(), "vault_fts", "heron marsh", limit=5)  # type: ignore[arg-type]
+    assert [row["path"] for row in rows] == ["Notes/heron.md"]
