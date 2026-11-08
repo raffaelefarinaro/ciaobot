@@ -357,6 +357,40 @@ async function checkPopupSurface(
   return { small, panels, opened, skipped }
 }
 
+/**
+ * Open the terminal on alpha-chat-1 and measure the pane and its key row.
+ * The row is display:none under a fine pointer, and on macOS CI the emulated
+ * pointer has read fine at this point (run 42428047964). So the session's
+ * readiness is awaited in the DOM (includeHidden), and the pointer is left to
+ * measure(), which repairs it and retries.
+ */
+async function checkTerminalPane(page: Page, afterOpen?: () => Promise<void>): Promise<void> {
+  await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  await openChatDetails(page)
+  await page.locator('#chat-work-rail .chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  await afterOpen?.()
+  // Rendered once the shell's screen exists; Enter is enabled once the session is live.
+  const keys = pane.getByRole('toolbar', { name: 'Terminal keys', includeHidden: true })
+  await expect(keys).toBeAttached()
+  await expect(keys.getByRole('button', { name: 'Enter', includeHidden: true })).toBeEnabled()
+
+  // The row is measured on its own: all nine keys are there, so the check
+  // cannot pass on a zero-sized row.
+  const row = await measure(page, '.terminal-pane .tp-keys')
+  expect(row.total, 'the key row has nine buttons').toBe(9)
+  expect(row.bad, `keys under ${TOUCH_MIN}px:\n${row.bad.join('\n')}`).toEqual([])
+
+  const pair = await measure(page, '.terminal-pane')
+  expect(pair.total, 'the pane has more controls than the row').toBeGreaterThan(9)
+  expect(pair.bad, `pane controls under ${TOUCH_MIN}px:\n${pair.bad.join('\n')}`).toEqual([])
+
+  // measure() proved a coarse pointer at its read; the row is shown there.
+  await expect(pane.getByRole('toolbar', { name: 'Terminal keys' })).toBeVisible()
+}
+
 test.use({ ...devices['iPhone 13'], defaultBrowserType: undefined })
 
 test.describe('touch targets', () => {
@@ -617,27 +651,17 @@ test.describe('touch targets', () => {
   })
 
   test('the terminal pane and its key row are at least 44×44 on touch', async ({ page }) => {
-    await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    await openChatDetails(page)
-    await page.locator('#chat-work-rail .chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+    await checkTerminalPane(page)
+  })
 
-    const pane = page.locator('.terminal-pane')
-    await expect(pane).toBeVisible()
-    // The row appears once the shell's screen exists; Enter is enabled once
-    // the session is live.
-    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
-    await expect(keys).toBeVisible()
-    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
-
-    // The row is measured on its own: all nine keys are there, so the check
-    // cannot pass on a zero-sized row.
-    const row = await measure(page, '.terminal-pane .tp-keys')
-    expect(row.total, 'the key row has nine buttons').toBe(9)
-    expect(row.bad, `keys under ${TOUCH_MIN}px:\n${row.bad.join('\n')}`).toEqual([])
-
-    const pair = await measure(page, '.terminal-pane')
-    expect(pair.total, 'the pane has more controls than the row').toBeGreaterThan(9)
-    expect(pair.bad, `pane controls under ${TOUCH_MIN}px:\n${pair.bad.join('\n')}`).toEqual([])
+  test('the terminal key row is measured when the pointer reads fine after the pane opens', async ({ page }) => {
+    await checkTerminalPane(page, async () => {
+      // macOS CI's fingerprint: fine pointer, touch points still reported.
+      const cdp = await page.context().newCDPSession(page)
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+      await page.evaluate(() => Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 1, configurable: true }))
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), 'the flip took').toBe(false)
+    })
   })
 
   test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
