@@ -614,6 +614,11 @@ def _ensure_receipt(
         )
     else:
         return
+    _write_receipt_verified(receipt)
+
+
+def _write_receipt_verified(receipt: install_receipt.InstallReceipt) -> None:
+    """Write the receipt and require that reading it back returns the same one."""
     try:
         install_receipt.write_receipt(receipt)
         written = install_receipt.read_receipt()
@@ -639,13 +644,7 @@ def _carry_receipt_history(previous: install_receipt.InstallReceipt) -> None:
         previous_version=previous.previous_version,
         previous_executable=previous.previous_executable,
     )
-    try:
-        install_receipt.write_receipt(carried)
-        written = install_receipt.read_receipt()
-    except (OSError, ValueError):
-        raise NativeCoordinatorError("receipt_write_failed", "install_failed") from None
-    if written != carried:
-        raise NativeCoordinatorError("receipt_write_failed", "install_failed")
+    _write_receipt_verified(carried)
 
 
 def _reinstall_engine_preserving_history(
