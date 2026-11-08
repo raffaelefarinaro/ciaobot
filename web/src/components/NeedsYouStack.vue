@@ -11,12 +11,14 @@
  * so the sign-in in progress is never hidden. Focusing a card inside the fold
  * does not take it out: moving it on mousedown would pull it from under the
  * pointer and lose the click; it leaves once the engine moves its state on. The region is height-capped and scrolls
- * on its own, so the transcript always keeps its room.
+ * on its own, so the transcript always keeps its room. When a card appears or changes state, the region scrolls itself
+ * (instantly under reduced motion) so that card's key control is in view: a `[data-needs-you-primary]` element, else its
+ * primary button. It never moves the focus, and it leaves the scroll alone while the focus is in another card.
  *
  * Every card renders in one keyed list, folded or not: a card that leaves the
  * fold is moved, never rebuilt, so its focus and its local state survive.
  */
-import { computed, nextTick, ref, useId, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import NeedsYouCard from './NeedsYouCard.vue'
 import { useProjectStore } from '../stores/projects'
@@ -61,6 +63,56 @@ watch(folded, (now) => {
     errorMessage.value = ''
   }
 })
+
+/** Room left between the revealed control and the stack's edge. */
+const REVEAL_PAD = 8
+/** Each card's last seen state, so a reveal follows only a new card or a state change. */
+let seen = new Map<string, string>()
+
+/** A card's key control: the body's marked one, else its primary button. */
+function revealTarget(card: HTMLElement): HTMLElement | null {
+  return card.querySelector<HTMLElement>('[data-needs-you-primary]')
+    ?? card.querySelector<HTMLElement>('.needs-you-btn--primary')
+}
+
+/**
+ * Scroll the stack, never the page, so the newest changed card's key control
+ * is in view. Never moves the focus, and leaves the stack alone while the
+ * focus is in another card.
+ */
+function reveal(ids: Set<string>): void {
+  const stack = stackEl.value
+  if (!stack || !ids.size) return
+  const cards = [...stack.querySelectorAll<HTMLElement>('.needs-you-card')]
+    .filter(c => ids.has(c.dataset.actionId ?? '') && !(foldedIds.value.has(c.dataset.actionId ?? '') && !expanded.value))
+  const card = cards[cards.length - 1]
+  if (!card) return
+  const active = document.activeElement
+  if (active && stack.contains(active) && !card.contains(active)) return
+  const target = revealTarget(card)
+  if (!target) return
+  const s = stack.getBoundingClientRect()
+  const t = target.getBoundingClientRect()
+  let delta = 0
+  if (t.bottom + REVEAL_PAD > s.bottom) delta = t.bottom + REVEAL_PAD - s.bottom
+  else if (t.top - REVEAL_PAD < s.top) delta = t.top - REVEAL_PAD - s.top
+  const top = Math.max(0, stack.scrollTop + delta)
+  if (top === stack.scrollTop) return
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  stack.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
+}
+
+/** The ids that are new or changed state since the last call. */
+function changedIds(): Set<string> {
+  const next = new Map(props.actions.map(a => [a.id, a.state] as const))
+  const changed = new Set([...next].filter(([id, st]) => seen.get(id) !== st).map(([id]) => id))
+  seen = next
+  return changed
+}
+
+onMounted(() => reveal(changedIds()))
+watch(() => props.actions.map(a => `${a.id}:${a.state}`).join('|'), () => reveal(changedIds()), { flush: 'post' })
 
 function touch(event: FocusEvent): void {
   const id = (event.target as HTMLElement | null)?.closest<HTMLElement>('.needs-you-card')?.dataset.actionId

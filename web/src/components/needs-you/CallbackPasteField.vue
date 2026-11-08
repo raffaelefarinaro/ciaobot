@@ -41,7 +41,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <form class="needs-you-paste" @submit.prevent="submit">
+  <form class="needs-you-paste" data-needs-you-primary @submit.prevent="submit">
     <label :for="inputId" class="needs-you-paste-label">{{ hint }}</label>
     <div class="needs-you-paste-row">
       <input

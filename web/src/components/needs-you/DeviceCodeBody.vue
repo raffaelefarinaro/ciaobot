@@ -95,6 +95,7 @@ onBeforeUnmount(() => {
     <div
       v-if="action.state === 'waiting' && code"
       class="needs-you-device-code"
+      data-needs-you-primary
       role="group"
       aria-label="One-time code"
     ><code>{{ code }}</code></div>
