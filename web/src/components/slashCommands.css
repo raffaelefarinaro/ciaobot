@@ -1,0 +1,74 @@
+/* Slash-command picker styling.
+ *
+ * Shared verbatim by `ChatPanel.vue` and `SlashCommandPicker.vue` through
+ * `<style scoped src="./slashCommands.css">`. The chat's @-mention picker
+ * reuses the same `.commands-picker*` classes, so the rules live here instead
+ * of in the new component: scoped CSS does not reach into a child's subtree.
+ */
+
+.commands-picker {
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--bg);
+  font-size: 0.9rem;
+}
+.commands-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.commands-picker-row.active {
+  background: var(--bg3);
+}
+.commands-picker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.commands-picker-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.commands-picker-kind {
+  color: var(--accent2);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.commands-picker-hint {
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.commands-picker-desc {
+  color: var(--fg3);
+  font-size: 0.85em;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Touch layouts: a row is a real control, so it meets the 44px minimum. */
+@media (pointer: coarse), (max-width: 767px) {
+  .commands-picker-row {
+    min-height: var(--touch);
+  }
+}

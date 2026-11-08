@@ -415,9 +415,13 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   anything. Uploads go through `lib/chatAttachments.ts::postFormWithProgress` (XHR, for upload progress), injectable as `postForm`; `uploads` is the in-flight list `ComposerUploadProgress.vue` renders, and Send is disabled while it is non-empty. `ChatTurnActivity.vue` owns the rendering of one completed turn's
   `Activity` disclosure and owns no state — open/closed, the thinking
   preference and the markdown renderer are props, and every action is an emit.
-  `ChatPanel` keeps the send path, the slash-command and @-mention pickers,
-  the trace open/closed map, the memoised markdown cache, scroll anchoring and
-  the live streaming trace. Trace CSS lives in `components/chatTrace.css` and
+  `ChatPanel` keeps the send path, the @-mention picker, the trace
+  open/closed map, the memoised markdown cache, scroll anchoring and
+  the live streaming trace. The slash-command list is shared with Home:
+  `composables/useSlashCommands.ts` owns its state and text surgery,
+  `SlashCommandPicker.vue` renders it, and `components/slashCommands.css`
+  (scoped `src`, because the @-mention picker also uses those classes) styles
+  it. Trace CSS lives in `components/chatTrace.css` and
   is pulled into both components with `<style scoped src>`; scoped rules in a
   parent do not reach a child's subtree, so moving markup into a component
   without moving its styles silently unstyles it.

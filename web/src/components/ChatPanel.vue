@@ -1053,25 +1053,14 @@
 
     <!-- Slash-command picker. Skills can be picked from any slash token;
          Ciao-owned commands remain start-of-message only. -->
-    <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
-      <div
-        v-for="(cmd, i) in filteredCommands"
-        :key="cmd.name"
-        class="commands-picker-row"
-        :class="{ active: i === commandHighlightIdx }"
-        role="option"
-        :aria-selected="i === commandHighlightIdx"
-        @mousedown.prevent="applyCommand(cmd)"
-        @mouseenter="commandHighlightIdx = i"
-      >
-        <div class="commands-picker-head">
-          <span v-if="cmd.source === 'skill'" class="commands-picker-kind">skill</span>
-          <span class="commands-picker-name">/{{ cmd.name }}</span>
-          <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
-        </div>
-        <div v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</div>
-      </div>
-    </div>
+    <SlashCommandPicker
+      v-if="slash.visible.value"
+      class="commands-picker"
+      :commands="slash.matches.value"
+      :highlight="slash.highlight.value"
+      @pick="slash.insert($event, autoResize)"
+      @highlight="slash.highlight.value = $event"
+    />
 
     <div class="input-bar" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
@@ -1490,7 +1479,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1565,18 +1554,19 @@ import {
 } from '../lib/commentHighlight'
 import { questionAnswerError, questionAnswerIsValid, questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import {
-  useMentionPicker,
+import { useMentionPicker,
   type MentionAgent,
   type MentionChat,
   type MentionFile,
   type MentionProject,
 } from '../composables/useMentionPicker'
+import { useSlashCommands } from '../composables/useSlashCommands'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
+import SlashCommandPicker from './SlashCommandPicker.vue'
 import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
@@ -1785,105 +1775,10 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands.
-const slashCommands = ref<SlashCommand[]>([])
-const commandHighlightIdx = ref(0)
-
-interface SlashCommandTrigger {
-  start: number
-  end: number
-  query: string
-}
-
-/** Find a slash token immediately before the textarea caret. */
-function findSlashCommandTrigger(text: string, cursor: number): SlashCommandTrigger | null {
-  const end = Math.max(0, Math.min(cursor, text.length))
-  const beforeCaret = text.slice(0, end)
-  const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/)
-  if (!match) return null
-
-  const start = end - match[0].length + match[0].lastIndexOf('/')
-  return { start, end, query: match[1] || '' }
-}
-
-const slashCommandTrigger = ref<SlashCommandTrigger | null>(null)
-
-function dismissSlashCommandPicker(): void {
-  slashCommandTrigger.value = null
-  commandHighlightIdx.value = 0
-}
-
-function refreshSlashCommandPicker(): void {
-  const el = inputEl.value
-  if (!el || el.selectionStart !== el.selectionEnd) {
-    dismissSlashCommandPicker()
-    return
-  }
-  slashCommandTrigger.value = findSlashCommandTrigger(inputText.value, el.selectionStart)
-  commandHighlightIdx.value = 0
-}
-
-async function loadSlashCommands(): Promise<void> {
-  try {
-    const provider = encodeURIComponent(chat.value.provider || '')
-    const workspace = encodeURIComponent(project.value?.workspace || store.activeWorkspace || '')
-    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}&workspace=${workspace}`)
-    slashCommands.value = [
-      ...(response.commands || []),
-      ...(response.skills || []),
-    ]
-  } catch {
-    // Asset discovery is offline: leave the picker empty rather than stale.
-    slashCommands.value = []
-  }
-}
-
-const filteredCommands = computed<SlashCommand[]>(() => {
-  const active = slashCommandTrigger.value
-  if (!active) return []
-  const needle = active.query.toLowerCase()
-  return slashCommands.value.filter(command =>
-    command.name.toLowerCase().startsWith(needle),
-  )
-})
-
-const showCommandsPicker = computed(() => filteredCommands.value.length > 0)
-
-watch(filteredCommands, (list) => {
-  if (commandHighlightIdx.value >= list.length) commandHighlightIdx.value = 0
-})
-
-function applyCommand(cmd: SlashCommand) {
-  const active = slashCommandTrigger.value
-  if (!active) return
-
-  const before = inputText.value.slice(0, active.start)
-  const after = inputText.value.slice(active.end)
-  const token = `/${cmd.name}`
-  // Keep the existing separator when this replaces a token in the middle of
-  // a draft; otherwise leave room for command arguments as before.
-  const suffix = cmd.argument_hint && !(after && /^\s/.test(after)) ? ' ' : ''
-  inputText.value = before + token + suffix + after
-  const cursor = before.length + token.length + suffix.length
-  dismissSlashCommandPicker()
-  nextTick(() => {
-    const input = inputEl.value
-    if (!input) return
-    input.setSelectionRange(cursor, cursor)
-    input.focus()
-    autoResize()
-  })
-}
-
-watch(inputText, () => {
-  if (!slashCommandTrigger.value) return
-  const el = inputEl.value
-  const current = el && el.selectionStart === el.selectionEnd
-    ? findSlashCommandTrigger(inputText.value, el.selectionStart)
-    : null
-  if (current) slashCommandTrigger.value = current
-  else dismissSlashCommandPicker()
-})
+// Slash-command picker: the composable owns the trigger, matches and text
+// surgery; commands load from /api/commands on mount and when the provider
+// changes.
+const slash = useSlashCommands({ draft: inputText, input: inputEl })
 const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
@@ -1990,7 +1885,7 @@ function openMemoryPassSource(): void {
   if (archivePath) void fileViewer.open(archivePath)
 }
 watch(() => chat.value.provider, () => {
-  void loadSlashCommands()
+  void slash.load(chat.value.provider || '', project.value?.workspace || store.activeWorkspace || '')
 })
 
 const queueEditNotice = ref('')
@@ -2597,7 +2492,7 @@ const showMentionPicker = mentionPicker.showPicker
 
 function refreshComposerPickers(): void {
   mentionPicker.refresh()
-  refreshSlashCommandPicker()
+  slash.refresh()
 }
 
 async function loadProjectFiles() {
@@ -4020,7 +3915,7 @@ onMounted(async () => {
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
   await loadModels()
-  await loadSlashCommands()
+  await slash.load(chat.value.provider || '', project.value?.workspace || store.activeWorkspace || '')
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
@@ -4721,16 +4616,15 @@ function handleKeydown(e: KeyboardEvent) {
   if (mentionPicker.handleKeydown(e)) return
 
   // Slash-command picker navigation takes precedence over send/newline.
-  if (showCommandsPicker.value) {
+  if (slash.visible.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      commandHighlightIdx.value = (commandHighlightIdx.value + 1) % filteredCommands.value.length
+      slash.move(1)
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      const n = filteredCommands.value.length
-      commandHighlightIdx.value = (commandHighlightIdx.value - 1 + n) % n
+      slash.move(-1)
       return
     }
     if (e.key === 'Escape') {
@@ -4742,13 +4636,13 @@ function handleKeydown(e: KeyboardEvent) {
       // now, so the picker opens mid-message ("…and then run /rev"): clearing
       // inputText here wiped the whole message, and the draft-sync watcher
       // persisted the empty string, so it could not be recovered.
-      dismissSlashCommandPicker()
+      slash.dismiss()
       return
     }
     if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault()
-      const cmd = filteredCommands.value[commandHighlightIdx.value]
-      if (cmd) applyCommand(cmd)
+      const cmd = slash.current()
+      if (cmd) slash.insert(cmd, autoResize)
       return
     }
   }
@@ -6998,66 +6892,8 @@ details[open] > .activity-summary::before {
 }
 
 
-/* Slash-command picker */
-.commands-picker {
-  max-height: 240px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 4px 0;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
-  background: var(--bg);
-  font-size: 0.9rem;
-}
-.commands-picker-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-.commands-picker-row.active {
-  background: var(--bg3);
-}
-.commands-picker-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.commands-picker-name {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.commands-picker-kind {
-  color: var(--accent2);
-  font-size: 0.72em;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-.commands-picker-hint {
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: 0.85em;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.commands-picker-desc {
-  color: var(--fg3);
-  font-size: 0.85em;
-  line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
+/* Slash-command picker styles are shared with SlashCommandPicker.vue through
+   slashCommands.css; the @-mention picker below reuses the same classes. */
 
 .mention-picker-row {
   min-height: var(--touch);
@@ -8334,6 +8170,10 @@ details[open] > .activity-summary::before {
 </style>
 
 <style scoped src="./chatTrace.css"></style>
+
+<!-- The slash-command picker: the chat and Home's composer render the same
+     listbox, and the @-mention picker shares its classes. -->
+<style scoped src="./slashCommands.css"></style>
 
 <!-- The openable dead link: a `file:` path rendered as a button the engine
      can act on. Shared with the file viewer and the pinned-file panel. -->
