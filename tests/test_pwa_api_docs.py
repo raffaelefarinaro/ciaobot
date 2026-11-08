@@ -118,6 +118,11 @@ def test_pwa_api_documents_all_explicit_app_routes() -> None:
     app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
     api_doc = (repo / "PWA_API.md").read_text(encoding="utf-8")
 
+    setup_status_row = next(
+        line for line in api_doc.splitlines() if "`/api/setup-status`" in line
+    )
+    assert "native_bootstrap" in setup_status_row
+
     route_paths = re.findall(r'(?:Route|WebSocketRoute)\("([^"]+)"', app_source)
     missing = [
         path
