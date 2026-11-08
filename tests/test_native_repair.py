@@ -8,6 +8,7 @@ effect is an injected fake, so no test touches the real HOME, LaunchAgents,
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import plistlib
@@ -1769,6 +1770,96 @@ def test_write_definition_failure_leaves_live_bytes_and_no_temp(
     assert caught.value.failure_code == "install_failed"
     assert definition.read_bytes() == b"<plist>live</plist>"
     assert sorted(p.name for p in definition.parent.iterdir()) == ["com.ciao.server.plist"]
+
+
+def test_write_definition_fchmod_failure_closes_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = tmp_path / "LaunchAgents" / "com.ciao.server.plist"
+    definition.parent.mkdir()
+    definition.write_bytes(b"<plist>live</plist>")
+    target = _target(tmp_path, definition=definition, definition_present=True)
+    captured: list[int] = []
+
+    def fchmod_fails(fd: int, _mode: int) -> None:
+        captured.append(fd)
+        raise OSError("injected fchmod failure")
+
+    monkeypatch.setattr(repair.os, "fchmod", fchmod_fails)
+    try:
+        with pytest.raises(native.NativeCoordinatorError) as caught:
+            repair._write_definition(target, b"<plist>new</plist>")
+        assert caught.value.failure_code == "install_failed"
+        with pytest.raises(OSError) as closed:
+            os.fstat(captured[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        if captured:
+            try:
+                os.close(captured[0])
+            except OSError:
+                pass
+    assert definition.read_bytes() == b"<plist>live</plist>"
+    assert sorted(p.name for p in definition.parent.iterdir()) == ["com.ciao.server.plist"]
+
+
+def test_write_definition_fdopen_failure_closes_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = tmp_path / "LaunchAgents" / "com.ciao.server.plist"
+    definition.parent.mkdir()
+    definition.write_bytes(b"<plist>live</plist>")
+    target = _target(tmp_path, definition=definition, definition_present=True)
+    captured: list[int] = []
+
+    def fdopen_fails(fd: int, *args: object, **kwargs: object) -> object:
+        captured.append(fd)
+        raise OSError("injected fdopen failure")
+
+    monkeypatch.setattr(repair.os, "fdopen", fdopen_fails)
+    try:
+        with pytest.raises(native.NativeCoordinatorError) as caught:
+            repair._write_definition(target, b"<plist>new</plist>")
+        assert caught.value.failure_code == "install_failed"
+        with pytest.raises(OSError) as closed:
+            os.fstat(captured[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        if captured:
+            try:
+                os.close(captured[0])
+            except OSError:
+                pass
+    assert definition.read_bytes() == b"<plist>live</plist>"
+    assert sorted(p.name for p in definition.parent.iterdir()) == ["com.ciao.server.plist"]
+
+
+def test_write_definition_interrupted_before_fdopen_closes_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = tmp_path / "LaunchAgents" / "com.ciao.server.plist"
+    target = _target(tmp_path, definition=definition, definition_present=False)
+    captured: list[int] = []
+
+    def interrupt(fd: int, _mode: int) -> None:
+        captured.append(fd)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(repair.os, "fchmod", interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            repair._write_definition(target, b"<plist/>")
+        with pytest.raises(OSError) as closed:
+            os.fstat(captured[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        if captured:
+            try:
+                os.close(captured[0])
+            except OSError:
+                pass
+        for path in definition.parent.glob(f".{definition.name}.*.tmp"):
+            path.unlink()
 
 
 def test_reinstall_engine_wiring_passes_force_and_retains_private_on_cleanup_failure(
