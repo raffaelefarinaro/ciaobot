@@ -1580,8 +1580,8 @@ const expandedSubagents = ref<Record<string, boolean>>({})
 const activeTheme = ref<Theme>('system')
 // The scale itself, its bounds, its step and its persistence live in
 // useFontScale, shared with the global zoom shortcuts. Only the displayed
-// percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
-// DEFAULT_FONT_SCALE (1.2) reads as "100%".
+// percentage is Settings' own: the scale is anchored to DEFAULT_FONT_SCALE,
+// which reads as "100%".
 const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
 const appearance = useAppearanceSettings()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))

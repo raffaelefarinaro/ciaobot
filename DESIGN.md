@@ -203,6 +203,8 @@ The product uses a **hybrid typography system** (the proportional face is the op
 
 - **Titles:** 15–16px, bold, with slightly tight tracking. Titles should remain visible when actions compete for space.
 - **Body:** 14px on desktop with comfortable 1.6 line height for natural reading.
+- **Font scale:** every size is multiplied by `--font-scale`, whose default is `1.15` (`DEFAULT_FONT_SCALE` in `useFontScale.ts`): 14 × 1.15 = 16.1px body, the platform's 16px body, with Settings showing that as 100%. A stored scale still multiplies every token. On a phone the composer uses the same body size, floored at 16px so iOS never zooms a focused field, so typed and sent text are the same size.
+- **Chat prose:** a request keeps 1.5 leading; a reply uses 1.55. Markdown headings inside a reply are 1.35em / 1.18em / 1.08em (h1/h2/h3) of the message font.
 - **Mobile form text:** At least 16px to prevent browser auto-zoom while keeping user zoom available.
 - **Labels & Badges:** Monospaced 11px, semibold, often uppercase with 0.5px tracking for technical precision.
 - **Wordmark:** Bold monospace `ciaobot`, led in the sidebar by the Ciaobot face as a one-colour pixel mark (`CiaoMark.vue`, traced from `face.png` in three tones of `currentColor`) drawn in the workspace accent. A blinking caret may appear only in startup or explicitly terminal-like moments.

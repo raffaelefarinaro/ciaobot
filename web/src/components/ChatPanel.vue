@@ -6147,7 +6147,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   padding: 0;
   background: transparent;
   border: 0;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
 /* A message's actions and the turn's facts. The row is always laid out, so it
@@ -6525,9 +6525,9 @@ details[open] > .activity-summary::before {
   line-height: 1.35;
   font-weight: 700;
 }
-.message-content :deep(h1) { font-size: 1.5em; }
-.message-content :deep(h2) { font-size: 1.25em; }
-.message-content :deep(h3) { font-size: 1.1em; }
+.message-content :deep(h1) { font-size: 1.35em; }
+.message-content :deep(h2) { font-size: 1.18em; }
+.message-content :deep(h3) { font-size: 1.08em; }
 
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
@@ -7121,6 +7121,14 @@ details[open] > .activity-summary::before {
   line-height: 1.45;
 }
 
+/* iOS auto-zoom floor at every width. The composer follows the body token
+   (so typed and sent text agree) and must still never drop under 16px, which
+   is the size Safari zooms below on focus. A wide touch device (an iPhone in
+   landscape, an iPad) has no phone rule to fall back on. */
+@media (pointer: coarse) {
+  .chat-input { font-size: max(16px, var(--text-base)); }
+}
+
 /* The command surface (same shape as Home's HomeIntake): attachments,
    the prompt, then one bar of controls under a hairline. */
 .composer-surface {
@@ -7250,7 +7258,6 @@ details[open] > .activity-summary::before {
 }
 
 @media (max-width: 700px) {
-  .chat-input { font-size: max(16px, calc(16px * var(--font-scale))); }
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
   .composer-move-bg-long { display: none; }
@@ -8136,12 +8143,10 @@ details[open] > .activity-summary::before {
   .message-wrap { width: 96%; max-width: 96%; }
   .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 10px 14px; }
-  /* Keep input and placeholder at the same size so the text doesn't jump
-     when the user starts typing. 16px is the iOS auto-zoom floor: any
-     smaller and Safari zooms the page on focus, which is worse than a
-     slightly truncated placeholder. */
-  .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
-  .chat-input::placeholder { font-size: 16px; }
+  /* The field keeps the coarse-pointer floor and size from the shared rules;
+     a phone only tightens its padding and leading. The placeholder inherits
+     the field's size, so typing never moves the text. */
+  .chat-input { padding: 12px 12px; line-height: 1.25; }
   /* Keep every composer action at the shared touch-target minimum. The footer
      lock is the 61px minimum; the bottom padding carries the platform's safe
      inset so the surface sits 8px above the usable edge. */

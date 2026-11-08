@@ -189,10 +189,10 @@ watch(shouldPollStartup, (shouldPoll) => {
 
 <style>
 :root {
-  /* Font scale multiplier. The reference is the original (pre-rescale) UI;
-     the default 1.2 corresponds to "100%" in the Settings display, so the
-     slider's display math (scale / 1.2 * 100) yields 100 at this value. */
-  --font-scale: 1.2;
+  /* Font scale multiplier. The default is the platform's 16px body, not a
+     designed 120%: the body token is 14px, so 14 × 1.15 = 16.1px. Settings
+     still shows it as "100%" (scale / DEFAULT_FONT_SCALE * 100). */
+  --font-scale: 1.15;
 
   /* Surface */
   --bg: #1a1a2e;        /* page */
@@ -712,9 +712,12 @@ input:focus, textarea:focus, select:focus {
    override the global input rule with smaller text tokens; this carve-out
    pins every input/textarea/select to 16px when the pointer is coarse, no
    matter what scoped styles say. Pairs with the (pointer: fine) tightening
-   above: trackpad/desktop stays tight, touch stays zoom-stable. */
+   above: trackpad/desktop stays tight, touch stays zoom-stable. The chat
+   composer is the exception: ChatPanel gives it its own body-token floor
+   (`max(16px, var(--text-base))` under a coarse pointer) so typed text and
+   the sent message agree at every width. */
 @media (pointer: coarse) {
-  input, textarea, select { font-size: 16px !important; }
+  input:not(.chat-input), textarea:not(.chat-input), select { font-size: 16px !important; }
 }
 
 /* ── Shared page layout (schedules, settings, login) ─────────── */

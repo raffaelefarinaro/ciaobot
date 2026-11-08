@@ -219,7 +219,11 @@ if its computed `font-size` is below 16px. The global input rule in
 `App.vue` already pins mobile inputs at `16px * var(--font-scale)`, and a
 `@media (pointer: coarse)` carve-out re-pins them to a flat `16px` so
 component-level overrides (markdown editor, comment compose) cannot drop
-back below the zoom threshold. The desktop tightening override is gated on
+back below the zoom threshold. The chat composer is the one exception: it is
+excluded from that flat pin and carries its own width-independent
+`max(16px, var(--text-base))` floor under a coarse pointer, so its size
+follows the transcript's body token (typed and sent text agree) without ever
+falling under 16px. The desktop tightening override is gated on
 `(pointer: fine)` rather than `(min-width: 769px)` so wide touch devices
 (iPad portrait/landscape) never get the smaller typography. Do not weaken
 either rule.
