@@ -311,11 +311,11 @@ The macOS walk above does not touch the Windows engine, and there is no Windows 
 
 1. Restore the clean snapshot (or create a new account that has never had Ciaobot).
 2. Install: `irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex` (or the `-ReleaseDir`/`-Version` form for a candidate that is not published). Expect a sign-in URL and no error.
-3. In a **new** terminal: `ciao --version` prints the candidate version, and `ciao service status` reports the engine as running.
+3. In a **new** terminal: `uv tool list` shows `ciaobot v<candidate>`, and `ciao service status` reports the engine as running.
 4. Open the sign-in URL, sign in, and run one real chat turn with each installed provider.
 5. Settings -> Restart: the engine comes back (this is the exit-code-75 path under `ciao supervise`).
 6. Sign out and back in (or reboot and sign in): the engine starts by itself.
-7. Uninstall: run the installer with `-Uninstall`. Expect `Ciaobot is uninstalled.`, `schtasks /Query /TN \Ciaobot\Engine` failing, the PATH entry gone, and the workspace folder still present.
+7. Uninstall: run the installer with `-Uninstall`. Expect `Ciaobot is uninstalled.`, `schtasks /Query /TN \Ciaobot\Engine` failing, the PATH entry removed only if the installer added it and the tool bin directory is empty (a shared uv tools directory can keep it on PATH), and the workspace folder still present.
 8. Record the VM snapshot, the commit, the date and pass/fail per step in the #696 parity matrix. Anything broken becomes an issue; this skill does not fix it.
 
 Engine update and rollback are not part of this smoke until #857 lands; add them then.

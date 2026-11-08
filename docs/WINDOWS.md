@@ -234,8 +234,9 @@ What differs from macOS:
 
 This ends and deletes the `\Ciaobot\Engine` task and its XML, uninstalls the
 engine's `uv tool` environment, deletes the install receipt and the installer's
-state file, and removes the `PATH` entry the installer added (and only that
-entry). It leaves `uv` in place, because it runs other tools, and it leaves your
+state file, and removes the `PATH` entry only if the installer added it and the
+tool bin directory is empty; a shared uv tools directory can keep it on `PATH`.
+It leaves `uv` in place, because it runs other tools, and it leaves your
 workspace folder untouched; the script prints where the workspace is. Delete the
 folder yourself if you want your notes gone.
 
