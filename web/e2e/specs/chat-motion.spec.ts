@@ -1,16 +1,32 @@
 import { expect, test } from '@playwright/test'
 import { COMPOSER, boot, isolate } from '../support/app'
 
+/** The flag the page-side observer sets; declared here so the spec needs no `any`. */
+interface ChatRiseWindow { __sawChatRise?: boolean }
+
 /**
  * Motion that only a real layout can show: a chat opened from Home rises (the
  * reverse of pulling it down), archiving moves to the next chat rather than Home,
  * and the phone drawer slides out on close the way it slides in on open.
  */
-test('a chat opened from Home rises into place, then settles', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-rise'); await boot(page, '/', '.empty-shell')
+test('a chat opened from Home rises into place, then settles', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-rise'); await boot(page, '/', '.empty-shell:not(.home-boot)')
+  // The rise only starts 800 ms after bootstrap (bootSettledAt in ChatLayout.vue), so wait for bootstrap first.
   await page.waitForTimeout(900)
+  // The class lives only for the 320 ms rise, so polling for it can miss it on a loaded
+  // runner. Latch it in the page the moment any chat panel carries it, before the click.
+  await page.evaluate(() => {
+    const w = window as unknown as ChatRiseWindow
+    const isRising = (el: Element) => el.matches('.chat-panel.chat-rise') || el.querySelector('.chat-panel.chat-rise') !== null
+    new MutationObserver(records => {
+      for (const r of records) {
+        if (r.target instanceof Element && r.type === 'attributes' && isRising(r.target)) w.__sawChatRise = true
+        for (const n of r.addedNodes) if (n instanceof Element && isRising(n)) w.__sawChatRise = true
+      }
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true })
+  })
   await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
-  await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(1)
-  await page.waitForTimeout(500); await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(0) })
+  await expect.poll(() => page.evaluate(() => (window as unknown as ChatRiseWindow).__sawChatRise === true)).toBe(true)
+  await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(0) })
 test('archiving a chat opens the next one in the title rail order instead of Home', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-archive'); await boot(page, '/chat/alpha-chat-1', COMPOSER)
   await page.getByRole('button', { name: /^Archive/ }).first().click()
   await page.getByRole('button', { name: 'Archive', exact: true }).last().click()
