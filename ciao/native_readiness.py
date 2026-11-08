@@ -1110,18 +1110,8 @@ def parse_listener_pid(stdout: str) -> int | None:
     ``lsof`` can print its pid once per socket. Repeating the same pid is still
     one listener; two different pids are ambiguous and refused.
     """
-    pids: set[int] = set()
-    for line in stdout.splitlines():
-        text = line.strip()
-        if not text:
-            continue
-        pid = _decimal_pid(text)
-        if pid is None:
-            return None
-        pids.add(pid)
-    if len(pids) != 1:
-        return None
-    return next(iter(pids))
+    pids = parse_listener_pids(stdout)
+    return next(iter(pids)) if pids is not None and len(pids) == 1 else None
 
 
 def parse_launchd_job(stdout: str) -> LaunchdJob | None:

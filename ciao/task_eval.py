@@ -1935,6 +1935,10 @@ def _fake_send(flags: dict[str, str], n: int, *, thread: str | None, to: str | N
         return _FakeReply(effect, stdout, thread_id=thread, to=to, body=body)
     if effect == "draft_created":
         return _fake_draft_reply(n, thread, to=to, body=body)
+    return _fake_sent_reply(n, thread, to=to, body=body)
+
+
+def _fake_sent_reply(n: int, thread: str | None, *, to: str | None, body: str | None) -> _FakeReply:
     return _FakeReply(
         effect="sent",
         stdout=json.dumps({"id": f"eval-sent-{n}", "threadId": thread, "labelIds": ["SENT"]}) + "\n",
@@ -2065,14 +2069,7 @@ def _fake_api(
     if key in (("messages", "send"), ("drafts", "send")):
         payload = _fake_json_flag(flags, "json")
         thread, to, body = _fake_compose(payload, messages)
-        return _FakeReply(
-            effect="sent",
-            stdout=json.dumps({"id": f"eval-sent-{n}", "threadId": thread, "labelIds": ["SENT"]}) + "\n",
-            thread_id=thread,
-            message_id=f"eval-sent-{n}",
-            to=to,
-            body=body,
-        )
+        return _fake_sent_reply(n, thread, to=to, body=body)
     if rest[:1] == ["messages"] and len(rest) > 1 and rest[1] in _FAKE_MODIFY_METHODS:
         return _FakeReply(effect="modified", stdout="{}\n")
     return _fake_error(2, 2, f"unknown API method: {' '.join(rest) or '(none)'}", "unknown")
