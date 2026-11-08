@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -42,6 +44,8 @@ __all__ = [
     "MCP_AUTH_FLOWS",
     "McpAuthHandler",
     "OpencodeMcpAuthFlow",
+    "SYSTEM_SETTING_URLS",
+    "SystemSettingHandler",
 ]
 
 logger = logging.getLogger(__name__)
@@ -292,6 +296,61 @@ class RestartHandler(ActionHandler):
         return "The user saw your restart request."
 
 
+_PRIVACY_PANE = "x-apple.systempreferences:com.apple.preference.security"
+#: The constant URL each privacy pane opens. The model names a pane; it never supplies a URL.
+SYSTEM_SETTING_URLS: dict[str, str] = {
+    "full_disk_access": f"{_PRIVACY_PANE}?Privacy_AllFiles",
+    "calendars": f"{_PRIVACY_PANE}?Privacy_Calendars",
+    "contacts": f"{_PRIVACY_PANE}?Privacy_Contacts",
+    "reminders": f"{_PRIVACY_PANE}?Privacy_Reminders",
+    "photos": f"{_PRIVACY_PANE}?Privacy_Photos",
+    "screen_recording": f"{_PRIVACY_PANE}?Privacy_ScreenCapture",
+    "accessibility": f"{_PRIVACY_PANE}?Privacy_Accessibility",
+    "automation": f"{_PRIVACY_PANE}?Privacy_Automation",
+    "camera": f"{_PRIVACY_PANE}?Privacy_Camera",
+    "microphone": f"{_PRIVACY_PANE}?Privacy_Microphone",
+}
+SYSTEM_SETTING_TITLES: dict[str, str] = {
+    "full_disk_access": "Full Disk Access", "calendars": "Calendars", "contacts": "Contacts",
+    "reminders": "Reminders", "photos": "Photos", "screen_recording": "Screen & System Audio Recording",
+    "accessibility": "Accessibility", "automation": "Automation", "camera": "Camera", "microphone": "Microphone",
+}
+SYSTEM_SETTING_OFF_MAC_ERROR = "System Settings is only available when Ciaobot runs on macOS."
+SYSTEM_SETTING_OPEN_ERROR = "System Settings could not be opened. Open it from the Apple menu."
+
+
+def _open_system_settings(url: str) -> None:
+    subprocess.run(["open", url], check=True, timeout=10)
+
+
+class SystemSettingHandler(ActionHandler):
+    """Opens one macOS Privacy & Security pane on the engine's own Mac, from a constant URL."""
+
+    async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
+        if not ctx.is_loopback:
+            raise ChatActionError("not_local")  # action unchanged; the route answers 400
+        cid = ctx.chat.chat_id
+        url = SYSTEM_SETTING_URLS.get(action.params.get("setting", ""))
+        if sys.platform != "darwin" or url is None:
+            ctx.pcm.update_action(cid, action.id, state="failed", error=SYSTEM_SETTING_OFF_MAC_ERROR)
+            return
+        try:
+            await asyncio.to_thread(_open_system_settings, url)
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("System Settings could not be opened for chat %s: %s", cid, type(exc).__name__)
+            ctx.pcm.update_action(cid, action.id, state="failed", error=SYSTEM_SETTING_OPEN_ERROR)
+            return
+        ctx.pcm.update_action(cid, action.id, state="done")
+
+    def wake_prompt(self, action: ChatAction) -> str:
+        title = SYSTEM_SETTING_TITLES.get(action.params.get("setting", ""), "the requested pane")
+        return (
+            f"The user opened System Settings → Privacy & Security → {title}. "
+            "Try the step that was blocked again; if it still fails, the app may need to be restarted "
+            "for the change to apply."
+        )
+
+
 MODE_WAKE_DESCRIPTIONS: dict[str, str] = {
     "plan": "read-only, propose changes",
     "normal": "ask before every action",
@@ -342,6 +401,7 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "command": CommandActionHandler(),
     "restart": RestartHandler(),
     "permission_mode": PermissionModeHandler(),
+    "system_setting": SystemSettingHandler(),
     "device_code": DeviceCodeFlow(),
     "gws_auth": GwsAuthHandler(),
 }

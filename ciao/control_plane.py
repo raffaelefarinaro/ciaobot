@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -2930,6 +2931,9 @@ class CiaoControlPlane:
             ) from None
         # Kind-specific raise-time refusals, on validated params, go here:
         # J (system_setting: macOS hosts only).
+        if kind == "system_setting" and sys.platform != "darwin":
+            raise ControlPlaneError("invalid_action", "System Settings panes exist only when Ciaobot runs on macOS.")
+        # F (gws_auth: only the workspace's linked profile).
         if kind == "gws_auth":
             from ciao import gws_auth
 

@@ -275,6 +275,30 @@ def _validate_permission_mode(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+#: The macOS privacy panes a `system_setting` card may open. Each maps to a constant URL in the runtime.
+SYSTEM_SETTINGS: tuple[str, ...] = (
+    "full_disk_access", "calendars", "contacts", "reminders", "photos",
+    "screen_recording", "accessibility", "automation", "camera", "microphone",
+)
+
+
+def _validate_system_setting(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `system_setting` kind: a macOS Privacy & Security pane, by name from a closed set."""
+    if set(raw) - {"setting", "note"}:
+        raise ChatActionError("unknown_param")
+    if "setting" not in raw:
+        raise ChatActionError("missing_param")
+    setting = raw["setting"]
+    if not isinstance(setting, str):
+        raise ChatActionError("invalid_type")
+    if setting not in SYSTEM_SETTINGS:  # exact case, no strip
+        raise ChatActionError("invalid_param")
+    params = {"setting": setting}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    return params
+
+
 #: The device-code tools the card may sign in (a closed set; exact match).
 _DEVICE_TOOLS = ("gh", "az")
 _DEVICE_CODE_RE = re.compile(r"^[A-Z0-9-]{4,16}$")
@@ -362,11 +386,13 @@ _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "command": _validate_command,
     "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
+    "system_setting": _validate_system_setting,
     "device_code": _validate_device_code,
     "gws_auth": _validate_gws_auth,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {
     "mcp_auth": ("server",),
+    "system_setting": ("setting",),
     "device_code": ("tool",),
     "gws_auth": ("profile",),
 }
