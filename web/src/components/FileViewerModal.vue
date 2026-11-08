@@ -47,7 +47,7 @@
             @click="store.startEditing"
           >Edit</button>
           <button
-            v-if="store.path"
+            v-if="store.path && !store.imageUrl"
             type="button"
             class="fv-text-btn fv-discuss-btn"
             title="Discuss in chat"
@@ -73,10 +73,10 @@
             <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
               <div class="fv-actions-menu">
                 <!-- On a phone Discuss moves here, so the filename keeps the bar. -->
-                <DropdownMenuItem v-if="store.path" as-child class="fv-menu-discuss" @select="discussInChat">
+                <DropdownMenuItem v-if="store.path && !store.imageUrl" as-child class="fv-menu-discuss" @select="discussInChat">
                   <button type="button">Discuss in chat</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child @select.prevent="copyPath">
+                <DropdownMenuItem as-child :disabled="!!store.imageUrl" @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
@@ -782,13 +782,14 @@ const copyState = ref<'' | 'ok'>('')
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 // The file opens on the engine's machine, so only offer it there: from a phone
 // or another Mac it would open on a screen nobody is looking at.
-const canOpenExternally = isLoopbackPage()
+const canOpenExternally = computed(() => isLoopbackPage() && !store.imageUrl)
 
 // The chat on screen whose split view can take the file; '' where there is
 // none (a phone, a project page, Home, Settings, the memory map). Pinning
 // anywhere else would put the file beside a chat that is not shown.
 const activePinKey = computed(() => store.dockTarget)
-const canPin = computed(() => !!activePinKey.value)
+// A served image has no workspace path to pin, copy, or open elsewhere.
+const canPin = computed(() => !!activePinKey.value && !store.imageUrl)
 const isPinned = computed(() => {
   if (!activePinKey.value) return false
   return projectsStore.pinnedFileFor(activePinKey.value) === cleanPath(store.path)
@@ -1016,7 +1017,7 @@ useTypeToComment({
   addImages: (files: File[]) => addDraftImages(files),
 })
 
-const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
+const imageSrc = computed(() => store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
 // Why the current image URL failed to load; empty while it has not failed.
 const imageError = ref('')
 async function onImageError(): Promise<void> {
@@ -1177,7 +1178,7 @@ async function openExternally(): Promise<void> {
 
 async function discussInChat(): Promise<void> {
   const path = store.path
-  if (!path) return
+  if (!path || store.imageUrl) return
   // Comments pending on this file are appended by startFileDiscussion; the
   // "help me understand" nudge only fits the case where there are none.
   const seed = projectsStore.fileComments[path]?.length
@@ -1200,7 +1201,7 @@ function downloadFile(): void {
   const a = document.createElement('a')
   a.download = name || 'download'
   if (store.kind === 'image') {
-    a.href = `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
+    a.href = store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
   } else if (store.kind === 'pdf') {
     a.href = `/api/workspace-binary?path=${encodeURIComponent(cleaned)}&raw=1`
   } else if (store.kind === 'html') {
@@ -1228,7 +1229,9 @@ async function shareFile(): Promise<void> {
     if (store.kind === 'image' || store.kind === 'pdf' || store.kind === 'html') {
       const endpoint = store.kind === 'image' ? '/api/workspace-image'
         : store.kind === 'pdf' ? '/api/workspace-binary' : '/api/workspace-file'
-      const url = `${endpoint}?path=${encodeURIComponent(cleaned)}${store.kind === 'pdf' ? '&raw=1' : ''}`
+      const url = store.kind === 'image' && store.imageUrl
+        ? store.imageUrl
+        : `${endpoint}?path=${encodeURIComponent(cleaned)}${store.kind === 'pdf' ? '&raw=1' : ''}`
       const response = await fetch(url, { credentials: 'same-origin' })
       if (!response.ok) throw new Error('Could not load the file to share.')
       const blob = await response.blob()
@@ -1248,7 +1251,9 @@ watch(
   () => [store.isOpen, store.path, store.chatId, projectsStore.streaming[store.chatId]] as const,
   ([isOpen, path, chatId, isStreaming], oldValues) => {
     const wasStreaming = oldValues ? oldValues[3] : false
-    if (isOpen && path && chatId && wasStreaming && !isStreaming) {
+    // A served image has no workspace path: re-opening it as one on stream end
+    // would replace the picture with a file-not-found error.
+    if (isOpen && path && chatId && !store.imageUrl && wasStreaming && !isStreaming) {
       store.open(path, store.line, chatId)
     }
   }

@@ -29,6 +29,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const isOpen = ref(false)
   const kind = ref<FileViewerKind>('text')
   const path = ref('')
+  // '' = a workspace-path image (the existing `<path>` mode); a served chat
+  // attachment opens by URL, which `/api/workspace-image` cannot resolve.
+  const imageUrl = ref('')
   const line = ref<number | null>(null)
   const content = ref('')
   const loading = ref(false)
@@ -142,6 +145,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   function _reset(): void {
     kind.value = 'text'
+    imageUrl.value = ''
     htmlView.value = 'preview'
     sourceLoading.value = false
     sourceError.value = ''
@@ -336,6 +340,19 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     if (view === 'code') await loadSource()
   }
 
+  // A served image (a chat message attachment) has no workspace path: render
+  // its URL directly and make no request until the `<img>` loads it.
+  function openImageUrl(url: string, name: string, chat = ''): void {
+    if (!url) return
+    _reset()
+    isOpen.value = true
+    kind.value = 'image'
+    path.value = name || 'image'
+    imageUrl.value = url
+    chatId.value = chat
+    loadToken.value++
+  }
+
   async function openImage(filePath: string, chat: string = ''): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
     if (await dockInstead(filePath, chat)) return true
@@ -456,6 +473,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     isOpen,
     kind,
     path,
+    imageUrl,
     line,
     content,
     loading,
@@ -479,6 +497,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     // actions
     open,
     openImage,
+    openImageUrl,
     openSharedPin,
     setDockTarget,
     loadSource,
