@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { installViewportPlumbing, stopViewportPlumbing, viewportHeight } from '../viewport'
+import { installViewportPlumbing, stopViewportPlumbing } from '../viewport'
 
 afterEach(() => {
   stopViewportPlumbing()
@@ -9,10 +9,9 @@ afterEach(() => {
 })
 
 describe('viewport plumbing', () => {
-  it('sets --app-h from the visible viewport', () => {
+  it('leaves --app-h unset while the keyboard is closed', () => {
     installViewportPlumbing()
-    expect(document.documentElement.style.getPropertyValue('--app-h'))
-      .toBe(`${viewportHeight()}px`)
+    expect(document.documentElement.style.getPropertyValue('--app-h')).toBe('')
   })
 
   // The settling timers fire up to 500ms out. Under vitest that can land after

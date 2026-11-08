@@ -8142,9 +8142,17 @@ details[open] > .activity-summary::before {
      slightly truncated placeholder. */
   .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
-  /* Keep every composer action at the shared touch-target minimum.
-     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop. */
-  .input-bar { min-height: 61px; padding-top: 8px; padding-bottom: 8px; }
+  /* Keep every composer action at the shared touch-target minimum. The footer
+     lock is the 61px minimum; the bottom padding carries the platform's safe
+     inset so the surface sits 8px above the usable edge. */
+  .input-bar {
+    min-height: 61px;
+    padding-top: 8px;
+    padding-bottom: calc(8px + var(--safe-bottom));
+  }
+  /* The last transcript row sits 16px above the composer surface: this 8px
+     plus the bar's 8px top padding. */
+  .messages { padding-bottom: 8px; }
   .chat-input { height: var(--touch); min-height: var(--touch); }
   .input-actions .send-btn {
     min-width: var(--touch);
