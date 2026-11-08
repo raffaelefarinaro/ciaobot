@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -1116,6 +1117,20 @@ class GwsHealthMonitor:
 # ── Reliable re-login (in-process loopback callback server) ───────────────
 
 
+# Messages for a redirect address pasted back from another device. Each is a
+# fixed string: the pasted URL is never echoed (it carries the code and state).
+RELOGIN_NO_PENDING = "No Google sign-in is waiting. Start again."
+RELOGIN_BAD_REDIRECT = (
+    "Paste the full address from the browser's address bar. It starts with http://127.0.0.1:"
+)
+RELOGIN_STATE_MISMATCH = "That address is from a different sign-in. Start again."
+_MAX_PASTED_REDIRECT_CHARS = 4096
+# The `error` query value comes from the redirect, so it is shown only when it
+# looks like an OAuth error code (a short token); anything else gets a fixed line.
+_GOOGLE_ERROR_CODE = re.compile(r"[a-z0-9_.-]{1,64}", re.IGNORECASE)
+RELOGIN_GOOGLE_ERROR = "Google returned an error."
+
+
 @dataclass
 class _ReloginSession:
     profile: str
@@ -1135,6 +1150,9 @@ class _ReloginSession:
     # fix (that's the manual/paste flows), but it is a small, safe addition
     # since the session already carries per-flow state end to end.
     code_verifier: str = ""
+    # Set (under the manager's lock) by the one caller that runs the exchange,
+    # so the listener thread and a paste-back thread cannot both redeem the code.
+    finishing: bool = False
     _done: threading.Event = field(default_factory=threading.Event)
 
 
@@ -1317,8 +1335,10 @@ class GwsReloginManager:
         error: str | None = None,
     ) -> None:
         """Called from the callback handler thread with the captured redirect."""
-        if session.status != "pending":
-            return
+        with self._lock:
+            if session.status != "pending" or session.finishing:
+                return
+            session.finishing = True
         if error:
             session.status = "error"
             session.error = error
@@ -1341,6 +1361,60 @@ class GwsReloginManager:
         # Tear the listener down after a single redirect (off the serving thread).
         self._shutdown_server(session)
 
+    def _handle_callback_query(
+        self, session: _ReloginSession, query: dict[str, list[str]]
+    ) -> tuple[bool, str] | None:
+        """Apply one redirect's query to *session*. None = state mismatch (ignored, the code is not touched)."""
+        error = (query.get("error") or [""])[0]
+        got_state = (query.get("state") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        if error:
+            if _GOOGLE_ERROR_CODE.fullmatch(error):
+                message = f"Google returned error: {error}"
+            else:
+                message = RELOGIN_GOOGLE_ERROR
+            self._finish(session, error=message)
+            return False, "Google reported an error. You can close this tab."
+        if not hmac.compare_digest(got_state.encode("utf-8"), session.state.encode("utf-8")):
+            return None
+        if not code:
+            self._finish(session, error="No authorization code in redirect.")
+            return False, "No authorization code received."
+        self._finish(session, code=code)
+        ok = session.status == "completed"
+        return ok, (
+            "Google Workspace re-login complete. You can close this tab and return to Ciaobot."
+            if ok
+            else "Re-login failed. Return to Ciaobot for details."
+        )
+
+    def complete_from_redirect(self, profile: str, url: str) -> dict[str, Any]:
+        """Finish a pending re-login from the redirect address the user pasted (another device).
+
+        No HTTP request is made: the pasted query goes through the same path as the listener.
+        Raises ValueError with one of the RELOGIN_* messages; never echoes the URL.
+        """
+        with self._lock:
+            session = self._sessions.get(profile)
+        if session is None or session.status != "pending" or session.finishing:
+            raise ValueError(RELOGIN_NO_PENDING)
+        raw = (url or "").strip()
+        if len(raw) > _MAX_PASTED_REDIRECT_CHARS:
+            raise ValueError(RELOGIN_BAD_REDIRECT)
+        try:
+            parsed = urllib.parse.urlparse(raw)
+            port = parsed.port
+        except ValueError:
+            raise ValueError(RELOGIN_BAD_REDIRECT) from None
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or port != session.port:
+            raise ValueError(RELOGIN_BAD_REDIRECT)
+        query = urllib.parse.parse_qs(parsed.query)
+        got_state = (query.get("state") or [""])[0]
+        if not hmac.compare_digest(got_state.encode("utf-8"), session.state.encode("utf-8")):
+            raise ValueError(RELOGIN_STATE_MISMATCH)
+        self._handle_callback_query(session, query)
+        return self.status(profile)
+
     def _make_handler(self, profile: str, expected_state: str):
         manager = self
 
@@ -1352,31 +1426,11 @@ class GwsReloginManager:
             def do_GET(self) -> None:  # noqa: N802
                 session: _ReloginSession = self.server._ciao_session  # type: ignore[attr-defined]
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                got_state = (query.get("state") or [""])[0]
-                error = (query.get("error") or [""])[0]
-                code = (query.get("code") or [""])[0]
-
-                if error:
-                    manager._finish(session, error=f"Google returned error: {error}")
-                    self._respond(False, "Google reported an error. You can close this tab.")
-                    return
-                if got_state != expected_state:
-                    # Do not touch the code for a mismatched state.
+                result = manager._handle_callback_query(session, query)
+                if result is None:
                     self._respond(False, "Ignoring an unexpected callback.")
                     return
-                if not code:
-                    manager._finish(session, error="No authorization code in redirect.")
-                    self._respond(False, "No authorization code received.")
-                    return
-                manager._finish(session, code=code)
-                ok = session.status == "completed"
-                self._respond(
-                    ok,
-                    "Google Workspace re-login complete. You can close this tab "
-                    "and return to Ciaobot."
-                    if ok
-                    else "Re-login failed. Return to Ciaobot for details.",
-                )
+                self._respond(*result)
 
             def _respond(self, ok: bool, message: str) -> None:
                 body = (

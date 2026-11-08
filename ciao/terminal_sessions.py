@@ -1295,7 +1295,8 @@ class TerminalSessionManager:
             # session is announced as exited: a caller that sees
             # ``exited`` can rely on the process being closed, and the
             # close (which reaps the shell) cannot be observed half
-            # done.
+            # done. A status that lags end of file is read again
+            # after the close, below.
             session.exit_code = _poll_quietly(process)
             session.shell_gone = True
             try:
@@ -1303,6 +1304,13 @@ class TerminalSessionManager:
                     # A natural end releases the process here: the shell
                     # is gone and its job groups go with it.
                     await self._close_session_process(session)
+                    if session.exit_code is None:
+                        # The pty reaches end of file as the shell exits,
+                        # which can be a moment before the kernel will
+                        # hand its status over. The close has normally
+                        # reaped it, so the code can be read now; without this a
+                        # shell that exited 0 reads as "exit code None".
+                        session.exit_code = _poll_quietly(process)
                     # There is nothing left to control, so the
                     # controller is released and the detached deadline
                     # starts: an exited record ages out like any other

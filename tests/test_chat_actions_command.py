@@ -16,8 +16,10 @@ import pytest
 
 from ciao import agent_cli
 from ciao.chat_actions import (
+    COMMAND_MAX_BYTES,
     ChatActionError,
     _VALIDATORS,
+    normalize_command,
     normalize_note,
     validate_params,
 )
@@ -98,6 +100,202 @@ def test_a_kind_without_a_validator_is_unsupported(monkeypatch: pytest.MonkeyPat
     with pytest.raises(ChatActionError) as excinfo:
         validate_params("command", {"command": "ls"})
     assert excinfo.value.reason == "unsupported_kind"
+
+
+# ── The text contract ─────────────────────────────────────────────────────
+
+
+def test_a_command_of_exactly_the_byte_bound_is_accepted() -> None:
+    """4096 bytes is inside the bound; the limit is not off by one."""
+    command = "a" * COMMAND_MAX_BYTES
+
+    assert normalize_command(command) == command
+
+
+def test_one_byte_over_the_bound_is_refused() -> None:
+    with pytest.raises(ChatActionError):
+        normalize_command("a" * (COMMAND_MAX_BYTES + 1))
+
+
+def test_the_bound_counts_bytes_not_characters() -> None:
+    """A multibyte command is measured as it is stored, not as it is typed.
+
+    1365 three-byte characters are 4095 bytes and fit; 1366 are 4098 and do
+    not, even though both are well under 4096 characters.
+    """
+    assert normalize_command("€" * 1365) == "€" * 1365
+
+    with pytest.raises(ChatActionError):
+        normalize_command("€" * 1366)
+
+
+def test_the_raw_bound_applies_before_the_text_is_trimmed() -> None:
+    """A command that arrives huge is refused even when it trims to nothing.
+
+    The bound is on what arrived, not on what would be kept: 4096 spaces
+    around "ls" is 4098 raw bytes, and the text that would be stored is two
+    characters. One space fewer is exactly the bound, and it is accepted.
+    """
+    with pytest.raises(ChatActionError) as excinfo:
+        normalize_command(" " * 4096 + "ls")
+    assert excinfo.value.reason == "too_long"
+
+    assert normalize_command(" " * 4094 + "ls") == "ls"
+
+    # The same in bytes rather than characters: 1365 three-byte characters
+    # are 4095 bytes and fit on their own, so two spaces around them are
+    # already over the raw bound even though the text that would be kept
+    # still fits.
+    with pytest.raises(ChatActionError) as excinfo:
+        normalize_command("  " + "€" * 1365)
+    assert excinfo.value.reason == "too_long"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, 7, 3.5, True, b"ls -la", ["ls"], {"command": "ls"}, object()],
+    ids=[
+        "none",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "list",
+        "dict",
+        "object",
+    ],
+)
+def test_a_value_that_is_not_text_is_refused(value: object) -> None:
+    with pytest.raises(ChatActionError):
+        normalize_command(value)
+
+
+def test_a_lone_surrogate_is_refused() -> None:
+    """A surrogate is not text: it has no UTF-8 encoding at all.
+
+    The card copies the command into a shell, so a value that cannot be
+    encoded has to be refused rather than mangled.
+    """
+    with pytest.raises(ChatActionError):
+        normalize_command("ls -la \ud800")
+
+
+@pytest.mark.parametrize(
+    "character",
+    [
+        "\x00",  # NUL
+        "\x07",  # BEL
+        "\x0b",  # vertical tab
+        "\x1b",  # ESC
+        "\x7f",  # DEL
+        "\x85",  # C1 NEL
+        "\x9b",  # C1 CSI
+        "\u202a",  # RLO
+        "\u202e",  # PDF
+        "\u2066",  # LRI
+        "\u2069",  # PDI
+        "\u200b",  # zero-width space
+        "\u2028",  # line separator
+        "\u2029",  # paragraph separator
+    ],
+    ids=[
+        "nul",
+        "bel",
+        "vt",
+        "esc",
+        "del",
+        "c1-nel",
+        "c1-csi",
+        "bidi-rlo",
+        "bidi-pdf",
+        "bidi-lri",
+        "bidi-pdi",
+        "zero-width-space",
+        "line-separator",
+        "paragraph-separator",
+    ],
+)
+def test_a_control_or_invisible_character_is_refused(character: str) -> None:
+    """Invisible characters are refused, not stripped.
+
+    A right-to-left override or a zero-width space inside a command is
+    invisible on the card and changes what the user copies into their shell,
+    so it never reaches the state at all.
+    """
+    with pytest.raises(ChatActionError):
+        normalize_command(f"ls{character}-la")
+
+
+def test_line_feeds_and_tabs_are_allowed() -> None:
+    """A multi-line command is ordinary: a shell script is several lines."""
+    assert normalize_command("cd /tmp\n\tls -la") == "cd /tmp\n\tls -la"
+
+
+def test_carriage_returns_become_line_feeds() -> None:
+    """CRLF and a bare CR are line endings, not control characters."""
+    assert normalize_command("ls\r\n-la\r") == "ls\n-la"
+
+
+def test_outer_whitespace_is_stripped() -> None:
+    assert normalize_command("  ls -la  ") == "ls -la"
+    assert normalize_command("\n ls -la \n") == "ls -la"
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\n", "\t\n "], ids=["empty", "spaces", "newline", "mixed"])
+def test_a_command_with_nothing_left_in_it_is_refused(value: str) -> None:
+    with pytest.raises(ChatActionError):
+        normalize_command(value)
+
+
+#: A credential-shaped value used to prove that a refusal never carries the
+#: text it refused. It is not a real credential.
+_SENTINEL = "sk-live-0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        pytest.param(None, "invalid_type", id="not-text"),
+        pytest.param(
+            f"{_SENTINEL}\ud800", "invalid_encoding", id="lone-surrogate"
+        ),
+        pytest.param(_SENTINEL * 200, "too_long", id="too-long-ascii"),
+        pytest.param("€" * 1366 + _SENTINEL, "too_long", id="too-long-multibyte"),
+        pytest.param(" " * 4096 + _SENTINEL, "too_long", id="too-long-raw-only"),
+        pytest.param(" \t\n ", "empty", id="whitespace-only"),
+        pytest.param(f"{_SENTINEL}\x00", "invalid_characters", id="nul"),
+        pytest.param(f"{_SENTINEL}\u202e", "invalid_characters", id="bidi-override"),
+    ],
+)
+def test_a_refusal_names_its_exact_static_reason(
+    value: object, reason: str
+) -> None:
+    """Every refusal has one closed reason, and never the text.
+
+    The reason is a fixed word, so a caller can map it to a status without
+    parsing prose. The rejected text is model-authored and can name a
+    credential, and the refusal ends up in a log line and a telemetry
+    field, so the text is nowhere in it.
+    """
+    with pytest.raises(ChatActionError) as excinfo:
+        normalize_command(value)
+
+    assert excinfo.value.reason == reason
+    assert str(excinfo.value) == reason
+    assert _SENTINEL not in str(excinfo.value)
+    assert _SENTINEL not in excinfo.value.reason
+    # The error carries the reason and nothing else: one argument, and no
+    # cause. A refused command is model-authored, so the error must not
+    # carry it along in a traceback either.
+    assert excinfo.value.args == (reason,)
+    assert excinfo.value.__cause__ is None
+    assert (
+        excinfo.value.__context__ is None
+        or excinfo.value.__suppress_context__ is True
+    )
+    assert _SENTINEL not in repr(excinfo.value)
+
+
 
 
 # ── The handler ────────────────────────────────────────────────────────────

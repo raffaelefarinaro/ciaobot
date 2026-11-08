@@ -6,8 +6,11 @@
  */
 import { computed, ref, watch } from 'vue'
 import { actionCopy, chatActionErrorReason, MCP_AUTH_STEPS, safeExternalUrl } from '../../lib/chatActions'
+import { isLoopbackPage } from '../../lib/loopback'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
+import CallbackPasteField from './CallbackPasteField.vue'
+import HelperTerminalButton from './HelperTerminalButton.vue'
 
 const props = defineProps<{ chatId: string; action: ChatAction }>()
 const emit = defineEmits<{ error: [message: string]; notice: [message: string] }>()
@@ -16,8 +19,16 @@ const store = useProjectStore()
 const starting = ref(false)
 const copy = computed(() => actionCopy(props.action))
 const url = computed(() => safeExternalUrl(props.action.params.url))
+const isClaude = computed(() => props.action.params.provider === 'claude')
+const sessionId = computed(() => props.action.params.session_id ?? '')
 /** This body's root, so a focus inside it can be seen before it leaves. */
 const bodyEl = ref<HTMLElement | null>(null)
+const PASTE_HINT = 'Signing in on this phone? After you approve, the page fails to load. Copy its address and paste it here.'
+/** A sign-in that ends on an unreachable loopback page: this device is not the engine's computer. */
+const showPaste = computed(() => props.action.state === 'waiting'
+  && !!props.action.params.url
+  && props.action.params.callback_used !== '1'
+  && !isLoopbackPage())
 
 // The focus rests on the card while the sign-in moves on. A disabled button or
 // a link that is about to be removed would otherwise drop it onto the page.
@@ -26,9 +37,13 @@ function focusCard(): void {
 }
 
 // Runs before the DOM is patched, so the link still holds the focus here.
-watch(() => props.action.state, () => {
+watch([() => props.action.state, showPaste], () => {
   if (bodyEl.value?.contains(document.activeElement)) focusCard()
 })
+
+function onSent(): void {
+  emit('notice', 'Address sent. This card updates when the sign-in finishes.')
+}
 
 async function start(): Promise<void> {
   if (starting.value) return
@@ -82,6 +97,20 @@ async function start(): Promise<void> {
       target="_blank"
       rel="noopener noreferrer"
     >{{ copy?.primaryLabel }}</a>
+
+    <HelperTerminalButton
+      v-if="isClaude && (action.state === 'working' || action.state === 'waiting')"
+      :chat-id="chatId"
+      :session-id="sessionId"
+    />
+
+    <CallbackPasteField
+      v-if="showPaste"
+      :chat-id="chatId"
+      :action-id="action.id"
+      :hint="PASTE_HINT"
+      @sent="onSent"
+    />
   </div>
 </template>
 

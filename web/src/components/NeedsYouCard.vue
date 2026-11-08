@@ -17,6 +17,8 @@ import RestartBody from './needs-you/RestartBody.vue'
 import CommandBody from './needs-you/CommandBody.vue'
 import PermissionModeBody from './needs-you/PermissionModeBody.vue'
 import SystemSettingBody from './needs-you/SystemSettingBody.vue'
+import DeviceCodeBody from './needs-you/DeviceCodeBody.vue'
+import GwsAuthBody from './needs-you/GwsAuthBody.vue'
 import { actionCopy } from '../lib/chatActions'
 import { shouldRestoreFocus } from '../lib/moveToBackground'
 import { useProjectStore } from '../stores/projects'
@@ -28,10 +30,17 @@ const BODIES: Partial<Record<ChatActionKind, Component>> = {
   command: CommandBody,
   permission_mode: PermissionModeBody,
   system_setting: SystemSettingBody,
+  device_code: DeviceCodeBody,
   restart: RestartBody,
+  gws_auth: GwsAuthBody,
 }
 const ICONS: Partial<Record<ChatActionKind, AppIconName>> = {
-  mcp_auth: 'shield', permission_mode: 'shield', system_setting: 'shield', restart: 'spark',
+  mcp_auth: 'shield',
+  permission_mode: 'shield',
+  system_setting: 'shield',
+  device_code: 'shield',
+  gws_auth: 'shield',
+  restart: 'spark',
 }
 /** Kinds whose card has no Not now: the body owns the way out. */
 const HIDE_DISMISS: Partial<Record<ChatActionKind, true>> = {}

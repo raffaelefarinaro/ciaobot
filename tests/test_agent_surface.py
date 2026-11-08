@@ -1996,7 +1996,7 @@ def test_a_needs_action_never_touches_the_host_terminal(
     def _refuse(name: str):
         def _inner(*_args, **_kwargs):
             reached.append(name)
-            raise AssertionError(f"{name} was reached from a terminal offer")
+            raise AssertionError(f"{name} was reached from a needs-action command")
 
         return _inner
 
@@ -2035,7 +2035,7 @@ def test_a_needs_action_never_touches_the_host_terminal(
     token = _offer_token(service, chat, project)
     with _client(service) as client:
         response = _post(client, token, "chat_needs_action", {"kind": "command", "params": {"command": command}})
-    assert not reached, f"a terminal offer reached {reached}"
+    assert not reached, f"a needs-action command reached {reached}"
     assert response.status_code == 200
     # The suggestion was stored for the user to read — and never run.
     assert response.json()["data"]["action"]["params"]["command"] == command
@@ -2323,11 +2323,11 @@ def test_an_invalid_utf8_command_file_is_refused(tmp_path: Path) -> None:
 
 
 def test_an_oversize_command_file_is_refused(tmp_path: Path) -> None:
-    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+    from ciao.chat_actions import COMMAND_MAX_BYTES
 
     path = tmp_path / "command.txt"
     path.write_text(
-        "OVERSIZE-SENTINEL-" + "a" * TERMINAL_OFFER_MAX_BYTES, encoding="utf-8"
+        "OVERSIZE-SENTINEL-" + "a" * COMMAND_MAX_BYTES, encoding="utf-8"
     )
     with pytest.raises(agent_cli.UsageError) as excinfo:
         agent_cli._command_file_text(str(path))
@@ -2345,13 +2345,13 @@ def test_a_command_file_at_the_byte_bound_is_accepted(tmp_path: Path) -> None:
     file that is exactly at the limit is accepted even when the whitespace
     around the command is what fills it. The limit is not off by one.
     """
-    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+    from ciao.chat_actions import COMMAND_MAX_BYTES
 
     body = "npm install -g ciao"
-    filler = TERMINAL_OFFER_MAX_BYTES - len(body)
+    filler = COMMAND_MAX_BYTES - len(body)
     raw = " " * (filler // 2) + body + "\n " * ((filler - filler // 2) // 2)
-    raw += " " * (TERMINAL_OFFER_MAX_BYTES - len(raw.encode("utf-8")))
-    assert len(raw.encode("utf-8")) == TERMINAL_OFFER_MAX_BYTES
+    raw += " " * (COMMAND_MAX_BYTES - len(raw.encode("utf-8")))
+    assert len(raw.encode("utf-8")) == COMMAND_MAX_BYTES
     path = _command_file(tmp_path, raw)
     assert agent_cli._command_file_text(str(path)) == body
 
@@ -2399,7 +2399,7 @@ def test_the_command_file_is_read_with_a_bound(
     """
     from pathlib import Path as _Path
 
-    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+    from ciao.chat_actions import COMMAND_MAX_BYTES
 
     def _refuse(*_args, **_kwargs):
         raise AssertionError("the command file was read without a bound")
@@ -2438,7 +2438,7 @@ def test_the_command_file_is_read_with_a_bound(
     assert agent_cli._command_file_text(str(path)) == "ls -la"
     # One read, of exactly the bound plus the byte that says "there is more".
     # An unbounded read (no size) or a larger one would show up here.
-    assert reads == [TERMINAL_OFFER_MAX_BYTES + 1]
+    assert reads == [COMMAND_MAX_BYTES + 1]
 
 
 # ── A path that fails before it is a path (#1842, R1 security) ─────────────

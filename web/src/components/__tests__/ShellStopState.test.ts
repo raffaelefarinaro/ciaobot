@@ -55,7 +55,7 @@ afterEach(() => {
 describe('shell stop state', () => {
   it('survives closing and reopening the popover, and shows in the rail too', async () => {
     const { wrapper } = mountHarness()
-    const opener = wrapper.get('.composer-activity-seg--runs')
+    const opener = wrapper.get('.composer-activity-seg')
     await opener.trigger('click')
     await flushPromises()
     popoverStop()!.click()
@@ -78,7 +78,7 @@ describe('shell stop state', () => {
 
   it('clears the announcement when the stop lock releases, and shows a failure after a close', async () => {
     const { store, wrapper } = mountHarness()
-    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await wrapper.get('.composer-activity-seg').trigger('click')
     await flushPromises()
     popoverStop()!.click()
     await flushPromises()
@@ -88,7 +88,7 @@ describe('shell stop state', () => {
 
     vi.mocked(api.post).mockRejectedValueOnce(new Error('boom'))
     popoverStop()!.click()
-    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await wrapper.get('.composer-activity-seg').trigger('click')
     await flushPromises()
     expect(store.stopTaskErrors.c1?.b1).toBeTruthy()
     expect(railStop()!.textContent?.trim()).toBe('Stop')

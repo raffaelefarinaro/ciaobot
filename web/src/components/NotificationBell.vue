@@ -5,13 +5,20 @@ import NotificationInboxList from './NotificationInboxList.vue'
 
 defineOptions({ inheritAttrs: false })
 
-const props = withDefaults(defineProps<{ variant?: 'popover' | 'sheet' }>(), { variant: 'popover' })
+const props = withDefaults(defineProps<{
+  variant?: 'popover' | 'sheet'
+  /** Off where another control opens the sheet (the chat header's ⋯ menu): no button renders. */
+  trigger?: boolean
+}>(), { variant: 'popover', trigger: true })
 const emit = defineEmits<{ navigate: [] }>()
 
 const inbox = useNotificationInboxStore()
 
 const isOpen = ref(false)
 const buttonEl = ref<HTMLButtonElement | null>(null)
+// The element the dialog is anchored to and returns focus to; the bell's own
+// button unless `open()` was handed another one.
+const anchorEl = ref<HTMLElement | null>(null)
 const dialogEl = ref<HTMLElement | null>(null)
 const headingEl = ref<HTMLElement | null>(null)
 const pos = ref({ top: 0, left: 0 })
@@ -24,7 +31,7 @@ const WIDTH = 380
 // The popover sits beside the button (the sidebar's right edge), clamped so it
 // never leaves the viewport; the sheet hangs full width under the pane header.
 function place() {
-  const rect = buttonEl.value?.getBoundingClientRect()
+  const rect = (anchorEl.value ?? buttonEl.value)?.getBoundingClientRect()
   if (!rect) return
   // A bell hidden by a breakpoint (the header bell past 768px) has no box: its
   // open dialog has nothing to point at, so it closes. Opening calls this before
@@ -51,15 +58,16 @@ const style = computed(() => ({ '--nb-top': `${pos.value.top}px`, '--nb-left': `
 function onPointerDown(ev: Event) {
   const target = ev.target as Node | null
   if (!target) return
-  if (dialogEl.value?.contains(target) || buttonEl.value?.contains(target)) return
+  if (dialogEl.value?.contains(target) || buttonEl.value?.contains(target) || anchorEl.value?.contains(target)) return
   // The backdrop closes on its own click, so a touch that starts on it does not
   // also land its click on whatever sits underneath.
   if ((target as HTMLElement).classList?.contains('notif-backdrop')) return
   close()
 }
 
-function open() {
+function open(anchor?: HTMLElement) {
   if (isOpen.value) return
+  anchorEl.value = anchor ?? null
   place()
   isOpen.value = true
   document.addEventListener('pointerdown', onPointerDown, true)
@@ -72,7 +80,9 @@ function close(returnFocus = false) {
   isOpen.value = false
   document.removeEventListener('pointerdown', onPointerDown, true)
   window.removeEventListener('resize', place)
-  if (returnFocus) void nextTick(() => buttonEl.value?.focus())
+  const returnTo = anchorEl.value ?? buttonEl.value
+  anchorEl.value = null
+  if (returnFocus) void nextTick(() => returnTo?.focus())
 }
 
 function toggle() {
@@ -91,7 +101,7 @@ function onKeydown(ev: KeyboardEvent) {
 function onFocusout(ev: FocusEvent) {
   const next = ev.relatedTarget as Node | null
   if (!next) return
-  if (dialogEl.value?.contains(next) || buttonEl.value?.contains(next)) return
+  if (dialogEl.value?.contains(next) || buttonEl.value?.contains(next) || anchorEl.value?.contains(next)) return
   close()
 }
 
@@ -110,6 +120,7 @@ defineExpose({ open, close })
 
 <template>
   <button
+    v-if="trigger"
     ref="buttonEl"
     v-bind="$attrs"
     type="button"

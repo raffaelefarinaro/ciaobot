@@ -49,7 +49,7 @@ async def test_provider_inventory_merges_scopes_safely_and_marks_denied_servers(
         async def provider_mcp_runtime_connections(self, workspace, names):
             assert workspace == "work"
             return {
-                "claude": {"allowed": [{"state": "connected", "provider": "claude", "chat_id": "c1"}], "session-only": [{"state": "unknown", "provider": "claude", "chat_id": "c2"}]},
+                "claude": {"allowed": [{"state": "connected", "provider": "claude", "chat_id": "c1"}], "session-only": [{"state": "unknown", "provider": "claude", "chat_id": "c2"}], "claude.ai Salesloft": [{"state": "needs_auth", "provider": "claude", "chat_id": "c2"}]},
                 "opencode": {},
             }
 
@@ -64,6 +64,8 @@ async def test_provider_inventory_merges_scopes_safely_and_marks_denied_servers(
     assert by_name["blocked"]["allowed"] is False
     assert by_name["global"]["allowed"] is None
     assert by_name["session-only"]["scope"] == "account"
+    # A claude.ai connector is connected on claude.ai, not with a CLI command.
+    assert by_name["claude.ai Salesloft"]["scope"] == "claudeai"
     assert by_name["allowed"]["connections"][0]["chat_id"] == "c1"
     assert opencode["servers"][0]["enabled"] is False
     encoded = repr(payload)

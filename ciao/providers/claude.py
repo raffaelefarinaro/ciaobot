@@ -196,6 +196,11 @@ _BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
 _INITIALIZE_TIMEOUT_MESSAGE = "Control request timeout: initialize"
 
 
+def is_claudeai_connector(name: str) -> bool:
+    """A claude.ai connector: listed by the claude.ai account, connected on claude.ai, never by ``claude mcp login``."""
+    return name.startswith(_CLAUDEAI_PREFIX)
+
+
 class ClaudeInitializeTimeout(RuntimeError):
     """The CLI never answered the SDK's ``initialize`` handshake in time."""
 
@@ -868,7 +873,7 @@ class ClaudeProvider(BaseSDKProvider):
                     states = await self.read_mcp_status()
                 except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
                     states = {}
-                if any(name.startswith(_CLAUDEAI_PREFIX) for name in states):
+                if any(is_claudeai_connector(name) for name in states):
                     self._claudeai_seen_marker.parent.mkdir(parents=True, exist_ok=True)
                     self._claudeai_seen_marker.touch()
                     self._claudeai_catalog_retries = 0

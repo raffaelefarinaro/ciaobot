@@ -15,7 +15,6 @@
  *   POST /__fixture__/update-tasks                   give this session update tasks
  *   POST /__fixture__/projects  { projects: [...] }  replace this session's project list
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
- *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
 *   POST /__fixture__/chat-action { chat_id, kind, params, state? }  put a needs-you action on a chat
  *   POST /__fixture__/terminal-repo  { chat_id }      link a repository to a chat's terminal
  *   POST /__fixture__/inbox     { reset?, chats?, removeChats?, tasks?, schedules?,
@@ -320,7 +319,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
@@ -344,36 +343,14 @@ function findSessionTask(state, id) {
   return sessionTask(state, row)
 }
 
-// ── The suggested command ───────────────────────────────────────────────
-//
-// The engine holds one optional offer per chat: a command the assistant
-// suggested, which the user reviews before running. The fixture keeps it per
-// browser session, for the same reason the transcript is per session — one
-// server serves every worker, and a spec that offers a command in one chat
-// must not be visible to a spec running beside it.
-//
-// The offer is never executed here. It is a string the browser shows, copies
-// and dismisses; nothing in this file runs it.
-
-// A fresh 32-hex offer id, the way the engine mints one.
-function mintOfferId() {
+// A fresh 32-hex id, the way the engine mints one.
+function mintId() {
   return randomBytes(16).toString('hex')
 }
 
-/** The offer id shape the engine mints: 32 lowercase hex characters. */
-const OFFER_ID_PATTERN = /^[0-9a-f]{32}$/
-
-/** The longest command the engine accepts, in bytes. */
-const OFFER_COMMAND_MAX_BYTES = 4096
-
-/** The offer this session holds for a chat, or null. */
-function offerFor(state, chatId) {
-  return state.terminalOffers.get(chatId) || null
-}
-
-/** A chat row carrying this session's offer and needs-you actions. */
-function chatWithOffer(state, chat) {
-  return { ...chat, terminal_offer: offerFor(state, chat.chat_id), actions: actionsFor(state, chat.chat_id) }
+/** A chat row carrying this session's needs-you actions. */
+function chatWithSessionState(state, chat) {
+  return { ...chat, actions: actionsFor(state, chat.chat_id) }
 }
 
 /** The needs-you actions this session holds for a chat. */
@@ -430,62 +407,16 @@ function liveSchedules(state) {
     .map(s => ({ ...s, ...state.schedulePatches.get(s.schedule_id) }))
 }
 
-/** The chat list, with this session's offers on the rows. */
-function chatsWithOffers(state) {
-  return liveChats(state).map(chat => chatWithOffer(state, chat))
+/** The chat list, with this session's needs-you actions on the rows. */
+function chatsForSession(state) {
+  return liveChats(state).map(chat => chatWithSessionState(state, chat))
 }
 
-/** One chat's row, with this session's offer on it. */
+/** One chat's row, with this session's needs-you actions on it. */
 function chatDetail(state, chatId) {
   const chat = liveChats(state).find(c => c.chat_id === chatId)
   if (!chat) return {}
-  return chatWithOffer(state, chat)
-}
-
-/** The chat id in an `/api/chats/<id>` path, or ''. */
-function chatIdFromPath(pathname) {
-  const match = /^\/api\/chats\/([^/]+)$/.exec(pathname)
-  return match ? decodeURIComponent(match[1]) : ''
-}
-
-/**
- * Dismiss the command a chat offered.
- *
- * The body is exactly `{terminal_offer:{expected_id}}` and nothing else: a
- * dismissal never carries a pin, a title or any other update, so it can
- * never race another write on the same chat — and a body that does carry one
- * is refused rather than half-applied. The shape is parsed before the chat
- * is looked up, so a malformed request is a static 400 and never a 404.
- *
- * An offer with a different id is a conflict — the client asked to dismiss a
- * command that is no longer the one on offer — and the engine's current
- * offer comes back with it. No offer at all is an idempotent success.
- */
-function dismissOffer(state, chatId, body) {
-  const keys = Object.keys(body)
-  if (keys.length !== 1 || keys[0] !== 'terminal_offer') {
-    return { status: 400, body: { error: 'bad_request' } }
-  }
-  const request = body.terminal_offer
-  if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    return { status: 400, body: { error: 'bad_request' } }
-  }
-  const requestKeys = Object.keys(request)
-  if (requestKeys.length !== 1 || requestKeys[0] !== 'expected_id') {
-    return { status: 400, body: { error: 'bad_request' } }
-  }
-  const expectedId = request.expected_id
-  if (typeof expectedId !== 'string' || !OFFER_ID_PATTERN.test(expectedId)) {
-    return { status: 400, body: { error: 'bad_request' } }
-  }
-  const chat = CHATS.find(c => c.chat_id === chatId)
-  if (!chat) return { status: 404, body: { error: 'not found' } }
-  const current = offerFor(state, chatId)
-  if (current && current.id !== expectedId) {
-    return { status: 409, body: { error: 'terminal_offer_conflict', terminal_offer: current } }
-  }
-  state.terminalOffers.delete(chatId)
-  return { status: 200, body: { ...chat, terminal_offer: null } }
+  return chatWithSessionState(state, chat)
 }
 
 // ── The browser terminal ────────────────────────────────────────────────
@@ -655,9 +586,7 @@ const GET_ROUTES = {
   '/api/workspaces': (req) => workspacesPayload(sessionOf(req)),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': (req) => sessionOf(req).projects || PROJECTS,
-  // The chat list carries this session's suggested commands: a chat holds the
-  // command the assistant suggested for it, or none.
-  '/api/chats': (req) => chatsWithOffers(sessionOf(req)),
+  '/api/chats': (req) => chatsForSession(sessionOf(req)),
   '/api/schedules': (req) => liveSchedules(sessionOf(req)),
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': (req) => ({ actions: sessionOf(req).actions ?? [] }),
@@ -815,7 +744,7 @@ const GET_PATTERNS = [
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
-  // One chat's row, with this session's suggested command on it.
+  // One chat's row, with this session's needs-you actions on it.
   [/^\/api\/chats\/[^/]+$/, (req, url) => chatDetail(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || ''))],
   [/^\/api\/tasks\/[0-9a-f]{32}$/, (req, url) => {
     const id = url.pathname.split('/').pop()
@@ -1080,30 +1009,6 @@ const server = http.createServer(async (req, res) => {
       state.terminalRepoScopes.add(`chat:${chatId}`)
       return sendJson(res, { ok: true })
     }
-    if (pathname === '/__fixture__/terminal-offer') {
-      // Offer a suggested command to one chat. The replacement is silent: the
-      // engine announces an accepted change over the events socket, and this
-      // one is not announced, so the browser only learns about it from a read
-      // — or from the conflict a stale dismissal gets back. The id is fresh
-      // every time, so a dismissal that names the previous one is stale.
-      const body = await readBody(req)
-      const chatId = String(body?.chat_id || '')
-      const command = String(body?.command || '')
-      if (!chatId || !command) {
-        return sendJson(res, { error: 'chat_id and command are required' }, 400)
-      }
-      // The chat has to exist: the engine holds one offer per real chat.
-      if (!CHATS.some(c => c.chat_id === chatId)) {
-        return sendJson(res, { error: 'unknown chat' }, 404)
-      }
-      // The command is bounded, like the engine's.
-      if (Buffer.byteLength(command, 'utf8') > OFFER_COMMAND_MAX_BYTES) {
-        return sendJson(res, { error: 'the command is too long' }, 400)
-      }
-      const offer = { id: mintOfferId(), command }
-      state.terminalOffers.set(chatId, offer)
-      return sendJson(res, { ok: true, offer })
-    }
     if (pathname === '/__fixture__/chat-action') {
       // Put a needs-you action on one chat, as the engine would raise it. One
       // action per kind: a second of the same kind replaces the first.
@@ -1120,7 +1025,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, { error: 'unknown chat' }, 404)
       }
       const action = {
-        id: mintOfferId(),
+        id: mintId(),
         kind,
         origin: 'agent',
         state: typeof body.state === 'string' ? body.state : 'open',
@@ -1172,9 +1077,6 @@ const server = http.createServer(async (req, res) => {
       )
       return sendJson(res, answer.body, answer.status)
     }
-    // The dismissal of a suggested command: exactly `{terminal_offer:{expected_id}}`,
-    // and only a PATCH carries one. Every other write keeps the behaviour it
-    // had.
     if (req.method === 'PATCH' && pathname === '/api/settings/appearance') {
       const state = sessionOf(req)
       for (const key of ['text_contrast', 'body_font', 'theme', 'font_scale', 'custom_colors']) {
@@ -1204,13 +1106,6 @@ const server = http.createServer(async (req, res) => {
         state.handover[name] = body.memory_handover
       }
       return sendJson(res, workspacesPayload(state))
-    }
-    if (req.method === 'PATCH') {
-      const chatId = chatIdFromPath(pathname)
-      if (chatId && body && typeof body === 'object' && body.terminal_offer !== undefined) {
-        const answer = dismissOffer(sessionOf(req), chatId, body)
-        return sendJson(res, answer.body, answer.status)
-      }
     }
     // A task write answers with the record it stored, at a new revision, so a
     // spec can close the overlay, reopen the task and see what it typed. Only
@@ -1336,10 +1231,6 @@ server.on('upgrade', (req, socket) => {
   state.sockets.add(ws)
   socket.on('close', () => state.sockets.delete(ws))
   const frame = snapshotFrame(state.activeStreams)
-  // The suggested-command map is complete, like the pin map: the snapshot
-  // replaces the browser's copy, so it must carry every offer this session
-  // holds — a chat it does not name holds none.
-  frame.chat_terminal_offers = Object.fromEntries(state.terminalOffers)
   // The needs-you map is complete too: a chat it does not name holds none.
   frame.chat_actions = Object.fromEntries([...state.chatActions].filter(([, list]) => list.length))
   ws.send(frame)
