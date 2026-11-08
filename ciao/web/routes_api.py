@@ -6435,7 +6435,11 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
-    return JSONResponse(await asyncio.to_thread(setup_status, request.app.state.config))
+    payload = await asyncio.to_thread(setup_status, request.app.state.config)
+    payload["native_bootstrap"] = (
+        getattr(request.app.state, "native_bootstrap", None) is not None
+    )
+    return JSONResponse(payload)
 
 
 
