@@ -372,10 +372,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     /* Top padding matches the desktop/home 61px header's centring (12px here
        vs the 30px icon half-height) rather than --space-2: with 8px the
        touch-hit icons' -7px margin pulled their visual box to ~1px below the
-       safe-area line, which on a standalone iOS PWA put the row inside the
-       status bar's frosted-glass edge — the icons rendered as if something
-       translucent was covering them, while the title row below stayed crisp.
-       The extra 4px drops the icons below the glass like every other view. */
+       header edge. The extra 4px is touch-icon clearance, not room for a
+       status-bar material. */
     padding-top: calc(var(--space-3) + var(--safe-top));
     padding-left: calc(var(--space-3) + var(--safe-left));
     padding-right: calc(var(--space-3) + var(--safe-right));
