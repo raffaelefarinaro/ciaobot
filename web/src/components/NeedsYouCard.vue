@@ -8,40 +8,15 @@
  * owns the generic controls, Not now and Continue the chat / Done, and the
  * copy. The kind's body owns the primary control and its steps.
  */
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import AppIcon from './AppIcon.vue'
-import type { AppIconName } from './AppIcon.vue'
-import McpAuthBody from './needs-you/McpAuthBody.vue'
-import RestartBody from './needs-you/RestartBody.vue'
-import CommandBody from './needs-you/CommandBody.vue'
-import PermissionModeBody from './needs-you/PermissionModeBody.vue'
-import SystemSettingBody from './needs-you/SystemSettingBody.vue'
-import DeviceCodeBody from './needs-you/DeviceCodeBody.vue'
-import GwsAuthBody from './needs-you/GwsAuthBody.vue'
+import { NEEDS_YOU_BODIES, NEEDS_YOU_ICONS } from './needs-you/registry'
 import { actionCopy } from '../lib/chatActions'
 import { shouldRestoreFocus } from '../lib/moveToBackground'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction, ChatActionKind } from '../lib/types'
 
-/** One body per kind; each later child registers its own here. */
-const BODIES: Partial<Record<ChatActionKind, Component>> = {
-  mcp_auth: McpAuthBody,
-  command: CommandBody,
-  permission_mode: PermissionModeBody,
-  system_setting: SystemSettingBody,
-  device_code: DeviceCodeBody,
-  restart: RestartBody,
-  gws_auth: GwsAuthBody,
-}
-const ICONS: Partial<Record<ChatActionKind, AppIconName>> = {
-  mcp_auth: 'shield',
-  permission_mode: 'shield',
-  system_setting: 'shield',
-  device_code: 'shield',
-  gws_auth: 'shield',
-  restart: 'spark',
-}
 /** Kinds whose card has no Not now: the body owns the way out. */
 const HIDE_DISMISS: Partial<Record<ChatActionKind, true>> = {}
 
@@ -64,7 +39,7 @@ const notice = ref('')
 let disposed = false
 
 const copy = computed(() => actionCopy(props.action))
-const body = computed(() => BODIES[props.action.kind] ?? null)
+const body = computed(() => NEEDS_YOU_BODIES[props.action.kind] ?? null)
 const busy = computed(() => props.action.state === 'working' || props.action.state === 'waiting')
 /** Empty on mount, so the first render is not announced; then the new title and reason. */
 const liveText = ref('')
@@ -147,7 +122,7 @@ onBeforeUnmount(() => {
         <ActivityGlyph v-else-if="action.state === 'failed'" kind="alert" />
         <AppIcon
           v-else
-          :name="action.state === 'done' ? 'check' : (ICONS[action.kind] ?? 'activity')"
+          :name="action.state === 'done' ? 'check' : (NEEDS_YOU_ICONS[action.kind] ?? 'activity')"
           :size="16"
         />
       </span>

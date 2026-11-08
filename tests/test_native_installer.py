@@ -4752,16 +4752,68 @@ def test_a_transient_spawn_failure_is_retried(
         return real_popen(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(native.subprocess, "Popen", flaky_popen)
+    # The child must still be alive at the ownership check (``owns_process``
+    # refuses an exited child). It holds until the autouse fixture creates the
+    # release sentinel right after that check, then exits 7.
     script = (
-        "import os, sys\n"
+        "import os, sys, time\n"
         "fd = int(sys.argv[1])\n"
         "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
         "os.close(fd)\n"
+        "give_up = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[2]) and time.monotonic() < give_up:\n"
+        "    time.sleep(0.01)\n"
         "raise SystemExit(7)\n"
     )
+    release = str(tmp_path / WIZARD_RELEASE_NAME)
     outcome, events, _raw = _run_coordinator(
         tmp_path,
-        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd), release),
+    )
+
+    assert len(attempts) == 2
+    assert "wizard_ready" in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_transient_spawn_retry_survives_a_slow_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    real_popen = subprocess.Popen
+    attempts: list[int] = []
+
+    def flaky_popen(*args: object, **kwargs: object) -> object:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError(
+                errno.EAGAIN, "fork: resource temporarily unavailable"
+            )
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    def slow_listener(port: int, child_pid: int) -> frozenset[int]:
+        # Delay the parent at the injected seam so the child reaches its exit
+        # first. The retry must still reach wizard_ready before wizard_failed.
+        time.sleep(0.3)
+        return frozenset({child_pid})
+
+    monkeypatch.setattr(native.subprocess, "Popen", flaky_popen)
+    script = (
+        "import os, sys, time\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "give_up = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[2]) and time.monotonic() < give_up:\n"
+        "    time.sleep(0.01)\n"
+        "raise SystemExit(7)\n"
+    )
+    release = str(tmp_path / WIZARD_RELEASE_NAME)
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd), release),
+        wizard_listener=slow_listener,
     )
 
     assert len(attempts) == 2
