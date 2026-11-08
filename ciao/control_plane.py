@@ -2929,8 +2929,17 @@ class CiaoControlPlane:
                 "invalid_action", f"The request was refused ({exc.reason})."
             ) from None
         # Kind-specific raise-time refusals, on validated params, go here:
-        # F (gws_auth: only the workspace's linked profile), J (system_setting:
-        # macOS hosts only).
+        # J (system_setting: macOS hosts only).
+        if kind == "gws_auth":
+            from ciao import gws_auth
+
+            linked = gws_auth.workspace_gws_profile(self.config, self._workspace(principal))
+            if not linked or validated["profile"] != linked:
+                raise ControlPlaneError(
+                    "invalid_action",
+                    "gws_auth can only ask for this workspace's linked Google account; "
+                    "run `ciao gws status` to see it.",
+                )
         if kind == "permission_mode" and validated["mode"] == self.chat_mode(principal):
             raise ControlPlaneError("invalid_action", f"This chat is already in {validated['mode']} mode.")
         try:

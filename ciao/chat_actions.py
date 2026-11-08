@@ -324,20 +324,59 @@ def _validate_device_code(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
+_GOOGLE_CONSENT_HOST = "accounts.google.com"
+_PROFILE_MAX = 64
+
+
+def _validate_gws_auth(raw: Mapping[str, object]) -> dict[str, str]:
+    """The `gws_auth` kind: sign the workspace's Google account in again.
+
+    ``url`` is engine-only (the consent URL ``GwsReloginManager.start`` returned) and is
+    checked too, because ``update_action`` revalidates the merged params.
+    """
+    from ciao.gws_auth import slugify_profile
+
+    if set(raw) - {"profile", "note", "url"}:
+        raise ChatActionError("unknown_param")
+    if "profile" not in raw:
+        raise ChatActionError("missing_param")
+    profile = raw["profile"]
+    if not isinstance(profile, str):
+        raise ChatActionError("invalid_type")
+    if not profile or len(profile) > _PROFILE_MAX or slugify_profile(profile) != profile:
+        raise ChatActionError("invalid_param")
+    params = {"profile": profile}
+    if raw.get("note") is not None:
+        params["note"] = normalize_note(raw["note"])
+    url = _text(raw, "url", required=False, limit=_URL_MAX)
+    if url is not None:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.hostname != _GOOGLE_CONSENT_HOST:
+            raise ChatActionError("invalid_url")
+        params["url"] = url
+    return params
+
+
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
     "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
     "device_code": _validate_device_code,
+    "gws_auth": _validate_gws_auth,
 }
-_KEY_PARAMS: dict[str, tuple[str, ...]] = {"mcp_auth": ("server",), "device_code": ("tool",)}
+_KEY_PARAMS: dict[str, tuple[str, ...]] = {
+    "mcp_auth": ("server",),
+    "device_code": ("tool",),
+    "gws_auth": ("profile",),
+}
 
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
 ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
     "mcp_auth": frozenset({"url", "session_id", "callback_used"}),
     "device_code": frozenset({"session_id", "code", "url", "entered"}),
+    "gws_auth": frozenset({"url"}),
 }
 
 

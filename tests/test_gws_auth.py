@@ -1175,3 +1175,183 @@ def test_workspace_gws_profile_unlinked_returns_empty_even_when_personal_exists(
 
 def test_workspace_gws_profile_no_config_returns_empty(tmp_path: Path) -> None:
     assert gws_auth.workspace_gws_profile(None, "home") == ""
+
+
+def _paste_manager(tmp_path: Path):
+    """A relogin manager whose exchange records what it was handed."""
+    cfg = _config(tmp_path)
+    _write_client_secret(gws_auth.profile_config_dir(cfg, "personal"))
+    calls: list[dict] = []
+
+    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
+        calls.append({"code": code, "redirect_uri": redirect_uri})
+        return {"ok": True, "email": "paste@example.com"}
+
+    manager = gws_auth.GwsReloginManager(cfg, exchange_fn=fake_exchange, session_ttl=10)
+    return manager, calls
+
+
+def test_complete_from_redirect_finishes_a_pending_session(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+    port, state = started["port"], started["state"]
+
+    final = manager.complete_from_redirect(
+        "personal", f"http://127.0.0.1:{port}/?code=abc&state={state}"
+    )
+
+    assert final["status"] == "completed"
+    assert calls == [{"code": "abc", "redirect_uri": started["redirect_uri"]}]
+    _assert_listener_closed(port)
+
+
+@pytest.mark.parametrize(
+    "build, expected",
+    [
+        (lambda p, s: f"https://127.0.0.1:{p}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://localhost:{p}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:{p + 1}/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:notaport/?code=c&state={s}", gws_auth.RELOGIN_BAD_REDIRECT),
+        (lambda p, s: f"http://127.0.0.1:{p}/?code=c&state=wrong", gws_auth.RELOGIN_STATE_MISMATCH),
+        (lambda p, s: f"http://127.0.0.1:{p}/?code=c&state=wröng", gws_auth.RELOGIN_STATE_MISMATCH),
+        (
+            lambda p, s: f"http://127.0.0.1:{p}/?error=access_denied&state=wrong",
+            gws_auth.RELOGIN_STATE_MISMATCH,
+        ),
+        (lambda p, s: "x" * 4097, gws_auth.RELOGIN_BAD_REDIRECT),
+    ],
+)
+def test_complete_from_redirect_rejects_wrong_port_host_scheme_state(
+    tmp_path: Path, build, expected: str
+) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect(
+            "personal", build(started["port"], started["state"])
+        )
+
+    assert str(exc.value) == expected
+    assert manager.status("personal")["status"] == "pending"
+    assert calls == []
+    manager.cancel("personal")
+
+
+def test_complete_from_redirect_without_session(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect("personal", "http://127.0.0.1:1/?code=c&state=s")
+
+    assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+    assert calls == []
+
+
+def test_complete_from_redirect_after_completion_is_no_pending(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+    url = f"http://127.0.0.1:{started['port']}/?code=abc&state={started['state']}"
+    manager.complete_from_redirect("personal", url)
+
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect("personal", url)
+
+    assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+    assert len(calls) == 1
+
+
+def test_a_second_finisher_does_not_redeem_the_code_while_the_exchange_runs(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    cfg = _config(tmp_path)
+    _write_client_secret(gws_auth.profile_config_dir(cfg, "personal"))
+    calls: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
+        calls.append(code)
+        entered.set()
+        release.wait(5)
+        return {"ok": True, "email": "once@example.com"}
+
+    manager = gws_auth.GwsReloginManager(cfg, exchange_fn=blocking_exchange, session_ttl=10)
+    started = manager.start("personal")
+    port, state = started["port"], started["state"]
+
+    first = threading.Thread(
+        target=manager.complete_from_redirect,
+        args=("personal", f"http://127.0.0.1:{port}/?code=c1&state={state}"),
+    )
+    first.start()
+    try:
+        assert entered.wait(5), "the first finisher never reached the exchange"
+        # A paste while the first exchange is still in flight is refused, not redeemed.
+        with pytest.raises(ValueError) as exc:
+            manager.complete_from_redirect(
+                "personal", f"http://127.0.0.1:{port}/?code=c2&state={state}"
+            )
+        assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+        # A listener redirect in flight is answered but does not redeem either.
+        _drive_callback(port, f"?code=c3&state={state}")
+        assert calls == ["c1"]
+    finally:
+        release.set()
+        first.join(5)
+
+    assert calls == ["c1"]
+    assert manager.status("personal")["status"] == "completed"
+    # After completion a paste is refused and still does not exchange again.
+    with pytest.raises(ValueError) as exc:
+        manager.complete_from_redirect(
+            "personal", f"http://127.0.0.1:{port}/?code=c4&state={state}"
+        )
+    assert str(exc.value) == gws_auth.RELOGIN_NO_PENDING
+    assert calls == ["c1"]
+
+
+GOOGLE_ERROR_FALLBACK = "Google returned an error."
+
+
+@pytest.mark.parametrize(
+    "error_value, expected",
+    [
+        ("access_denied", "Google returned error: access_denied"),
+        ("invalid_scope.v2-x", "Google returned error: invalid_scope.v2-x"),
+        ("a" * 64, "Google returned error: " + "a" * 64),
+        ("a" * 65, GOOGLE_ERROR_FALLBACK),
+        ("access denied", GOOGLE_ERROR_FALLBACK),
+        ("<b>boom</b>", GOOGLE_ERROR_FALLBACK),
+        ("bad\nvalue", GOOGLE_ERROR_FALLBACK),
+    ],
+)
+def test_complete_from_redirect_bounds_the_google_error_text(
+    tmp_path: Path, error_value: str, expected: str
+) -> None:
+    from urllib.parse import urlencode
+
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+    query = urlencode({"error": error_value, "state": started["state"]})
+
+    final = manager.complete_from_redirect(
+        "personal", f"http://127.0.0.1:{started['port']}/?{query}"
+    )
+
+    assert final["status"] == "error"
+    assert final["error"] == expected
+    assert calls == []
+
+
+def test_relogin_listener_ignores_a_non_ascii_state(tmp_path: Path) -> None:
+    manager, calls = _paste_manager(tmp_path)
+    started = manager.start("personal")
+
+    _drive_callback(started["port"], "?code=c&state=%C3%A9")
+
+    assert manager.status("personal")["status"] == "pending"
+    assert calls == []
+    manager.cancel("personal")
