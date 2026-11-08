@@ -1044,9 +1044,13 @@ testable without mounting the panel. `ChatTurnActivity.vue` owns the rendering
 of one *completed* turn's `Activity` disclosure; it holds no state at all, and
 reports every action (toggle, body click, open file, expand a lazy reasoning
 step) as an emit. `ChatPanel` keeps what genuinely spans the pane: the send
-path, the slash-command and @-mention pickers, the open/closed trace map, the
-memoised markdown renderer, scroll anchoring, and the live (streaming) trace.
-Trace styling lives in `components/chatTrace.css`, pulled into both components
+path, the @-mention picker, the open/closed trace map, the memoised markdown
+renderer, scroll anchoring, and the live (streaming) trace. The slash-command
+list is shared with Home and owned outside the pane:
+`composables/useSlashCommands.ts` (state and text surgery),
+`components/SlashCommandPicker.vue` (the listbox) and
+`components/slashCommands.css` (the shared scoped styles, also used by the
+@-mention picker). Trace styling lives in `components/chatTrace.css`, pulled into both components
 through `<style scoped src>`, because a parent's scoped rules do not reach a
 child's subtree.
 
