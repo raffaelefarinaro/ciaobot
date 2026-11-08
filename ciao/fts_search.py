@@ -800,6 +800,11 @@ def search(
 ) -> list[dict[str, str]]:
     """Search FTS5 table with Porter stemmer query. Returns ranked results with snippets.
 
+    A multi-word query returns the notes holding every word first, in BM25
+    order; when those are fewer than ``limit``, notes holding any of the words
+    fill the rest, also in BM25 order. Results therefore need not contain
+    every word, and ``rank`` is comparable only within each of the two runs.
+
     ``path_prefix`` restricts results to one subtree of the stored keys. It is
     how a workspace-scoped search stays inside its own agent root now that the
     prune no longer deletes every other root's rows on each pass.
@@ -810,7 +815,7 @@ def search(
         raise ValueError("pass path_prefix or path_prefixes, not both")
     # Sanitize search term. If query is a simple string, escape double quotes
     # and wrap words. SQLite FTS5 MATCH syntax is powerful.
-    # To support basic multi-word queries gracefully, we join words with AND.
+    # Multi-word queries try AND first, then OR fills any remaining slots.
     words = re.findall(r"\w+", query)
     if not words:
         return []
@@ -836,13 +841,18 @@ def search(
     try:
         cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
-        if not rows and len(words) > 1:
-            # AND-of-all-words returns nothing for paraphrase queries ("how
-            # much do I charge per hour" — no note holds every word). Degrade
-            # to OR and let BM25 rank the notes matching the distinctive
-            # terms; a weaker match beats an empty answer for recall.
-            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit))
-            rows = cursor.fetchall()
+        if len(rows) < limit and len(words) > 1:
+            # AND-of-all-words is precise but brittle: a paraphrase ("how much
+            # do I charge per hour") matches no note at all, and a knowledge
+            # update usually matches only one side of it, because the note
+            # holding the old value and the note holding the new one rarely
+            # share every query word. So whenever AND leaves the page short,
+            # top it up with the OR query's BM25 order, skipping notes AND
+            # already returned. AND hits keep the lead; zero AND hits is just
+            # the case where the whole page comes from OR.
+            seen = {row[0] for row in rows}
+            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit + len(rows)))
+            rows += [row for row in cursor.fetchall() if row[0] not in seen][: limit - len(rows)]
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""

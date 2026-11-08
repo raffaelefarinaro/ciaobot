@@ -5,9 +5,10 @@ Two halves keep the memory system honest:
 ## 1. Deterministic suite (CI)
 
 `tests/test_memory_eval.py` runs LongMemEval-style cases over a synthetic
-fixture vault — paraphrase recall (aliases + the OR fallback), knowledge
+fixture vault — paraphrase recall (aliases + the OR top-up), knowledge
 updates (supersession keeps both versions findable, note names the current
-one), abstention (an unknown topic returns nothing, never noise),
+one; when AND matches only the newer note, the OR top-up still returns the
+older one after it), abstention (an unknown topic returns nothing, never noise),
 bookkeeping isolation (the proposals queue can never outrank knowledge), and
 temporal aging (`[as-of:]` facts age at 90 days, learned-at stamps at 180).
 It never calls a model and never touches user data. Extend it whenever a
