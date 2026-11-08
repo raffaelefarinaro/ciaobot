@@ -1,12 +1,14 @@
 /**
  * iOS viewport / keyboard plumbing.
  *
- * Drives a `--app-h` CSS variable off VisualViewport so the layout responds
- * instantly when the iOS keyboard opens/closes. `100dvh` alone does not update
- * on iOS Safari until the user interacts with the page. Also toggles a
- * `.keyboard-open` class so the home-indicator safe-area can collapse while
- * the keyboard is covering it. Safe-area insets stay in CSS so the browser
- * can update them as the standalone viewport settles.
+ * Pins the layout to the visible viewport through a `--app-h` CSS variable
+ * while the keyboard is open: `100dvh` alone does not update on iOS Safari
+ * until the user interacts with the page. The property exists only while the
+ * keyboard is up; with it closed the layout falls back to `100dvh`, the full
+ * screen in an installed PWA. Also toggles a `.keyboard-open` class that marks
+ * the keyboard state for `releaseDismissedKeyboard()` and any CSS that needs
+ * it. Safe-area insets stay in CSS so the browser can update them as the
+ * viewport settles.
  *
  * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
  * element should measure itself against: with `interactive-widget=resizes-content`
@@ -62,12 +64,17 @@ function measure(): void {
 
   const h = viewportHeight()
   maxViewportHeight = Math.max(maxViewportHeight, h)
-  document.documentElement.style.setProperty('--app-h', `${h}px`)
   // With `interactive-widget=resizes-content` the layout viewport shrinks
   // along with the visual viewport, so the old `innerHeight - h > 100`
   // heuristic always returns false. Detect keyboard open by comparing
   // against the tallest viewport height we've seen for this orientation.
   const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
+  // Only the keyboard-open height needs pinning: `100dvh` is the full screen
+  // once it closes, and a latched pixel height is the dead band under the
+  // composer that this module used to leave behind.
+  const root = document.documentElement
+  if (keyboardOpen) root.style.setProperty('--app-h', `${h}px`)
+  else root.style.removeProperty('--app-h')
   const wasOpen = document.documentElement.classList.contains('keyboard-open')
   document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
   for (const cb of subscribers) cb(h)
@@ -143,12 +150,13 @@ export function installViewportPlumbing(): void {
 
   // iOS suspends JS while the PWA is backgrounded. If the keyboard was open
   // when it went away, the system dismisses it during the suspension and the
-  // matching `resize` never reaches us, so `--app-h` stays latched at the
-  // keyboard-open height and the layout keeps a dead zone under the input bar
-  // until the user opens and closes the keyboard by hand. Re-measure on every
-  // resume. Deliberately does NOT reset `maxViewportHeight`: if the keyboard
-  // *is* still up at resume, resetting would record the shrunken height as the
-  // maximum and the keyboard-open state would never be detected again.
+  // matching `resize` never reaches us, so the keyboard-open state (and the
+  // `--app-h` that pins the layout to the shrunken viewport) stays latched and
+  // the layout keeps a dead zone under the input bar until the user opens and
+  // closes the keyboard by hand. Re-measure on every resume. Deliberately does
+  // NOT reset `maxViewportHeight`: if the keyboard *is* still up at resume,
+  // resetting would record the shrunken height as the maximum and the
+  // keyboard-open state would never be detected again.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') remeasureWhileSettling()
   })

@@ -47,11 +47,16 @@ describe('installViewportPlumbing', () => {
     vv.dispatchEvent(new Event('resize'))
   }
 
-  it('tracks the visual viewport height on the --app-h variable', () => {
+  it('leaves --app-h unset while the keyboard is closed', () => {
     installViewportPlumbing()
     settle()
-    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    expect(appHeight()).toBe('')
     expect(keyboardOpen()).toBe(false)
+  })
+
+  it('sets --app-h to the visible height while the keyboard is open', () => {
+    installViewportPlumbing()
+    settle()
 
     openKeyboard()
     expect(appHeight()).toBe(`${KEYBOARD_HEIGHT}px`)
@@ -70,7 +75,7 @@ describe('installViewportPlumbing', () => {
     document.dispatchEvent(new Event('visibilitychange'))
     settle()
 
-    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    expect(appHeight()).toBe('')
     expect(keyboardOpen()).toBe(false)
   })
 
@@ -83,7 +88,7 @@ describe('installViewportPlumbing', () => {
     window.dispatchEvent(new Event('pageshow'))
     settle()
 
-    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    expect(appHeight()).toBe('')
     expect(keyboardOpen()).toBe(false)
   })
 
@@ -99,7 +104,7 @@ describe('installViewportPlumbing', () => {
     vv.height = FULL_HEIGHT
     settle()
 
-    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    expect(appHeight()).toBe('')
     expect(keyboardOpen()).toBe(false)
   })
 
@@ -150,7 +155,7 @@ describe('installViewportPlumbing', () => {
 
     expect(keyboardOpen()).toBe(false)
     expect(document.activeElement).not.toBe(field)
-    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    expect(appHeight()).toBe('')
     field.remove()
   })
 
