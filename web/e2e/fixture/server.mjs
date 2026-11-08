@@ -81,6 +81,15 @@ const TASK = {
   attempt_detail: '',
   live_attempt_id: '',
 }
+/**
+ * A 1×1 PNG, the smallest real image. `/api/images/<ref>` answers it for a
+ * transcript whose message carries an image, so the viewer has bytes to load.
+ */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 const TASK_LINK_TRANSCRIPT = [
   { role: 'user', content: 'What is left from yesterday?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
   {
@@ -99,7 +108,7 @@ const TASK_LINK_TRANSCRIPT = [
  * select a message and see the action footer a real transcript renders.
  */
 const TRANSCRIPT = [
-  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0, images: ['upload-sample.png'] },
   {
     role: 'assistant',
     content: 'First answer.',
@@ -1041,6 +1050,18 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname.startsWith('/api/terminal/')) {
     return terminalApi(req, res, pathname, url, sessionOf(req))
+  }
+
+  // A message image is served by the engine at `/api/images/<ref>`; the
+  // fixture answers the one ref its transcript carries.
+  if (pathname === '/api/images/upload-sample.png') {
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'cache-control': 'no-store',
+      'content-length': PNG_1X1.length,
+    })
+    res.end(PNG_1X1)
+    return
   }
 
   if (pathname.startsWith('/api/')) {

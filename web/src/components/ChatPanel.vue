@@ -290,16 +290,16 @@
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
-                  <a
+                  <button
                     v-for="img in item.msg.images"
                     :key="img"
-                    :href="img.startsWith('data:') ? img : `/api/images/${img}`"
-                    target="_blank"
-                    rel="noopener"
+                    type="button"
                     class="message-image-link"
+                    :aria-label="`Open image ${img}`"
+                    @click="openMessageImage(img)"
                   >
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
-                  </a>
+                  </button>
                 </div>
                 <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
                   <li v-for="(f, fi) in userAttachments(item.msg.content)" :key="fi" class="message-file" :title="f.path || f.name">
@@ -4202,6 +4202,17 @@ function openFileCard(filePath: string): void {
   }
 }
 
+/** A message attachment is served at `/api/images/<ref>`, outside the
+ *  workspace sandbox, so the viewer opens the URL rather than a path. */
+function openMessageImage(ref: string): void {
+  const data = ref.startsWith('data:')
+  fileViewer.openImageUrl(
+    data ? ref : `/api/images/${ref}`,
+    data ? 'image' : ref,
+    chat.value?.chat_id || '',
+  )
+}
+
 /** Fold a turn's footer facts into one record.
  *
  * The fields do not arrive together. The merged final-answer row carries
@@ -6644,7 +6655,7 @@ details[open] > .activity-summary::before {
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.message-image-link { display: inline-block; line-height: 0; text-decoration: none; }
+.message-image-link { display: inline-block; line-height: 0; text-decoration: none; border: 0; padding: 0; background: none; cursor: zoom-in; }
 .message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
 .message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
 .message-file-icon { flex: none; color: var(--accent2); }

@@ -560,3 +560,24 @@ describe('docking beside the chat', () => {
     expect(store.isOpen).toBe(true)
   })
 })
+
+describe('served images', () => {
+  test('openImageUrl shows a served image without a workspace fetch', () => {
+    const store = useFileViewerStore()
+    store.openImageUrl('/api/images/upload-sample.png', 'upload-sample.png', 'chat-1')
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('image')
+    expect(store.path).toBe('upload-sample.png')
+    expect(store.imageUrl).toBe('/api/images/upload-sample.png')
+    expect(store.loading).toBe(false)
+    expect(api.get).not.toHaveBeenCalled()
+  })
+
+  test('a later workspace openImage clears imageUrl', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
+    const store = useFileViewerStore()
+    store.openImageUrl('/api/images/upload-sample.png', 'upload-sample.png')
+    await store.openImage('photo.png')
+    expect(store.imageUrl).toBe('')
+  })
+})
