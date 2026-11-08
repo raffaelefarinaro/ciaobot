@@ -234,9 +234,10 @@ cannot finish says which step is left with the command that finishes it.
 unregisters the task, deletes its XML, uninstalls the uv tool, deletes the
 receipt, removes the `PATH` entry **only** if this installer added it (recorded
 in `%LOCALAPPDATA%\Ciaobot\install-state.json`, the two facts nothing else
-keeps), leaves `uv` in place, and prints where the workspace was kept. The
-`windows` CI job's advisory install.ps1 steps run the file under both PowerShell hosts with
-`-DryRun` against a generated fixture, and then runs a real end-to-end
+keeps) and the tool bin directory is empty (a shared uv tools directory can
+keep it on `PATH`), leaves `uv` in place, and prints where the workspace was
+kept. The `windows` CI job's advisory install.ps1 steps run the file under both
+PowerShell hosts with `-DryRun` against a generated fixture, and then run a real end-to-end
 install/`-Uninstall`/`-NoStart` against a wheel built from the branch, printing
 whether the task existed after each.
 
