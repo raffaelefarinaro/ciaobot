@@ -4,7 +4,7 @@ import { ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, RouterLinkStub, type DOMWrapper } from '@vue/test-utils'
 import SettingsMcpServers from '../settings/SettingsMcpServers.vue'
-import { useMcpServers } from '../../composables/useMcpServers'
+import { useMcpServers, type McpApiClient } from '../../composables/useMcpServers'
 import type { McpStatus } from '../../lib/types'
 
 const runMock = vi.hoisted(() => vi.fn())
@@ -24,20 +24,20 @@ beforeEach(() => {
 
 const PREFIX = 'cd -- /workspace/personal && '
 
-function panel(change?: (status: McpStatus) => void, props: { defaultProvider?: string } = {}) {
+function panel(change?: (status: McpStatus) => void, props: { defaultProvider?: string } = {}, post?: ReturnType<typeof vi.fn>) {
   const status: McpStatus = { workspace: 'personal', agent_root: '/workspace/personal', shell: { kind: 'posix', cd_prefix: PREFIX }, providers: [
     { provider: 'claude', available: true, inventory_state: 'loaded', servers: [
-      { name: 'notion', scope: 'project', source: '.mcp.json', allowed: false, connections: [] },
+      { name: 'notion', scope: 'project', source: '.mcp.json', allowed: false, applies_to: '/workspace', connections: [] },
     ] },
     { provider: 'opencode', available: true, inventory_state: 'loaded', servers: [
-      { name: 'notion', scope: 'project', source: 'opencode.json', allowed: null, connections: [{ chat_id: 'chat-one', state: 'failed', error: 'MCP server connection failed.' }, { chat_id: 'chat-two', state: 'needs_auth' }] },
+      { name: 'notion', scope: 'project', source: 'opencode.json', allowed: null, applies_to: '/workspace/personal/opencode.json', connections: [{ chat_id: 'chat-one', state: 'failed', error: 'MCP server connection failed.' }, { chat_id: 'chat-two', state: 'needs_auth' }] },
     ] },
   ] }
   change?.(status)
   const get = vi.fn().mockResolvedValue(status)
-  const mcp = useMcpServers({ api: { get } })
+  const mcp = useMcpServers({ api: post ? { get, post } as McpApiClient : { get } })
   mcp.status.value = status
-  return { wrapper: mount(SettingsMcpServers, { props: { mcp, ...props }, attachTo: document.body, global: { stubs: { RouterLink: RouterLinkStub } } }), get }
+  return { wrapper: mount(SettingsMcpServers, { props: { mcp, ...props }, attachTo: document.body, global: { stubs: { RouterLink: RouterLinkStub } } }), get, post }
 }
 
 const tab = (wrapper: ReturnType<typeof panel>['wrapper'], label: string) => wrapper.findAll('[role="tab"]').find(t => t.text().startsWith(label))!
@@ -348,6 +348,78 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.find('[role="menu"]').exists()).toBe(true)
     await wrapper.get('.mcp-more').trigger('focusout', { relatedTarget: wrapper.get('#mcp-server-name').element })
     expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('turns a server off and back on from its row', async () => {
+    const post = vi.fn()
+      .mockResolvedValueOnce({ workspace: 'personal', provider: 'claude', server: 'notion', enabled: false, changed: true, applies_to: '/workspace', warning: null, reload: { reloaded: [], pending: ['c1', 'c2'] } })
+      .mockResolvedValueOnce({ workspace: 'personal', provider: 'claude', server: 'notion', enabled: true, changed: true, applies_to: '/workspace', warning: null, reload: { reloaded: [], pending: [] } })
+    const { wrapper } = panel(undefined, {}, post)
+    const toggle = wrapper.get('[aria-label="Turn off notion for Claude Code"]')
+    ;(toggle.element as HTMLElement).focus()
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(toggle.text()).toBe('Turn on')
+    expect(wrapper.get('.mcp-server-heading').findAll('.badge').map(b => b.text())).toContain('off')
+    expect(document.activeElement).toBe(toggle.element)
+    expect(wrapper.get('.mcp-toggle-note').text()).toBe('notion is off for Claude Code chats in /workspace. 2 running chats keep their current connection until reloaded. Claude Code sessions running outside Ciaobot keep their current state until they restart.')
+    await wrapper.get('[aria-label="Turn on notion for Claude Code"]').trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenLastCalledWith('/api/mcp/servers/enabled', { workspace: 'personal', provider: 'claude', server: 'notion', enabled: true })
+    expect(toggle.text()).toBe('Turn off')
+    expect(wrapper.get('.mcp-server-heading').findAll('.badge').map(b => b.text())).not.toContain('off')
+    expect(wrapper.get('.mcp-toggle-note').text()).toContain('notion is on for Claude Code chats in /workspace.')
+    wrapper.unmount()
+  })
+  it('shows where a switch applies before writing', () => {
+    const post = vi.fn()
+    const { wrapper } = panel(undefined, {}, post)
+    expect(wrapper.get('.mcp-applies-to').text()).toContain('/workspace')
+    expect(post).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+  it('a turned-off row offers no sign-in anywhere', async () => {
+    const { wrapper } = panel(status => { for (const p of status.providers) p.servers[0]!.enabled = false })
+    await tab(wrapper, 'OpenCode').trigger('click')
+    expect(button(wrapper, 'Sign in')).toBeUndefined()
+    expect(button(wrapper, 'Sign in in terminal')).toBeUndefined()
+    expect(wrapper.find('.mcp-signin').exists()).toBe(false)
+    await wrapper.get('[aria-label="More actions for notion"]').trigger('click')
+    expect(wrapper.findAll('[role="menuitem"]').map(i => i.text())).toEqual(['Copy sign-out command'])
+    expect(wrapper.text()).toContain('Off: new OpenCode chats here don’t connect to it.')
+    expect(wrapper.text()).not.toContain('Connection not checked.')
+    wrapper.unmount()
+  })
+  it('offers no switch when the engine gives no applies_to', async () => {
+    const { wrapper } = panel(status => {
+      status.providers[0]!.servers = [{ name: 'corp', scope: 'managed', source: 'managed', allowed: null, applies_to: null, connections: [] }]
+      status.providers[1]!.servers = [{ name: 'live', scope: 'runtime', source: 'provider', allowed: null, applies_to: null, connections: [] }]
+    })
+    expect(wrapper.find('.mcp-toggle').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Managed by your organization')
+    await tab(wrapper, 'OpenCode').trigger('click')
+    expect(wrapper.find('.mcp-toggle').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('shows the engine warning in the result', async () => {
+    const post = vi.fn().mockResolvedValue({ workspace: 'personal', provider: 'opencode', server: 'notion', enabled: false, changed: true, applies_to: '/workspace/personal/opencode.json', warning: 'Another OpenCode config file still turns notion on.', reload: { reloaded: [], pending: [] } })
+    const { wrapper } = panel(undefined, {}, post)
+    await tab(wrapper, 'OpenCode').trigger('click')
+    await wrapper.get('[aria-label="Turn off notion for OpenCode"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.mcp-toggle-note').text()).toContain('Another OpenCode config file still turns notion on.')
+    wrapper.unmount()
+  })
+  it('shows the engine refusal as an alert', async () => {
+    const message = 'opencode.jsonc has comments or trailing commas, so Ciaobot leaves it alone.'
+    const post = vi.fn().mockRejectedValue(Object.assign(new Error(message), { status: 409 }))
+    const { wrapper } = panel(undefined, {}, post)
+    await tab(wrapper, 'OpenCode').trigger('click')
+    const toggle = wrapper.get('[aria-label="Turn off notion for OpenCode"]')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toBe(message)
+    expect(toggle.text()).toBe('Turn off')
     wrapper.unmount()
   })
 })
