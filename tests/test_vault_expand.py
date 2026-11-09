@@ -6,16 +6,13 @@ function the behavioural-eval recall contracts measure, and these tests pin its
 bounds.
 
 `vault_search` answers with `_public_snippet`: the FTS-highlighted lines only,
-inside SQLite's 32-token budget. That is a privacy property — it is what keeps
-an unrelated private line out of a recall answer — and the core prompt turns it
-into a rule by forbidding a generic full-note read for a pure recall question.
-
-The rule has a failure mode. A snippet can keep the clause that names a value
-and drop the clause that qualifies, negates, or supersedes it, and recall then
-answers confidently from a fragment whose meaning is the opposite of the note's.
-`fts_search.expand_note` is the bounded repair, and these tests pin both halves
-of it: that it recovers the omitted qualification, and that it does not become
-the full-note read the rule exists to prevent.
+inside SQLite's 32-token budget. A snippet can keep the clause that names a value
+and drop the clause that qualifies, negates, or supersedes it. Recall no longer
+answers from snippets: the core prompt has it read the best-matching note, and
+its privacy guard is the answer-level "private working evidence" rule. No agent
+path calls `expand_note` any more; these tests pin the library function the
+behavioural contracts measure: that it recovers the omitted qualification and
+stays scoped and bounded.
 """
 
 from __future__ import annotations
