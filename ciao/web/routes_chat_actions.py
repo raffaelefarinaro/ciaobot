@@ -1,8 +1,8 @@
-"""Browser-only routes for a chat's needs-you cards: start, dismiss, continue and callback.
+"""Browser-only routes for a chat's needs-you cards: start, dismiss, continue, callback, and raising an MCP sign-in from Settings.
 
 These routes sit behind the signed session cookie and are not loopback-only. An
 agent can raise an action (``ciao chat needs-action``) but can never start,
-dismiss or continue one; only the card's buttons do that.
+dismiss or continue one; only the card's buttons do that. Settings' MCP **Sign in** raises an `mcp_auth` card through `chat_mcp_auth_request`, then starts it through the start route.
 
 Every route answers 200 JSON and never 204, because the PWA treats an empty body
 as "route not available on the running server". Refusals map the same way in
@@ -129,4 +129,24 @@ async def chat_action_callback(request: Request) -> JSONResponse:
         )
     except (ChatActionConflictError, ChatActionError) as exc:
         return _action_error_response(pcm, chat_id, action_id, exc)
+    return JSONResponse({"action": payload})
+
+
+async def chat_mcp_auth_request(request: Request) -> JSONResponse:
+    """Raise (or return) the chat's MCP sign-in card for one server. Body exactly ``{"server": "<name>"}``."""
+    pcm: ProjectChatManager = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw else None
+    except ValueError:
+        return JSONResponse({"error": "invalid_body", "action": None}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"server"} or not isinstance(body["server"], str):
+        return JSONResponse({"error": "invalid_body", "action": None}, status_code=400)
+    try:
+        payload = pcm.actions_runtime.request_mcp_auth(chat_id, body["server"])
+    except ChatActionError as exc:
+        return JSONResponse({"error": exc.reason, "action": None}, status_code=400)
     return JSONResponse({"action": payload})
