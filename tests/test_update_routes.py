@@ -13,9 +13,16 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import __version__ as ENGINE_VERSION
 from ciao import engine_update
+from ciao.auto_update import SNOOZE_SECONDS, AutoUpdateCoordinator, AutoUpdateSupport
+from ciao.app_settings import AppSettingsStore
 from ciao.web import auth
-from ciao.web.routes_node import update_start_endpoint, update_status_endpoint
+from ciao.web.routes_node import (
+    update_settings_endpoint,
+    update_start_endpoint,
+    update_status_endpoint,
+)
 
 NOT_INSTALLER = (
     "in-app updates are only for engines installed with the Ciaobot engine installer"
@@ -102,6 +109,7 @@ def _app(**state: object) -> Starlette:
         routes=[
             Route("/api/update/status", update_status_endpoint, methods=["GET"]),
             Route("/api/update/start", update_start_endpoint, methods=["POST"]),
+            Route("/api/update/settings", update_settings_endpoint, methods=["PATCH"]),
         ]
     )
     for name, value in state.items():
@@ -608,11 +616,179 @@ async def test_parked_refusal_is_dropped_once_the_record_moves() -> None:
     assert "error" not in second.json()
 
 
+class _FakeCoordinator:
+    """The coordinator's status/settings surface, without a loop."""
+
+    def __init__(self, status: dict[str, object]) -> None:
+        self._status = status
+        self.status_calls = 0
+        self.enabled: list[bool] = []
+        self.snoozes = 0
+
+    def status(self) -> dict[str, object]:
+        self.status_calls += 1
+        return dict(self._status)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled.append(enabled)
+
+    def snooze(self) -> None:
+        self.snoozes += 1
+
+
+AUTO_UPDATE_KEYS = {
+    "enabled",
+    "supported",
+    "unsupported_reason",
+    "snooze_until",
+    "outcome",
+    "error",
+    "attempted_at",
+}
+
+
+def _stamp(seconds: float) -> str:
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(seconds, UTC).isoformat(timespec="seconds")
+
+
+def test_auto_update_settings_and_status(tmp_path) -> None:
+    mode = lambda: "installer"  # noqa: E731 — a one-line fake for app.state
+    no_record = lambda: None  # noqa: E731
+
+    # 1. No coordinator in this engine: every key is still answered, so the
+    # card never renders a missing one as "supported".
+    app = _app(engine_update_mode=mode, engine_update_read=no_record)
+    with TestClient(app) as client:
+        body = client.get("/api/update/status").json()
+
+    assert body["current_version"] == ENGINE_VERSION
+    auto = body["auto_update"]
+    assert set(auto) == AUTO_UPDATE_KEYS
+    assert auto["enabled"] is True
+    assert auto["supported"] is False
+    assert auto["unsupported_reason"] == (
+        "automatic updates are not running in this engine"
+    )
+
+    # 2. With a coordinator: its own answer, and the poll changes nothing.
+    reported: dict[str, object] = {
+        "enabled": True,
+        "supported": True,
+        "unsupported_reason": "",
+        "snooze_until": "",
+        "outcome": "applied",
+        "error": "",
+        "attempted_at": "2026-11-09T10:00:00+00:00",
+    }
+    fake = _FakeCoordinator(reported)
+    app = _app(engine_update_mode=mode, engine_update_read=no_record, auto_update=fake)
+    with TestClient(app) as client:
+        body = client.get("/api/update/status").json()
+
+    assert body["auto_update"] == reported
+    # A GET is read-only: it never ticks, stages or claims an update.
+    assert fake.status_calls == 1
+    assert fake.enabled == []
+    assert fake.snoozes == 0
+
+    # 3. A real coordinator over a real settings file: "24 hours" has to be a
+    # persisted instant, not a call a fake recorded.
+    clock = lambda: 1_800_000_000.0  # noqa: E731
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    coordinator = AutoUpdateCoordinator(
+        store=store,
+        clock=clock,
+        stage=lambda version: engine_update.Operation(
+            id="unused",
+            phase="staged",
+            from_version="2.0.16",
+            to_version=version,
+            started_at="2026-11-09T10:00:00+00:00",
+            updated_at="2026-11-09T10:00:00+00:00",
+        ),
+        spawn_apply=lambda attempt_id: None,
+        fetch_latest=lambda: "2.0.16",
+        read_operation=lambda: None,
+        claim=lambda owner: False,
+        release_claim=lambda owner: None,
+        support=lambda: AutoUpdateSupport(True),
+        current_version=lambda: "2.0.16",
+    )
+    app = _app(
+        engine_update_mode=mode, engine_update_read=no_record, auto_update=coordinator
+    )
+    with TestClient(app) as client:
+        off = client.patch("/api/update/settings", json={"enabled": False})
+        assert off.status_code == 200
+        assert off.json()["enabled"] is False
+        assert set(off.json()) == AUTO_UPDATE_KEYS
+        assert AppSettingsStore(path).settings.auto_update_enabled is False
+
+        on = client.patch("/api/update/settings", json={"enabled": True})
+        assert on.status_code == 200
+        assert on.json()["enabled"] is True
+
+        snoozed = client.patch("/api/update/settings", json={"snooze": True})
+        assert snoozed.status_code == 200
+        until = _stamp(clock() + SNOOZE_SECONDS)
+        assert snoozed.json()["snooze_until"] == until
+        assert AppSettingsStore(path).settings.auto_update_snooze_until == until
+
+        # Enabling or disabling is not a way to clear an active hold.
+        client.patch("/api/update/settings", json={"enabled": False})
+        assert AppSettingsStore(path).settings.auto_update_snooze_until == until
+
+        for bad in (
+            {},
+            {"snooze": False},
+            {"enabled": "yes"},
+            {"enabled": 1},
+            {"enabled": True, "extra": 1},
+            {"snooze": True, "enabled": True},
+            {"nope": True},
+        ):
+            refused = client.patch("/api/update/settings", json=bad)
+            assert refused.status_code == 400, bad
+            assert refused.json()["error"]
+        malformed = client.patch("/api/update/settings", content=b"{not json")
+        assert malformed.status_code == 400
+
+    # 4. No coordinator is not "nothing to do": a write with no one to take it
+    # is refused, so the card can explain instead of pretending it saved.
+    app = _app(engine_update_mode=mode, engine_update_read=no_record)
+    with TestClient(app) as client:
+        missing = client.patch("/api/update/settings", json={"enabled": True})
+    assert missing.status_code == 503
+
+
+def test_status_survives_a_broken_coordinator() -> None:
+    class _Broken:
+        def status(self) -> dict[str, object]:
+            raise RuntimeError("coordinator is confused")
+
+    app = _app(auto_update=_Broken())
+    with TestClient(app) as client:
+        resp = client.get("/api/update/status")
+
+    assert resp.status_code == 200
+    auto = resp.json()["auto_update"]
+    assert set(auto) == AUTO_UPDATE_KEYS
+    assert auto["supported"] is False
+    assert auto["error"] == "coordinator is confused"
+
+
 # A logged-in operator may start an engine update from the browser, exactly as
 # they may POST /api/admin/restart. Neither "public" nor "loopback-only" is that:
 # `_PUBLIC_API` is unauthenticated from anywhere, and `_LOOPBACK_ONLY_API` exists
 # for the CLI's pre-session drain handshake, not for a browser action.
 def test_update_routes_require_a_session() -> None:
-    for path in ("/api/update/status", "/api/update/start"):
+    for path in (
+        "/api/update/status",
+        "/api/update/start",
+        "/api/update/settings",
+    ):
         assert path not in auth._PUBLIC_API, path
         assert path not in auth._LOOPBACK_ONLY_API, path
