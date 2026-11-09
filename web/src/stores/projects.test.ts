@@ -2898,6 +2898,21 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
   })
 
+  test('requestMcpAuth posts the server and adopts the returned card', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ action: action('a1', { params: { server: 'notion', provider: 'opencode' } }) })
+    const result = await store.requestMcpAuth('c-1', 'notion')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/mcp-auth', { server: 'notion' })
+    expect(result?.id).toBe('a1')
+    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
+  })
+
+  test('requestMcpAuth rethrows a refusal', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
+    await expect(store.requestMcpAuth('c-1', 'notion')).rejects.toThrow('invalid_state')
+  })
+
   test('dismissChatAction applies the remaining list', async () => {
     const store = useProjectStore()
     const sock = events(store)

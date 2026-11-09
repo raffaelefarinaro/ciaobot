@@ -2405,6 +2405,16 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /** Settings' MCP Sign in: put the chat's sign-in card for `server` on the chat, or get the one there. */
+  async function requestMcpAuth(chatId: string, server: string): Promise<ChatAction | null> {
+    const readStartedAt = chatReadStart()
+    const res = await api.post<{ action?: unknown }>(`/api/chats/${encodeURIComponent(chatId)}/actions/mcp-auth`, { server })
+    const raised = res?.action
+    if (!isChatAction(raised)) return null
+    upsertChatAction(chatId, raised, readStartedAt)
+    return raised
+  }
+
   async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
     const readStartedAt = chatReadStart()
     try {
@@ -7315,7 +7325,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, dismissChatAction, continueChatAction, submitChatActionCallback,
+    startChatAction, requestMcpAuth, dismissChatAction, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,
