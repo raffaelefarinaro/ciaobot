@@ -59,7 +59,7 @@
                 v-if="needsAuth(server)"
                 type="button"
                 class="mcp-signin btn-primary"
-                :disabled="signingIn !== null"
+                :aria-disabled="signingIn !== null ? 'true' : undefined"
                 @click="signInInChat(current.provider, server.name, signInChat(server)!)"
               >{{ signingIn === moreKey(server) ? 'Starting…' : 'Sign in' }}</button>
               <button
@@ -86,7 +86,7 @@
               <span v-if="menuCopied === moreKey(server)" class="hint" role="status">Copied</span>
             </div>
             <p v-if="signInError === moreKey(server)" class="action-result --error" role="alert">{{ SIGN_IN_ERROR }}</p>
-            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in connects the open chat at once; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in finishes in the open chat, which connects as soon as you complete it; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
           </template>
         </div>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
