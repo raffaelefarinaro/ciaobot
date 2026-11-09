@@ -39,6 +39,7 @@ const SECTION_LABELS: Record<string, string> = {
   '/': 'Home',
   '/schedules': 'Automations',
   '/tasks': 'Tasks',
+  '/stats': 'Usage',
   '/memory': 'Memory',
   '/memory/review': 'To decide',
   '/memory/map': 'Memory map',

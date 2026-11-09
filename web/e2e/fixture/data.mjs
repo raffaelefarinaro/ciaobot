@@ -1064,3 +1064,28 @@ export const VERIFICATION_NODES = [
     entry_coverage: entryCoverage(),
   },
 ]
+
+export function usageStats(range) {
+  const days = [7, 30, 90, 365].includes(range) ? range : 30
+  const now = new Date()
+  const daily = []
+  for (let i = 181; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i))
+    daily.push({ date: d.toISOString().slice(0, 10), count: (i * 37) % 23 })
+  }
+  return {
+    range_days: days, generated_at: now.toISOString(),
+    today: { chats_opened: 14, messages_sent: 212, chats_archived: 5, memories_saved: 7, projects_worked_on: 4, tasks_completed: 3, avg_chats_opened_30d: 10.4, avg_messages_sent_30d: 151 },
+    totals: { chats_opened: 248, messages_sent: 4517, chats_archived: 171, memories_saved: 112, tasks_completed: 37, projects_worked_on: 16, automation_runs: 180, tokens: 71500000 },
+    previous: { chats_opened: 210, messages_sent: 3702, chats_archived: 157, memories_saved: 85, tasks_completed: 31, projects_worked_on: 13, automation_runs: 173, tokens: null },
+    daily_messages: daily,
+    projects: [
+      { project_id: 'alpha-general', name: 'General', messages: 412 },
+      { project_id: 'alpha-notes', name: 'alpha-notes-a-very-long-unbreakable-project-identifier', messages: 260 },
+      { project_id: 'beta-general', name: 'General', messages: 198 },
+    ],
+    memory_pipeline: { proposed: 179, accepted: 112, notes_updated: 62 },
+    hours: [2, 1, 0, 0, 0, 0, 1, 4, 9, 14, 16, 12, 7, 11, 15, 13, 10, 8, 6, 9, 14, 17, 12, 6],
+    models: [{ model: 'claude-opus-5-5', turns: 680 }, { model: 'claude-sonnet-5-5', turns: 220 }, { model: 'openai/gpt-5.6-luna', turns: 100 }],
+  }
+}

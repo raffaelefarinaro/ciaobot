@@ -1030,7 +1030,7 @@ import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{
   collapsed: boolean
-  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'
+  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'
   /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
   canOpenBeside?: boolean
 }>()

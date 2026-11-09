@@ -1120,36 +1120,6 @@ export interface DebugIssueReport {
   report_text: string
 }
 
-// ── CLI Stats ───────────────────────────────────────────────────────────
-
-export interface DailyActivity {
-  date: string
-  messageCount: number
-  sessionCount: number
-  toolCallCount: number
-}
-
-export interface DailyModelTokens {
-  date: string
-  tokensByModel: Record<string, number>
-}
-
-export interface CliStats {
-  version: number
-  dailyActivity: DailyActivity[]
-  dailyModelTokens: DailyModelTokens[]
-  modelUsage: Record<string, {
-    inputTokens: number
-    outputTokens: number
-    cacheReadInputTokens: number
-    cacheCreationInputTokens: number
-  }>
-  totalSessions: number
-  totalMessages: number
-  firstSessionDate: string
-}
-
-
 // ── Settings skill inventory ───────────────────────────────────────────
 
 export interface SkillInventoryItem {

@@ -130,6 +130,7 @@
             v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
             @open-sidebar="sidebarCollapsed = false"
           />
+          <UsageView v-else-if="viewMode === 'stats'" @open-sidebar="sidebarCollapsed = false" />
           <ProjectView
             v-else-if="projectIdParam"
             :project-id="projectIdParam"
@@ -311,6 +312,7 @@ const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
+const UsageView = defineAsyncComponent(() => import('./UsageView.vue'))
 // The chat chunk is the biggest one, and the first chat opened after an
 // update is exactly when it has to be fetched: the hashed assets change with
 // every build, so nothing is warm. `defineAsyncComponent` renders nothing
@@ -656,11 +658,12 @@ const chatRoutePending = computed(() => {
   if (!id || store.activeChat) return false
   return chatLookupPendingId.value === id
 })
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
   if (path.startsWith('/tasks')) return 'tasks'
+  if (path.startsWith('/stats')) return 'stats'
   if (path.startsWith('/memory')) return 'memory'
   if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
@@ -689,7 +692,7 @@ const viewShortcutsActive = computed(() =>
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
 // on `viewShortcutsActive`, which the board does not exclude.
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals' && viewMode.value !== 'stats',
 )
 const sidebarCollapsed = ref(false)
 // On a phone the drawer slides out on close the way it slides in on open: for the
@@ -756,6 +759,7 @@ const pageDocumentTitle = computed(() => {
   if (viewMode.value === 'memory') return 'memory'
   if (viewMode.value === 'proposals') return 'proposals'
   if (viewMode.value === 'tasks') return 'tasks'
+  if (viewMode.value === 'stats') return 'usage'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -1271,7 +1275,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       // navigating to `/` would throw the user off the surface they pressed a
       // number on.
       void store.switchWorkspace(workspace.name, {
-        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory',
+        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'stats',
       })
       return
     }
@@ -1330,7 +1334,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals' || viewMode.value === 'stats') {
       e.preventDefault()
       void router.push('/')
       return
