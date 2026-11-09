@@ -934,9 +934,10 @@ def search_logs(
 # an accident — it is what keeps an unrelated private line out of a recall
 # answer. It is also narrow enough to cut away the half of a sentence that
 # decides the answer: a qualification ("…only for work logged before the
-# amendment"), a negation, or the paragraph naming the current value. Recall is
-# then told to answer from snippets alone, so it answers confidently from a
-# fragment whose meaning is the opposite of the note's.
+# amendment"), a negation, or the paragraph naming the current value. Recall
+# that answered from snippets alone answered confidently from a fragment whose
+# meaning is the opposite of the note's, so the core prompt now has it read the
+# best-matching note a search picked before answering.
 #
 # `expand_note` is the bounded repair. It is deliberately NOT a note reader:
 #

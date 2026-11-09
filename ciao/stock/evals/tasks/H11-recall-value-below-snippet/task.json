@@ -1,0 +1,30 @@
+{
+  "id": "H11-recall-value-below-snippet",
+  "tier": "hard",
+  "category": "recall",
+  "prompt": "How much is the yearly rent on my allotment plot now?",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "answer_contains", "any": ["240"], "normalize": true},
+    {
+      "kind": "answer_excludes",
+      "any": [
+        "is chf 180",
+        "is 180",
+        "rent: chf 180",
+        "costs chf 180",
+        "pay chf 180",
+        "still chf 180",
+        "remains chf 180",
+        "is chf 310",
+        "is 310"
+      ],
+      "normalize": true
+    },
+    {"kind": "unchanged", "path": "memory-vault/Documents/allotment.md"},
+    {"kind": "new_files", "glob": "memory-vault/**/*", "max": 0}
+  ]
+}

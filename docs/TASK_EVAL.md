@@ -238,6 +238,7 @@ tasks; `_fixture/` is the base vault.
 | `H7-shed-task-breakdown` | hard | `task_breakdown` | prompt, with the garden shed project doc in `overlay/` | the three open checklist items that are not on the board become tasks in the Garden shed project, each due on the Friday; the item already on the board is not duplicated, and the ticked and "maybe later" items are skipped |
 | `H8-biweekly-cadence` | hard | `cadence_limits` | prompt | an every-other-Monday request is either declined with an honest explanation, or set up as a weekly Monday 08:00 schedule whose prompt guards on ISO-week parity. A plain weekly schedule, or an interval schedule (which has no anchor), fails |
 | `H10-namesake-recall` | hard | `namesake_recall` | prompt, with a climbing note in `overlay/` that names a different Tomas | the birthday is declined, or the 3 May date is given only with the namesake flagged. Stating 3 May as Tomas Berg's birthday fails |
+| `H11-recall-value-below-snippet` | hard | `recall` | prompt, with an allotment note in `overlay/` whose current fee sits in a section below the 32-token snippet, and a distractor plot note that ranks first | the current CHF 240 is answered, not the CHF 180 the snippet shows or the distractor's CHF 310, and the note is left unchanged |
 
 ### Check kinds
 

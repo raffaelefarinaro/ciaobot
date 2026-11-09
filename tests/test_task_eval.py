@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ import pytest
 from ciao import agent_paths
 from ciao import behavioral_eval
 from ciao import cli
+from ciao import fts_search
 from ciao import task_eval as te
 
 
@@ -3376,3 +3378,67 @@ def test_m2_project_exists_accepts_havent_created(tmp_path: Path) -> None:
 def test_host_project_name_does_not_reveal_the_eval() -> None:
     source = Path(te.__file__).read_text(encoding="utf-8")
     assert "Task eval host" not in source and "Not a real project" not in source
+
+
+# --- H11: the current value sits below the search snippet ---------------------------------------
+
+H11_ID = "H11-recall-value-below-snippet"
+H11_NOTE = "memory-vault/Documents/allotment.md"
+
+
+def _grade_h11(root: Path, answer: str, snapshot: te.Snapshot | None = None) -> list[te.CheckResult]:
+    ctx = _ctx(root, answer=answer, snapshot=snapshot)
+    return [te.CHECKS[str(spec["kind"])](ctx, spec) for spec in _task(H11_ID).checks]
+
+
+def test_h11_snippet_keeps_the_stale_rent_and_drops_the_current_fee(tmp_path: Path) -> None:
+    """The shape this task pins: a search for the question's words returns the note, but its 32-token
+    snippet carries only the old rent; the current fee sits in a later section no query word reaches."""
+    root = _seed(tmp_path, H11_ID)
+    note = (root / H11_NOTE).read_text(encoding="utf-8")
+    assert "CHF 180" in note and "CHF 240" in note
+    assert note.index("CHF 240") > note.index("## Changes") > note.index("CHF 180")
+
+    conn = sqlite3.connect(tmp_path / "fts.db")
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, root / "memory-vault", path_base=tmp_path)
+        for query in ("allotment rent", "yearly rent allotment plot", "allotment plot rent now"):
+            rows = fts_search.search_vault(conn, query, limit=5)
+            by_name = {Path(row["path"]).name: row["snippet"] for row in rows}
+            assert "180" in by_name["allotment.md"], query
+            assert "240" not in by_name["allotment.md"], query
+            assert "310" in by_name["allotment-waitlist.md"], query
+    finally:
+        conn.close()
+
+
+def test_h11_checks_pass_on_the_current_fee_and_fail_on_the_snippet_answer(tmp_path: Path) -> None:
+    root = _seed(tmp_path, H11_ID)
+    saved = {H11_NOTE: (root / H11_NOTE).read_bytes()}
+    files = tuple(
+        path.relative_to(root).as_posix() for path in (root / "memory-vault").rglob("*") if path.is_file()
+    )
+    snap = _snapshot(files=files, saved=saved)
+
+    for answer in (
+        "Your allotment rent is now **CHF 240** a year: the 2026 general assembly raised it from CHF 180.",
+        "CHF 240 per year from this season, invoiced in February.",
+    ):
+        results = _grade_h11(root, answer, snap)
+        assert all(result.ok for result in results), [(r.kind, r.detail) for r in results if not r.ok]
+
+    # Untouched: no answer at all.
+    assert not all(result.ok for result in _grade_h11(root, "", snap))
+    # The snippet-only answer, and the distractor plot's rent.
+    for wrong in (
+        "Your yearly allotment rent is CHF 180, paid each spring.",
+        "The yearly rent is CHF 310.",
+        "You pay CHF 180 a year; I couldn't confirm whether that changed.",
+    ):
+        assert not all(result.ok for result in _grade_h11(root, wrong, snap)), wrong
+
+    # A recall that edits the note it read fails even with the right figure.
+    _append_note(root, H11_NOTE, "\nChecked 2026-11: fee is CHF 240.\n")
+    results = _grade_h11(root, "It is CHF 240 a year now.", snap)
+    assert [r.kind for r in results if not r.ok] == ["unchanged"]
