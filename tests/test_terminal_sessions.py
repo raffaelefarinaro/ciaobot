@@ -36,6 +36,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -1285,6 +1287,93 @@ async def test_detached_ttl_is_exact_and_output_does_not_extend_it(
     await manager.shutdown()
 
 
+async def _two_expired_sessions_with_held_input(
+    tmp_path: Path, manager: TerminalSessionManager, factory: FakeFactory,
+    clock: FakeClock,
+) -> tuple[FakeProcess, FakeProcess, threading.Event, threading.Event]:
+    """Two detached, expired sessions, each with a write held in its terminal."""
+    first = await manager.create(tmp_path, "chat", "chat-1")
+    second = await manager.create(tmp_path, "chat", "chat-2")
+    one, two = factory.processes
+    gate_one, gate_two = threading.Event(), threading.Event()
+    one.write_gates = [gate_one]
+    two.write_gates = [gate_two]
+    manager.attach(first.session_id, "conn-1")
+    manager.attach(second.session_id, "conn-2")
+    await manager.write_input(first.session_id, "conn-1", b"one")
+    await manager.write_input(second.session_id, "conn-2", b"two")
+    await _wait_until(one.write_held.is_set, what="the first write to be held")
+    await _wait_until(two.write_held.is_set, what="the second write to be held")
+    manager.detach(first.session_id, "conn-1")
+    manager.detach(second.session_id, "conn-2")
+    clock.advance(TERMINAL_DETACHED_TTL_S)
+    return one, two, gate_one, gate_two
+
+
+async def test_a_sweep_that_is_cancelled_still_closes_what_it_pruned(
+    tmp_path: Path,
+) -> None:
+    """A pruned session is closed even if the sweep is cancelled mid-way.
+
+    The sweep removes the sessions from the registry before it closes
+    them, so a shutdown cannot find them there any more: their close
+    must not depend on the sweep surviving.
+    """
+    clock = FakeClock()
+    factory = FakeFactory()
+    manager = _manager(factory, clock)
+    one, two, gate_one, gate_two = await _two_expired_sessions_with_held_input(
+        tmp_path, manager, factory, clock
+    )
+
+    sweep = asyncio.create_task(manager.reap_expired())
+    await _let_the_loop_run()
+    assert manager.retained_count() == 0
+    sweep.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sweep
+
+    # Both closes go on without the sweep: neither shell waits for the
+    # shutdown to be closed, and each gets its input first.
+    gate_one.set()
+    gate_two.set()
+    await _wait_until(
+        lambda: one.close_count == two.close_count == 1,
+        what="both pruned shells to close",
+    )
+    assert bytes(one.written) == b"one" and bytes(two.written) == b"two"
+
+    await asyncio.wait_for(manager.shutdown(), 60)
+    assert one.close_count == two.close_count == 1
+    assert _terminal_tasks() == []
+
+
+async def test_a_sweep_closes_the_pruned_sessions_side_by_side(
+    tmp_path: Path,
+) -> None:
+    """One pruned terminal that is slow to take its input does not hold up another."""
+    clock = FakeClock()
+    factory = FakeFactory()
+    manager = _manager(factory, clock)
+    slow, quick, slow_gate, quick_gate = await _two_expired_sessions_with_held_input(
+        tmp_path, manager, factory, clock
+    )
+
+    sweep = asyncio.create_task(manager.reap_expired())
+    await _let_the_loop_run()
+    quick_gate.set()
+    await _wait_until(lambda: quick.close_count == 1, what="the second shell to close")
+    assert slow.close_count == 0
+    assert not sweep.done()
+
+    slow_gate.set()
+    assert len(await asyncio.wait_for(sweep, 60)) == 2
+    assert slow.close_count == 1
+    assert bytes(slow.written) == b"one" and bytes(quick.written) == b"two"
+
+    await manager.shutdown()
+
+
 async def test_attached_session_is_not_expired_by_detach_sweeper(
     tmp_path: Path,
 ) -> None:
@@ -1670,6 +1759,47 @@ async def test_an_end_waits_for_a_terminal_that_takes_input_slowly(
     await manager.shutdown()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a real pty is POSIX only")
+async def test_an_end_hands_a_large_paste_to_a_program_that_echoes_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real pty: ``cat`` gets a whole paste queued just before the end.
+
+    ``cat`` writes back everything it reads, and the terminal echoes it
+    too. If nobody drained that output while the end handed the input
+    over, ``cat`` would block on its full output, stop reading, and the
+    pty would refuse the rest of the paste until the hang guard gave up
+    on it. The output is never read by the test: only the manager's own
+    reader can keep ``cat`` going.
+    """
+    cat = "/bin/cat"
+    assert os.access(cat, os.X_OK)
+    manager = TerminalSessionManager()
+    info = await manager.create(tmp_path, "chat", "chat-1", argv=(cat,))
+    manager.attach(info.session_id, "conn-1")
+    left_at_close: list[int] = []
+    close = manager._close_session_process
+
+    async def recording_close(session):
+        left_at_close.append(len(session.pending) + session.inflight)
+        await close(session)
+
+    manager._close_session_process = recording_close  # type: ignore[method-assign]
+
+    # Short lines, so the terminal's line discipline passes each one on.
+    line = b"x" * 63 + b"\n"
+    paste = line * (TERMINAL_MAX_PENDING_WRITE_BYTES // len(line))
+    assert await manager.write_input(info.session_id, "conn-1", paste) == len(paste)
+    with caplog.at_level(logging.INFO, logger="ciao.terminal_sessions"):
+        # Bounded here only so a regression fails instead of hanging.
+        await asyncio.wait_for(manager.end(info.session_id), 120)
+
+    assert left_at_close == [0]
+    assert "may not have been written" not in caplog.text
+
+    await manager.shutdown()
+
+
 async def test_an_end_gives_up_on_a_hung_terminal_and_says_so(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1694,8 +1824,49 @@ async def test_an_end_gives_up_on_a_hung_terminal_and_says_so(
 
     assert bytes(factory.process.written) == b""
     assert factory.process.close_count == 1
-    assert "5 pending bytes not written" in caplog.text
+    assert "5 pending bytes may not have been written" in caplog.text
     assert _terminal_tasks("terminal-flusher-") == []
+
+    await manager.shutdown()
+
+
+async def test_an_end_caps_a_terminal_that_trickles_its_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A terminal that keeps taking a byte at a time cannot hold the end.
+
+    Every write makes progress, so the stall guard never fires; the
+    overall cap does, and it is loud. The stall guard is set out of
+    reach and the cap to nothing, so only the cap can end the wait.
+    """
+    monkeypatch.setattr("ciao.terminal_sessions._FLUSH_STALL_S", 3_600)
+    monkeypatch.setattr("ciao.terminal_sessions._FLUSH_END_CAP_S", 0)
+    factory = FakeFactory()
+    manager = _manager(factory)
+
+    info = await manager.create(tmp_path, "chat", "chat-1")
+    manager.attach(info.session_id, "conn-1")
+    process = factory.process
+    process.write_takes = 0
+    payload = b"a long paste that trickles in"
+    await manager.write_input(info.session_id, "conn-1", payload)
+    await _wait_until(
+        lambda: manager.get(info.session_id).pending_write_bytes == len(payload),
+        what="the bytes to be pending",
+    )
+    process.write_takes = 1
+
+    with caplog.at_level(logging.WARNING, logger="ciao.terminal_sessions"):
+        await asyncio.wait_for(manager.end(info.session_id), 60)
+
+    assert len(process.written) < len(payload)
+    assert "the input took longer than 0 s to hand over" in caplog.text
+    # The count includes a write that was still in flight at the cap,
+    # which is why the bytes "may" not have been written.
+    assert "pending bytes may not have been written" in caplog.text
+    assert process.close_count == 1
 
     await manager.shutdown()
 
@@ -1723,9 +1894,13 @@ async def test_an_end_does_not_wait_for_a_terminal_that_refused_its_input(
         lambda: manager.get(info.session_id).failed, what="the write to fail"
     )
     with caplog.at_level(logging.INFO, logger="ciao.terminal_sessions"):
-        await manager.end(info.session_id)
+        # Bounded here only so a regression fails instead of hanging.
+        await asyncio.wait_for(manager.end(info.session_id), 60)
 
-    assert "the terminal refused its input; 4 pending bytes" in caplog.text
+    assert (
+        "the terminal refused its input; 4 pending bytes may not have been written"
+        in caplog.text
+    )
     assert factory.process.close_count == 1
 
     await manager.shutdown()
