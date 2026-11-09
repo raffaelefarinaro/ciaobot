@@ -229,7 +229,7 @@ ciao/                          Python backend (Starlette).
     document_conversion.py     Lazy firecrawl-anydoc conversion for chat attachments.
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
-    routes_chat_actions.py     POST /api/chats/{id}/actions/{aid}/start|dismiss|continue|callback and POST /api/chats/{id}/actions/mcp-auth (Settings' MCP Sign in raises the chat's card): browser-only needs-you card routes.
+    routes_chat_actions.py     POST /api/chats/{id}/actions/{aid}/start|dismiss|continue|callback|turn-off and POST /api/chats/{id}/actions/mcp-auth (Settings' MCP Sign in raises the chat's card): browser-only needs-you card routes.
     routes_node.py             Package status/changelog/update and the engine-update coordinator's status/start routes.
     routes_agent.py            `POST /agent/v1/{op}` for the agent CLI (bearer-authenticated by the agent registry, outside the PWA session cookie) and `GET /api/agent/status`.
     mcp_inventory.py           Native Claude Code/OpenCode configuration inventory (read side; writes live in mcp_toggle.py), safe server metadata, and per-chat runtime MCP states. A server seen only in a live Claude chat is scope `account`, or `claudeai` for a `claude.ai …` connector, which the page shows as *not connected* when it needs auth, never with a sign-in command, and points to claude.ai.

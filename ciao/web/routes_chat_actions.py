@@ -1,8 +1,8 @@
-"""Browser-only routes for a chat's needs-you cards: start, dismiss, continue, callback, and raising an MCP sign-in from Settings.
+"""Browser-only routes for a chat's needs-you cards: start, dismiss, continue, callback, turn-off, and raising an MCP sign-in from Settings.
 
 These routes sit behind the signed session cookie and are not loopback-only. An
 agent can raise an action (``ciao chat needs-action``) but can never start,
-dismiss or continue one; only the card's buttons do that. Settings' MCP **Sign in** raises an `mcp_auth` card through `chat_mcp_auth_request`, then starts it through the start route.
+dismiss, continue or turn one off; only the card's buttons do that. Settings' MCP **Sign in** raises an `mcp_auth` card through `chat_mcp_auth_request`, then starts it through the start route.
 
 Every route answers 200 JSON and never 204, because the PWA treats an empty body
 as "route not available on the running server". Refusals map the same way in
@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from ciao.chat_actions import ChatActionError, action_payload
 from ciao.oauth_callback import CallbackRefused
 from ciao.web.auth import is_loopback_client
+from ciao.web.mcp_toggle import McpToggleError
 from ciao.web.project_chats import ChatActionConflictError, ProjectChatManager
 
 CALLBACK_BODY_MAX_BYTES = 8192
@@ -93,6 +94,29 @@ async def chat_action_continue(request: Request) -> JSONResponse:
     except (ChatActionConflictError, ChatActionError) as exc:
         return _action_error_response(pcm, chat_id, action_id, exc)
     return JSONResponse({"actions": remaining, "delivery": delivery})
+
+
+async def chat_action_turn_off(request: Request) -> JSONResponse:
+    """Turn off an mcp_auth card's server for this chat's workspace and provider, and remove the card.
+
+    A config refusal is 400 (never 409, which the PWA reads as a stale card) and keeps the card.
+    """
+    pcm: ProjectChatManager = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    action_id = request.path_params["action_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        remaining, reload = await pcm.actions_runtime.turn_off_server(chat_id, action_id)
+    except McpToggleError as exc:
+        current = pcm.get_action(chat_id, action_id)
+        return JSONResponse(
+            {"error": exc.reason, "action": action_payload(current) if current is not None else None},
+            status_code=400,
+        )
+    except (ChatActionConflictError, ChatActionError) as exc:
+        return _action_error_response(pcm, chat_id, action_id, exc)
+    return JSONResponse({"actions": remaining, "reload": reload})
 
 
 async def chat_action_callback(request: Request) -> JSONResponse:

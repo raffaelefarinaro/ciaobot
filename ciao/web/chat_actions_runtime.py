@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -31,6 +32,7 @@ from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow
 from ciao.web.gws_auth_action import GwsAuthHandler
 from ciao.web.mcp_auth_claude import ClaudeMcpAuthFlow
+from ciao.web.mcp_toggle import set_mcp_server_enabled
 
 if TYPE_CHECKING:
     from ciao.terminal_sessions import TerminalSessionManager
@@ -483,6 +485,39 @@ class ChatActionsRuntime:
                 await self._cancel_quietly(handler, ctx, action)
         self._pcm.dismiss_action(chat_id, action_id)
         return self._pcm.chat_action_payloads(chat_id)
+
+    async def turn_off_server(
+        self, chat_id: str, action_id: str
+    ) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
+        """Turn an mcp_auth card's server off for the chat's workspace and provider, then dismiss the card.
+
+        The provider's own config is changed (``ciao.web.mcp_toggle``); a refusal raises
+        ``McpToggleError`` and leaves the card as it is. The chat itself is reloaded even when
+        its project names a workspace the engine no longer knows (``_workspace_for_chat``
+        then answers the primary workspace, whose scope does not contain this chat).
+        """
+        action = self._pcm.get_action(chat_id, action_id)
+        if action is None:
+            raise self._conflict(chat_id)
+        if action.kind != "mcp_auth":
+            raise ChatActionError("unsupported_kind")
+        provider = str(action.params.get("provider", ""))
+        server = str(action.params.get("server", ""))
+        workspace = self._pcm._workspace_for_chat(chat_id)
+        agent_root = Path(self._pcm._agent_root_for_chat(chat_id))
+        await asyncio.to_thread(
+            set_mcp_server_enabled,
+            provider=provider, server=server, agent_root=agent_root, enabled=False,
+        )
+        remaining = await self.dismiss(chat_id, action_id)
+        reload = await self._pcm.reload_workspace_providers(workspace, provider)
+        covered = set(reload["reloaded"]) | set(reload["pending"])
+        if chat_id not in covered and chat_id in self._pcm._providers:
+            if chat_id in self._pcm.active_chat_ids() or not await self._pcm.reload_provider(chat_id):
+                reload["pending"] = sorted([*reload["pending"], chat_id])
+            else:
+                reload["reloaded"] = sorted([*reload["reloaded"], chat_id])
+        return remaining, reload
 
     async def continue_action(
         self, chat_id: str, action_id: str

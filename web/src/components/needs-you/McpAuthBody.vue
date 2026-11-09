@@ -2,10 +2,18 @@
 /**
  * The body of an `mcp_auth` needs-you card: the sign-in's primary control and
  * its steps. The card owns Not now and Continue the chat / Done; this body
- * never renders them.
+ * never renders them. It also owns Turn off, which turns the server off for this
+ * workspace and removes the card, and the line that says where Turn off applies.
  */
-import { computed, ref, watch } from 'vue'
-import { actionCopy, chatActionErrorReason, MCP_AUTH_STEPS, safeExternalUrl } from '../../lib/chatActions'
+import { computed, ref, useId, watch } from 'vue'
+import {
+  actionCopy,
+  chatActionErrorReason,
+  MCP_AUTH_STEPS,
+  mcpTurnOffErrorText,
+  mcpTurnOffScopeText,
+  safeExternalUrl,
+} from '../../lib/chatActions'
 import { isLoopbackPage } from '../../lib/loopback'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
@@ -17,7 +25,11 @@ const emit = defineEmits<{ error: [message: string]; notice: [message: string] }
 
 const store = useProjectStore()
 const starting = ref(false)
+const turningOff = ref(false)
 const copy = computed(() => actionCopy(props.action))
+const server = computed(() => props.action.params.server ?? '')
+const scopeText = computed(() => mcpTurnOffScopeText(props.action.params.provider ?? ''))
+const scopeId = useId()
 const url = computed(() => safeExternalUrl(props.action.params.url))
 const isClaude = computed(() => props.action.params.provider === 'claude')
 const sessionId = computed(() => props.action.params.session_id ?? '')
@@ -40,6 +52,22 @@ function focusCard(): void {
 watch([() => props.action.state, showPaste], () => {
   if (bodyEl.value?.contains(document.activeElement)) focusCard()
 })
+
+async function turnOff(): Promise<void> {
+  if (turningOff.value || starting.value) return
+  focusCard()
+  turningOff.value = true
+  emit('error', '')
+  emit('notice', '')
+  try {
+    const result = await store.turnOffChatActionServer(props.chatId, props.action.id)
+    if (result === 'conflict') emit('notice', 'This card changed on another device. The newer state is shown.')
+  } catch (e) {
+    emit('error', mcpTurnOffErrorText(chatActionErrorReason(e), server.value))
+  } finally {
+    turningOff.value = false
+  }
+}
 
 function onSent(): void {
   emit('notice', 'Address sent. This card updates when the sign-in finishes.')
@@ -98,6 +126,16 @@ async function start(): Promise<void> {
       rel="noopener noreferrer"
     >{{ copy?.primaryLabel }}</a>
 
+    <button
+      v-if="action.state !== 'done'"
+      type="button"
+      class="needs-you-btn needs-you-btn--quiet needs-you-turn-off"
+      :disabled="turningOff || starting"
+      :aria-label="`Turn off ${server}`"
+      :aria-describedby="scopeId"
+      @click="turnOff"
+    >{{ turningOff ? 'Turning off…' : 'Turn off' }}</button>
+
     <HelperTerminalButton
       v-if="isClaude && (action.state === 'working' || action.state === 'waiting')"
       :chat-id="chatId"
@@ -111,6 +149,8 @@ async function start(): Promise<void> {
       :hint="PASTE_HINT"
       @sent="onSent"
     />
+
+    <p v-if="action.state !== 'done'" :id="scopeId" class="needs-you-turn-off-scope">{{ scopeText }}</p>
   </div>
 </template>
 
@@ -149,4 +189,12 @@ async function start(): Promise<void> {
 .needs-you-steps .is-done::before { content: '\2713'; }
 .needs-you-steps .is-now { color: var(--fg); }
 .needs-you-steps .is-now::before { border-color: var(--accent); }
+/* Sits on its own line after the card's Not now and meta in the controls row. */
+.needs-you-turn-off-scope {
+  flex-basis: 100%;
+  order: 10;
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
 </style>

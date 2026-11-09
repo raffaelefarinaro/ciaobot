@@ -2379,7 +2379,7 @@ export const useProjectStore = defineStore('projects', () => {
     return true
   }
 
-  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback'): string {
+  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback' | 'turn-off'): string {
     return `/api/chats/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(actionId)}/${verb}`
   }
 
@@ -2423,6 +2423,21 @@ export const useProjectStore = defineStore('projects', () => {
         chatActionsChatClock[chatId] = nextChatReadClock()
       }
       return 'dismissed'
+    } catch (e) {
+      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
+      return 'conflict'
+    }
+  }
+
+  /** Turn the card's MCP server off for this workspace and provider. A refusal (400) keeps the card and rethrows. */
+  async function turnOffChatActionServer(chatId: string, actionId: string): Promise<'turned_off' | 'conflict'> {
+    const readStartedAt = chatReadStart()
+    try {
+      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'turn-off'), {})
+      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
+        chatActionsChatClock[chatId] = nextChatReadClock()
+      }
+      return 'turned_off'
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
       return 'conflict'
@@ -7325,7 +7340,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, requestMcpAuth, dismissChatAction, continueChatAction, submitChatActionCallback,
+    startChatAction, requestMcpAuth, dismissChatAction, turnOffChatActionServer, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,

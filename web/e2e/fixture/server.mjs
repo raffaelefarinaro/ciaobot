@@ -377,10 +377,10 @@ function setChatActionList(state, chatId, list) {
 const MCP_AUTH_FIXTURE_URL = 'https://auth.example.invalid/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A56446%2Fcallback&state=fixture'
 
 /**
- * A needs-you action's start, dismiss or continue. An unknown id is a 409 with
+ * A needs-you action's start, dismiss, continue or turn-off. An unknown id is a 409 with
  * the chat's list, as the engine answers a stale card. A start moves the action
  * on: `typed` runs it, `ran` finishes it, an `mcp_auth` waits on its sign-in
- * page, and any other kind is done. Dismiss and continue remove it.
+ * page, and any other kind is done. Dismiss and continue remove it; turn-off removes it like dismiss.
  */
 function chatActionRoute(state, chatId, actionId, verb, body) {
   if (!CHATS.some(c => c.chat_id === chatId)) return { status: 404, body: { error: 'not found' } }
@@ -398,6 +398,7 @@ function chatActionRoute(state, chatId, actionId, verb, body) {
   }
   const remaining = list.filter(a => a.id !== actionId)
   setChatActionList(state, chatId, remaining)
+  if (verb === 'turn-off') return { status: 200, body: { actions: remaining, reload: { reloaded: [], pending: [] } } }
   if (verb === 'continue') return { status: 200, body: { actions: remaining, delivery: 'started' } }
   return { status: 200, body: { actions: remaining } }
 }
@@ -1084,9 +1085,9 @@ const server = http.createServer(async (req, res) => {
       for (const socket of writer.sockets) socket.send({ type: 'chat_read', chat_id: chatId, last_read_at: lastReadAt })
       return sendJson(res, { ok: true })
     }
-    // A needs-you action's start, dismiss or continue.
+    // A needs-you action's start, dismiss, continue or turn-off.
     const actionRoute = req.method === 'POST'
-      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue)$/.exec(pathname)
+      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue|turn-off)$/.exec(pathname)
       : null
     if (actionRoute) {
       const answer = chatActionRoute(

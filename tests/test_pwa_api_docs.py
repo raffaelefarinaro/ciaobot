@@ -58,6 +58,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Settings MCP Sign in; signed session, browser-only. Raises the chat's own mcp_auth card, "
         "which the browser then starts; agents raise cards with `ciao chat needs-action`"
     ),
+    "/api/chats/{chat_id}/actions/{action_id}/turn-off": (
+        "Needs-you sign-in card's Turn off; signed session, browser-only. Agents turn servers off "
+        "with POST /api/mcp/servers/enabled, never through a card"
+    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
