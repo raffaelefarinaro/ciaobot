@@ -21,6 +21,10 @@ vi.mock('vue-router', () => ({ useRouter: () => router }))
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
+vi.mock('../../lib/usageStats', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/usageStats')>()),
+  fetchUsageStats: vi.fn(() => new Promise(() => {})),
+}))
 
 const get = vi.mocked(api.get)
 
@@ -123,6 +127,23 @@ describe('HomeReviewSummary', () => {
     const wrapper = mount(HomeReviewSummary)
     expect(wrapper.findAll('.home-review-item')).toHaveLength(0)
     expect(wrapper.get('.home-review-clear').text()).toBe('Nothing to review.')
+    wrapper.unmount()
+  })
+
+  it('is one window: a title bar, then the queues, then Today even when nothing needs review', () => {
+    useProposalsStore().rows = []
+    useTaskStore().schedules = []
+    const wrapper = mount(HomeReviewSummary)
+    const root = wrapper.get('.home-review-summary')
+    expect(root.classes()[0]).toBe('home-review-summary')
+    const title = root.get('.home-review-head #home-review-title')
+    expect(title.text()).toBe('At a glance')
+    expect(title.classes()).toContain('rail-title')
+    expect(root.find('.home-review-head button').exists()).toBe(false)
+    expect(root.get('.home-review-clear').text()).toBe('Nothing to review.')
+    expect(root.find('.home-today').exists()).toBe(true)
+    const html = wrapper.html()
+    expect(html.indexOf('home-review-clear')).toBeLessThan(html.indexOf('home-today'))
     wrapper.unmount()
   })
 

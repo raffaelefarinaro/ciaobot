@@ -133,10 +133,19 @@ test.describe('workbench layout', () => {
     // so only proposals remain.
     const rows = page.locator('.home-review-item')
     await expect(rows).toHaveCount(1)
+    // The window insets its rows 16px and a 1px border per side.
+    const list = await page.locator('.home-review-list').boundingBox()
+    expect(list!.width).toBeGreaterThan(rail!.width - 40)
     for (const row of await rows.all()) {
       const box = await row.boundingBox()
-      expect(box!.width).toBeGreaterThan(rail!.width - 2)
+      expect(box!.width).toBeGreaterThan(list!.width - 2)
     }
+
+    // Today sits under the queues: six rows, averages on the first two.
+    const today = page.locator('.home-rail .home-today .rail-kv')
+    await expect(today).toHaveCount(6)
+    await expect(today.first()).toContainText('14')
+    await expect(today.first()).toContainText('avg 10')
   })
 
   test('the sidebar stacks workspace, New chat and navigation without overlap', async ({ page }) => {
