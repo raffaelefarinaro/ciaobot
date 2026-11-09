@@ -6,6 +6,9 @@ Each file here records one run of `ciao eval tasks` (see [TASK_EVAL.md](../TASK_
 |---|---|---|
 | [v1.9.0.md](v1.9.0.md) | v1.9.0 candidate, develop `a60fae98` | claude/haiku, opencode/deepseek-v4.1-flash |
 | [2026-11-02.md](2026-11-02.md) | develop `06c0dd8e` (after 1.8.1) | claude/haiku, opencode/deepseek-v4.1-flash, opencode/gpt-6-luna |
+| [memory-comparison-2026-11.md](memory-comparison-2026-11.md) | develop, Nov 2026 (before and after #2716, #2737) | claude-haiku-5-5 answering, claude-sonnet-5-5 judging |
+
+The memory comparison is a different kind of record: Ciaobot's memory against other local memory systems on LongMemEval-S, a probe of a real vault, and the prompt evals that came out of it. The file describes how to reproduce it.
 
 ## Recording a run
 
