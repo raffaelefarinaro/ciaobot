@@ -1282,7 +1282,7 @@ async def test_detached_ttl_is_exact_and_output_does_not_extend_it(
 
     assert await manager.reap_expired() == [info.session_id]
     assert manager.retained_count() == 0
-    assert factory.process.closed is True
+    await _wait_until(lambda: factory.process.closed, what="the shell to close")
 
     await manager.shutdown()
 
@@ -1313,11 +1313,13 @@ async def _two_expired_sessions_with_held_input(
 async def test_a_sweep_that_is_cancelled_still_closes_what_it_pruned(
     tmp_path: Path,
 ) -> None:
-    """A pruned session is closed even if the sweep is cancelled mid-way.
+    """A pruned session is closed whatever becomes of the sweep.
 
-    The sweep removes the sessions from the registry before it closes
-    them, so a shutdown cannot find them there any more: their close
-    must not depend on the sweep surviving.
+    A sweep cancelled before it decides prunes nothing, and the sessions
+    stay in the registry for the shutdown to close. A sweep that has
+    pruned has already handed each close to a task of the manager: the
+    sweep returns without waiting, each shell is closed after its input
+    is handed over, and a shutdown that arrives meanwhile joins them.
     """
     clock = FakeClock()
     factory = FakeFactory()
@@ -1326,24 +1328,28 @@ async def test_a_sweep_that_is_cancelled_still_closes_what_it_pruned(
         tmp_path, manager, factory, clock
     )
 
-    sweep = asyncio.create_task(manager.reap_expired())
-    await _let_the_loop_run()
-    assert manager.retained_count() == 0
-    sweep.cancel()
+    # Cancelled while it waits for the registry: nothing is pruned.
+    async with manager._lock:
+        cancelled = asyncio.create_task(manager.reap_expired())
+        await _let_the_loop_run()
+        cancelled.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await sweep
+        await cancelled
+    assert manager.retained_count() == 2
 
-    # Both closes go on without the sweep: neither shell waits for the
-    # shutdown to be closed, and each gets its input first.
+    # Pruned: the sweep returns while both writes are still held.
+    assert len(await asyncio.wait_for(manager.reap_expired(), 60)) == 2
+    assert manager.retained_count() == 0
+    assert one.close_count == two.close_count == 0
+
+    # The shutdown (which also stops the sweeper) joins both closes.
+    stopping = asyncio.create_task(manager.shutdown())
+    await _let_the_loop_run()
+    assert not stopping.done()
     gate_one.set()
     gate_two.set()
-    await _wait_until(
-        lambda: one.close_count == two.close_count == 1,
-        what="both pruned shells to close",
-    )
+    await asyncio.wait_for(stopping, 60)
     assert bytes(one.written) == b"one" and bytes(two.written) == b"two"
-
-    await asyncio.wait_for(manager.shutdown(), 60)
     assert one.close_count == two.close_count == 1
     assert _terminal_tasks() == []
 
@@ -1359,16 +1365,14 @@ async def test_a_sweep_closes_the_pruned_sessions_side_by_side(
         tmp_path, manager, factory, clock
     )
 
-    sweep = asyncio.create_task(manager.reap_expired())
+    assert len(await asyncio.wait_for(manager.reap_expired(), 60)) == 2
     await _let_the_loop_run()
     quick_gate.set()
     await _wait_until(lambda: quick.close_count == 1, what="the second shell to close")
     assert slow.close_count == 0
-    assert not sweep.done()
 
     slow_gate.set()
-    assert len(await asyncio.wait_for(sweep, 60)) == 2
-    assert slow.close_count == 1
+    await _wait_until(lambda: slow.close_count == 1, what="the first shell to close")
     assert bytes(slow.written) == b"one" and bytes(quick.written) == b"two"
 
     await manager.shutdown()
@@ -1837,12 +1841,14 @@ async def test_an_end_caps_a_terminal_that_trickles_its_input(
 ) -> None:
     """A terminal that keeps taking a byte at a time cannot hold the end.
 
-    Every write makes progress, so the stall guard never fires; the
-    overall cap does, and it is loud. The stall guard is set out of
-    reach and the cap to nothing, so only the cap can end the wait.
+    Every write makes progress, so the stall guard (set out of reach)
+    never fires; the overall cap does, and it is loud. The payload is
+    far more writes than fit in the cap, so the end really trickles
+    before the cap stops it.
     """
+    cap = 0.25
     monkeypatch.setattr("ciao.terminal_sessions._FLUSH_STALL_S", 3_600)
-    monkeypatch.setattr("ciao.terminal_sessions._FLUSH_END_CAP_S", 0)
+    monkeypatch.setattr("ciao.terminal_sessions._FLUSH_END_CAP_S", cap)
     factory = FakeFactory()
     manager = _manager(factory)
 
@@ -1850,22 +1856,24 @@ async def test_an_end_caps_a_terminal_that_trickles_its_input(
     manager.attach(info.session_id, "conn-1")
     process = factory.process
     process.write_takes = 0
-    payload = b"a long paste that trickles in"
+    payload = b"x" * TERMINAL_MAX_PENDING_WRITE_BYTES
     await manager.write_input(info.session_id, "conn-1", payload)
     await _wait_until(
         lambda: manager.get(info.session_id).pending_write_bytes == len(payload),
         what="the bytes to be pending",
     )
     process.write_takes = 1
+    await _wait_until(lambda: len(process.written) > 0, what="the trickle to start")
 
     with caplog.at_level(logging.WARNING, logger="ciao.terminal_sessions"):
         await asyncio.wait_for(manager.end(info.session_id), 60)
 
-    assert len(process.written) < len(payload)
-    assert "the input took longer than 0 s to hand over" in caplog.text
+    assert 0 < len(process.written) < len(payload)
+    assert f"the input took longer than {cap:g} s to hand over" in caplog.text
     # The count includes a write that was still in flight at the cap,
     # which is why the bytes "may" not have been written.
     assert "pending bytes may not have been written" in caplog.text
+    assert "took no input" not in caplog.text
     assert process.close_count == 1
 
     await manager.shutdown()

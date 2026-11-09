@@ -552,10 +552,12 @@ class TerminalSessionManager:
         between cannot have its session closed under it. Each close is
         started under the lock, in the same step as the removal, and
         runs in a task the manager owns: a sweep that is cancelled does
-        not leave a pruned shell open. The closes are awaited outside
-        the lock, side by side.
+        not leave a pruned shell open. The sweep does not wait for the
+        closes — a slow one would hold up the next prune — and a
+        shutdown joins whatever is still closing.
 
-        Returns the ids that were pruned.
+        Returns the ids that were pruned; their shells may still be
+        closing.
         """
         async with self._lock:
             now = self._clock()
@@ -583,11 +585,6 @@ class TerminalSessionManager:
                 session.ended = True
                 session.wake.set()
                 self._finish_task(session)
-        # The pruned sessions close side by side: a terminal that is
-        # slow to take its last input holds up only its own close.
-        await asyncio.gather(
-            *(asyncio.shield(self._finish_task(session)) for session in expired)
-        )
         return [session.session_id for session in expired]
 
     async def _sweep_loop(self) -> None:
@@ -810,6 +807,8 @@ class TerminalSessionManager:
             await asyncio.wait({spawn}, timeout=_SPAWN_WAIT_S)
         reader = session.reader
         if reader is not None:
+            # The create was cancelled, so no caller ever saw this
+            # session or typed into it: there is no echo to drain.
             reader.cancel()
             await asyncio.wait({reader})
         await self._final_flush(session)
@@ -1326,7 +1325,10 @@ class TerminalSessionManager:
                 try:
                     chunk = process.read(TERMINAL_READ_BYTES)
                 except Exception:
-                    session.failed = True
+                    # A session that is ending is not failed: it ended
+                    # on purpose, as in the flusher.
+                    if not session.close_requested:
+                        session.failed = True
                     break
                 if chunk is None:
                     await asyncio.sleep(idle)
@@ -1585,30 +1587,32 @@ class TerminalSessionManager:
                 return
             remaining = deadline - loop.time()
             if remaining <= 0:
-                logger.warning(
-                    "terminal session %s: the input took longer than %.0f s "
-                    "to hand over; %d pending bytes may not have been written",
-                    session.session_id,
-                    _FLUSH_END_CAP_S,
-                    left,
-                )
+                _log_flush_capped(session, left)
                 return
+            # Which bound the wait used is kept, not inferred from the
+            # clock afterwards: a timer can fire a little early (by a
+            # clock tick on Windows), which would mistake one for the
+            # other.
+            capped = remaining < _FLUSH_STALL_S
             session.flush_wake.set()
             try:
                 await asyncio.wait_for(
-                    session.flush_progress.wait(), min(_FLUSH_STALL_S, remaining)
+                    session.flush_progress.wait(),
+                    remaining if capped else _FLUSH_STALL_S,
                 )
             except TimeoutError:
-                if loop.time() < deadline:
+                left = len(session.pending) + session.inflight
+                if capped:
+                    _log_flush_capped(session, left)
+                else:
                     logger.warning(
                         "terminal session %s: the terminal took no input for "
-                        "%.0f s; %d pending bytes may not have been written",
+                        "%g s; %d pending bytes may not have been written",
                         session.session_id,
                         _FLUSH_STALL_S,
-                        len(session.pending) + session.inflight,
+                        left,
                     )
-                    return
-                # The cap ran out during the wait: the check above logs it.
+                return
 
     # ── closing the process ────────────────────────────────────────────────
 
@@ -1675,6 +1679,17 @@ class TerminalSessionManager:
         exc = task.exception()
         if exc is not None:  # pragma: no cover - defensive
             logger.warning("terminal session task failed: %s", type(exc).__name__)
+
+
+def _log_flush_capped(session: _Session, left: int) -> None:
+    """Report an end flush that ran out of :data:`_FLUSH_END_CAP_S`."""
+    logger.warning(
+        "terminal session %s: the input took longer than %g s to hand over; "
+        "%d pending bytes may not have been written",
+        session.session_id,
+        _FLUSH_END_CAP_S,
+        left,
+    )
 
 
 def _replay_reason(reason: str) -> TerminalSessionReason:
