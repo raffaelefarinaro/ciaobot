@@ -1484,6 +1484,49 @@ def test_comparison_shows_each_side_mode() -> None:
     assert "| E2-recall-guest-count | auto | bypass |" in table
 
 
+def test_compare_pools_every_run_of_a_task_across_rounds() -> None:
+    # Three --repeats 3 rounds appended into one file: repeat numbers recur and the
+    # rounds ran at different code revisions. compare must use all nine runs.
+    def run(status: str, revision: str, repeat: int, context_total: int) -> dict[str, Any]:
+        return {**_row(label="candidate", status=status, context_total=context_total),
+                "code_revision": revision, "repeat": repeat, "mode": "auto"}
+
+    candidate = [
+        run("failed", "rev-b", 1, 100), run("failed", "rev-b", 2, 100), run("passed", "rev-b", 3, 100),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+    ]
+    baseline = [{**_row(status="passed" if i else "failed"), "repeat": i % 3 + 1, "mode": "auto"} for i in range(9)]
+
+    item = te.compare(baseline, candidate)[0]
+
+    cand = item["candidate"]
+    assert cand["n"] == 9
+    assert cand["passed"] == 7
+    assert cand["pass_rate"] == pytest.approx(7 / 9)
+    assert cand["median_context_total"] == 300
+    assert cand["mode"] == "auto"
+    assert cand["code_revision"] == "rev-a,rev-b"
+    assert item["baseline"]["pass_rate"] == pytest.approx(8 / 9)
+    assert item["delta"]["pass_rate"] == pytest.approx(-1 / 9)
+
+    table = te.render_comparison([item])
+    header = table.splitlines()[0]
+    assert "Baseline n" in header and "Candidate n" in header
+    assert "| 0.89 (8/9) | 0.78 (7/9) |" in table
+    assert "| 9 | 9 |" in table
+
+
+def test_compare_reports_mixed_modes_on_one_side() -> None:
+    candidate = [{**_row(label="candidate"), "mode": "auto"}, {**_row(label="candidate"), "mode": "bypass"}]
+
+    item = te.compare([_row()], candidate)[0]
+
+    assert item["candidate"]["n"] == 2
+    assert item["candidate"]["mode"] == "auto,bypass"
+    assert item["baseline"]["mode"] == "-"
+
+
 def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> None:
     runtime = tmp_path / ".runtime"
     folder = runtime / "transcripts" / "chat-oc"

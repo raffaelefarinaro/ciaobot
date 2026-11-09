@@ -152,7 +152,13 @@ zero; the `Errors` column counts the error runs of each group.
 The `Median model calls` column uses the scored runs whose `model_calls` is not null.
 `compare` joins two reports by task id and reports
 the pass-rate difference and the percentage change in context, wall time and
-cost; its table shows each side's mode.
+cost. Each side pools every run of a task in its file, whatever its repeat
+number, label or code revision, so a file that appends several `--repeats`
+rounds counts all of them: the pass rate is passes over scored runs and the
+medians cover every scored run. The table shows each side's mode, its run
+count `n`, and the pass rate with its passes/scored count, e.g. `0.78 (7/9)`.
+When a side mixes modes or revisions, its `mode` and `code_revision` list each
+value, comma-separated. Use `report` to see a pooled file split by revision.
 
 ## Permission mode
 

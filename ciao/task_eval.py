@@ -2799,6 +2799,32 @@ def _median(values: Sequence[float | None]) -> float | None:
     return statistics.median(present) if present else None
 
 
+def _group_stats(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Counts, pass rate and medians over every row in ``items``.
+
+    The pass rate and the medians are over runs that neither skipped nor errored.
+    """
+    ran = [r for r in items if r.get("status") != "skipped"]
+    scored = [r for r in ran if r.get("status") != "error"]
+    passed = sum(1 for r in scored if r.get("status") == "passed")
+    return {
+        "n": len(items),
+        "ran": len(ran),
+        "skipped": len(items) - len(ran),
+        "errors": len(ran) - len(scored),
+        "scored": len(scored),
+        "passed": passed,
+        "pass_rate": passed / len(scored) if scored else None,
+        "median_context_total": _median([r["tokens"]["context_total"] for r in scored]),
+        "median_output": _median([r["tokens"]["output"] for r in scored]),
+        "median_wall_s": _median([r.get("wall_s") for r in scored]),
+        "median_cost_usd": _median([r.get("cost_usd") for r in scored]),
+        "median_model_calls": _median([r.get("model_calls") for r in scored]),
+        "tool_errors": sum(int(r.get("tool_errors") or 0) for r in items),
+        "timeouts": sum(1 for r in items if r.get("timed_out")),
+    }
+
+
 def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Per (label, provider, model, mode, code revision, task): counts, pass rate and medians.
 
@@ -2821,10 +2847,6 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     summary: list[dict[str, Any]] = []
     for key in sorted(groups):
         label, provider, model, mode, revision, task_id = key
-        items = groups[key]
-        ran = [r for r in items if r.get("status") != "skipped"]
-        scored = [r for r in ran if r.get("status") != "error"]
-        passed = sum(1 for r in scored if r.get("status") == "passed")
         summary.append(
             {
                 "label": label,
@@ -2833,28 +2855,35 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "mode": mode,
                 "code_revision": revision,
                 "task_id": task_id,
-                "n": len(items),
-                "ran": len(ran),
-                "skipped": len(items) - len(ran),
-                "errors": len(ran) - len(scored),
-                "pass_rate": passed / len(scored) if scored else None,
-                "median_context_total": _median([r["tokens"]["context_total"] for r in scored]),
-                "median_output": _median([r["tokens"]["output"] for r in scored]),
-                "median_wall_s": _median([r.get("wall_s") for r in scored]),
-                "median_cost_usd": _median([r.get("cost_usd") for r in scored]),
-                "median_model_calls": _median([r.get("model_calls") for r in scored]),
-                "tool_errors": sum(int(r.get("tool_errors") or 0) for r in items),
-                "timeouts": sum(1 for r in items if r.get("timed_out")),
+                **_group_stats(groups[key]),
             }
         )
     return summary
 
 
-def _index_by_task(summary: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    index: dict[str, dict[str, Any]] = {}
-    for item in summary:
-        index.setdefault(str(item["task_id"]), item)
-    return index
+def _distinct(items: Sequence[Mapping[str, Any]], field: str) -> str:
+    """The sorted distinct values of ``field`` joined by commas; a missing value reads ``-``."""
+    return ",".join(sorted({str(r.get(field) or "-") for r in items}))
+
+
+def _pool_by_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """One summary per task over every row of that task.
+
+    A report that pools several rounds (appended ``--repeats`` runs, reruns at another
+    revision) holds several rows per task and repeat number; all of them count. The
+    identity fields list each distinct value, so a side that mixes modes shows it.
+    """
+    by_task: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        by_task.setdefault(str(row.get("task_id")), []).append(row)
+    return {
+        task_id: {
+            "task_id": task_id,
+            **{field: _distinct(items, field) for field in ("label", "provider", "model", "mode", "code_revision")},
+            **_group_stats(items),
+        }
+        for task_id, items in by_task.items()
+    }
 
 
 def _delta(new: float | None, old: float | None) -> float | None:
@@ -2870,10 +2899,11 @@ def _pct(new: float | None, old: float | None) -> float | None:
 def compare(baseline: Sequence[Mapping[str, Any]], candidate: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Per task: the baseline and candidate summaries and their deltas.
 
-    Each side should hold one group per task; if it holds several, the first is used.
+    Each side's summary pools every run of the task in that side's rows, whatever its
+    repeat number, revision or label, so pass rate is passes over scored runs.
     """
-    base = _index_by_task(summarize(baseline))
-    cand = _index_by_task(summarize(candidate))
+    base = _pool_by_task(baseline)
+    cand = _pool_by_task(candidate)
     comparison: list[dict[str, Any]] = []
     for task_id in sorted(set(base) | set(cand)):
         b = base.get(task_id)
@@ -2940,22 +2970,31 @@ def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_pass(side: Mapping[str, Any]) -> str:
+    rate = side.get("pass_rate")
+    if rate is None:
+        return "-"
+    return f"{rate:.2f} ({side['passed']}/{side['scored']})"
+
+
 def render_comparison(comparison: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Baseline mode | Candidate mode | Baseline pass | Candidate pass | Delta pass | Delta context % | Delta wall % | Delta cost % |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Baseline mode | Candidate mode | Baseline n | Candidate n | Baseline pass | Candidate pass | Delta pass | Delta context % | Delta wall % | Delta cost % |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in comparison:
         base = item["baseline"] or {}
         cand = item["candidate"] or {}
         delta = item["delta"]
         lines.append(
-            "| {task} | {bm} | {cm} | {bp} | {cp} | {dp} | {dc} | {dw} | {dco} |".format(
+            "| {task} | {bm} | {cm} | {bn} | {cn} | {bp} | {cp} | {dp} | {dc} | {dw} | {dco} |".format(
                 task=item["task_id"],
                 bm=base.get("mode", "-"),
                 cm=cand.get("mode", "-"),
-                bp=_fmt(base.get("pass_rate")),
-                cp=_fmt(cand.get("pass_rate")),
+                bn=base.get("n", 0),
+                cn=cand.get("n", 0),
+                bp=_fmt_pass(base),
+                cp=_fmt_pass(cand),
                 dp=_fmt(delta["pass_rate"]),
                 dc=_fmt(delta["context_total_pct"], 1),
                 dw=_fmt(delta["wall_s_pct"], 1),
