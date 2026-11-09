@@ -33,6 +33,7 @@ from ciao.web.routes_chat_actions import (
     chat_mcp_auth_request,
 )
 from ciao.web.routes_mcp import (
+    mcp_server_enabled_endpoint,
     mcp_status_endpoint,
     mcp_usage_endpoint,
 )
@@ -687,6 +688,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/stats", cli_stats, methods=["GET"]),
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
+        Route("/api/mcp/servers/enabled", mcp_server_enabled_endpoint, methods=["POST"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),

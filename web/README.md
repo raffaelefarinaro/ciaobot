@@ -586,7 +586,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   copying it when the terminal is locked or unavailable. `composables/useMcpServers.ts`
   owns status and usage reads, while `components/settings/SettingsMcpServers.vue`
   renders provider configuration and per-chat connection states.
-  Settings never edits native MCP configuration, handles secret values or probes
+  Settings edits native MCP configuration only to turn one server off or on
+  (`POST /api/mcp/servers/enabled`); it never handles secret values or probes
   servers; commands run only in the terminal the user is watching. A server that
   needs a sign-in in an open chat gets **Sign in** instead of **Sign in in
   terminal** (which stays in the ··· menu): `store.requestMcpAuth` raises that

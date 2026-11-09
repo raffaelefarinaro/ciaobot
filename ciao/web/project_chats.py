@@ -4284,6 +4284,10 @@ class ProjectChatManager:
         """Where a Not now on a detected sign-in applies: the chat's workspace and provider."""
         return (self._workspace_for_chat(chat.chat_id), chat.provider, key)
 
+    def forget_mcp_auth_decline(self, workspace: str, provider: str, server: str) -> None:
+        """Let a turned-on server's sign-in card come back: drop the Not now remembered for it."""
+        self.declined_mcp_auth.discard((workspace, provider, action_key("mcp_auth", {"server": server})))
+
     def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -5277,6 +5281,27 @@ class ProjectChatManager:
         provider = self._pop_provider(chat_id)
         self._cancel_between_turns_drain(chat_id)
         return await self._disconnect_provider(chat_id, provider)
+
+    async def reload_workspace_providers(self, workspace: str, provider: str) -> dict[str, list[str]]:
+        """Reload the idle cached providers of the workspace's chats on ``provider``.
+
+        So a turned-on or turned-off MCP server takes effect. A chat in ``active_chat_ids()``
+        (a turn, subagents) is never reloaded, because ``reload_provider``'s own guard skips
+        the live-stream check. Busy or blocked chats are returned as ``pending``.
+        """
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        active = set(self.active_chat_ids())
+        reloaded: list[str] = []
+        pending: list[str] = []
+        for chat_id in sorted(chat_ids):
+            chat = self._chats.get(chat_id)
+            if chat is None or chat.provider != provider or chat_id not in self._providers:
+                continue
+            if chat_id in active or not await self.reload_provider(chat_id):
+                pending.append(chat_id)
+            else:
+                reloaded.append(chat_id)
+        return {"reloaded": reloaded, "pending": pending}
 
     # ── Idle provider reaping ────────────────────────────────────────────
 
