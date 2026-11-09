@@ -223,6 +223,8 @@ Every pane uses one page grid (App.vue `--page-max` 1180px, `--page-gutter` 32px
 
 All interactive targets are at least 44×44px on touch layouts. Compact visual glyphs may sit inside a larger hit area. Honor device safe areas, virtual keyboards, standalone PWA chrome, and browser zoom. Do not disable pinch zoom or text scaling. The installed PWA uses an opaque black iOS status bar in both themes, with white glyphs, and the platform insets the viewport, so `--safe-*` are `env()` passthroughs with no display-mode or keyboard override. The shell's `theme-color` stays `#1a1a2e`, not the bar's black.
 
+Structured question cards keep their header and Cancel/Send answer actions visible while the question details scroll independently. The details region is named and keyboard-focusable, with an inset focus ring; selecting an option never submits or moves focus. Preserve the composer draft and focus when a question arrives, and keep the footer reachable with large text and short viewports.
+
 Long or implementation-oriented content must not dominate a mobile page. Collapse long prompts and diagnostics behind Preview/Expand/Copy controls, preserve the page title, and move secondary or destructive actions into an overflow menu or bottom sheet.
 
 ## Elevation & Depth
