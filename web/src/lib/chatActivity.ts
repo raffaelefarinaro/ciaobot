@@ -257,6 +257,14 @@ export function isProgressCommentary(content: string): boolean {
   return false
 }
 
+/** Clear ongoing narration: the first nonblank line ends with a colon
+ *  ("Now run tests:"). The same shape `isProgressCommentary` treats as
+ *  progress, so it can never be a delivered answer. */
+function endsWithNarrationColon(content: string): boolean {
+  const line = content.split('\n').map(part => part.trim()).find(Boolean) ?? ''
+  return /:\s*$/.test(line)
+}
+
 /** Index of the turn's user-facing final reply. Prefers the last non-progress
  *  assistant text (so a trailing "Now the docs:" after a real answer does not
  *  steal the final bubble); falls back to the last assistant text so a
@@ -276,15 +284,19 @@ export function findFinalAnswerIndex(
     // narration, or an earlier explicit completion already answered the turn.
     // The hidden-continuation exception: an earlier `final_answer` row means
     // this stamped row closes the turn even when it opens like narration and
-    // tools run after it.
+    // tools run after it — but a colon-ending first line is clear ongoing
+    // narration, not a closing sentence, so it stays in Activity.
     if (
       fallback < 0
       && m.timestamp
       && (
         !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
         || !isProgressCommentary(m.content || '')
-        || buffer.slice(0, k).some(
-          r => r.role === 'assistant' && !r.tool_name && r.phase === 'final_answer'
+        || (
+          !endsWithNarrationColon(m.content || '')
+          && buffer.slice(0, k).some(
+            r => r.role === 'assistant' && !r.tool_name && r.phase === 'final_answer'
+          )
         )
       )
     ) return k

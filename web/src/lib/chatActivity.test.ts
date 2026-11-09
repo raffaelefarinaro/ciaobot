@@ -292,6 +292,21 @@ describe('findFinalAnswerIndex', () => {
       { kind: 'trace', steps: [buffer[1], buffer[2]] },
     ])
   })
+
+  it('keeps an earlier completed answer when stamped colon narration is followed by bookkeeping', () => {
+    // A stamped row whose first nonblank line ends with a colon ("Now run
+    // tests:") is ongoing narration even when an earlier explicit completion
+    // exists: it belongs in Activity, and the completed answer closes the turn.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Now run tests:', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
 })
 
 describe('findFinalAnswerIndex with a reasoning tail', () => {
