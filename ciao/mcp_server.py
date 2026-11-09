@@ -327,6 +327,16 @@ async def _op_context_logs(service: CiaoMcpService, lines: int = CONTEXT_LOGS_DE
     return await service._invoke("context_logs", lambda cp, p: cp.context_logs(p, lines=lines))
 
 
+async def _op_usage_stats(service: CiaoMcpService, range_days: int = 30) -> dict[str, Any]:
+    """Return usage statistics for the calling workspace over the last `range_days`
+    local days (7, 30, 90 or 365; default 30): today's counts, period totals and the
+    preceding period's totals, 182 days of daily user messages, top projects, the memory
+    proposal funnel, messages by hour and turns per model. Read-only."""
+    return await service._invoke(
+        "usage_stats", lambda cp, p: cp.usage_stats(p, range_days=range_days)
+    )
+
+
 async def _op_context_get(service: CiaoMcpService) -> dict[str, Any]:
     """Return the active Ciaobot workspace, project, chat, provider, and
     control surface, plus local server/startup/active-chat status folded
@@ -1488,6 +1498,7 @@ async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]
 OPERATIONS: tuple[Operation, ...] = (
     Operation("context_get", _READ, _op_context_get.__doc__ or "", _op_context_get),
     Operation("context_logs", _READ, _op_context_logs.__doc__ or "", _op_context_logs),
+    Operation("usage_stats", _READ, _op_usage_stats.__doc__ or "", _op_usage_stats),
     Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
