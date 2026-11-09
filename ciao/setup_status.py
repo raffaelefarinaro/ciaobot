@@ -25,6 +25,7 @@ from xml.parsers.expat import ExpatError
 from typing import Iterable, Mapping, Any
 
 from ciao import provider_registry
+from ciao.agent_paths import claude_global_config_path
 from ciao.os_support.shell_hints import path_hint
 from ciao.workspace_guide import guide_path
 
@@ -577,12 +578,11 @@ def discover_claude_mcps(
 def _claude_config_path_from_env(source: Mapping[str, str] | None = None) -> Path:
     """The Claude config file the provider payload would read.
 
-    Honors ``CLAUDE_CONFIG_PATH`` so the startup warm-up probes the same
+    Honors ``CLAUDE_CONFIG_PATH``, then ``CLAUDE_CONFIG_DIR`` (see
+    ``agent_paths.claude_global_config_path``) so the startup warm-up probes the same
     connector set the Settings -> Models & providers route will report.
     """
-    src = source if source is not None else os.environ
-    raw = str(src.get("CLAUDE_CONFIG_PATH", "")).strip()
-    return Path(raw).expanduser() if raw else Path.home() / ".claude.json"
+    return claude_global_config_path(source)
 
 
 def warm_claude_discovery_cache(
@@ -672,7 +672,7 @@ def _disabled_claude_mcp_names(
     config_path: Path | None = None,
 ) -> set[str]:
     """Return short connector names disabled via the per-project ``/mcp`` panel."""
-    path = config_path or Path.home() / ".claude.json"
+    path = config_path or claude_global_config_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

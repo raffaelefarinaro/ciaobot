@@ -1,4 +1,4 @@
-"""Read-only MCP inventory from provider-native configuration and sessions."""
+"""Native MCP inventory from provider configuration and sessions (the read side of Settings → MCP servers; writes live in mcp_toggle.py)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from ciao.agent_paths import claude_config_project_key, claude_global_config_path
 from ciao.providers.claude import is_claudeai_connector
 
 
@@ -110,7 +111,7 @@ def _candidate_paths(agent_root: Path, provider: str) -> list[tuple[Path, str, s
                 (agent_root / ".mcp.json", "project", "project", False),
                 (agent_root / ".claude" / "settings.local.json", "local", "local", False),
                 (agent_root / ".claude" / "settings.json", "project", "project", False),
-                (home / ".claude.json", "user", "user", False),
+                (claude_global_config_path(), "user", "user", False),
                 (home / ".claude" / "settings.json", "user", "user", False),
             ]
         )
@@ -166,9 +167,29 @@ def _claude_servers(config: dict[str, Any], scope: str, agent_root: Path) -> dic
 
 def _claude_project_servers(config: dict[str, Any], agent_root: Path) -> dict[str, Any]:
     projects = config.get("projects")
-    entry = projects.get(str(agent_root)) if isinstance(projects, dict) else None
+    entry = projects.get(claude_config_project_key(agent_root)) if isinstance(projects, dict) else None
     local = entry.get("mcpServers") if isinstance(entry, dict) else None
     return dict(local) if isinstance(local, dict) else {}
+
+
+def claude_disabled_servers(agent_root: Path, config_path: Path | None = None) -> list[str]:
+    """Server names Claude Code has turned off: top-level and this folder's project entry."""
+    path = config_path or claude_global_config_path()
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    projects = data.get("projects")
+    entry = projects.get(claude_config_project_key(agent_root)) if isinstance(projects, dict) else None
+    names: list[str] = []
+    for source in (data.get("disabledMcpServers"), entry.get("disabledMcpServers") if isinstance(entry, dict) else None):
+        if isinstance(source, list):
+            for item in source:
+                if isinstance(item, str) and item and item not in names:
+                    names.append(item)
+    return names
 
 
 def _server_kind(provider: str, config: dict[str, Any]) -> str:
@@ -205,6 +226,8 @@ def _provider_inventory(
     rows: dict[str, dict[str, Any]] = {}
     priorities: dict[str, int] = {}
     inventory_state = "loaded"
+    disabled = set(claude_disabled_servers(agent_root)) if provider == "claude" else set()
+    claude_key = claude_config_project_key(agent_root) if provider == "claude" else None
     for path, scope, source, jsonc in _candidate_paths(agent_root, provider):
         config, unreadable = _read_config(path, jsonc=jsonc)
         if unreadable:
@@ -212,6 +235,7 @@ def _provider_inventory(
             continue
         if config is None:
             continue
+        nested = None
         if provider == "claude":
             servers = _claude_servers(config, scope, agent_root)
             project_servers = _claude_project_servers(config, agent_root)
@@ -241,11 +265,14 @@ def _provider_inventory(
             if provider == "claude":
                 kind = _server_kind(provider, raw_config)
                 allowed: bool | None = False if name in explicitly_denied else None
-                enabled = True
+                enabled = name not in disabled
+                applies_to = None if scope == "managed" else claude_key
             else:
                 kind = str(raw_config.get("type") or ("remote" if raw_config.get("url") else "local"))
-                enabled = raw_config.get("disabled") is not True and raw_config.get("enabled") is not False
+                v2 = nested is not None
+                enabled = raw_config.get("disabled") is not True and (v2 or raw_config.get("enabled") is not False)
                 allowed = None
+                applies_to = str(path)
             rows[name] = {
                 "name": name,
                 "scope": scope,
@@ -253,6 +280,7 @@ def _provider_inventory(
                 "kind": kind,
                 "enabled": enabled,
                 "allowed": allowed,
+                "applies_to": applies_to,
                 "connections": [],
             }
             priorities[name] = priority
@@ -269,8 +297,9 @@ def _provider_inventory(
                 "scope": "local",
                 "source": "user",
                 "kind": _server_kind(provider, raw_config),
-                "enabled": True,
+                "enabled": name not in disabled,
                 "allowed": False if explicitly_blocked else None,
+                "applies_to": claude_key,
                 "connections": [],
             }
             priorities[name] = priority
@@ -283,12 +312,26 @@ def _provider_inventory(
                 "scope": _runtime_scope(provider, name),
                 "source": "provider",
                 "kind": "remote",
-                "enabled": True,
+                "enabled": name not in disabled,
                 "allowed": None,
+                "applies_to": claude_key,
                 "connections": [],
             }
             rows[name] = row
         row["connections"] = connections
+
+    for name in sorted(disabled):
+        if name not in rows:
+            rows[name] = {
+                "name": name,
+                "scope": _runtime_scope("claude", name),
+                "source": "provider",
+                "kind": "remote",
+                "enabled": False,
+                "allowed": None,
+                "applies_to": claude_key,
+                "connections": [],
+            }
 
     return {
         "provider": provider,
