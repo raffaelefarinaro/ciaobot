@@ -1780,6 +1780,7 @@ def test_write_definition_fchmod_failure_closes_fd(
     definition.write_bytes(b"<plist>live</plist>")
     target = _target(tmp_path, definition=definition, definition_present=True)
     captured: list[int] = []
+    fd_open = False
 
     def fchmod_fails(fd: int, _mode: int) -> None:
         captured.append(fd)
@@ -1790,11 +1791,15 @@ def test_write_definition_fchmod_failure_closes_fd(
         with pytest.raises(native.NativeCoordinatorError) as caught:
             repair._write_definition(target, b"<plist>new</plist>")
         assert caught.value.failure_code == "install_failed"
-        with pytest.raises(OSError) as closed:
+        try:
             os.fstat(captured[0])
-        assert closed.value.errno == errno.EBADF
+        except OSError as closed:
+            assert closed.errno == errno.EBADF
+        else:
+            fd_open = True
+            pytest.fail("descriptor remained open")
     finally:
-        if captured:
+        if captured and fd_open:
             try:
                 os.close(captured[0])
             except OSError:
@@ -1811,6 +1816,7 @@ def test_write_definition_fdopen_failure_closes_fd(
     definition.write_bytes(b"<plist>live</plist>")
     target = _target(tmp_path, definition=definition, definition_present=True)
     captured: list[int] = []
+    fd_open = False
 
     def fdopen_fails(fd: int, *args: object, **kwargs: object) -> object:
         captured.append(fd)
@@ -1821,11 +1827,15 @@ def test_write_definition_fdopen_failure_closes_fd(
         with pytest.raises(native.NativeCoordinatorError) as caught:
             repair._write_definition(target, b"<plist>new</plist>")
         assert caught.value.failure_code == "install_failed"
-        with pytest.raises(OSError) as closed:
+        try:
             os.fstat(captured[0])
-        assert closed.value.errno == errno.EBADF
+        except OSError as closed:
+            assert closed.errno == errno.EBADF
+        else:
+            fd_open = True
+            pytest.fail("descriptor remained open")
     finally:
-        if captured:
+        if captured and fd_open:
             try:
                 os.close(captured[0])
             except OSError:
@@ -1840,6 +1850,7 @@ def test_write_definition_interrupted_before_fdopen_closes_fd(
     definition = tmp_path / "LaunchAgents" / "com.ciao.server.plist"
     target = _target(tmp_path, definition=definition, definition_present=False)
     captured: list[int] = []
+    fd_open = False
 
     def interrupt(fd: int, _mode: int) -> None:
         captured.append(fd)
@@ -1849,11 +1860,15 @@ def test_write_definition_interrupted_before_fdopen_closes_fd(
     try:
         with pytest.raises(KeyboardInterrupt):
             repair._write_definition(target, b"<plist/>")
-        with pytest.raises(OSError) as closed:
+        try:
             os.fstat(captured[0])
-        assert closed.value.errno == errno.EBADF
+        except OSError as closed:
+            assert closed.errno == errno.EBADF
+        else:
+            fd_open = True
+            pytest.fail("descriptor remained open")
     finally:
-        if captured:
+        if captured and fd_open:
             try:
                 os.close(captured[0])
             except OSError:
