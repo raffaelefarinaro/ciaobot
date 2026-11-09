@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import re
 import tempfile
 from typing import Any
 
@@ -11,6 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Match
 
+from ciao.jsonio import json_nesting_exceeds, loads_untrusted
 from ciao.web.auth import _setup_finish_refusal
 
 DEFAULT_BODY_LIMIT = 1024 * 1024
@@ -20,29 +19,6 @@ SKILL_IMPORT_BODY_LIMIT = 10 * 1024 * 1024
 WORKSPACE_WRITE_BODY_LIMIT = 13 * 1024 * 1024
 SPOOL_MEMORY_LIMIT = 1024 * 1024
 REPLAY_CHUNK_SIZE = 64 * 1024
-# Ciaobot's API bodies are settings and command objects a handful of levels
-# deep (an object holding a list of objects at most); 64 leaves an order of
-# magnitude of headroom, and the explicit limit holds on every Python version
-# instead of depending on when the interpreter's JSON parser runs out of stack.
-MAX_JSON_DEPTH = 64
-
-# One match per JSON string (escapes included, so a quoted bracket or an
-# escaped quote never counts) or per structural bracket.
-_JSON_DEPTH_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
-
-
-def _json_depth_exceeds(text: str, limit: int) -> bool:
-    """Whether ``text`` nests arrays/objects deeper than ``limit``, in one linear pass."""
-    depth = 0
-    for match in _JSON_DEPTH_TOKEN.finditer(text):
-        token = match.group()
-        if token in "[{":
-            depth += 1
-            if depth > limit:
-                return True
-        elif token in "]}":
-            depth -= 1
-    return False
 
 
 def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
@@ -127,21 +103,20 @@ class ApiRequestBodyLimitMiddleware:
                     break
 
             media_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
-            # The PWA labels every request JSON, bodiless GETs included, so an
-            # empty body is no body rather than malformed JSON.
-            if size and policy != "multipart_only" and (
-                media_type == b"application/json" or media_type.endswith(b"+json")
-            ):
+            # Handlers read the body with `request.json()` whatever the declared
+            # type, so every non-multipart body is checked for deep nesting; only
+            # one declared as JSON must also parse. The PWA labels every request
+            # JSON, bodiless GETs included, so an empty body is no body rather
+            # than malformed JSON.
+            if size and policy != "multipart_only" and not media_type.startswith(b"multipart/"):
                 spool.seek(0)
                 raw = spool.read()
                 try:
-                    # Decode the way json.loads does for bytes, so the depth scan
-                    # sees characters rather than UTF-16/32 code-unit bytes.
-                    text = raw.decode(json.detect_encoding(raw), "surrogatepass")
-                    if _json_depth_exceeds(text, MAX_JSON_DEPTH):
-                        raise ValueError("JSON nested too deeply")
-                    json.loads(text)
-                except (ValueError, UnicodeDecodeError):
+                    if media_type == b"application/json" or media_type.endswith(b"+json"):
+                        loads_untrusted(raw)
+                    elif json_nesting_exceeds(raw):
+                        raise ValueError("nested too deeply")
+                except ValueError:
                     await JSONResponse({"error": "bad json"}, status_code=400)(scope, receive, send)
                     return
 

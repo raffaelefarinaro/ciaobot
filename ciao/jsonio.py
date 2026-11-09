@@ -23,6 +23,51 @@ def read_json_dict(path: Path) -> dict[str, Any]:
     return data
 
 
+# Untrusted request bodies (the API, agent and webhook endpoints) nest no
+# deeper than a settings or command object, a handful of levels at most; 64
+# leaves an order of magnitude of headroom. The limit is explicit so it holds on
+# every Python version instead of depending on when the interpreter's JSON
+# parser runs out of stack (3.12 raises RecursionError, 3.14 does not).
+MAX_JSON_DEPTH = 64
+
+# One match per JSON string or per structural bracket, so a quoted bracket or an
+# escaped quote never counts toward depth. An unterminated string runs to the
+# end of the text: requiring the closing quote would make every later quote a
+# fresh, failing match attempt, which is quadratic on `"\"\"\"...`.
+_JSON_DEPTH_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)|[\[\]{}]', re.DOTALL)
+
+
+def json_nesting_exceeds(data: bytes | str, limit: int = MAX_JSON_DEPTH) -> bool:
+    """Whether ``data`` nests ``[``/``{`` deeper than ``limit`` outside strings.
+
+    Runs in time linear in the length of ``data`` and needs it to be neither
+    valid JSON nor valid text: bytes are decoded the way ``json.loads`` decodes
+    them, with undecodable bytes replaced, so any body can be scanned.
+    """
+    text = data if isinstance(data, str) else data.decode(json.detect_encoding(data), "replace")
+    depth = 0
+    for match in _JSON_DEPTH_TOKEN.finditer(text):
+        token = match.group()
+        if token in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif token in "]}":
+            depth -= 1
+    return False
+
+
+def loads_untrusted(data: bytes | str) -> Any:
+    """``json.loads`` for a body from the network, refusing deep nesting first.
+
+    Raises ``ValueError`` (``UnicodeDecodeError`` and ``json.JSONDecodeError``
+    included) for anything that is not JSON or nests past ``MAX_JSON_DEPTH``.
+    """
+    if json_nesting_exceeds(data):
+        raise ValueError(f"JSON nests deeper than {MAX_JSON_DEPTH} levels")
+    return json.loads(data)
+
+
 def write_private_text(path: Path, text: str) -> None:
     """Write ``text`` so the file is owner-only for its whole lifetime.
 

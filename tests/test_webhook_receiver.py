@@ -308,6 +308,7 @@ def test_bodies_that_are_not_a_bounded_event_are_refused(tmp_path: Path) -> None
         b'{"text": 7}',
         b"{}",
         too_long,
+        b"[" * 20000 + b"]" * 20000,
     ):
         with pytest.raises(WebhookReceiverError) as refusal:
             receiver.receive(trigger, idempotency_key="k1", body=body)

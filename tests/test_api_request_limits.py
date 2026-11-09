@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -13,7 +14,8 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.request_limits import ApiRequestBodyLimitMiddleware, DEFAULT_BODY_LIMIT, _route_limit
-from ciao.web.request_limits import MAX_JSON_DEPTH, SKILL_IMPORT_BODY_LIMIT
+from ciao.jsonio import MAX_JSON_DEPTH
+from ciao.web.request_limits import SKILL_IMPORT_BODY_LIMIT
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.security import SecurityHeadersMiddleware
 from ciao.web.app import create_app
@@ -131,9 +133,9 @@ def _nested(depth: int) -> bytes:
     return b'{"x":' * depth + b"0" + b"}" * depth
 
 
-def _post_json(app, body: bytes):
+def _post_json(app, body: bytes, content_type: str = "application/json"):
     return TestClient(ApiRequestBodyLimitMiddleware(app)).post(
-        "/api/write", content=body, headers={"content-type": "application/json"}
+        "/api/write", content=body, headers={"content-type": content_type}
     )
 
 
@@ -189,6 +191,50 @@ def test_depth_limit_applies_to_utf16_json() -> None:
     assert _post_json(app, shallow).status_code == 200
     assert _post_json(app, deep).status_code == 400
     assert seen == [shallow]
+
+
+def test_unterminated_string_full_of_escaped_quotes_is_rejected_in_linear_time() -> None:
+    # Requiring a closing quote made every escaped quote start a new match that
+    # failed at the end of the body: quadratic, 128 KB took about 45 s on the
+    # event loop. Linear scanning answers this in milliseconds.
+    app, seen = _counting_app()
+    body = b'"' + b'\\"' * (128 * 1024)
+    started = time.monotonic()
+    response = _post_json(app, body)
+    elapsed = time.monotonic() - started
+    assert response.status_code == 400
+    assert seen == []
+    assert elapsed < 5, elapsed
+
+
+def test_deep_body_is_rejected_whatever_its_declared_content_type() -> None:
+    # Handlers parse with `request.json()`, which ignores Content-Type.
+    app, seen = _counting_app()
+    for content_type in ("text/plain", "application/x-www-form-urlencoded", ""):
+        response = _post_json(app, _nested(20000), content_type)
+        assert response.status_code == 400, content_type
+        assert response.json() == {"error": "bad json"}
+    assert seen == []
+
+
+def test_shallow_non_json_bodies_reach_the_handler_unparsed() -> None:
+    app, seen = _counting_app()
+    bodies = [
+        (b"plain text with a [bracket and a { brace", "text/plain"),
+        (b"a=1&b=%5B%7B&c=" + b"%5B" * 200, "application/x-www-form-urlencoded"),
+        (bytes(range(256)) * 4, "application/octet-stream"),
+    ]
+    for body, content_type in bodies:
+        assert _post_json(app, body, content_type).status_code == 200, content_type
+    assert seen == [body for body, _ in bodies]
+
+
+def test_multipart_body_is_not_depth_scanned() -> None:
+    app, seen = _counting_app()
+    body = b"--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n" + b"[" * 1000 + b"\r\n--b--\r\n"
+    response = _post_json(app, body, "multipart/form-data; boundary=b")
+    assert response.status_code == 200
+    assert seen == [body]
 
 
 def test_oversized_json_integer_is_rejected_before_handler() -> None:
