@@ -45,6 +45,25 @@ jobs:
     - name: Linux backend tests
       run: pytest -n auto tests/
 
+  # `requires-python` admits every release from 3.12 up, and installers pick
+  # the newest interpreter, so the backend gates also run on the newest Python
+  # Ciaobot supports. A separate job (not a matrix) keeps the required
+  # `linux-server` check name unchanged.
+  linux-server-latest-python:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.14'
+        cache: 'pip'
+    - name: Install Python dependencies
+      run: python -m pip install -e '.[test]'
+    - name: Python static type check
+      run: mypy ciao
+    - name: Linux backend tests
+      run: pytest -n auto tests/
+
   # The package smoke installs the wheel and serves the packaged PWA, so it
   # runs here, after the build has written ciao/web/static.
   linux-web:

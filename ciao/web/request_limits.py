@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from typing import Any
 
@@ -19,6 +20,29 @@ SKILL_IMPORT_BODY_LIMIT = 10 * 1024 * 1024
 WORKSPACE_WRITE_BODY_LIMIT = 13 * 1024 * 1024
 SPOOL_MEMORY_LIMIT = 1024 * 1024
 REPLAY_CHUNK_SIZE = 64 * 1024
+# Ciaobot's API bodies are settings and command objects a handful of levels
+# deep (an object holding a list of objects at most); 64 leaves an order of
+# magnitude of headroom, and the explicit limit holds on every Python version
+# instead of depending on when the interpreter's JSON parser runs out of stack.
+MAX_JSON_DEPTH = 64
+
+# One match per JSON string (escapes included, so a quoted bracket or an
+# escaped quote never counts) or per structural bracket.
+_JSON_DEPTH_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.DOTALL)
+
+
+def _json_depth_exceeds(text: str, limit: int) -> bool:
+    """Whether ``text`` nests arrays/objects deeper than ``limit``, in one linear pass."""
+    depth = 0
+    for match in _JSON_DEPTH_TOKEN.finditer(text):
+        token = match.group()
+        if token in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif token in "]}":
+            depth -= 1
+    return False
 
 
 def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
@@ -109,12 +133,17 @@ class ApiRequestBodyLimitMiddleware:
                 media_type == b"application/json" or media_type.endswith(b"+json")
             ):
                 spool.seek(0)
+                raw = spool.read()
                 try:
-                    json.loads(spool.read())
-                except (ValueError, RecursionError, UnicodeDecodeError):
+                    # Decode the way json.loads does for bytes, so the depth scan
+                    # sees characters rather than UTF-16/32 code-unit bytes.
+                    text = raw.decode(json.detect_encoding(raw), "surrogatepass")
+                    if _json_depth_exceeds(text, MAX_JSON_DEPTH):
+                        raise ValueError("JSON nested too deeply")
+                    json.loads(text)
+                except (ValueError, UnicodeDecodeError):
                     await JSONResponse({"error": "bad json"}, status_code=400)(scope, receive, send)
                     return
-                spool.seek(0)
 
             # Non-JSON bodies need the same rewind as parsed JSON bodies before
             # a handler starts consuming the replay stream.
