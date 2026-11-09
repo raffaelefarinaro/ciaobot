@@ -930,16 +930,17 @@ def search_logs(
 # ── Scoped evidence drill-down ─────────────────────────────────────────────
 #
 # `search` answers with `_public_snippet`: the FTS-highlighted lines only,
-# inside SQLite's 32-token budget. That narrowness is a privacy property, not
-# an accident — it is what keeps an unrelated private line out of a recall
-# answer. It is also narrow enough to cut away the half of a sentence that
-# decides the answer: a qualification ("…only for work logged before the
-# amendment"), a negation, or the paragraph naming the current value. Recall
-# that answered from snippets alone answered confidently from a fragment whose
-# meaning is the opposite of the note's, so the core prompt now has it read the
-# best-matching note a search picked before answering.
+# inside SQLite's 32-token budget, narrow enough to cut away the half of a
+# sentence that decides the answer: a qualification ("…only for work logged
+# before the amendment"), a negation, or the paragraph naming the current value.
+# Recall that answered from snippets alone answered confidently from a fragment
+# whose meaning is the opposite of the note's, so the core prompt now has it
+# read the best-matching full note before answering; its privacy guard is the
+# answer-level "private working evidence" rule, not the snippet's narrowness.
 #
-# `expand_note` is the bounded repair. It is deliberately NOT a note reader:
+# `expand_note` is now only the library function the behavioural-eval recall
+# contracts measure; no agent path calls it. It is deliberately NOT a note
+# reader:
 #
 # * Scoped — the only admissible argument is a stored key the index currently
 #   holds *in `vault_fts`* and under the caller's own `path_prefix`. Another
@@ -954,8 +955,8 @@ def search_logs(
 #   section of the same note is still not returned, which is exactly the
 #   property `_public_snippet` was protecting; credential-shaped assignments
 #   that do land inside a window have their value redacted as well.
-# * Explicit — nothing calls this automatically. Recall asks for it, by the
-#   path a search already returned, when the snippet cannot support the answer.
+# * Explicit — nothing calls this automatically; it takes the path a search
+#   already returned.
 #
 # There is no opaque, expiring result token: the stored key IS the reference,
 # and it is re-validated against the live index and re-read from disk on every

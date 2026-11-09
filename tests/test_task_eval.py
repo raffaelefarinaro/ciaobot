@@ -3424,6 +3424,7 @@ def test_h11_checks_pass_on_the_current_fee_and_fail_on_the_snippet_answer(tmp_p
     for answer in (
         "Your allotment rent is now **CHF 240** a year: the 2026 general assembly raised it from CHF 180.",
         "CHF 240 per year from this season, invoiced in February.",
+        "The note says 'Yearly rent: CHF 180', but its Changes section sets the fee at CHF 240 from this season.",
     ):
         results = _grade_h11(root, answer, snap)
         assert all(result.ok for result in results), [(r.kind, r.detail) for r in results if not r.ok]
