@@ -12,11 +12,12 @@ for (const mobile of [false, true]) {
       shell: { kind: 'posix', cd_prefix: 'cd -- /workspace/personal && ' },
       providers: [
         { provider: 'opencode', available: true, inventory_state: 'loaded',
-          servers: [{ name: 'notion', scope: 'project', source: 'opencode.json', allowed: null,
+          servers: [{ name: 'notion', scope: 'project', source: 'opencode.json', allowed: null, applies_to: '/workspace/personal/opencode.json',
             connections: [{ state: 'failed', chat_id: 'chat-example', error: 'MCP server connection failed. Check the provider logs.' }] }] },
         { provider: 'claude', available: true, inventory_state: 'loaded', servers: [] },
       ],
     } }))
+    await page.route('**/api/mcp/servers/enabled', route => route.fulfill({ json: { workspace: 'personal', provider: 'opencode', server: 'notion', enabled: false, changed: true, applies_to: '/workspace/personal/opencode.json', warning: null, reload: { reloaded: [], pending: [] } } }))
     await boot(page, '/settings/mcp', '#mcp-servers')
     const tabs = page.locator('[role="tab"]')
     await expect(tabs).toHaveCount(2)
@@ -27,6 +28,7 @@ for (const mobile of [false, true]) {
     await expect(tabs.first()).toHaveAttribute('aria-selected', 'true')
     await page.getByRole('tab', { name: /OpenCode/ }).click()
     await expect(page.locator('.mcp-connection')).toContainText('connection failed')
+    const toggle = page.getByRole('button', { name: 'Turn off notion for OpenCode' })
 
     const ask = page.getByRole('button', { name: 'Ask Ciao to add one' })
     await expect(ask).toBeVisible()
@@ -39,7 +41,7 @@ for (const mobile of [false, true]) {
     await expect(addRow.locator('code')).toContainText('opencode mcp add notion --url https://example.com/mcp')
 
     if (mobile) {
-      const targets = [ask, tabs.first(), addRow.getByRole('button', { name: 'Copy' }), addRow.getByRole('button', { name: 'Run in terminal' }), page.getByLabel('Server name'), page.locator('.mcp-connection a')]
+      const targets = [ask, tabs.first(), addRow.getByRole('button', { name: 'Copy' }), addRow.getByRole('button', { name: 'Run in terminal' }), toggle, page.getByLabel('Server name'), page.locator('.mcp-connection a')]
       for (const target of targets) {
         await target.scrollIntoViewIfNeeded()
         expect((await target.boundingBox())!.height).toBeGreaterThanOrEqual(44)
@@ -49,6 +51,10 @@ for (const mobile of [false, true]) {
       await page.setViewportSize({ width: 640, height: 450 })
       await page.locator('.mcp-connection').scrollIntoViewIfNeeded()
     }
+    await toggle.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('button', { name: 'Turn on notion for OpenCode' })).toBeFocused()
+    await expect(page.locator('.mcp-toggle-note')).toContainText('notion is off in /workspace/personal/opencode.json.')
     await addRow.scrollIntoViewIfNeeded()
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
     await page.screenshot({ path: testInfo.outputPath('mcp-status.png'), fullPage: true })
