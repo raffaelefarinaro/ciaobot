@@ -100,11 +100,11 @@
           </tbody>
         </table>
       </div>
-      <p>Only Ciaobot got extra searches; the other systems answered from one search, as in their default setup. Index times are rough: the other systems were indexed in parallel on a shared machine and include start-up time, so read them as orders of magnitude.</p>
+      <p>Only Ciaobot got extra searches; every other system answered from one search with the question text. Index times are rough: the other systems were indexed in parallel on a shared machine and include start-up time, so read them as orders of magnitude.</p>
       <p>Two things came out of it:</p>
       <ul>
         <li><strong>Reading the note beats reading snippets.</strong> Answering from search snippets alone scored 43%; reading the same notes in full scored 87%. A snippet can look settled while the note says further down that the value changed.</li>
-        <li><strong>Keyword search holds up.</strong> Ciaobot's plain keyword search came within a few questions of Basic Memory's hybrid search, which adds embeddings. Embeddings do find more, but on a real vault they barely changed the answers, so they are on hold until keyword misses start costing answers.</li>
+        <li><strong>Keyword search holds up.</strong> Ciaobot's plain keyword search came within a few questions of Basic Memory's hybrid search, which adds embeddings. Embeddings do find more, but on a real vault they would have changed only one or two answers, so they are on hold until keyword misses start costing answers.</li>
       </ul>
       <p>It also found two things to fix, both fixed since: search dropped some results when only part of a question matched, and the assistant was told to answer from snippets. It now reads the best-matching note before it answers. A lighter memory-writing prompt was tried and rejected: it let back in facts the user had already turned down.</p>
       <p>One run, one machine, 60 questions and a synthetic benchmark: read it as a direction, not a ranking. Every number, each system's setup and its limits are in the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/evals/memory-comparison-2026-11.md">full memory comparison on GitHub</a>.</p>

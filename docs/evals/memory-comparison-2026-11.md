@@ -53,7 +53,7 @@ Two references bracket the results:
 - **Oracle:** the answer model reads only the gold sessions. An upper bound for retrieval.
 - **Full context:** the answer model reads the whole haystack (about 126k tokens). What you get with no memory system and a large enough context window.
 
-**Ciaobot agentic** is closest to how Ciaobot recalls in a chat. Haiku sees the top-5 full notes for the question text, then may issue up to three more searches of its own wording (`SEARCH: <query>`), so up to four searches in all. Only Ciaobot got these extra searches: every other system answered from one search with the question text, as in its default setup. New hits are shown in full. It is told the search is lexical and to try two or three reformulations before saying the answer is not there.
+**Ciaobot agentic** is closest to how Ciaobot recalls in a chat. Haiku sees the top-5 full notes for the question text, then may issue up to three more searches of its own wording (`SEARCH: <query>`), so up to four searches in all. Only Ciaobot got these extra searches: every other system answered from one search with the question text. Their own agents could also search again; we did not give them that loop. New hits are shown in full. It is told the search is lexical and to try two or three reformulations before saying the answer is not there.
 
 ## Results
 
@@ -196,7 +196,7 @@ Before changing anything else, we recorded a baseline on develop `4c4093dc` for 
 
 mem0, Hindsight, Honcho, OpenViking, ByteRover, Supermemory, RetainDB and memU all build memory by running a language model over each session (extraction, distillation or reflection). That fails the cost rule above.
 
-mem0 can also store messages without extraction (`add(..., infer=False)`), but that skips the extraction its design and published scores rest on, so it would not measure mem0 as used, and we did not run it. Cognee is in the comparison without its language model because it documents a local-only path (local extraction and embeddings); its row says what that costs it.
+mem0 can also store messages without extraction (`add(..., infer=False)`), but that skips the extraction its design and published scores rest on, so it would not measure mem0 as used, and we did not run it. Cognee is in the comparison without its language model because it ships a model-free extraction path (its GLiNER demo pipeline, with local embeddings); its row says what that costs it.
 
 Several of these publish LongMemEval scores between about 83% and 94% (for example [mem0's research page](https://mem0.ai/research)). Those scores are self-reported and not verified by us, with answer and judge models of each vendor's choice rather than Haiku and Sonnet, so they cannot be placed in the tables above. A fair comparison would run them through the same answering and judging, with the extraction cost reported next to the accuracy.
 
