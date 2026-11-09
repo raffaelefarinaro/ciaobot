@@ -489,7 +489,7 @@ class ChatActionsRuntime:
     async def turn_off_server(
         self, chat_id: str, action_id: str
     ) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
-        """Turn an mcp_auth card's server off for the chat's workspace and provider, then dismiss the card.
+        """Turn an mcp_auth card's server off in the provider's own config, then dismiss the card.
 
         The provider's own config is changed (``ciao.web.mcp_toggle``); a refusal raises
         ``McpToggleError`` and leaves the card as it is. The chat itself is reloaded even when
@@ -501,7 +501,10 @@ class ChatActionsRuntime:
             raise self._conflict(chat_id)
         if action.kind != "mcp_auth":
             raise ChatActionError("unsupported_kind")
+        chat = self._pcm.get_chat(chat_id)
         provider = str(action.params.get("provider", ""))
+        if chat is None or provider != chat.provider:
+            raise ChatActionError("invalid_state")
         server = str(action.params.get("server", ""))
         workspace = self._pcm._workspace_for_chat(chat_id)
         agent_root = Path(self._pcm._agent_root_for_chat(chat_id))

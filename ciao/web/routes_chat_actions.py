@@ -97,7 +97,7 @@ async def chat_action_continue(request: Request) -> JSONResponse:
 
 
 async def chat_action_turn_off(request: Request) -> JSONResponse:
-    """Turn off an mcp_auth card's server for this chat's workspace and provider, and remove the card.
+    """Turn off an mcp_auth card's server in the provider's own config, and remove the card.
 
     A config refusal is 400 (never 409, which the PWA reads as a stale card) and keeps the card.
     """

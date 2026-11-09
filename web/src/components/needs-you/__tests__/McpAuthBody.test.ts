@@ -212,6 +212,19 @@ describe('McpAuthBody Turn off', () => {
     expect(w.emitted('error')?.at(-1)).toEqual([mcpTurnOffErrorText('config_has_comments', 'notion')])
   })
 
+  it('does not start the sign-in while a Turn off is pending', async () => {
+    apiPost.mockReturnValueOnce(new Promise(() => {}))
+    const w = mountBody(action({ state: 'open', params: { server: 'notion', provider: 'opencode' } }))
+
+    await turnOffButton(w).trigger('click')
+    await nextTick()
+    expect(turnOffButton(w).attributes('aria-busy')).toBe('true')
+    await w.get('button.needs-you-btn--primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).not.toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/start', expect.anything())
+  })
+
   it('hides Turn off on a done card', () => {
     const w = mountBody(action({ state: 'done', params: { server: 'notion', provider: 'opencode' } }))
     expect(w.findAll('button').some(b => b.text() === 'Turn off')).toBe(false)

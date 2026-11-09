@@ -492,3 +492,26 @@ def test_turn_off_needs_a_session(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_turn_off_refuses_a_card_for_the_other_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "opencode.json"
+        original = json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}})
+        config.write_text(original)
+        calls = _record_workspace_reloads(manager, monkeypatch, {"reloaded": [cid], "pending": []})
+        action = _raise(manager, cid, provider="claude")
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+        assert manager.chat_action_payloads(cid) == [action]
+        assert calls == []
+        assert config.read_text() == original
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_state"
+    assert body["action"]["id"] == action["id"]

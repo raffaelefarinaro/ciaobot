@@ -74,7 +74,7 @@ function onSent(): void {
 }
 
 async function start(): Promise<void> {
-  if (starting.value) return
+  if (starting.value || turningOff.value) return
   focusCard()
   starting.value = true
   emit('error', '')
@@ -131,6 +131,7 @@ async function start(): Promise<void> {
       type="button"
       class="needs-you-btn needs-you-btn--quiet needs-you-turn-off"
       :disabled="turningOff || starting"
+      :aria-busy="turningOff || undefined"
       :aria-label="`Turn off ${server}`"
       :aria-describedby="scopeId"
       @click="turnOff"
