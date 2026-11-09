@@ -152,7 +152,22 @@ zero; the `Errors` column counts the error runs of each group.
 The `Median model calls` column uses the scored runs whose `model_calls` is not null.
 `compare` joins two reports by task id and reports
 the pass-rate difference and the percentage change in context, wall time and
-cost; its table shows each side's mode.
+cost. Each side pools every run of a task in its file, whatever its repeat
+number, label or code revision, so a file that appends several `--repeats`
+rounds counts all of them: the pass rate is passes over scored runs and the
+medians cover every scored run. The table shows each side's mode, its run
+count `n`, and the pass rate with its passes/scored count, e.g. `0.78 (7/9)`.
+When a side mixes modes or revisions, its `mode` and `code_revision` list each
+value, comma-separated, and a `Baseline revision` / `Candidate revision` column
+pair appears only when some side mixes revisions. Use `report` to see a pooled
+file split by revision.
+
+Mixing revisions is the point of pooling, but mixing providers or models is not:
+their runs measure different things. If either side's runs of a task use more
+than one provider or model, `compare` exits with an error that names the side,
+the task and the values (for example `candidate H1-multi-source-synthesis: model
+haiku,sonnet`). Pass `--allow-mixed` to pool them anyway. It prints the same
+list as a warning on stderr and adds provider and model columns for each side.
 
 ## Permission mode
 
@@ -238,6 +253,7 @@ tasks; `_fixture/` is the base vault.
 | `H7-shed-task-breakdown` | hard | `task_breakdown` | prompt, with the garden shed project doc in `overlay/` | the three open checklist items that are not on the board become tasks in the Garden shed project, each due on the Friday; the item already on the board is not duplicated, and the ticked and "maybe later" items are skipped |
 | `H8-biweekly-cadence` | hard | `cadence_limits` | prompt | an every-other-Monday request is either declined with an honest explanation, or set up as a weekly Monday 08:00 schedule whose prompt guards on ISO-week parity. A plain weekly schedule, or an interval schedule (which has no anchor), fails |
 | `H10-namesake-recall` | hard | `namesake_recall` | prompt, with a climbing note in `overlay/` that names a different Tomas | the birthday is declined, or the 3 May date is given only with the namesake flagged. Stating 3 May as Tomas Berg's birthday fails |
+| `H11-recall-value-below-snippet` | hard | `recall` | prompt, with an allotment note in `overlay/` whose current fee sits in a section below the 32-token snippet, and a distractor plot note that also matches (the "read another match only if…" clause is not checked) | the current CHF 240 is answered, not the CHF 180 the snippet shows or the distractor's CHF 310, and the note is left unchanged |
 
 ### Check kinds
 

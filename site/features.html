@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Features · Ciaobot</title>
-  <meta name="description" content="What Ciaobot can do and how to use each feature: projects, documents side by side, memory, automations, Google Workspace, and more.">
+  <meta name="description" content="Projects, documents, memory, automations, Google Workspace and remote access, using the AI agents you already have.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/features.html">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="Features · Ciaobot">
-  <meta property="og:description" content="What Ciaobot can do and how to use each feature: projects, documents side by side, memory, automations, Google Workspace, and more.">
+  <meta property="og:description" content="Projects, documents, memory, automations, Google Workspace and remote access, using the AI agents you already have.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/features.html">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Features · Ciaobot">
-  <meta name="twitter:description" content="What Ciaobot can do and how to use each feature: projects, documents side by side, memory, automations, Google Workspace, and more.">
+  <meta name="twitter:description" content="Projects, documents, memory, automations, Google Workspace and remote access, using the AI agents you already have.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
@@ -28,160 +28,150 @@
     <div class="inner">
       <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
       <nav class="site-nav" aria-label="Main">
-        <a href="./">Home</a>
-        <a href="guide.html">Get started</a>
+        <a href="guide.html">Guide</a>
         <a href="features.html" aria-current="page">Features</a>
         <a href="memory.html">Memory</a>
-        <a href="terminal.html">Terminal</a>
-        <a href="companions.html">Companions</a>
-        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
   </header>
 
-  <main>
-    <section class="narrow">
-      <p class="eyebrow">Features</p>
-      <h1>What Ciaobot can do, and how to use it</h1>
-      <p class="lead">Every screenshot below is the real app, with the quickest way to use each feature.</p>
+  <main class="features-page">
+    <section class="feature-intro">
+      <h1>What Ciaobot can do</h1>
+      <p class="lead">Projects, files, memory and automations—using the AI agents you already have.</p>
+      <nav class="feature-index" aria-label="On this page">
+        <a href="#organise">Projects</a>
+        <a href="#code">Code</a>
+        <a href="#tasks">Tasks</a>
+        <a href="#documents">Documents</a>
+        <a href="#memory">Memory</a>
+        <a href="#automations">Automations</a>
+        <a href="#webhooks">Webhooks</a>
+        <a href="#google">Google</a>
+        <a href="#file-access">File access</a>
+        <a href="#devices">Devices</a>
+      </nav>
     </section>
 
-    <div class="feature" id="organise">
+    <section class="feature" id="organise">
       <div class="feature-text">
-        <p class="eyebrow">Stay organised</p>
         <h2>Workspaces, projects and chats</h2>
-        <p>Separate the big areas of your life into <strong>workspaces</strong> (Personal, Work, a client), each with its own memory. Inside, a <strong>project</strong> holds the background for a topic, and each <strong>chat</strong> is one task.</p>
-        <p>Home has a box to start a task right away, and below it what needs you: anything waiting on you first, then unread answers, chats still working, and the quiet ones last. A side column shows what needs a look — tasks in review, memory proposals, notes to revisit and automations that failed. When a project is done, mark it <strong>Complete</strong>: it leaves the sidebar, and its notes stay in memory.</p>
-        <p class="how"><strong>How:</strong> <em>New</em> next to <em>Projects</em> in the sidebar, <em>New chat</em> for a chat (<kbd>⌥</kbd>+<kbd>N</kbd>), keys <kbd>1</kbd>–<kbd>9</kbd> to switch workspace. Or ask: "Create a project called Moving house".</p>
+        <p>Keep personal, work and client life in separate <strong>workspaces</strong>. A <strong>project</strong> holds the background for one topic; a <strong>chat</strong> handles one task with that context already attached.</p>
+        <p>Home brings together new tasks, replies and anything waiting for you. Completed projects leave the sidebar without losing their notes.</p>
+        <p class="how"><strong>Try it:</strong> choose <em>New</em> beside Projects, or ask Ciaobot to create a project. Use <em>New chat</em> for each task.</p>
       </div>
-      <figure>
-        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="Home: a box to start a task, chats grouped as needing you, unread, working and earlier, and a column of what needs a look" loading="lazy" width="1600" height="1000"></a>
+      <figure class="feature-media">
+        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="Ciaobot Home with a task composer, chats grouped by activity and projects in the sidebar" loading="lazy" width="1600" height="1000"></a>
       </figure>
-    </div>
-
-    <section class="narrow" id="code">
-      <p class="eyebrow">Work on code</p>
-      <h2>Projects linked to a code repository</h2>
-      <p>Link a project to a git repository on your computer, and its chats can work on that code without losing what makes them Ciaobot chats: the project's background, your memory and your files stay where they always are.</p>
-      <p>Each chat has a <strong>code mode</strong>, off by default. Off, the chat is an ordinary conversation that only knows where the repository is. On, it also follows the repository's own <code>AGENTS.md</code>, loads the repository's skills and can write inside it. You don't have to flip it yourself: say "let's work on the code" and the agent switches code mode on and carries on with the repository loaded. Every switch shows in the conversation, with who made it.</p>
-      <p>Knowledge goes where it belongs. Things about the code, such as how to run the tests or a trap to avoid, go into the repository's <code>AGENTS.md</code>, where any coding agent will read them. Decisions, status, notes and reports stay in the project in Ciaobot. When you archive a chat, a code lesson it missed becomes a proposal you review before anything is written to the repository.</p>
-      <p>You can always see where the agent is working: a chat that moved to another branch or a worktree is tagged in the sidebar, and <em>Chat details</em> shows the branch, uncommitted changes and how many tokens the repository's instructions add.</p>
-      <p class="how"><strong>How:</strong> open a project and choose <em>Repository → Link</em>, then pick one of the repositories found on your computer or type its path. Or ask: "Link this project to ~/repos/my-app". In a chat, ask to work on the code, or use the <em>Code mode</em> switch in <em>Chat details</em>.</p>
     </section>
 
-    <div class="feature flip" id="tasks">
+    <section class="feature-plain" id="code">
+      <h2>Projects linked to a code repository</h2>
+      <p>Link a project to a Git repository, then turn on <strong>code mode</strong> for a chat. The agent follows the repository's <code>AGENTS.md</code>, loads its skills and can write inside it while your project notes and memory stay in Ciaobot.</p>
+      <p>Chat details shows the branch, worktree and uncommitted changes. Code lessons can be proposed for the repository's <code>AGENTS.md</code>; you review them before anything is written.</p>
+      <p class="how"><strong>Try it:</strong> open a project and choose <em>Repository → Link</em>, or ask: “Link this project to ~/repos/my-app”.</p>
+    </section>
+
+    <section class="feature" id="tasks">
       <div class="feature-text">
         <h2>Tasks you can track and delegate</h2>
-        <p>Keep the next steps in each workspace on a board: <strong>To do</strong>, <strong>In progress</strong>, <strong>In review</strong> and <strong>Done</strong>. Add a description, a project and a due date, and choose whether you or the agent will do the work.</p>
-        <p><strong>Delegate to agent</strong> shows you what will be sent before starting a chat. Follow the work there and answer when it needs you. When the agent reports the task finished, the result waits for your review; <strong>Approve Done</strong> closes the task.</p>
-        <p>Approving a task asks for a resolution note, and the note is optional: a blank note completes the task without one. While a task is in progress, you or the working agent can add progress notes, which later resumes read. Completing a project asks whether it was completed or stopped, with an optional note.</p>
-        <p>Task records stay in your vault as plain Markdown, alongside the context and notes they belong to.</p>
-        <p class="how"><strong>How:</strong> <em>Tasks</em> in the sidebar, then <em>New task</em>. Open a task and choose <em>Delegate to agent</em> to have Ciaobot work on it.</p>
+        <p>Keep work on a <strong>To do → In progress → In review → Done</strong> board, with projects, descriptions and due dates. Records stay as Markdown in your vault.</p>
+        <p>Delegate a task to an agent, review the prompt before it starts, and follow the resulting chat. When the agent finishes, check the result and choose <strong>Approve Done</strong>.</p>
+        <p class="how"><strong>Try it:</strong> open Tasks, choose <em>New task</em>, then <em>Delegate to agent</em>.</p>
       </div>
-      <figure>
-        <a href="assets/img/tasks.webp"><img src="assets/img/tasks.webp" alt="Tasks board with example wedding-planning tasks in To do, In progress, In review and Done" loading="lazy" width="1600" height="400"></a>
-        <figcaption>The Tasks board, with example tasks.</figcaption>
+      <figure class="feature-media">
+        <a href="assets/img/tasks.webp"><img src="assets/img/tasks.webp" alt="Tasks board with example wedding-planning tasks in four columns" loading="lazy" width="1600" height="400"></a>
+        <figcaption>Wide boards open at full resolution.</figcaption>
       </figure>
-    </div>
+    </section>
 
-    <div class="feature flip" id="documents">
+    <section class="feature" id="documents">
       <div class="feature-text">
-        <p class="eyebrow">Work on real files</p>
         <h2>Documents side by side</h2>
-        <p>When Ciaobot writes a note, a plan or a table, it opens next to the chat. Ask for a change and watch the file update. Tables (CSV) are editable, and you can comment on a single cell.</p>
-        <p>To point at something precisely, <strong>highlight any passage</strong>, in the document or in the chat, and add a comment. The comment goes out with your next message, so "make this friendlier" knows exactly what "this" is.</p>
-        <p>Word, PowerPoint, Excel and PDF files you attach are converted to Markdown with <a href="https://github.com/firecrawl/anydoc">AnyDoc</a>, so the assistant can work from their contents rather than a filename. AnyDoc is included with Ciaobot; conversion happens when a supported document is attached.</p>
-        <p>Links work too: Ciaobot reads web pages directly, stripping menus and ads. It can read available YouTube captions; GitHub links use <code>gh</code> instead. Nothing to install — no separate CLI and no Node.js on the host.</p>
-        <p class="how"><strong>How:</strong> ask for a document ("write the wedding-day timeline as a note"). Open any file card and use <em>Pin to sidebar</em> to keep it beside the chat. Drop in a supported office file or PDF to have Ciaobot read it.</p>
+        <p>Open notes, plans and tables beside the chat. Highlight a passage or table cell, add a comment, and the next message tells the agent exactly what to change.</p>
+        <p>Attachments in Word, PowerPoint, Excel and PDF formats are converted to Markdown with <a href="https://github.com/firecrawl/anydoc">AnyDoc</a>. Ciaobot can also read web pages and available YouTube captions.</p>
+        <p class="how"><strong>Try it:</strong> ask for a document, then use <em>Pin to sidebar</em> to keep it beside the conversation.</p>
       </div>
-      <figure>
-        <a href="assets/img/chat-doc.webp"><img src="assets/img/chat-doc.webp" alt="A chat on the left and the wedding-day timeline document open on the right, just updated by Ciaobot" loading="lazy" width="1600" height="1000"></a>
+      <figure class="feature-media">
+        <a href="assets/img/chat-doc.webp"><img src="assets/img/chat-doc.webp" alt="A chat beside a wedding-day timeline document being edited by Ciaobot" loading="lazy" width="1600" height="1000"></a>
       </figure>
-    </div>
+    </section>
 
-    <div class="feature" id="memory">
+    <section class="feature" id="memory">
       <div class="feature-text">
-        <p class="eyebrow">Your second brain</p>
         <h2>Memory you can see and correct</h2>
-        <p>Archive a chat and Ciaobot files what matters: a decision in the project note, a detail on a person's note, a preference in its short core memory. Anything it's unsure about waits for you in <strong>To decide</strong>.</p>
-        <p>The <strong>Memory</strong> view shows every note as a map of connections, and most changes can be undone.</p>
-        <p class="how"><strong>How:</strong> <em>Memory</em> in the sidebar. Or ask: "Remember that I'm allergic to penicillin". <a href="memory.html">How memory works →</a></p>
+        <p>Archive a chat and Ciaobot files useful decisions, details and preferences as Markdown. Uncertain changes wait in <strong>To decide</strong>, and managed changes can be undone.</p>
+        <p>The Memory view connects projects, people and places in a searchable map. Your notes remain readable outside Ciaobot.</p>
+        <p class="how"><strong>Try it:</strong> say “Remember that I'm allergic to penicillin”, or open Memory to review what was filed. <a href="memory.html">How memory works →</a></p>
       </div>
-      <figure>
-        <a href="assets/img/memory-map.webp"><img src="assets/img/memory-map.webp" alt="The Memory map: notes for projects, people and places connected by lines" loading="lazy" width="1600" height="1000"></a>
+      <figure class="feature-media">
+        <a href="assets/img/memory-map.webp"><img src="assets/img/memory-map.webp" alt="The Memory map connecting notes for projects, people and places" loading="lazy" width="1600" height="1000"></a>
       </figure>
-    </div>
+    </section>
 
-    <div class="feature flip" id="automations">
+    <section class="feature" id="automations">
       <div class="feature-text">
-        <p class="eyebrow">Let it work on its own</p>
         <h2>Automations</h2>
-        <p>If you do something more than once, schedule it. A morning agenda, weekly vocabulary, the Monday status draft. Each run leaves its result in a chat for you to read, just like a message from an assistant.</p>
-        <p>Runs can be one-off, daily, weekly, monthly, every few minutes, or manual. One system routine ships with Ciaobot: <em>Workspace care</em> tidies memory every night and files what it can. Anything that needs your call, including suggested improvements to your own skills, waits in <strong>To decide</strong> for you to accept or dismiss.</p>
-        <p class="how"><strong>How:</strong> <em>Automations</em> in the sidebar, then <em>New</em>. Or ask: "Every weekday at 8, tell me what's on my calendar". Ciaobot shows you a draft before creating it.</p>
+        <p>Turn repeated requests into one-off, daily, weekly, monthly or interval-based routines. Every run leaves its result in a chat, where you can read it or continue the work.</p>
+        <p>The included <em>Workspace care</em> routine tidies memory each night. Anything uncertain waits for your review.</p>
+        <p class="how"><strong>Try it:</strong> open Automations and choose <em>New</em>, or ask: “Every weekday at 8, tell me what's on my calendar”.</p>
       </div>
-      <figure>
-        <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="The Automations list with custom routines and system routines and their next run times" loading="lazy" width="1600" height="1000"></a>
+      <figure class="feature-media">
+        <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="Automations list with routines and their next run times" loading="lazy" width="1600" height="1000"></a>
       </figure>
-    </div>
+    </section>
 
-    <div class="feature" id="webhooks">
+    <section class="feature" id="webhooks">
       <div class="feature-text">
-        <p class="eyebrow">Let other tools start the work</p>
         <h2>Webhook triggers</h2>
-        <p>An automation runs at a time you pick. A <strong>webhook trigger</strong> runs when another tool tells it something happened: a build failed on GitHub, a form came in through Zapier, an n8n or Make workflow finished, Home Assistant saw the front door open. Each event opens a new chat that gets to work straight away.</p>
-        <p>You write the trigger's <strong>instructions</strong> once ("When a build fails, read the log, find the commit that broke it and draft a fix"). The sending tool adds the <strong>details</strong> for each event, such as the error, an order number or a link. The chat starts with your instructions and those details shown as quoted data. A sender can pass in data, but it can't add instructions or pick the workspace, project or model.</p>
-        <p>Any tool that can send an HTTP request works: a step in a GitHub Actions workflow, an HTTP node in n8n, Zapier's or Make's webhook action, a Home Assistant automation, a shell script. GitHub's built-in repository webhooks send their own format, so call Ciaobot from an Actions step instead. The sender has to be able to reach the computer Ciaobot runs on. For a cloud service, that means a route onto your <a href="remote.html">Tailscale network</a>, for example Tailscale's GitHub Action, or a self-hosted n8n on the same network.</p>
-        <p class="how"><strong>How:</strong> <em>Automations</em> in the sidebar, then <em>Webhook triggers</em>. Create one, copy its secret (it is shown only once), switch it on, and paste the URL and secret into the other tool. Or ask: "Set up a webhook so a failed nightly build opens a chat that finds the cause".</p>
+        <p>Let GitHub Actions, n8n, Zapier, Make, Home Assistant or any HTTP client start work when an event happens. The event opens a chat with your instructions and the sender's details.</p>
+        <p>The sender gets a secret URL but cannot change your instructions, workspace, project or model. The sending tool must be able to reach your Ciaobot host, for example through <a href="remote.html">Tailscale</a>.</p>
+        <p class="how"><strong>Try it:</strong> open Automations → <em>Webhook triggers</em>, create a trigger, then copy its URL and secret into the sending tool.</p>
       </div>
-      <figure>
+      <figure class="feature-media feature-code">
         <pre><code>curl -X POST "http://100.101.102.103:8443/hooks/v1/$TRIGGER" \
   -H "Authorization: Bearer $SECRET" \
   -H "Idempotency-Key: build-4821" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Nightly build failed on main: test_auth timed out"}'</code></pre>
-        <figcaption>What a sender posts: the trigger's secret, a key so a retry isn't counted twice, and the event details as <code>text</code>.</figcaption>
+  -d '{"text": "Nightly build failed on main"}'</code></pre>
+        <figcaption>The secret authenticates the sender; the idempotency key prevents duplicate retries.</figcaption>
       </figure>
-    </div>
-
-    <div class="feature flip" id="google">
-      <div class="feature-text">
-        <p class="eyebrow">Mail, calendar, documents</p>
-        <h2>Google Workspace, built in</h2>
-        <p>An assistant needs your calendar and inbox. Ciaobot works with Google's own command-line tool, <a href="https://github.com/googleworkspace/cli"><code>gws</code></a>, and ships ready-made skills for <strong>Gmail</strong> (read, triage, reply, send), <strong>Calendar</strong>, <strong>Drive</strong>, <strong>Docs</strong>, <strong>Sheets</strong>, <strong>Slides</strong>, <strong>Tasks</strong> and <strong>Forms</strong>.</p>
-        <p>Add as many Google accounts as you need and link <strong>one per workspace</strong>: your personal Gmail in Personal, your company account in Work.</p>
-        <p class="how"><strong>How:</strong> Open the workspace's settings and connect Google Workspace. Then just ask: "What's on my calendar tomorrow?"</p>
-      </div>
-      <figure>
-        <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Settings, Personal workspace Overview, with workspace file access, chat defaults and the Google account section" loading="lazy" width="1600" height="1000"></a>
-      </figure>
-    </div>
-
-    <section class="narrow" id="file-access">
-      <p class="eyebrow">Stay in control</p>
-      <h2>File access</h2>
-      <p>Each workspace decides how much of your computer its agent can read. <strong>Workspace only</strong> keeps the agent's shell and file tools inside that workspace's folder. <strong>Whole machine</strong> lets it read any file you can read. A workspace with no File access choice uses Workspace only on macOS and Linux, and Whole machine on Windows, which has no sandbox.</p>
-      <p>Workspace only does not limit the network: the agent can still reach the internet and Ciaobot's own command-line tool. On Linux, the sandbox needs a one-time AppArmor setup on Ubuntu 23.10 and later (see the Linux guide in the GitHub repository).</p>
-      <p>File access covers the agent, not the <a href="terminal.html">terminal panel</a>: that one is your own shell, and it is not confined to the workspace folder.</p>
-      <p class="how"><strong>How:</strong> Open the workspace's settings, then choose <em>File access</em>. Each workspace row shows the value in effect.</p>
     </section>
 
-    <div class="feature phone" id="devices">
+    <section class="feature" id="google">
       <div class="feature-text">
-        <p class="eyebrow">Wherever you are</p>
-        <h2>From any device</h2>
-        <p>Ciaobot runs on one computer, your Mac at home or a small rented server, and every other device is a window onto it. Your phone gets the same chats, projects and memory, and can be added to the home screen like an app.</p>
-        <p>A cheap VPS (for example from <a href="https://www.hostinger.com/vps-hosting">Hostinger</a>) makes an always-on host that's reachable from everywhere, even when your laptop is closed.</p>
-        <p class="how"><strong>How:</strong> <a href="remote.html">Use it anywhere →</a></p>
+        <h2>Google Workspace, built in</h2>
+        <p>Ready-made skills connect Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks and Forms through Google's <a href="https://github.com/googleworkspace/cli"><code>gws</code></a> CLI.</p>
+        <p>Link one Google account per workspace, so personal mail stays in Personal and company mail stays in Work.</p>
+        <p class="how"><strong>Try it:</strong> open the workspace's settings, connect Google, then ask: “What's on my calendar tomorrow?”</p>
       </div>
-      <figure>
-        <a href="assets/img/mobile-home.webp"><img src="assets/img/mobile-home.webp" alt="Ciaobot on a phone: the Personal workspace with unread and quiet chats" loading="lazy" width="600" height="1298"></a>
+      <figure class="feature-media">
+        <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Personal workspace settings with the Google account section" loading="lazy" width="1600" height="1000"></a>
       </figure>
-    </div>
+    </section>
 
+    <section class="feature-plain" id="file-access">
+      <h2>File access you control</h2>
+      <p><strong>Workspace only</strong> confines the agent's shell and file tools to that workspace on macOS and Linux. <strong>Whole machine</strong> lets it read what your user account can read. Windows uses Whole machine because it has no equivalent sandbox.</p>
+      <p>File access does not limit network requests, and it does not confine the <a href="terminal.html">terminal panel</a>, which is your own shell. Linux's sandbox uses bubblewrap and may need the one-time AppArmor setup in the Linux guide.</p>
+      <p class="how"><strong>Try it:</strong> open the workspace's settings and choose <em>File access</em>.</p>
+    </section>
 
-    <nav class="next-page narrow" aria-label="Next pages">
+    <section class="feature" id="devices">
+      <div class="feature-text">
+        <h2>From any device</h2>
+        <p>Run Ciaobot on one Mac, Windows PC or server, then use the same chats, projects and memory from your phone, tablet or another computer. The browser interface can be installed as an app.</p>
+        <p>A small always-on VPS keeps everything available even when your laptop is closed.</p>
+        <p class="how"><strong>Try it:</strong> follow the <a href="remote.html">remote access guide</a> to connect your devices privately with Tailscale.</p>
+      </div>
+      <figure class="feature-media">
+        <a href="assets/img/mobile-home.webp"><img src="assets/img/mobile-home.webp" alt="Ciaobot on a phone with the Personal workspace and its chats" loading="lazy" width="600" height="1298"></a>
+        <figcaption>The same workspace, sized for a phone.</figcaption>
+      </figure>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="guide.html">← Getting started</a>
       <a class="btn btn-primary" href="terminal.html">The terminal →</a>
     </nav>

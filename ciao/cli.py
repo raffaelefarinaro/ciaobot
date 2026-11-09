@@ -5734,9 +5734,22 @@ def _eval_tasks_command(args: argparse.Namespace) -> int:
             print(task_eval.render_summary(summary))
         return 0
     if action == "compare":
-        comparison = task_eval.compare(
-            task_eval.read_jsonl([args.baseline]), task_eval.read_jsonl([args.candidate])
-        )
+        allow_mixed = bool(getattr(args, "allow_mixed", False))
+        try:
+            comparison = task_eval.compare(
+                task_eval.read_jsonl([args.baseline]),
+                task_eval.read_jsonl([args.candidate]),
+                allow_mixed=allow_mixed,
+            )
+        except task_eval.MixedRunsError as exc:
+            raise SystemExit(f"error: {exc}") from exc
+        mixed = task_eval.mixed_runs(comparison)
+        if mixed:
+            print(
+                "warning: --allow-mixed pooled runs of different providers or models:\n  "
+                + "\n  ".join(mixed),
+                file=sys.stderr,
+            )
         if args.json:
             print(json.dumps(comparison, indent=2, ensure_ascii=False))
         else:
@@ -9943,6 +9956,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tasks_compare.add_argument("--baseline", type=Path, required=True)
     tasks_compare.add_argument("--candidate", type=Path, required=True)
+    tasks_compare.add_argument(
+        "--allow-mixed",
+        action="store_true",
+        help="Pool a task's runs even when one side mixes providers or models (warns on stderr).",
+    )
     tasks_compare.add_argument(
         "--json", action="store_true", help="Emit the comparison as JSON."
     )
