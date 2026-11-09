@@ -270,11 +270,24 @@ export function findFinalAnswerIndex(
     if (!isAssistantTextStep(m)) continue
     if (m.phase === 'commentary') continue
     // History rows carry no `phase`, but the server stamps the turn's last
-    // assistant text with its completion time. A stamped row is the delivered
-    // closing reply even when it opens like narration ("Good — updated both
-    // files.") and even when bookkeeping tools run after it; an unstamped
-    // trailing "Now the docs:" is not delivered.
-    if (fallback < 0 && m.timestamp) return k
+    // assistant text with its completion time — sometimes trailing progress
+    // narration too ("Now run tests:"). A stamped row is the delivered closing
+    // reply unless a bookkeeping tool ran after it, it reads as progress
+    // narration, or an earlier explicit completion already answered the turn.
+    // The hidden-continuation exception: an earlier `final_answer` row means
+    // this stamped row closes the turn even when it opens like narration and
+    // tools run after it.
+    if (
+      fallback < 0
+      && m.timestamp
+      && (
+        !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
+        || !isProgressCommentary(m.content || '')
+        || buffer.slice(0, k).some(
+          r => r.role === 'assistant' && !r.tool_name && r.phase === 'final_answer'
+        )
+      )
+    ) return k
     if (fallback < 0) fallback = k
     if (m.phase === 'final_answer') return k
     if (!isProgressCommentary(m.content || '')) return k

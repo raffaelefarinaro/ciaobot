@@ -276,6 +276,22 @@ describe('findFinalAnswerIndex', () => {
       { kind: 'trace', steps: [buffer[1], buffer[2], buffer[4]] },
     ])
   })
+
+  it('keeps an earlier answer when stamped narration is followed by bookkeeping', () => {
+    // The server can stamp trailing progress narration too, so a timestamp
+    // alone does not make the last text the answer. Without an earlier
+    // explicit completion, a stamped "Now run tests:" followed by tool
+    // bookkeeping still belongs in the trace.
+    const buffer = [
+      text('Done. The answer is here.'),
+      text('Now run tests:', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
 })
 
 describe('findFinalAnswerIndex with a reasoning tail', () => {
