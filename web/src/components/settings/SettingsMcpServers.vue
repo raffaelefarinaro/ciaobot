@@ -5,7 +5,7 @@
         <h2 class="section-title">MCP servers</h2>
         <p class="hint">Connections belong to Claude Code or OpenCode. This list shows their configuration for the <strong>{{ status?.workspace || 'selected' }}</strong> workspace and connection status from open chats.</p>
       </div>
-      <button class="btn-small" type="button" :disabled="loading" @click="fetchStatus">{{ loading ? 'Checking…' : 'Refresh' }}</button>
+      <button class="btn-small" type="button" :disabled="loading || toggling !== null" @click="fetchStatus">{{ loading ? 'Checking…' : 'Refresh' }}</button>
     </div>
     <p v-if="error" class="action-result --error" role="alert">{{ error }}</p>
     <p v-if="loading" class="hint" role="status">Reading CLI configuration and open chat connections…</p>
@@ -53,11 +53,12 @@
           </div>
           <p v-else-if="server.scope === 'managed'" class="hint">Managed by your organization; it can’t be turned off here.</p>
           <div v-for="group in groupMcpConnections(server.connections)" :key="group.state" class="mcp-connection">
-            <span class="badge" :class="stateClass(group.state, server)">{{ stateLabel(group.state, server) }}</span>
+            <span class="badge" :class="isOn(server) ? stateClass(group.state, server) : 'badge--muted'">{{ stateLabel(group.state, server) }}</span>
             <span v-if="group.chatIds.length > 1" class="mcp-connection-count">in {{ group.chatIds.length }} chats</span>
             <a :href="`/chat/${encodeURIComponent(group.chatIds[0]!)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${group.chatIds[0]}`">Open chat</a>
             <p v-if="group.error && !claudeAiNotConnected(group.state, server)" class="hint">{{ group.error }}</p>
           </div>
+          <p v-if="!isOn(server) && server.connections.length" class="hint">Running chats keep this connection until they reload.</p>
           <p v-if="!server.connections.length && isOn(server)" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
           <p v-if="!isOn(server)" class="hint">Off: new {{ providerLabel(current.provider) }} chats here don’t connect to it.</p>
           <p v-if="isClaudeAi(server)" class="hint">
@@ -102,8 +103,8 @@
             <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in finishes in the open chat, which connects as soon as you complete it; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
           </template>
         </div>
-        <p v-if="toggleNote" class="hint mcp-toggle-note" role="status">{{ toggleNote }}</p>
-        <p v-if="toggleError" class="action-result --error" role="alert">{{ toggleError }}</p>
+        <p v-if="toggleNote && toggleFor === current.provider" class="hint mcp-toggle-note" role="status">{{ toggleNote }}</p>
+        <p v-if="toggleError && toggleFor === current.provider" class="action-result --error" role="alert">{{ toggleError }}</p>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
 
         <h4>Or do it yourself</h4>
@@ -172,7 +173,6 @@ watch(
   () => { if (providers.value[0]) selected.value = providers.value[0].provider },
   { immediate: true },
 )
-watch(selected, () => { toggleNote.value = ''; toggleError.value = '' })
 const current = computed(() => providers.value.find(p => p.provider === selected.value) ?? providers.value[0])
 
 const name = ref('')
@@ -315,6 +315,8 @@ onBeforeUnmount(() => {
 const toggling = ref<string | null>(null)
 const toggleNote = ref('')
 const toggleError = ref('')
+/** The provider the note or error belongs to, so a result that lands after a tab switch stays on its own tab. */
+const toggleFor = ref<Provider | null>(null)
 function isOn(server: McpNativeServer): boolean { return server.enabled !== false }
 function toggleSummary(provider: Provider, result: McpToggleResult): string {
   const where = provider === 'claude' ? `for Claude Code chats in ${result.applies_to}` : `in ${result.applies_to}`
@@ -329,6 +331,7 @@ async function toggleServer(provider: Provider, server: McpNativeServer): Promis
   if (toggling.value) return
   const next = !isOn(server)
   toggling.value = menuKey(provider, server.name)
+  toggleFor.value = provider
   toggleNote.value = ''
   toggleError.value = ''
   try {
