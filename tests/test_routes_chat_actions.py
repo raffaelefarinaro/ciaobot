@@ -6,6 +6,7 @@ test sees what the browser sees. Each POST carries the Origin header the PWA sen
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,12 +19,14 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao.chat_actions import action_key
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_chat_actions import (
     chat_action_continue,
     chat_action_dismiss,
     chat_action_start,
+    chat_action_turn_off,
     chat_mcp_auth_request,
 )
 from tests.test_ws_auth import _real_events_app, _signed_client
@@ -48,6 +51,7 @@ def _client(manager: ProjectChatManager, *, signed_in: bool = True) -> TestClien
             Route("/api/chats/{chat_id}/actions/{action_id}/dismiss", chat_action_dismiss, methods=["POST"]),
             Route("/api/chats/{chat_id}/actions/{action_id}/continue", chat_action_continue, methods=["POST"]),
             Route("/api/chats/{chat_id}/actions/mcp-auth", chat_mcp_auth_request, methods=["POST"]),
+            Route("/api/chats/{chat_id}/actions/{action_id}/turn-off", chat_action_turn_off, methods=["POST"]),
         ],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
@@ -342,3 +346,172 @@ def test_mcp_auth_request_needs_a_session(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 401
+
+
+def _isolate_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
+def _record_workspace_reloads(
+    manager: ProjectChatManager, monkeypatch: pytest.MonkeyPatch, result: dict[str, list[str]]
+) -> list[tuple[str, str]]:
+    calls: list[tuple[str, str]] = []
+
+    async def fake(workspace: str, provider: str) -> dict[str, list[str]]:
+        calls.append((workspace, provider))
+        return result
+
+    monkeypatch.setattr(manager, "reload_workspace_providers", fake)
+    return calls
+
+
+def test_turn_off_writes_the_config_dismisses_and_reloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "opencode.json"
+        config.write_text(json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}}))
+        calls = _record_workspace_reloads(manager, monkeypatch, {"reloaded": [cid], "pending": []})
+        action = _raise(manager, cid)
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+        chat = manager.get_chat(cid)
+        assert chat is not None
+        assert action_key("mcp_auth", {"server": "linear"}) in chat.dismissed_action_keys
+        assert calls == [(manager._workspace_for_chat(cid), "opencode")]
+
+    assert response.status_code == 200
+    assert response.json() == {"actions": [], "reload": {"reloaded": [cid], "pending": []}}
+    assert json.loads(config.read_text())["mcp"]["servers"]["linear"]["disabled"] is True
+
+
+def test_turn_off_reloads_the_chat_itself_when_its_workspace_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "opencode.json").write_text(
+            json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}})
+        )
+        _record_workspace_reloads(manager, monkeypatch, {"reloaded": [], "pending": []})
+        reloaded: list[str] = []
+
+        async def fake_reload(chat_id: str) -> bool:
+            reloaded.append(chat_id)
+            return True
+
+        monkeypatch.setattr(manager, "reload_provider", fake_reload)
+        monkeypatch.setattr(manager, "active_chat_ids", lambda: [])
+        action = _raise(manager, cid)
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["reload"] == {"reloaded": [cid], "pending": []}
+    assert reloaded == [cid]
+
+
+def test_turn_off_refusal_keeps_the_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "opencode.jsonc").write_text(
+            '// comment\n{"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}}'
+        )
+        calls = _record_workspace_reloads(manager, monkeypatch, {"reloaded": [], "pending": []})
+        action = _raise(manager, cid)
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+        assert manager.chat_action_payloads(cid) == [action]
+        assert calls == []
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "config_has_comments"
+    assert body["action"]["id"] == action["id"]
+
+
+def test_turn_off_write_failure_is_400_unreadable_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "opencode.json"
+        original = json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}})
+        config.write_text(original)
+        calls = _record_workspace_reloads(manager, monkeypatch, {"reloaded": [], "pending": []})
+        action = _raise(manager, cid)
+
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            raise PermissionError("read-only")
+
+        monkeypatch.setattr("ciao.web.mcp_toggle.os.replace", refuse)
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+        assert manager.chat_action_payloads(cid) == [action]
+        assert calls == []
+        assert config.read_text() == original
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "unreadable_config"
+
+
+def test_a_stale_turn_off_is_409(tmp_path: Path) -> None:
+    with _live_chat(tmp_path) as (manager, cid):
+        current = _raise(manager, cid)
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/nope/turn-off", headers=_HEADERS)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "chat_action_conflict"
+    assert response.json()["actions"] == [current]
+
+
+def test_turn_off_of_an_unknown_chat_is_404(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+
+    response = _client(manager).post("/api/chats/ghost/actions/a/turn-off", headers=_HEADERS)
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+
+
+def test_turn_off_needs_a_session(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+
+    response = _client(manager, signed_in=False).post(
+        "/api/chats/c/actions/a/turn-off", headers=_HEADERS
+    )
+
+    assert response.status_code == 401
+
+
+def test_turn_off_refuses_a_card_for_the_other_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_opencode(tmp_path, monkeypatch)
+    with _live_chat(tmp_path) as (manager, cid):
+        root = Path(manager._agent_root_for_chat(cid))
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "opencode.json"
+        original = json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}})
+        config.write_text(original)
+        calls = _record_workspace_reloads(manager, monkeypatch, {"reloaded": [cid], "pending": []})
+        action = _raise(manager, cid, provider="claude")
+
+        response = _client(manager).post(f"/api/chats/{cid}/actions/{action['id']}/turn-off", headers=_HEADERS)
+
+        assert manager.chat_action_payloads(cid) == [action]
+        assert calls == []
+        assert config.read_text() == original
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_state"
+    assert body["action"]["id"] == action["id"]

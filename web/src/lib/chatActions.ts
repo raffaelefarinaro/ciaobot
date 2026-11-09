@@ -332,6 +332,33 @@ export function chatActionErrorReason(e: unknown): string {
   return typeof err?.payload?.error === 'string' ? err.payload.error : ''
 }
 
+/** Why a needs-you card could not turn its MCP server off, in the user's words. */
+export function mcpTurnOffErrorText(reason: string, server: string): string {
+  switch (reason) {
+    case 'config_has_comments':
+      return `The OpenCode config file that defines ${server} has comments or trailing commas, so Ciaobot leaves it alone. Change ${server} in that file yourself.`
+    case 'env_config':
+      return `OPENCODE_CONFIG_CONTENT in Ciaobot's environment defines ${server}; change it there.`
+    case 'not_configured':
+      return `No OpenCode config file for this workspace defines ${server}. Turn it off where it is defined.`
+    case 'managed':
+      return `${server} is managed by your organization and can't be turned off here.`
+    case 'config_busy':
+      return 'Claude Code is saving its settings. Try again in a moment.'
+    case 'unreadable_config':
+      return "The command line tool's settings file could not be read or changed, so nothing was changed."
+    default:
+      return `${server} could not be turned off. Try again.`
+  }
+}
+
+/** Where a needs-you card's Turn off applies, shown before the user clicks. */
+export function mcpTurnOffScopeText(provider: string): string {
+  return provider === 'claude'
+    ? "Turn off applies to Claude Code for this workspace's folder (the whole git repository, if it is one)."
+    : 'Turn off edits the OpenCode config file that defines this server.'
+}
+
 /** The URL when it is http or https, else null. Nothing else is ever opened or linked. */
 export function safeExternalUrl(raw: unknown): string | null {
   if (typeof raw !== 'string') return null

@@ -281,7 +281,7 @@ describe('NeedsYouCard', () => {
     await flushPromises()
 
     const row = card.get('.needs-you-card-controls')
-    expect(row.findAll('button').map(b => b.text())).toEqual(['Sign in', 'Not now'])
+    expect(row.findAll('button').map(b => b.text())).toEqual(['Sign in', 'Turn off', 'Not now'])
     expect(card.get('.needs-you-card-error').element.closest('.needs-you-card-controls')).toBeNull()
   })
 

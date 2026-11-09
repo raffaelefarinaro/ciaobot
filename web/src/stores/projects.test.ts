@@ -2935,6 +2935,28 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
   })
 
+  test('turnOffChatActionServer applies the remaining list', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
+    apiPost.mockResolvedValueOnce({ actions: [action('a2')], reload: { reloaded: [], pending: [] } })
+    await expect(store.turnOffChatActionServer('c-1', 'a1')).resolves.toBe('turned_off')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/turn-off', {})
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
+  })
+
+  test('a turn-off refusal keeps the card and rethrows', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { state: 'open' })])))
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
+      status: 400,
+      payload: { error: 'config_has_comments', action: action('a1', { state: 'open' }) },
+    }))
+    await expect(store.turnOffChatActionServer('c-1', 'a1')).rejects.toThrow('config_has_comments')
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
+  })
+
   test('continueChatAction posts to the continue route', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
