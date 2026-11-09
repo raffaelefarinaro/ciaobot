@@ -305,9 +305,9 @@ broken. Run both. Report what the tasks found; do not fix it here.
 `AGENTS.md` requires visual browser inspection before *pushing*. A release is
 the one moment where all of it is true at once, which is why these live here.
 
-### Windows smoke (preview, #696 C10/C11)
+### Windows smoke (#696 C10/C11)
 
-The macOS walk above does not touch the Windows engine, and there is no Windows job in `release-smoke` yet, so a release candidate gets this by hand while Windows is a preview. Use the clean-install Windows 11 VM snapshot (or a fresh local Windows account) and run it over SSH or in the console. It needs the release candidate's files, so run it after `publish` has attached them, or build them locally the way the CI end-to-end step does and use `-ReleaseDir <folder> -Version <x.y.z>`:
+The macOS walk above does not touch the Windows engine, and `release-smoke` has no Windows job, so a release candidate still gets this manual check. Use the clean-install Windows 11 VM snapshot (or a fresh local Windows account) and run it over SSH or in the console. It needs the release candidate's files, so run it after `publish` has attached them, or build them locally the way the CI end-to-end step does and use `-ReleaseDir <folder> -Version <x.y.z>`:
 
 1. Restore the clean snapshot (or create a new account that has never had Ciaobot).
 2. Install: `irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex` (or the `-ReleaseDir`/`-Version` form for a candidate that is not published). Expect a sign-in URL and no error.

@@ -29,10 +29,20 @@ def test_every_surface_names_the_same_windows_one_liner() -> None:
     assert ONE_LINER in _read("skills/ciao-release/SKILL.md")
 
 
-def test_the_readme_labels_windows_a_preview() -> None:
-    readme = _read("README.md")
-    assert "**Windows 11 (x64 or ARM64), preview:**" in readme
-    assert "preview" in _read("docs/WINDOWS.md").splitlines()[0].lower()
+def test_windows_documentation_describes_a_supported_platform() -> None:
+    expected = {
+        "README.md": "**Windows 11 (x64 or ARM64):**",
+        "docs/README.md": "[Windows](WINDOWS.md)",
+        "INTEGRATIONS.md": "### Windows 11 (x64 or ARM64)",
+        "ciao/stock/skills/ciao-capabilities/references/install-and-settings.md": "**Windows 11 (x64 or ARM64)**",
+        "skills/ciao-release-notes/SKILL.md": '"(Linux)", "(Windows)".',
+    }
+    for relative, wording in expected.items():
+        assert wording in _read(relative), relative
+
+    windows_doc = _read("docs/WINDOWS.md")
+    assert windows_doc.splitlines()[0] == "# Windows"
+    assert "Ciaobot's engine runs natively on Windows 11 and is supported." in windows_doc
 
 
 def test_documented_installer_options_are_real_install_ps1_parameters() -> None:

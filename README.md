@@ -6,7 +6,7 @@
 
 Ciaobot is your **second brain and personal assistant**: a persistent personal workspace for the agents you already use, [Claude Code](https://github.com/anthropics/claude-code) and [OpenCode](https://opencode.ai).
 
-**Your agents do the work. Ciaobot keeps the context.** Claude Code and OpenCode handle models and tools; Ciaobot adds projects, durable memory, files, and recurring tasks so each conversation can build on what came before.
+**Your agents do the work. Ciaobot remembers.** Claude Code and OpenCode handle models and tools; Ciaobot adds projects, durable memory, files, and recurring tasks so each conversation can build on what came before.
 
 **Change your AI, not your second brain.** Use Claude or OpenCode with a cloud or local model. Your notes, project context, and remembered preferences stay in a folder you own. Durable Markdown knowledge remains useful outside Ciaobot; provider sessions, tools, and permissions are not interchangeable.
 
@@ -28,7 +28,7 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 
 The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
 
-**Windows 11 (x64 or ARM64), preview:**
+**Windows 11 (x64 or ARM64):**
 
 ```powershell
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex

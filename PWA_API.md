@@ -186,7 +186,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspace-move/plan` | Dry-run moving the install workspace to `{target}`: `{ok, refusals, warnings}` (host browser only: loopback peer, local `Host`, exact same-origin `Origin`) |
 | POST | `/api/workspace-move` | Start moving the install workspace to `{target}`: detached drain, stop, move, repoint, restart (host browser only: loopback peer, local `Host`, exact same-origin `Origin`; 202) |
 
-| GET | `/api/stats` | Read CLI stats |
+| GET | `/api/stats` | Usage statistics for one workspace: `?workspace=<name>` (required, a registered workspace, else 400) and `?range=7\|30\|90\|365` (default 30, anything else 400). Returns `{workspace, range_days, generated_at, today, totals, previous, daily_messages, projects, memory_pipeline, hours, models}` computed from existing stores (`ciao/usage_stats.py`); completed local days are cached in memory, today is live. Same payload as `ciao stats` |
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config. A genuinely new workspace registers workspace-scoped onboarding at `runtime` before registry persistence and adds `onboarding_target: {kind: "workspace", name}` to the response; updating an existing workspace does not register progress. Restore does not create progress; reusing an archived name is a new creation. |

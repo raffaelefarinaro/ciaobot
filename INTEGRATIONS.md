@@ -8,7 +8,7 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## Install
 
-### Windows 11 (preview)
+### Windows 11 (x64 or ARM64)
 
 ```powershell
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
