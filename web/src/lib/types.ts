@@ -119,6 +119,9 @@ export interface McpNativeServer {
   name: string
   scope: string
   source: string
+  kind?: string
+  enabled?: boolean // false = turned off; missing = on
+  applies_to?: string | null // where Turn off / Turn on writes; null = cannot be switched here
   allowed: boolean | null
   connections: McpConnection[]
 }
@@ -135,6 +138,17 @@ export interface McpStatus {
   agent_root: string
   providers: McpProviderInventory[]
   shell: { kind: 'posix' | 'powershell'; cd_prefix: string }
+}
+
+export interface McpToggleResult {
+  workspace: string
+  provider: 'claude' | 'opencode'
+  server: string
+  enabled: boolean
+  changed: boolean
+  applies_to: string
+  warning: string | null
+  reload: { reloaded: string[]; pending: string[] }
 }
 
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
