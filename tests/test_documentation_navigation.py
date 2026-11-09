@@ -99,18 +99,35 @@ def test_home_has_one_controllable_product_demo() -> None:
         assert (ROOT / "site" / path).is_file()
 
 
-def test_site_install_picker_offers_both_one_liners() -> None:
-    # The home page and the guide carry one install command per platform, chosen
-    # by site.js from the visitor's OS. The static text is the macOS command (no
-    # JavaScript), and a <noscript> line gives the Windows one.
+def test_home_and_readme_share_the_primary_slogan() -> None:
+    slogan = "Your agents do the work. Ciaobot remembers."
+    home = (ROOT / "site/index.html").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"<title>{slogan}</title>" in home
+    assert f'<meta property="og:title" content="{slogan}">' in home
+    assert f'<meta name="twitter:title" content="{slogan}">' in home
+    assert "Your agents do the work. <span>Ciaobot remembers.</span>" in home
+    assert f"**{slogan}**" in readme
+
+
+def test_site_install_picker_offers_all_platforms() -> None:
+    # macOS offers the native client plus the engine one-liner, Windows has its
+    # PowerShell one-liner, and Linux opens its dedicated administrator guide.
     mac = "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh"
     windows = "irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex"
+    linux = "https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md"
     for relative in ("site/index.html", "site/guide.html"):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "data-install" in text and "data-install-os" in text, relative
         assert f'data-cmd="{mac}"' in text and f'data-cmd="{windows}"' in text, relative
         assert f'<code id="install-cmd">{mac}</code>' in text, relative
-        assert "<noscript>" in text and windows in text.split("<noscript>", 1)[1], relative
+        assert f'data-url="{linux}"' in text and ">Linux</option>" in text, relative
+        assert "data-mac-client" in text and "ciaobot-mac/releases" in text, relative
+        assert "Windows (preview)" not in text and "Windows is a preview" not in text, relative
+        noscript = text.split("<noscript>", 1)[1]
+        assert windows in noscript and linux in noscript, relative
         assert "docs/WINDOWS.md" in text, relative
     script = (ROOT / "site/assets/site.js").read_text(encoding="utf-8")
     assert "[data-install-os]" in script and "option.dataset.cmd" in script
+    assert "option.dataset.url" in script and "data-install-guide" in script
+    assert "ciaobot-mac/releases?per_page=20" in script and "browser_download_url" in script
