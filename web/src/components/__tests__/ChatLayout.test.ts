@@ -305,6 +305,7 @@ describe('ChatLayout', () => {
       const wrapper = await mountHome(1200)
       const rail = wrapper.get('.home-rail')
       expect(rail.find('.home-review-summary').exists()).toBe(true)
+      expect(rail.find('.home-review-summary .home-today').exists()).toBe(true)
       expect(rail.find('.needs-you').exists()).toBe(false)
       expect(rail.find('.home-notice-reopen').exists()).toBe(false)
       expect(rail.find('.update-tasks').exists()).toBe(false)
