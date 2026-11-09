@@ -249,6 +249,7 @@ function makeRouter() {
       { path: '/project/:projectId', name: 'project', component: Stub },
       { path: '/schedules', name: 'schedules', component: Stub },
       { path: '/tasks', name: 'tasks', component: Stub },
+      { path: '/stats', name: 'stats', component: Stub },
       { path: '/memory', name: 'memory', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/settings/:tab', name: 'settings-tab', component: Stub },
@@ -420,6 +421,33 @@ describe('component mount smoke', () => {
     // other and throw.
     expect(wrapper.text()).toContain('No tasks in')
     expect(wrapper.text()).not.toContain('Could not load')
+    wrapper.unmount()
+  })
+
+  it('UsageView mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../UsageView.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('ChatLayout renders the usage page at /stats and Esc leaves it', async () => {
+    const router = makeRouter()
+    await router.push('/stats')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The shared api mock answers [] for /api/stats: every value reads as a dash and nothing throws.
+    expect(wrapper.find('.usage-view').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Chats opened')
+
+    const esc = () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    esc()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
     wrapper.unmount()
   })
 

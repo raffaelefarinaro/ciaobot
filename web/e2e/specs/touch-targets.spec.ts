@@ -30,6 +30,7 @@ const TABS: Array<[string, string]> = [
 const MAIN_SURFACES: Array<[string, string]> = [
   ['/', '.home-setup'],
   ['/tasks', '.task-card'],
+  ['/stats', '.usage-kpi'],
   ['/automations', '.schedule-panel .page-tag'],
   ['/memory/review', '.pr-select-toggle'],
   ['/memory/map', '.mm-toolbar-stale'],
