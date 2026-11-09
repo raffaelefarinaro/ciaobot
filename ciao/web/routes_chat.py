@@ -188,8 +188,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                     break
                 continue
             if not isinstance(msg, dict):
-                # Valid JSON that is not an object (`[1]`, `"x"`, `5`) has no
-                # fields to read; answer it rather than let `.get` end the socket.
+                # Valid JSON that is not an object (`[1]`, `"x"`, `5`, `null`)
+                # has no fields to read; answer it rather than let `.get` end
+                # the socket.
                 try:
                     await websocket.send_json({"type": "error", "message": "invalid frame"})
                 except (WebSocketDisconnect, RuntimeError):
