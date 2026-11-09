@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import subprocess
@@ -57,6 +58,12 @@ logger = logging.getLogger(__name__)
 
 
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
+
+#: How long shutdown waits for the automatic-update loop to finish the tick it
+#: is in. Bounded because that wait can be a six-hour sleep or a release
+#: download; a tick that cannot finish in this window is cancelled, and the
+#: durable attempt record is what the next boot reconciles.
+AUTO_UPDATE_SHUTDOWN_SECONDS = 10
 
 
 @dataclass
@@ -1045,6 +1052,17 @@ async def _run_server_locked(
     # reshuffling init order, so it is attached right after both exist.
     pcm.schedule_store = schedule_store
 
+    def _update_admission_closed() -> bool:
+        """Whether an engine update claim holds admission closed.
+
+        A late-bound accessor rather than a captured value: the scheduler and
+        the backup service are constructed once, but the claim they must defer
+        to is taken at any time afterwards, and ``pcm`` is the one object that
+        owns it. Asking per dispatch is also what makes the answer true — a
+        value captured here would be the flag as it was at boot (always open).
+        """
+        return pcm.restart_draining
+
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
         result = await pcm.dispatch_schedule(
@@ -1123,6 +1141,7 @@ async def _run_server_locked(
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
         target_refusal=pcm.schedule_target_refusal,
+        admission_closed=_update_admission_closed,
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;
@@ -1516,9 +1535,41 @@ async def _run_server_locked(
         config,
         app_settings,
         node_state=lambda: legacy_node_state,
+        admission_closed=_update_admission_closed,
     )
     app.state.backup_stop = backup_stop
     asyncio.create_task(app.state.backup_service.backup_loop(stop=backup_stop))
+
+    # ── Automatic updates ────────────────────────────────────
+    # The engine's own update loop. It exists because the PWA's check only ran
+    # while a browser was connected, so a laptop with no tab open never learned
+    # a release was out. Wired here, after every subsystem the claim must
+    # account for exists — the chat manager's claim, the scheduler, this backup
+    # service and the memory-pass queue — and started only for the real engine:
+    # bootstrap mode is the setup wizard's throwaway workspace, and the CLI
+    # paths never reach this function. `wire_auto_update` returns the
+    # coordinator unstarted; this is the one task, and `_shutdown_auto_update`
+    # is the one place it is stopped.
+    auto_update_stop = asyncio.Event()
+    auto_update_task: asyncio.Task[None] | None = None
+    app.state.auto_update_stop = auto_update_stop
+    if not getattr(config, "bootstrap_mode", False):
+        from ciao.auto_update import wire_auto_update
+
+        app.state.auto_update = wire_auto_update(
+            store=app_settings,
+            chats=pcm,
+            schedules=schedule_manager,
+            backup=app.state.backup_service,
+            memory_passes=pcm.memory_passes,
+            app_state=app.state,
+        )
+        # Kept in a local and on `app.state`: the event loop holds only a weak
+        # reference, and a collected loop would silently stop checking.
+        auto_update_task = asyncio.create_task(
+            app.state.auto_update.run(auto_update_stop), name="auto-update-loop"
+        )
+        app.state.auto_update_task = auto_update_task
 
     # ── Google Workspace token health ────────────────────────
     # Cheap periodic `auth status` ping per configured GWS profile. When a
@@ -1731,10 +1782,30 @@ async def _run_server_locked(
         # running finishes on its own.
         backup_stop.set()
 
+    async def _shutdown_auto_update() -> None:
+        # Wake the update loop out of its wall-clock wait first, then let the
+        # tick it may be in finish: the wait is up to six hours, and the tick
+        # may be recording an attempt. Only a tick that outlives the bound is
+        # cancelled — by then it has had its chance to write the durable record
+        # the next boot reconciles.
+        auto_update_stop.set()
+        task = auto_update_task
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(task, timeout=AUTO_UPDATE_SHUTDOWN_SECONDS)
+        except TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async def _shutdown_children() -> None:
         await _shutdown_providers()
 
     app.state.shutdown_callbacks = [
+        # First: an update claim must not be taken while the engine is already
+        # tearing down, and the loop's stop event is what prevents the next tick.
+        _shutdown_auto_update,
         _shutdown_children,
         # Before the read executor: the scan is waiting on a worker, and closing
         # the pool out from under a pending task is the leak worth avoiding.
