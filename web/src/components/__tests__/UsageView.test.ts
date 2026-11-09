@@ -132,4 +132,14 @@ describe('UsageView', () => {
 
     expect(get).toHaveBeenLastCalledWith('/api/stats?workspace=work&range=30')
   })
+
+  it('shows the breakdown under the totals', async () => {
+    get.mockResolvedValue(SAMPLE)
+    const wrapper = mountView()
+    await flushPromises()
+
+    const html = wrapper.html()
+    expect(wrapper.find('.usage-breakdown').exists()).toBe(true)
+    expect(html.indexOf('usage-breakdown')).toBeGreaterThan(html.indexOf('usage-totals'))
+  })
 })

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
+import UsageBreakdown from './UsageBreakdown.vue'
 import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
 import {
@@ -105,6 +106,7 @@ const kpis = computed(() => KPIS.map(k => {
             </div>
           </dl>
         </section>
+        <UsageBreakdown :stats="stats" :range-days="stats?.range_days ?? range" />
       </div>
     </div>
   </div>
