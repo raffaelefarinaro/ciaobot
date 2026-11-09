@@ -1486,6 +1486,141 @@ def test_comparison_shows_each_side_mode() -> None:
     assert "| E2-recall-guest-count | auto | bypass |" in table
 
 
+def test_compare_pools_every_run_of_a_task_across_rounds() -> None:
+    # Three --repeats 3 rounds appended into one file: repeat numbers recur and the
+    # rounds ran at different code revisions. compare must use all nine runs.
+    def run(status: str, revision: str, repeat: int, context_total: int) -> dict[str, Any]:
+        return {**_row(label="candidate", status=status, context_total=context_total),
+                "code_revision": revision, "repeat": repeat, "mode": "auto"}
+
+    candidate = [
+        run("failed", "rev-b", 1, 100), run("failed", "rev-b", 2, 100), run("passed", "rev-b", 3, 100),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+    ]
+    baseline = [{**_row(status="passed" if i else "failed"), "repeat": i % 3 + 1, "mode": "auto"} for i in range(9)]
+
+    item = te.compare(baseline, candidate)[0]
+
+    cand = item["candidate"]
+    assert cand["n"] == 9
+    assert cand["passed"] == 7
+    assert cand["pass_rate"] == pytest.approx(7 / 9)
+    assert cand["median_context_total"] == 300
+    assert cand["mode"] == "auto"
+    assert cand["code_revision"] == "rev-a,rev-b"
+    assert item["baseline"]["pass_rate"] == pytest.approx(8 / 9)
+    assert item["delta"]["pass_rate"] == pytest.approx(-1 / 9)
+
+    table = te.render_comparison([item])
+    header = table.splitlines()[0]
+    assert "Baseline n" in header and "Candidate n" in header
+    assert "| 0.89 (8/9) | 0.78 (7/9) |" in table
+    assert "| 9 | 9 |" in table
+
+
+def test_compare_reports_mixed_modes_on_one_side() -> None:
+    candidate = [{**_row(label="candidate"), "mode": "auto"}, {**_row(label="candidate"), "mode": "bypass"}]
+
+    item = te.compare([_row()], candidate)[0]
+
+    assert item["candidate"]["n"] == 2
+    assert item["candidate"]["mode"] == "auto,bypass"
+    assert item["baseline"]["mode"] == "-"
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> Path:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def test_compare_refuses_a_side_that_mixes_models() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}]
+
+    with pytest.raises(te.MixedRunsError) as excinfo:
+        te.compare([_row()], candidate)
+
+    message = str(excinfo.value)
+    assert "candidate" in message
+    assert "E2-recall-guest-count" in message
+    assert "haiku,sonnet" in message
+    assert "--allow-mixed" in message
+
+
+def test_compare_refuses_a_side_that_mixes_providers() -> None:
+    baseline = [_row(), {**_row(), "provider": "opencode"}]
+
+    with pytest.raises(te.MixedRunsError, match="claude,opencode"):
+        te.compare(baseline, [_row(label="candidate")])
+
+
+def test_compare_does_not_refuse_mixed_revisions() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "code_revision": "rev-b"}]
+
+    item = te.compare([_row()], candidate)[0]
+
+    assert item["candidate"]["code_revision"] == "rev-a,rev-b"
+    assert te.mixed_runs([item]) == []
+
+
+def test_compare_cli_refuses_mixed_models(tmp_path: Path) -> None:
+    base = _write_jsonl(tmp_path / "base.jsonl", [_row()])
+    cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand)])
+
+    assert "E2-recall-guest-count" in str(excinfo.value.code)
+    assert "haiku,sonnet" in str(excinfo.value.code)
+
+
+def test_compare_cli_allow_mixed_warns_and_shows_provider_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = _write_jsonl(tmp_path / "base.jsonl", [_row()])
+    cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
+
+    code = cli.main(
+        ["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand), "--allow-mixed"]
+    )
+
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "warning" in err.lower()
+    assert "E2-recall-guest-count" in err and "haiku,sonnet" in err
+    header = out.splitlines()[0]
+    assert "Baseline model" in header and "Candidate model" in header
+    assert "Baseline provider" in header and "Candidate provider" in header
+    assert "| haiku | haiku,sonnet |" in out
+
+
+def test_comparison_table_hides_provider_model_and_revision_when_uniform() -> None:
+    table = te.render_comparison(te.compare([_row()], [_row(label="candidate")]))
+
+    header = table.splitlines()[0]
+    assert "provider" not in header.lower()
+    assert "model |" not in header.lower()
+    assert "revision" not in header.lower()
+
+
+def test_comparison_table_shows_revision_when_a_side_mixes_revisions() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "code_revision": "rev-b"}]
+
+    table = te.render_comparison(te.compare([_row()], candidate))
+
+    assert "Baseline revision" in table.splitlines()[0]
+    assert "| rev-a | rev-a,rev-b |" in table
+
+
+def test_compare_reports_missing_identity_like_summarize() -> None:
+    row = _row()
+    del row["code_revision"]
+
+    item = te.compare([row], [_row(label="candidate")])[0]
+
+    assert item["baseline"]["code_revision"] == te.summarize([row])[0]["code_revision"] == "None"
+
+
 def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> None:
     runtime = tmp_path / ".runtime"
     folder = runtime / "transcripts" / "chat-oc"
