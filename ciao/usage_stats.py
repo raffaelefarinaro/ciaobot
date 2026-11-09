@@ -403,8 +403,8 @@ def _task_events(
     except FileNotFoundError:
         return []
     except (TaskBoardError, OSError) as exc:
-        # An unreadable board is transient; an unparseable one (TaskBoardError) is not.
-        if isinstance(exc, OSError):
+        # An I/O failure (``read_failed``) is transient; other codes are permanent.
+        if isinstance(exc, OSError) or exc.code == "read_failed":
             _failed(failures, "tasks")
         logger.warning("usage stats: task board unreadable for %s: %s", sources.workspace, exc)
         return []

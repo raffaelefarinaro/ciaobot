@@ -21,7 +21,7 @@ from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import AgentPrincipal, CiaoControlPlane, ControlPlaneError
 from ciao.models import AgentRequest, ChatContext
 from ciao.sessions import StateStore
-from ciao.task_board import TaskBoardStore
+from ciao.task_board import TaskBoardError, TaskBoardStore
 from ciao.transcripts import TranscriptStore
 from ciao.usage_stats import (
     ChatFacts,
@@ -489,6 +489,18 @@ def test_corrupt_store_content_is_cached_as_read(tmp_path: Path) -> None:
     queue.write_bytes(b"\xff\xfe\xfa not utf-8")
     compute_usage_stats(sources, 7, now=NOW, tz=UTC)
     assert ("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE
+
+
+@pytest.mark.parametrize(("code", "cached"), [("read_failed", False), ("invalid_task", True)])
+def test_task_board_errors_cache_only_permanent_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, cached: bool
+) -> None:
+    def broken_list(self: object) -> object:
+        raise TaskBoardError(code, "x")
+
+    monkeypatch.setattr(usage_stats.TaskBoardStore, "list", broken_list)
+    compute_usage_stats(_sources(tmp_path), 7, now=NOW, tz=UTC)
+    assert (("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE) is cached
 
 
 def test_missing_store_files_are_not_failures(tmp_path: Path) -> None:
