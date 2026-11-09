@@ -206,8 +206,12 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
   return parts.join(' / ')
 }
 
-/** The Activity trace of a rendered turn: every step except the final reply. */
-export type TurnPart = { kind: 'trace'; steps: ChatMessage[] }
+/** One display part of a settled turn: an Activity trace segment or an
+ *  earlier reply the server explicitly marked as completed. The turn's closing
+ *  reply is never a part; the caller appends it with its outputs/subagents. */
+export type TurnPart =
+  | { kind: 'trace'; steps: ChatMessage[] }
+  | { kind: 'assistant'; msg: ChatMessage }
 
 /** Assistant prose step (not an Activity marker). Ignores `phase` so Claude
  *  mid-turn narration can still be found before we classify it. */
@@ -285,14 +289,35 @@ export function findFinalAnswerIndex(
  *  reply at `finalIdx` (the caller appends that itself, with the turn's
  *  outputs/subagents attached).
  *
- *  Only the final reply is a bubble: every other step (mid-turn text,
+ *  Only an earlier assistant row the server explicitly marked completed
+ *  (`phase: 'final_answer'`, no tool call) is a bubble: a hidden code-mode
+ *  continuation separates two settled replies in one turn and the server
+ *  tags the first so both stay visible. Every other step (mid-turn text,
  *  thinking, tool calls, file cards, and bookkeeping after the reply) forms
- *  the one Activity trace shown before it, in buffer order. Returns `[]` when
- *  there are no such steps. Pass `finalIdx < 0` when the turn produced no
+ *  ordered Activity trace segments around those bubbles, in buffer order.
+ *  Never emits an empty trace. Pass `finalIdx < 0` when the turn produced no
  *  reply (in progress / interrupted / tools only): every step is then trace. */
 export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPart[] {
-  const steps = buffer.filter((_, k) => k !== finalIdx)
-  return steps.length ? [{ kind: 'trace', steps }] : []
+  if (finalIdx < 0) {
+    return buffer.length ? [{ kind: 'trace', steps: buffer.slice() }] : []
+  }
+  const parts: TurnPart[] = []
+  let steps: ChatMessage[] = []
+  const flush = () => {
+    if (steps.length) parts.push({ kind: 'trace', steps })
+    steps = []
+  }
+  buffer.forEach((m, k) => {
+    if (k === finalIdx) return
+    if (m.role === 'assistant' && !m.tool_name && m.phase === 'final_answer') {
+      flush()
+      parts.push({ kind: 'assistant', msg: m })
+      return
+    }
+    steps.push(m)
+  })
+  flush()
+  return parts
 }
 
 export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {

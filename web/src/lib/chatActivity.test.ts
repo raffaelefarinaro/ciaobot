@@ -373,7 +373,7 @@ describe('buildTurnParts', () => {
     ])
   })
 
-  it('never returns an assistant part', () => {
+  it('keeps unmarked mid-turn text in Activity', () => {
     const buffer = [
       text('first update that is long enough to once have been a bubble. '.repeat(5)),
       thinking('hmm'), activity('Read a'), text('second'), activity('Edit b'),
@@ -384,6 +384,90 @@ describe('buildTurnParts', () => {
     const steps = parts.flatMap(p => (p.kind === 'trace' ? p.steps : []))
     expect(steps).not.toContain(buffer[5])
     expect(steps).toHaveLength(5)
+  })
+
+  it('preserves an explicit completed reply before continuation work', () => {
+    const buffer = [
+      text("I've built it, and you can look at it now.", {
+        phase: 'final_answer',
+        timestamp: '2026-11-09T13:21:00Z',
+      }),
+      text('Now let me finish the housekeeping.'),
+      activity('$ Bash git status'),
+      text('Nothing in the code changed since my last message.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+    ]
+    const finalIdx = findFinalAnswerIndex(buffer)
+    expect(finalIdx).toBe(3)
+    const parts = buildTurnParts(buffer, finalIdx)
+    expect(parts).toEqual([
+      { kind: 'assistant', msg: buffer[0] },
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+    const steps = parts.flatMap(p => (p.kind === 'trace' ? p.steps : []))
+    expect(steps).not.toContain(buffer[0])
+    expect(steps).not.toContain(buffer[3])
+  })
+
+  it('preserves consecutive explicit completed boundaries in order', () => {
+    const buffer = [
+      activity('Read a'), text('A.', { phase: 'final_answer' }),
+      activity('Read b'), text('B.', { phase: 'final_answer' }), activity('Read c'),
+      text('All done. Final reply.'),
+    ]
+    expect(buildTurnParts(buffer, 5)).toEqual([
+      { kind: 'trace', steps: [buffer[0]] },
+      { kind: 'assistant', msg: buffer[1] },
+      { kind: 'trace', steps: [buffer[2]] },
+      { kind: 'assistant', msg: buffer[3] },
+      { kind: 'trace', steps: [buffer[4]] },
+    ])
+    // Adjacent completions emit adjacent assistant parts, no empty trace.
+    const adjacent = [
+      text('A.', { phase: 'final_answer' }),
+      text('B.', { phase: 'final_answer' }),
+      activity('Read c'),
+      text('All done. Final reply.'),
+    ]
+    expect(buildTurnParts(adjacent, 3)).toEqual([
+      { kind: 'assistant', msg: adjacent[0] },
+      { kind: 'assistant', msg: adjacent[1] },
+      { kind: 'trace', steps: [adjacent[2]] },
+    ])
+  })
+
+  it('keeps unmarked substantive text folded beside an explicit completion', () => {
+    const note = 'A substantive mid-turn note. '.repeat(10)
+    const blocker = "The classifier is blocking edits. I'll continue with the rest."
+    const buffer = [
+      text(note), text(blocker), text('A.', { phase: 'final_answer' }),
+      thinking('hmm'), activity('Read a'),
+      text('Tool-backed note', { tool_name: '_activity', phase: 'final_answer' }),
+      text('All done. Final reply.'),
+    ]
+    const parts = buildTurnParts(buffer, 6)
+    expect(parts).toEqual([
+      { kind: 'trace', steps: [buffer[0], buffer[1]] },
+      { kind: 'assistant', msg: buffer[2] },
+      { kind: 'trace', steps: [buffer[3], buffer[4], buffer[5]] },
+    ])
+  })
+
+  it('keeps all steps in trace without a selected closing answer', () => {
+    const buffer = [text('A.', { phase: 'final_answer' }), activity('Read a')]
+    expect(buildTurnParts(buffer, -1)).toEqual([
+      { kind: 'trace', steps: buffer },
+    ])
+    expect(buildTurnParts([], -1)).toEqual([])
+  })
+
+  it('keeps a timestamped second reply selected after an explicit first completion', () => {
+    const buffer = [
+      text('A.', { phase: 'final_answer' }),
+      text('Good — updated both files.', { timestamp: '2026-11-09T13:31:41Z' }),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(1)
   })
 })
 

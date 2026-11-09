@@ -713,6 +713,31 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
+def _mark_preceding_answer(rows: list[dict]) -> None:
+    """Mark the existing answer before a hidden continuation; append nothing.
+
+    A hidden continuation prompt is skipped before it can render, so the row
+    that answered the user just before it would otherwise fold into Activity
+    like any mid-turn note. Scanning backwards keeps the absolute row list (and
+    the wire indices built from it) untouched: stop at a real user row, skip
+    system/tool rows and empty assistant text, and at the nearest nonempty
+    tool-free assistant text either leave an explicit ``commentary`` note alone
+    or tag the answer ``final_answer``.
+    """
+    for row in reversed(rows):
+        role = row.get("role")
+        if role == "user":
+            return
+        if role != "assistant" or row.get("tool_name"):
+            continue
+        if not str(row.get("content") or "").strip():
+            continue
+        if row.get("phase") == "commentary":
+            return
+        row["phase"] = "final_answer"
+        return
+
+
 def _render_opencode_thread(
     thread: dict,
     chat,
@@ -802,6 +827,8 @@ def _render_opencode_thread(
             # Hidden code-mode continuation: skipped before user_idx += 1 so
             # markers keep their turn_index.
             if cli_envelopes.is_hidden_continuation(content):
+                if metadata:
+                    _mark_preceding_answer(result)
                 continue
             entry: dict = {
                 "role": "user",
@@ -1763,6 +1790,7 @@ async def _assemble_chat_messages(
         # hidden outright; G3's code-mode event row already shows the switch. Skip
         # without incrementing user_idx so markers keep their turn_index.
         if m.type == "user" and cli_envelopes.is_hidden_continuation(content):
+            _mark_preceding_answer(result)
             continue
         # CLI-synthesized user envelopes (subagent completions, bash output,
         # slash-command echoes). Promote <task-notification> to a clean system
