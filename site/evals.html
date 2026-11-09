@@ -83,6 +83,31 @@
       <p>One thing every model still gets wrong is part of Ciaobot itself: the memory pass sometimes files a fact a settings file already answers, and re-suggests a fact you had already turned down. That is the next thing being fixed.</p>
     </section>
 
+    <section id="memory-comparison">
+      <h2>How the memory compares</h2>
+      <p>In November 2026 we put Ciaobot's memory next to other memory systems that run on your own computer, on a public benchmark of long chat histories (<a href="https://github.com/xiaowu0162/LongMemEval">LongMemEval</a>). Every system got the same 60 questions, the same small model to answer (Claude Haiku) and the same grader. We left out systems that need a paid AI call for every conversation they store.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>System</th><th>Questions answered correctly</th><th>Time to index one history</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Ciaobot</strong>, searching and reading notes</td><td><strong>90%</strong></td><td>under 0.1&nbsp;s</td></tr>
+            <tr><td>Basic Memory</td><td>83%</td><td>8&nbsp;min</td></tr>
+            <tr><td>OpenClaw, with local embeddings</td><td>72%</td><td>49&nbsp;s</td></tr>
+            <tr><td>Cognee, without an AI model</td><td>48%</td><td>29&nbsp;min</td></tr>
+            <tr><td><em>Reference: the whole history in the prompt</em></td><td><em>92%</em></td><td><em>none</em></td></tr>
+            <tr><td><em>Reference: only the right conversations</em></td><td><em>93%</em></td><td><em>none</em></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Two things came out of it:</p>
+      <ul>
+        <li><strong>Reading the note beats reading snippets.</strong> Answering from search snippets alone scored 43%; reading the same notes in full scored 87%. A snippet can look settled while the note says further down that the value changed.</li>
+        <li><strong>Keyword search is competitive today.</strong> Ciaobot's plain keyword search, with the assistant rewording its own searches when the first try misses, matched or beat the systems that use embeddings. Embeddings do find more on their own, and on a real vault too, but they barely changed the answers, so they are on hold until the vault grows.</li>
+      </ul>
+      <p>It also found two things to fix, both fixed since: search dropped some results when only part of a question matched, and the assistant was told to answer from snippets. It now reads the best-matching note before it answers. A lighter memory-writing prompt was tried and rejected: it let back in facts people had already turned down.</p>
+      <p>One run, one machine, 60 questions and a synthetic benchmark: read it as a direction, not a ranking. Every number, each system's setup and its limits are in the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/evals/memory-comparison-2026-11.md">full memory comparison on GitHub</a>.</p>
+    </section>
+
     <section>
       <h2>Read the numbers with care</h2>
       <ul>
