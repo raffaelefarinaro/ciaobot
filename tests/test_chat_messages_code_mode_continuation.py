@@ -442,42 +442,60 @@ def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None
     def activity(text: str) -> dict:
         return row("system", text, tool_name="_activity")
 
-    answer = row("assistant", ANSWER_ONE)
-    tagged = {**answer, "phase": "final_answer"}
-    commentary = row("assistant", NARRATION, phase="commentary")
+    def thinking(text: str) -> dict:
+        return row("system", text, tool_name="_thinking")
+
+    def filecard(path: str) -> dict:
+        return row("system", path, tool_name="_filecard")
+
+    def answer() -> dict:
+        return row("assistant", ANSWER_ONE)
+
+    def tagged() -> dict:
+        return {**answer(), "phase": "final_answer"}
+
     older = row("assistant", "An older answer.")
+    comments = row("assistant", NARRATION, phase="commentary")
     empty = row("assistant", "   ")
     tool_backed = row("assistant", "Read b.md", tool_name="_activity")
-    user = row("user", "q")
-
-    cases: list[tuple[list[dict], dict | None]] = [
-        ([], None),
+    cases: list[tuple[list[dict], list[dict]]] = [
+        ([], []),
         (
-            [user, activity("Read a.md"), row("system", "hmm", tool_name="_thinking"),
-             row("system", "a.md", tool_name="_filecard")],
-            None,
+            [row("user", "q"), activity("Read a.md"), thinking("hmm"), filecard("a.md")],
+            [row("user", "q"), activity("Read a.md"), thinking("hmm"), filecard("a.md")],
         ),
-        ([answer, user, activity("Read a.md")], None),
-        ([older, commentary, activity("Read a.md")], None),
         (
-            [answer, activity("Read a.md"), row("system", "hmm", tool_name="_thinking"),
-             row("system", "a.md", tool_name="_filecard"), empty, tool_backed],
-            tagged,
+            [answer(), row("user", "next"), activity("Read a.md")],
+            [answer(), row("user", "next"), activity("Read a.md")],
+        ),
+        (
+            [older, comments, activity("Read a.md")],
+            [older, comments, activity("Read a.md")],
+        ),
+        (
+            [answer(), activity("Read a.md"), thinking("hmm"), filecard("a.md"),
+             empty, tool_backed],
+            [tagged(), activity("Read a.md"), thinking("hmm"), filecard("a.md"),
+             empty, tool_backed],
+        ),
+        (
+            [older, answer(), activity("Read a.md")],
+            [older, tagged(), activity("Read a.md")],
         ),
     ]
-    for rows, expected_tag in cases:
-        before = [dict(item) for item in rows]
+    for rows, expected in cases:
         mark(rows)
-        if expected_tag is None:
-            assert rows == before
-        else:
-            assert len(rows) == len(before)
-            assert rows[-2:] == before[-2:]
-            assert rows[0] == expected_tag
-            assert rows[1:-2] == before[1:-2]
-        # Idempotent: a repeat call finds the same answer and appends nothing.
+        assert rows == expected
+        # Idempotent: snapshot the exact rows, then a second call must leave
+        # them identical rather than tagging an older note or appending a row.
+        after_first = json.loads(json.dumps(rows))
         mark(rows)
-        assert len(rows) == len(before)
+        assert rows == after_first
+    # An older note before the eligible answer stays untagged.
+    rows = [older, answer(), activity("Read a.md")]
+    mark(rows)
+    assert "phase" not in rows[0]
+    assert rows[1]["phase"] == "final_answer"
 
 
 @pytest.mark.parametrize(
@@ -612,7 +630,10 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
             workspace_root=tmp_path,
         )
 
-    assert [r["content"] for r in rows if r["role"] == "assistant"] == [ANSWER_TWO]
+    assert rows == [
+        {"role": "user", "content": "First question.", "turn_index": 0},
+        {"role": "assistant", "content": ANSWER_TWO},
+        {"role": "user", "content": "Next question.", "turn_index": 1},
+    ]
     assert not any(r.get("phase") for r in rows)
-    assert [r["turn_index"] for r in rows if r["role"] == "user"] == [0, 1]
     assert CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
