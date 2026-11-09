@@ -86,7 +86,7 @@
               <span v-if="menuCopied === moreKey(server)" class="hint" role="status">Copied</span>
             </div>
             <p v-if="signInError === moreKey(server)" class="action-result --error" role="alert">{{ SIGN_IN_ERROR }}</p>
-            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in signs in through the open chat, which connects at once; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in connects the open chat at once; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
           </template>
         </div>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
