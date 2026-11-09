@@ -2861,9 +2861,25 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return summary
 
 
+def _identity(row: Mapping[str, Any], field: str) -> str:
+    """``field`` as :func:`summarize` keys it: a missing mode reads ``-``, any other missing value ``None``."""
+    if field == "mode":
+        return str(row.get("mode") or "-")
+    return str(row.get(field))
+
+
 def _distinct(items: Sequence[Mapping[str, Any]], field: str) -> str:
-    """The sorted distinct values of ``field`` joined by commas; a missing value reads ``-``."""
-    return ",".join(sorted({str(r.get(field) or "-") for r in items}))
+    """The sorted distinct values of ``field`` joined by commas."""
+    return ",".join(sorted({_identity(r, field) for r in items}))
+
+
+# A side whose runs of one task used different providers or models measures different
+# things; pooling them into one pass rate hides that, so compare refuses unless asked.
+_MIXED_FIELDS = ("provider", "model")
+
+
+class MixedRunsError(ValueError):
+    """A compare side pools runs of one task made with different providers or models."""
 
 
 def _pool_by_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -2896,11 +2912,32 @@ def _pct(new: float | None, old: float | None) -> float | None:
     return (new - old) / old * 100.0
 
 
-def compare(baseline: Sequence[Mapping[str, Any]], candidate: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def mixed_runs(comparison: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per side and task whose pooled runs span several providers or models."""
+    problems: list[str] = []
+    for item in comparison:
+        for side in ("baseline", "candidate"):
+            summary = item[side]
+            if not summary:
+                continue
+            mixed = [f"{field} {summary[field]}" for field in _MIXED_FIELDS if "," in summary[field]]
+            if mixed:
+                problems.append(f"{side} {item['task_id']}: " + "; ".join(mixed))
+    return problems
+
+
+def compare(
+    baseline: Sequence[Mapping[str, Any]],
+    candidate: Sequence[Mapping[str, Any]],
+    *,
+    allow_mixed: bool = False,
+) -> list[dict[str, Any]]:
     """Per task: the baseline and candidate summaries and their deltas.
 
     Each side's summary pools every run of the task in that side's rows, whatever its
-    repeat number, revision or label, so pass rate is passes over scored runs.
+    repeat number, revision or label, so pass rate is passes over scored runs. A side
+    whose runs of a task span several providers or models raises :class:`MixedRunsError`
+    unless ``allow_mixed``; see :func:`mixed_runs` to warn about them.
     """
     base = _pool_by_task(baseline)
     cand = _pool_by_task(candidate)
@@ -2927,6 +2964,14 @@ def compare(baseline: Sequence[Mapping[str, Any]], candidate: Sequence[Mapping[s
                 },
             }
         )
+    if not allow_mixed:
+        problems = mixed_runs(comparison)
+        if problems:
+            raise MixedRunsError(
+                "refusing to pool runs of different providers or models into one pass rate:\n  "
+                + "\n  ".join(problems)
+                + "\nSplit the report, or pass --allow-mixed to pool them anyway."
+            )
     return comparison
 
 
@@ -2977,28 +3022,41 @@ def _fmt_pass(side: Mapping[str, Any]) -> str:
     return f"{rate:.2f} ({side['passed']}/{side['scored']})"
 
 
+def _sides_mix(comparison: Sequence[Mapping[str, Any]], field: str) -> bool:
+    return any("," in str((item[side] or {}).get(field, "")) for item in comparison for side in ("baseline", "candidate"))
+
+
 def render_comparison(comparison: Sequence[Mapping[str, Any]]) -> str:
-    lines = [
-        "| Task | Baseline mode | Candidate mode | Baseline n | Candidate n | Baseline pass | Candidate pass | Delta pass | Delta context % | Delta wall % | Delta cost % |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
+    # Provider and model columns (as a pair) and the revision column appear only when
+    # some side pools several values of them.
+    extra: list[str] = []
+    if any(_sides_mix(comparison, field) for field in _MIXED_FIELDS):
+        extra.extend(_MIXED_FIELDS)
+    if _sides_mix(comparison, "code_revision"):
+        extra.append("code_revision")
+    titles = {"provider": "provider", "model": "model", "code_revision": "revision"}
+    extra_titles = [f"{side} {titles[field]}" for field in extra for side in ("Baseline", "Candidate")]
+    header = ["Task", "Baseline mode", "Candidate mode", *extra_titles, "Baseline n", "Candidate n",
+              "Baseline pass", "Candidate pass", "Delta pass", "Delta context %", "Delta wall %", "Delta cost %"]
+    align = ["---"] * (3 + len(extra_titles)) + ["---:"] * 9
+    lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(align) + " |"]
     for item in comparison:
         base = item["baseline"] or {}
         cand = item["candidate"] or {}
         delta = item["delta"]
-        lines.append(
-            "| {task} | {bm} | {cm} | {bn} | {cn} | {bp} | {cp} | {dp} | {dc} | {dw} | {dco} |".format(
-                task=item["task_id"],
-                bm=base.get("mode", "-"),
-                cm=cand.get("mode", "-"),
-                bn=base.get("n", 0),
-                cn=cand.get("n", 0),
-                bp=_fmt_pass(base),
-                cp=_fmt_pass(cand),
-                dp=_fmt(delta["pass_rate"]),
-                dc=_fmt(delta["context_total_pct"], 1),
-                dw=_fmt(delta["wall_s_pct"], 1),
-                dco=_fmt(delta["cost_pct"], 1),
-            )
-        )
+        cells = [
+            str(item["task_id"]),
+            str(base.get("mode", "-")),
+            str(cand.get("mode", "-")),
+            *[str(side.get(field, "-")) for field in extra for side in (base, cand)],
+            str(base.get("n", 0)),
+            str(cand.get("n", 0)),
+            _fmt_pass(base),
+            _fmt_pass(cand),
+            _fmt(delta["pass_rate"]),
+            _fmt(delta["context_total_pct"], 1),
+            _fmt(delta["wall_s_pct"], 1),
+            _fmt(delta["cost_pct"], 1),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)

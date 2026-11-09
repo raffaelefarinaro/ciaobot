@@ -158,7 +158,16 @@ rounds counts all of them: the pass rate is passes over scored runs and the
 medians cover every scored run. The table shows each side's mode, its run
 count `n`, and the pass rate with its passes/scored count, e.g. `0.78 (7/9)`.
 When a side mixes modes or revisions, its `mode` and `code_revision` list each
-value, comma-separated. Use `report` to see a pooled file split by revision.
+value, comma-separated, and a `Baseline revision` / `Candidate revision` column
+pair appears only when some side mixes revisions. Use `report` to see a pooled
+file split by revision.
+
+Mixing revisions is the point of pooling, but mixing providers or models is not:
+their runs measure different things. If either side's runs of a task use more
+than one provider or model, `compare` exits with an error that names the side,
+the task and the values (for example `candidate H1-multi-source-synthesis: model
+haiku,sonnet`). Pass `--allow-mixed` to pool them anyway. It prints the same
+list as a warning on stderr and adds provider and model columns for each side.
 
 ## Permission mode
 
