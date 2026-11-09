@@ -232,6 +232,7 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 |---|---|---|
 | `context get` | Return the active workspace, project, chat, provider, and control surface, plus local server/startup status. | — |
 | `context logs [--lines N]` | Installed version plus recent failed background jobs whose recorded workspace is exactly the active one, already redacted, capped and fenced as untrusted data. Engine-wide error/debug/service logs are omitted (`scope`/`omitted` say why) because they have no immutable workspace provenance; `lines` (1–1000) is retained but no longer caps a log tail. | Read-only; works under workspace-only file access. Never assume the omission means there were no engine errors. |
+| `stats [--range 7\|30\|90\|365]` | Usage statistics for the active workspace (default 30 days): today, period totals and the preceding period, daily user messages for 182 days, top projects, the memory proposal funnel, messages by hour and turns per model. | Read-only. |
 | `gws status` | Report whether the active workspace's Google Workspace account is connected and its token is valid. | Read-only; never triggers a live re-auth check — use it to warn the user their login expired, not to force one. |
 | `workspace list` | List all configured logical workspaces — names, vault roots, defaults — not just the active one. | — |
 | `repo candidates` | List git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects, to offer for `project update --repo`. | Read-only; a checkout elsewhere can still be linked by path. |
