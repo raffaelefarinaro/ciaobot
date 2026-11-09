@@ -1786,7 +1786,6 @@ def _assert_definition_failure_probe(tmp_path: Path, failure: str) -> None:
         failure = sys.argv[2]
         os.environ["CIAO_MEMORY_DIR"] = str(root / "memory")
         os.environ["CIAO_LAUNCH_AGENTS_DIR"] = str(root / "agents")
-        sys.platform = "darwin"
 
         from ciao import native_repair as repair
         from ciao.native_installer import NativeCoordinatorError
