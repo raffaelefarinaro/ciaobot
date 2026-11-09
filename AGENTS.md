@@ -95,6 +95,10 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   failure is re-run (`--lf`) before it is called red. Timing tests assert
   relative behaviour with a small absolute allowance, not a fixed millisecond
   budget a loaded machine can miss.
+- Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
+  failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
+  that attempt's jobs, so the required `linux-server`, `linux-web` and
+  `windows` checks go missing and the PR shows BLOCKED while everything is green.
 - Assert a guard where it acts, not only in the finished output. When a change
   bounds, redacts, filters or fences untrusted text, the test should observe the
   value at that seam (what is handed to the fence, filter or builder), and an

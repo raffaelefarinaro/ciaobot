@@ -256,9 +256,9 @@ def test_a_deep_body_labelled_multipart_on_a_json_route_is_still_scanned() -> No
 )
 def test_upload_routes_take_random_binary_unscanned(path: str) -> None:
     # Random bytes trip the bracket-depth scan more often the longer they are
-    # (about 9 in 10 at 1 MiB), which is why a body is scanned only when its
-    # route has no multipart policy; the leading brackets make this payload
-    # trip it every time. A route taking a raw binary body would need a
+    # (rarely at a few KB, most bodies at 1 MiB), which is why a body is
+    # scanned only when its route has no multipart policy; the leading
+    # brackets make this payload trip it every time. A route taking a raw binary body would need a
     # policy of its own.
     seen: list[bytes] = []
 

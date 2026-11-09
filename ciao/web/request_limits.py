@@ -27,8 +27,8 @@ def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
     Every body whose policy is not a multipart one is depth-scanned for JSON
     nesting. A route that takes a raw binary body would need a policy of its
     own here: stray bracket bytes in random data exceed the depth limit more
-    often the longer the body (about 9 in 10 at 1 MiB), so scanning them would
-    refuse ordinary uploads. No route does today.
+    often the longer the body (rarely at a few KB, most bodies at 1 MiB), so
+    scanning them would refuse ordinary uploads. No route does today.
     """
     path = scope.get("path", "")
     method = scope.get("method", "").upper()
