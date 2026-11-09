@@ -96,6 +96,18 @@ def test_deeply_nested_frame_is_an_invalid_json_error_and_the_socket_stays_open(
     assert started == [("chat-1", "still here")]
 
 
+@pytest.mark.parametrize("frame", ["[1]", '"x"', "5", "null"])
+def test_non_object_frame_is_an_error_and_the_socket_stays_open(frame: str) -> None:
+    started: list[tuple[str, str]] = []
+    client = signed_in(TestClient(_app(started)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text(frame)
+        assert ws.receive_json() == {"type": "error", "message": "invalid frame"}
+        ws.send_text('{"type":"message","text":"still here"}')
+        assert ws.receive_json() == {"type": "status", "message": "thinking"}
+    assert started == [("chat-1", "still here")]
+
+
 def test_empty_message_is_ignored_without_starting_a_stream() -> None:
     started: list[tuple[str, str]] = []
     client = signed_in(TestClient(_app(started)))
