@@ -463,6 +463,33 @@ def test_a_first_frame_that_is_not_json_is_refused(tmp_path: Path) -> None:
             assert _close_code(ws) == CLOSE_POLICY
 
 
+def test_a_deeply_nested_first_frame_is_refused(tmp_path: Path) -> None:
+    """A deep frame is refused like any other non-attach frame, not a crash."""
+    app = _app(tmp_path)
+    with _client(app) as client:
+        session_id = _create_session(client)
+        with client.websocket_connect(
+            f"{WS_BASE}{STREAM}/{session_id}", headers=_origin()
+        ) as ws:
+            ws.send_text("[" * 20000 + "]" * 20000)
+            assert _close_code(ws) == CLOSE_POLICY
+
+
+def test_a_deeply_nested_client_frame_is_a_bad_frame(tmp_path: Path) -> None:
+    """After the attach, a deep frame is a bad frame, answered and closed."""
+    app = _app(tmp_path)
+    with _client(app) as client:
+        session_id = _create_session(client)
+        with client.websocket_connect(
+            f"{WS_BASE}{STREAM}/{session_id}", headers=_origin()
+        ) as ws:
+            _attach(ws)
+            _replay(ws)
+            ws.send_text('{"type":' * 20000 + "0" + "}" * 20000)
+            assert ws.receive_json() == {"type": "error", "reason": "bad_frame"}
+            assert _close_code(ws) == CLOSE_BAD_FRAME
+
+
 @pytest.mark.parametrize(
     "offset",
     [True, False, 0.0, 1.5, -1, -1000],

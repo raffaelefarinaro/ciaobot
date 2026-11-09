@@ -85,6 +85,17 @@ def test_message_acks_thinking_when_socket_stays_open() -> None:
     assert started == [("chat-1", "hello there")]
 
 
+def test_deeply_nested_frame_is_an_invalid_json_error_and_the_socket_stays_open() -> None:
+    started: list[tuple[str, str]] = []
+    client = signed_in(TestClient(_app(started)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":' * 20000 + "0" + "}" * 20000)
+        assert ws.receive_json() == {"type": "error", "message": "invalid json"}
+        ws.send_text('{"type":"message","text":"still here"}')
+        assert ws.receive_json() == {"type": "status", "message": "thinking"}
+    assert started == [("chat-1", "still here")]
+
+
 def test_empty_message_is_ignored_without_starting_a_stream() -> None:
     started: list[tuple[str, str]] = []
     client = signed_in(TestClient(_app(started)))

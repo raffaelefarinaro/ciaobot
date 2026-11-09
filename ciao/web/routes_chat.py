@@ -25,6 +25,7 @@ import re
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ciao.jsonio import loads_untrusted
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import QUEUE_DELIVERIES, STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
@@ -179,8 +180,8 @@ async def ws_chat(websocket: WebSocket) -> None:
         while True:
             raw = await websocket.receive_text()
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                msg = loads_untrusted(raw)
+            except ValueError:
                 try:
                     await websocket.send_json({"type": "error", "message": "invalid json"})
                 except (WebSocketDisconnect, RuntimeError):

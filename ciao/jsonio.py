@@ -52,7 +52,9 @@ def json_nesting_exceeds(data: bytes | str, limit: int = MAX_JSON_DEPTH) -> bool
             depth += 1
             if depth > limit:
                 return True
-        elif token in "]}":
+        elif token in "]}" and depth:
+            # An unmatched closer ends any JSON parse there, so it never lets a
+            # later run of openers start from below zero.
             depth -= 1
     return False
 
