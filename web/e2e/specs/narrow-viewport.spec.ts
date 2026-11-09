@@ -44,6 +44,24 @@ test.describe('narrow viewport', () => {
     }
   })
 
+  test('the usage page does not scroll sideways at 390px', async ({ page }) => {
+    await boot(page, '/stats', '.usage-heat')
+
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+
+    // The heatmap is 182 day cells; its strip scrolls inside its own card.
+    await expect(page.locator('.usage-heat-cell:not(.usage-heat-cell--pad):not(.usage-legend-swatch)')).toHaveCount(182)
+    const strip = await page.locator('.usage-heat').boundingBox()
+    const card = await page.locator('.usage-card:has(.usage-heat)').boundingBox()
+    expect(strip).not.toBeNull()
+    expect(card).not.toBeNull()
+    expect(strip!.width).toBeLessThanOrEqual(card!.width)
+  })
+
   // On a phone every brand-row control is a 44px touch box; the bell used to
   // size itself to 44px on top of its touch padding, which pushed the collapse
   // control past the 320px drawer's edge.
