@@ -54,6 +54,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Needs-you card paste-back field; signed session, browser-only. Replays a pasted loopback OAuth "
         "callback only to the pending flow's own 127.0.0.1 listener, once; the agent never holds the callback URL"
     ),
+    "/api/chats/{chat_id}/actions/mcp-auth": (
+        "Settings MCP Sign in; signed session, browser-only. Raises the chat's own mcp_auth card, "
+        "which the browser then starts; agents raise cards with `ciao chat needs-action`"
+    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",

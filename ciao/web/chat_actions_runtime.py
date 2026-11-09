@@ -575,6 +575,35 @@ class ChatActionsRuntime:
             return provider
         return None
 
+    def request_mcp_auth(self, chat_id: str, server: str) -> dict[str, object]:
+        """Put the chat's sign-in card for ``server`` on the chat, or return the one already there.
+
+        The user asked for this sign-in in Settings, so an earlier Not now for this
+        server no longer applies to this chat or its workspace. A ``done`` card for
+        the server is dropped first: once connected, detection marks the card done,
+        and after a later expiry that card would come back unchanged. The card is
+        started by the usual start route; nothing here talks to a provider.
+        """
+        server = server.strip()
+        chat = self._pcm.get_chat(chat_id)
+        if chat is None or chat.archived:
+            raise ChatActionError("invalid_state")
+        if chat.provider == "claude" and is_claudeai_connector(server):
+            raise ChatActionError("invalid_param")
+        key = action_key("mcp_auth", {"server": server})
+        chat.dismissed_action_keys.discard(key)
+        self._pcm.declined_mcp_auth.discard(self._pcm.mcp_auth_decline_key(chat, key))
+        for existing in list(chat.actions):
+            if existing.state == "done" and action_key(existing.kind, existing.params) == key:
+                self._stop_poll(existing.id)
+                self._pcm.remove_action(chat_id, existing.id)
+        payload = self._pcm.raise_action(
+            chat_id, "mcp_auth", {"server": server, "provider": chat.provider}, origin="engine"
+        )
+        if payload is None:
+            raise ChatActionError("invalid_state")
+        return payload
+
     async def detect_mcp_auth(self, chat_id: str) -> None:
         """Raise a sign-in card for each server that needs one, and finish cards whose server connected."""
         provider = self.detection_provider(chat_id)
