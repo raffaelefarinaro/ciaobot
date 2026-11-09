@@ -2152,6 +2152,11 @@ def test_observation_prompt_formats_its_one_placeholder() -> None:
     assert "{" not in rendered and "}" not in rendered
 
 
+def test_observation_prompt_requires_a_behaviour_change() -> None:
+    assert "change what an agent does" in memory_pass.OBSERVATION_PROMPT
+    assert "When <situation>" in memory_pass.OBSERVATION_PROMPT
+
+
 # ── Linked repository (#1437) ─────────────────────────────────────────────
 
 

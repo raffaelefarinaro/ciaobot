@@ -5058,13 +5058,15 @@ def _observation_propose_command(args: argparse.Namespace) -> int:
     vault_root, workspace = context
     try:
         result = propose_observation(
-            vault_root, workspace=workspace, observation_id=args.id
+            vault_root, workspace=workspace, observation_id=args.id, drop=args.drop
         )
     except ValueError as exc:
         print(f"ciao observation-propose: {exc}", file=sys.stderr)
         return 2
     if args.json:
         _emit_json(result)
+    elif result["dropped"]:
+        print(f"Dropped {result['id']} without a proposal; it is now resolved.")
     elif result["queued"]:
         print(f"Queued a [{result['destination']}] proposal for {result['id']}.")
     else:
@@ -9069,6 +9071,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Queue a proposal for an observation seen in three chats.",
     )
     observation_propose_parser.add_argument("id", help="The observation id.")
+    observation_propose_parser.add_argument(
+        "--drop",
+        action="store_true",
+        help="Resolve the observation without queuing a proposal (it would not change agent behaviour, or memory already says it).",
+    )
     _observation_options(observation_propose_parser)
     observation_propose_parser.set_defaults(func=_observation_propose_command)
 
