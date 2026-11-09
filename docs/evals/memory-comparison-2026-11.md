@@ -1,7 +1,7 @@
 # Memory comparison and evals: November 2026
 
 - **Dates:** 8–9 November 2026.
-- **Engine:** the comparison runs and the vault probe used develop as of 8–9 November, before #2716. The recall prompt evals compare the commits before and after #2737. The search fix was re-measured on develop `618ed22a`, which includes #2716, #2737 and #2741.
+- **Engine:** the comparison runs and the vault probe used develop as of 8–9 November, before #2716. The recall prompt evals compare a baseline on `8b9315c8` plus the H11 task (an uncommitted tree) with candidate runs that span `6e1ee923` (63 runs) and `36477064` (15 runs). The search fix was re-measured on develop `618ed22a`, which includes #2716, #2737 and #2741.
 - **Answering and judging:** `claude-haiku-5-5` answers and `claude-sonnet-5-5` judges, both through the Claude CLI (`claude -p`) on a subscription. No API keys were set for any system.
 - **Machine:** one macOS host (Apple silicon). Every number is from a single run.
 
@@ -34,7 +34,7 @@ Every system gets the same answering and judging:
 
 ### The cost rule
 
-We compared only systems whose memory can be built without a model call per session. A system that runs an LLM over every chat to extract facts pays for that on every write, and it would also need a key or a second subscription. That rules out several well-known systems (see [Systems not run](#systems-not-run-and-why)). Embeddings computed by a small local model are allowed.
+We compared only systems whose memory can be built without a language-model call per session. A system that runs a language model over every conversation it stores pays for that on every write: it needs an API key, a second subscription, or a local model large enough to extract facts well. That rules out several well-known systems (see [Systems not run](#systems-not-run-and-why)). Embeddings computed by a small local model are allowed.
 
 ### Systems and their configurations
 
@@ -44,16 +44,16 @@ Each system indexes only one question's haystack at a time, in a fresh, isolated
 |---|---|---|---|
 | Ciaobot | develop, Nov 2026 | One Markdown note per session, indexed by `fts_search.index_vault`, searched by `fts_search.search_vault` (the `ciao vault search` path), top 5. Three ways of answering: from the top-5 snippets, from the top-5 full notes, and agentic (below). | Keyword search only: no stemming of synonyms, no embeddings. |
 | Basic Memory | 1.0.0 | Fresh home per question, `bm reindex --search --embeddings` (FTS plus local FastEmbed bge-small), `bm tool search --mode hybrid`, first 5 distinct notes, read in full. | Its best mode we found. Indexing is slow on CPU. |
-| OpenClaw memory-core | 2026.11.2 | Built-in engine. Sessions written into the daily notes `memory/YYYY-MM-DD.md` of their date, `openclaw memory index`, `openclaw memory search --max-results 5`. Two providers: none (keyword only) and local Ollama `nomic-embed-text` (hybrid). Defaults otherwise: MMR on, recency decay on with a 30-day half-life. Reported two ways: its native snippets, and its hits expanded to the full source sessions, as the others read. | Recency decay is computed against the machine's clock, and we found no way to anchor it to the question's date. On a 2023 dataset it cannot work as designed. |
+| OpenClaw memory-core | 2026.11.2 | Built-in engine. Sessions written into the daily notes `memory/YYYY-MM-DD.md` of their date, `openclaw memory index`, `openclaw memory search --max-results 5`. Two providers: none (keyword only) and local Ollama `nomic-embed-text` (hybrid). Defaults otherwise: MMR on, recency decay on with a 30-day half-life. Reported two ways: its native snippets, and its hits expanded to the full source sessions, as the others read. | Recency decay and MMR are on by default, and we found no setting to turn them off or anchor them to the question date. Decay is computed against the machine's clock, so on a 2023 dataset it cannot work as designed. |
 | Cognee | 1.6.7 | Local-only: GLiNER graph extraction and fastembed embeddings, CPU, no LLM. One `remember()` per question over all sessions, then `recall()` with default routing (`HYBRID_COMPLETION`, context only), `top_k=5`. | Cognee's normal pipeline uses an LLM to build the graph and to answer. Without one, the context it returns is thin (about 2.9k tokens). This is not its flagship configuration. |
-| Holographic (`hermes-plugin-holographic`) | 0.26.5 | Local SQLite FTS5 plus HRR, `auto_extract` on (rule-based, no model), embeddings off (default). Each session fed through `sync_turn` and `on_session_end`, then `prefetch(question)`. | The rule-based extractor kept only preference sentences and stores no session dates. We stopped after 20 questions (10 knowledge-update, 10 temporal) at 0/20. |
+| Holographic (`hermes-plugin-holographic`) | 0.26.5 | Local SQLite FTS5 plus HRR, `auto_extract` on (rule-based, no model), embeddings off (default). Each session fed through `sync_turn` and `on_session_end`, then `prefetch(question)`. | `auto_extract` is off by default: Holographic's intended path is the agent calling `fact_store` itself. We measured only the rule-based extractor, on the first 20 sampled questions (10 knowledge-update, 10 temporal). It kept only preference sentences and stores no session dates. This is not a measure of Holographic as used. |
 
 Two references bracket the results:
 
 - **Oracle:** the answer model reads only the gold sessions. An upper bound for retrieval.
 - **Full context:** the answer model reads the whole haystack (about 126k tokens). What you get with no memory system and a large enough context window.
 
-**Ciaobot agentic** is closest to how Ciaobot recalls in a chat. Haiku sees the top-5 full notes for the question text, then may issue up to three more searches of its own wording (`SEARCH: <query>`). New hits are shown in full. It is told the search is lexical and to try two or three reformulations before saying the answer is not there.
+**Ciaobot agentic** is closest to how Ciaobot recalls in a chat. Haiku sees the top-5 full notes for the question text, then may issue up to three more searches of its own wording (`SEARCH: <query>`), so up to four searches in all. Only Ciaobot got these extra searches: every other system answered from one search with the question text, as in its default setup. New hits are shown in full. It is told the search is lexical and to try two or three reformulations before saying the answer is not there.
 
 ## Results
 
@@ -65,8 +65,8 @@ Correct answers per question type. KU knowledge-update, TR temporal-reasoning, M
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | *Oracle (gold sessions only)* | *93.3% (56)* | 10 | 12 | 11 | 6 | 6 | 6 | 5 | – | 7.3k |
 | *Full context (whole haystack)* | *91.7% (55)* | 10 | 12 | 10 | 6 | 6 | 5 | 6 | – | 126k |
-| **Ciaobot, agentic** | **90.0% (54)** | 10 | 11 | 9 | 6 | 6 | 5 | 7 | 0.07 s | 19.1k |
-| **Ciaobot, top-5 full notes** | **86.7% (52)** | 10 | 11 | 8 | 6 | 6 | 5 | 6 | 0.07 s | 15.1k |
+| **Ciaobot, agentic (up to four searches)** | **90.0% (54)** | 10 | 11 | 9 | 6 | 6 | 5 | 7 | 0.07 s | 19.1k |
+| **Ciaobot, top-5 full notes (one search)** | **86.7% (52)** | 10 | 11 | 8 | 6 | 6 | 5 | 6 | 0.07 s | 15.1k |
 | Basic Memory, hybrid | 83.3% (50) | 10 | 11 | 8 | 6 | 6 | 5 | 4 | 497 s | 15.2k |
 | OpenClaw, embeddings, full sessions | 71.7% (43) | 6 | 7 | 5 | 6 | 6 | 6 | 7 | 49 s | 9.6k |
 | Cognee, local | 48.3% (29) | 4 | 3 | 2 | 5 | 6 | 3 | 6 | 1,726 s | 2.9k |
@@ -74,17 +74,20 @@ Correct answers per question type. KU knowledge-update, TR temporal-reasoning, M
 | Ciaobot, snippets only | 43.3% (26) | 7 | 4 | 1 | 4 | 1 | 1 | 8 | 0.07 s | 0.3k |
 | OpenClaw, keyword, full sessions | 40.0% (24) | 5 | 5 | 1 | 3 | 1 | 2 | 7 | 14 s | 10.4k |
 | OpenClaw, keyword, native snippets | 25.0% (15) | 2 | 1 | 1 | 2 | 1 | 1 | 7 | 14 s | 0.9k |
-| Holographic (20 questions) | 0/20 | 0/10 | 0/10 | – | – | – | – | – | 0.4 s | ≈0 |
 
-The agentic run's answer model read 50.8k input tokens per question on average, across all its calls. A single-pass system reads about its context plus the prompt.
+Not ranked: Holographic's rule-based extractor, run on the first 20 sampled questions only (10 knowledge-update, 10 temporal), answered 0/20, with an index time of 0.4 s and almost no context returned. That configuration is not how Holographic is meant to be used (see its row above), so it is left out of the table.
+
+The agentic run's answer model read 50.8k input tokens per question on average, across all its calls. A single-pass system reads about its context plus the prompt. On one search each, Ciaobot's 86.7% is the like-for-like comparison with the other systems; the agentic 90.0% shows what the extra searches add.
+
+**Index times are rough.** Basic Memory, OpenClaw and Cognee were indexed by parallel workers sharing the machine, while Ciaobot ran sequentially and in-process. The times include each tool's CLI start-up. Read them as orders of magnitude, not as benchmarks.
 
 What stands out:
 
 - **Reading the note matters more than the search engine.** The same Ciaobot search scored 43.3% when Haiku answered from snippets and 86.7% when it read the same five notes in full. OpenClaw's embedding search moved from 43.3% to 71.7% the same way. A snippet that holds the query words often leaves out the later change, negation or condition that decides the answer.
 - **Retrieval reached the answer for most systems.** At least one gold session was among the retrieved sessions for 51 of 52 answerable questions with Ciaobot and Basic Memory, 52/52 with Cognee, 50/52 with OpenClaw embeddings and 36/52 with OpenClaw keyword search. Cognee's low score points to how little of those sessions its local context carries (about 2.9k tokens), not to finding the wrong ones.
 - **Where Ciaobot agentic lost:** 5 of its 6 misses were questions whose answer is spread over 2–5 sessions and only part of it was retrieved. Two of those were caused by the search bug fixed in #2716. The other misses were reasoning errors, or a guess where it should have abstained.
-- **Basic Memory** gave the closest result to Ciaobot's top-5 notes (83.3% against 86.7%). Its only clear gap is abstention (4/8). Its index takes minutes per question on CPU, against well under a second for FTS5.
-- **OpenClaw's keyword mode** reached a gold session for only 36 of 52 questions. Its embedding mode did much better. Recency decay could not be anchored to the question dates (see above), which may cost it some knowledge-update and temporal questions.
+- **Basic Memory** gave the closest result to Ciaobot's top-5 notes (83.3% against 86.7%). Its only clear gap is abstention (4/8). Its index took minutes per question on CPU in our parallel run, against well under a second for FTS5.
+- **OpenClaw's keyword mode** reached a gold session for only 36 of 52 questions. Its embedding mode did much better. We found no setting to turn off its recency decay or anchor it to the question date (see above), which may cost it some knowledge-update and temporal questions.
 
 ### Search recall, all 470 answerable questions
 
@@ -94,7 +97,7 @@ Model-free. Each session is a document, the query is the question text, and we s
 - **Fractional@5:** the share of gold sessions in the top 5.
 - **Any-hit@5:** at least one gold session is in the top 5.
 
-This is the protocol of agentmemory's published benchmark ([agent-memory.dev](https://agent-memory.dev/), keyless BM25 component). Their numbers are theirs, from their harness, not re-run by us.
+This is the protocol of agentmemory's published benchmark ([retrieval evaluation, 28 October 2026](https://github.com/rohitg00/agentmemory/blob/main/docs/benchmarks/2026-10-28-retrieval-evaluation.md), agentmemory 0.9.31, keyless BM25 component). Their numbers are theirs, from their harness, not re-run by us.
 
 | Search | Strict@5 | Fractional@5 | Any-hit@5 |
 |---|---:|---:|---:|
@@ -136,7 +139,7 @@ Answer accuracy on the 78 answerable questions (Haiku answering, same judge):
 | Agent, "read the best-matching note" (≈ the rule merged in #2737) | 89.7% | 61.5% |
 | Agent, "read up to three notes" | 92.3% | 76.9% |
 
-All conditions abstained correctly on all 10 unanswerable questions, except "up to three notes" (9/10). The three agent rules are within a few questions of each other. "Up to three notes" beat the old rule on 5 questions and lost on 3, which is not a significant difference. On the 13 real questions, one question is 7.7 points.
+All conditions abstained correctly on all 10 unanswerable questions, except "up to three notes" (9/10). The three agent rules are within a few questions of each other. "Up to three notes" won on 5 questions and lost on 3 (one of them the abstention miss) against the old rule, which is not a significant difference. On the 13 real questions, one question is 7.7 points.
 
 Search recall (strict@5) on the 78 answerable questions:
 
@@ -147,7 +150,7 @@ Search recall (strict@5) on the 78 answerable questions:
 | Ciaobot FTS5 | 65.4 | 26.7 | 61.5 |
 | Plain BM25 | 57.7 | 13.3 | 53.8 |
 
-Embeddings find more on the real vault too, 17 points more than FTS5. The answers barely change, because the agent reformulates. Of the agent's 9 wrong answers under the old rule, it had already found the right note in 8. Embeddings would have changed retrieval in at most 2 of them, so the expected gain is about 1–2 questions in 78. The cost is a local model of about 130 MB and a second index. We deferred embeddings and will revisit when keyword misses explain more than 3 of the agent's wrong answers.
+Embeddings find more on the real vault too, 17 points more than FTS5. The answers barely change, because the agent reformulates. In all 9 of the agent's wrong answers under the old rule, it had already seen the right note. Separately, embeddings would have changed retrieval in at most 2 of those 9 questions, so the expected gain is about 1–2 questions in 78. The cost is a local model of about 130 MB and a second index. We deferred embeddings and will revisit when keyword misses explain more than 3 of the agent's wrong answers.
 
 ## Prompt evals
 
@@ -165,15 +168,17 @@ Full suite, `claude/haiku`: 22 tasks, 3 repeats each, with H1 and M6 extended to
 | H11, value below the snippet | 0/3 | 3/3 |
 | H1, multi-source synthesis (9 runs) | 8/9 | 7/9 |
 | M6, memory pass, paraphrase of a decided fact (9 runs) | 3/9 | 2/9 |
-| Median model calls per run | 5 | 5 |
+| Median tool calls per run | 4 | 4 |
 
-H1 and M6 fail the same way under both prompts. We read that as noise, not a regression. The prompt stays within its budget (11,980 → 11,975 characters, budget 12,000).
+H1 and M6 fail the same way under both prompts. We read that as noise, not a regression. The prompt stays within its budget (11,980 → 11,975 characters, budget 12,000). The run files do not record model calls, so the table gives tool calls instead.
+
+The baseline ran on `8b9315c8` plus the H11 task, from an uncommitted tree. The candidate runs span two commits on the #2737 branch: `6e1ee923` (63 runs) and `36477064` (15 runs).
 
 The trade-off: recall now reads full private notes into the transcript, where a 32-token snippet used to keep unrelated private lines out. The prompt's rule that search results are private working evidence now names notes read as well.
 
 ### A lighter memory-pass prompt: rejected
 
-Anthropic's "Components of agent memory" (6 November 2026) reports that prescriptive memory-writing rules can hurt frontier models. We tested a lighter memory-pass prompt, 54% of the current length, that drops most of Ciaobot's exclusion rules. The test set is real archived chats with known accept/dismiss outcomes: 29 chats, with 21 facts the user had accepted and 21 they had dismissed. We counted how many accepted facts each prompt kept, and how many proposals of a kind the user had dismissed it queued.
+Anthropic's ["Components of agent memory"](https://www.anthropic.com/research/components-of-agent-memory) (6 November 2026) reports that prescriptive memory-writing rules can hurt frontier models. We tested a lighter memory-pass prompt, 54% of the current length, that drops most of Ciaobot's exclusion rules. The test set is real archived chats with known accept/dismiss outcomes: 29 chats, with 21 facts the user had accepted and 21 they had dismissed. We counted how many accepted facts each prompt kept, and how many proposals of a kind the user had dismissed it queued.
 
 | Run | Accepted facts kept (current / light) | Dismissed-kind proposals (current / light) |
 |---|---:|---:|
@@ -189,9 +194,11 @@ Before changing anything else, we recorded a baseline on develop `4c4093dc` for 
 
 ## Systems not run and why
 
-mem0, Hindsight, Honcho, OpenViking, ByteRover, Supermemory, RetainDB and memU all build memory by running an LLM over each session (extraction, distillation or reflection). That fails the cost rule above.
+mem0, Hindsight, Honcho, OpenViking, ByteRover, Supermemory, RetainDB and memU all build memory by running a language model over each session (extraction, distillation or reflection). That fails the cost rule above.
 
-Several of these publish LongMemEval scores between about 83% and 94%. Those scores are self-reported, with answer and judge models of each vendor's choice rather than Haiku and Sonnet, so they cannot be placed in the tables above. A fair comparison would run them through the same answering and judging, with the extraction cost reported next to the accuracy.
+mem0 can also store messages without extraction (`add(..., infer=False)`), but that skips the extraction its design and published scores rest on, so it would not measure mem0 as used, and we did not run it. Cognee is in the comparison without its language model because it documents a local-only path (local extraction and embeddings); its row says what that costs it.
+
+Several of these publish LongMemEval scores between about 83% and 94% (for example [mem0's research page](https://mem0.ai/research)). Those scores are self-reported and not verified by us, with answer and judge models of each vendor's choice rather than Haiku and Sonnet, so they cannot be placed in the tables above. A fair comparison would run them through the same answering and judging, with the extraction cost reported next to the accuracy.
 
 ## What changed
 
