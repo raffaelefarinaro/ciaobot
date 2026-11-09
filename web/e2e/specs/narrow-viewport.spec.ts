@@ -76,6 +76,8 @@ async function expectQuestionFooterFocus(control: Locator) {
     const computed = getComputedStyle(el)
     const b = el.getBoundingClientRect(), cardEl = el.closest('.question-card')!, card = cardEl.getBoundingClientRect(), cs = getComputedStyle(cardEl)
     const extent = parseFloat(computed.outlineWidth) + parseFloat(computed.outlineOffset)
+    const visualViewport = window.visualViewport
+    const viewportLeft = visualViewport?.offsetLeft ?? 0, viewportTop = visualViewport?.offsetTop ?? 0
     return {
       outlineStyle: computed.outlineStyle,
       outlineWidth: computed.outlineWidth,
@@ -85,16 +87,37 @@ async function expectQuestionFooterFocus(control: Locator) {
       focusVisible: el.matches(':focus-visible'),
       bounds: { left: b.left - extent, right: b.right + extent, top: b.top - extent, bottom: b.bottom + extent },
       paddingBox: { left: card.left + parseFloat(cs.borderLeftWidth), right: card.right - parseFloat(cs.borderRightWidth), top: card.top + parseFloat(cs.borderTopWidth), bottom: card.bottom - parseFloat(cs.borderBottomWidth) },
+      viewport: { left: viewportLeft, right: viewportLeft + (visualViewport?.width ?? innerWidth), top: viewportTop, bottom: viewportTop + (visualViewport?.height ?? innerHeight) },
     }
   })
   expect(style.outlineStyle, JSON.stringify(style)).toBe('solid')
   expect(parseFloat(style.outlineWidth)).toBeGreaterThanOrEqual(2)
   expect(style.outlineColor).not.toBe('rgba(0, 0, 0, 0)')
   expect(parseFloat(style.outlineOffset)).toBeGreaterThanOrEqual(2)
+  expect(style.focus).toBe(true)
+  expect(style.focusVisible).toBe(true)
   expect(style.bounds.left).toBeGreaterThanOrEqual(style.paddingBox.left - 1)
   expect(style.bounds.right).toBeLessThanOrEqual(style.paddingBox.right + 1)
   expect(style.bounds.top).toBeGreaterThanOrEqual(style.paddingBox.top - 1)
   expect(style.bounds.bottom).toBeLessThanOrEqual(style.paddingBox.bottom + 1)
+  expect(style.bounds.left).toBeGreaterThanOrEqual(style.viewport.left - 1)
+  expect(style.bounds.right).toBeLessThanOrEqual(style.viewport.right + 1)
+  expect(style.bounds.top).toBeGreaterThanOrEqual(style.viewport.top - 1)
+  expect(style.bounds.bottom).toBeLessThanOrEqual(style.viewport.bottom + 1)
+}
+
+async function expectQuestionTargetsReachable(page: import('@playwright/test').Page) {
+  const body = page.getByRole('region', { name: 'Question details' })
+  for (const target of [body.locator('.question-option').last(), body.locator('.question-other').last()]) {
+    await target.evaluate(el => el.scrollIntoView({ block: 'nearest' }))
+    const geometry = await target.evaluate(el => {
+      const target = el.getBoundingClientRect(), body = el.closest('.question-form-body')!.getBoundingClientRect()
+      const v = window.visualViewport, left = v?.offsetLeft ?? 0, top = v?.offsetTop ?? 0
+      const right = left + (v?.width ?? innerWidth), bottom = top + (v?.height ?? innerHeight)
+      return { target: target.toJSON(), body: body.toJSON(), viewport: { left, top, right, bottom }, visible: target.width > 0 && target.height > 0 && target.left >= body.left - 1 && target.right <= body.right + 1 && target.top >= body.top - 1 && target.bottom <= body.bottom + 1 && target.left >= left - 1 && target.right <= right + 1 && target.top >= top - 1 && target.bottom <= bottom + 1 }
+    })
+    expect(geometry.visible, `Question field must be reachable by scrolling the details region: ${JSON.stringify(geometry)}`).toBe(true)
+  }
 }
 
 test.describe('narrow viewport', () => {
@@ -220,6 +243,7 @@ test.describe('narrow viewport', () => {
     })
     expect(landscapeScroll.scrollHeight).toBeGreaterThan(landscapeScroll.clientHeight)
     expect(landscapeScroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
     await expectQuestionSubmitVisible(page)
     await page.setViewportSize({ width: 390, height: 500 })
     await expectQuestionSubmitVisible(page)
@@ -269,8 +293,17 @@ test.describe('narrow viewport', () => {
     })
     expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight)
     expect(scroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
     await expectQuestionSubmitVisible(page)
     await page.setViewportSize({ width: 844, height: 390 })
+    await expectQuestionSubmitVisible(page)
+    const landscapeScroll = await body.evaluate(el => {
+      el.scrollTop = el.scrollHeight
+      return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+    })
+    expect(landscapeScroll.scrollHeight).toBeGreaterThan(landscapeScroll.clientHeight)
+    expect(landscapeScroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
     await expectQuestionSubmitVisible(page)
   })
 
@@ -306,6 +339,8 @@ test.describe('narrow viewport', () => {
     expect(parseFloat(bodyStyle.outlineWidth)).toBeGreaterThanOrEqual(2)
     expect(bodyStyle.outlineColor).not.toBe('rgba(0, 0, 0, 0)')
     expect(bodyStyle.outlineOffset).toBe('-2px')
+    await page.keyboard.press('Tab')
+    await expect(page.locator('.question-option').first()).toBeFocused()
     await expectQuestionSubmitVisible(page)
   })
 
