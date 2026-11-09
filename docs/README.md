@@ -5,7 +5,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 ## Using Ciaobot
 
 - [Get started](https://www.raffaelefarinaro.com/ciaobot/guide.html): install, connect an agent, and complete your first task.
-- [Workspaces, projects, and chats](https://www.raffaelefarinaro.com/ciaobot/#blocks): organise personal, work, and client context.
+- [Workspaces, projects, and chats](https://www.raffaelefarinaro.com/ciaobot/features.html#organise): organise personal, work, and client context.
 - [Memory](https://www.raffaelefarinaro.com/ciaobot/memory.html): archiving, recall, proposals, history, and notes to revisit.
 - [Files and documents](https://www.raffaelefarinaro.com/ciaobot/features.html#documents): preview, pin, edit, and annotate outputs beside a chat.
 - [Tasks](https://www.raffaelefarinaro.com/ciaobot/features.html#tasks): track next steps, delegate to an agent, and review results before completing them.
@@ -25,7 +25,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Memory backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup): connect a private repository and inspect backup status.
 - [Remote access](https://www.raffaelefarinaro.com/ciaobot/remote.html): browsers, the installed PWA, and HTTPS access from other devices.
 - [Linux hosting](LINUX.md): systemd deployment and server operation.
-- [Windows (preview)](WINDOWS.md): install, logon task, logs, providers, and uninstall on Windows 11.
+- [Windows](WINDOWS.md): install, logon task, logs, providers, and uninstall on Windows 11.
 - [Troubleshooting and configuration](../INTEGRATIONS.md): setup checks and integration diagnostics.
 - [Security policy](../SECURITY.md) and [remote boundary audit](REMOTE_BOUNDARY.md): access controls and their limits.
 - [Report a problem](https://github.com/raffaelefarinaro/ciaobot/issues): include what you tried and what happened, without credentials or private workspace data.

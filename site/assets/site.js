@@ -1,27 +1,65 @@
-// The install picker: one command per platform, chosen for the visitor's OS and
-// switchable. Each <option> carries its label and command, so the copy button
-// below copies whatever is showing. Without JavaScript the picker stays hidden
-// and the page shows the macOS command plus a <noscript> line for Windows.
+// One install action per platform. macOS offers the native client and the engine
+// command; Windows has its PowerShell command; Linux links to its admin guide.
 (function () {
   document.querySelectorAll('[data-install]').forEach(function (box) {
     var select = box.querySelector('[data-install-os]');
     var code = box.querySelector('code');
     var label = box.querySelector('[data-install-label]');
     var note = box.querySelector('[data-install-note]');
+    var commandBox = box.querySelector('[data-install-command]');
+    var guide = box.querySelector('[data-install-guide]');
+    var macClient = box.querySelector('[data-mac-client]');
+    var macNote = box.querySelector('[data-mac-client-note]');
     if (!select || !code) return;
+
     function show() {
       var option = select.options[select.selectedIndex];
-      code.textContent = option.dataset.cmd;
+      var platform = option.value;
+      var command = option.dataset.cmd || '';
+      var guideURL = option.dataset.url || '';
+      box.dataset.platform = platform;
+      code.textContent = command;
       if (label) label.textContent = option.dataset.label;
-      if (note) note.hidden = option.value !== 'windows';
+      if (commandBox) commandBox.hidden = !command;
+      if (note) note.hidden = platform !== 'windows';
+      if (macClient) macClient.hidden = platform !== 'mac';
+      if (macNote) macNote.hidden = platform !== 'mac';
+      if (guide) {
+        guide.hidden = !guideURL;
+        if (guideURL) guide.href = guideURL;
+      }
     }
+
     var ua = navigator.userAgentData;
     var platform = (ua && ua.platform) || navigator.platform || navigator.userAgent || '';
     if (/win/i.test(platform)) select.value = 'windows';
+    else if (/linux/i.test(platform) && !/android/i.test(navigator.userAgent)) select.value = 'linux';
     select.addEventListener('change', show);
     select.closest('.install-os').hidden = false;
     show();
   });
+})();
+
+// Resolve the newest native Mac DMG, including prereleases. Without JavaScript
+// or network access, the button still opens the client's releases page.
+(function () {
+  var links = document.querySelectorAll('[data-mac-client]');
+  if (!links.length || !window.fetch) return;
+  fetch('https://api.github.com/repos/raffaelefarinaro/ciaobot-mac/releases?per_page=20')
+    .then(function (response) {
+      if (!response.ok) throw new Error(response.status);
+      return response.json();
+    })
+    .then(function (releases) {
+      for (var i = 0; i < releases.length; i += 1) {
+        if (releases[i].draft) continue;
+        var asset = releases[i].assets.find(function (item) { return /\.dmg$/i.test(item.name); });
+        if (!asset) continue;
+        links.forEach(function (link) { link.href = asset.browser_download_url; });
+        break;
+      }
+    })
+    .catch(function () {});
 })();
 
 // Copy-to-clipboard for the install command and the example prompts.
@@ -73,69 +111,4 @@
   }
   motion.addEventListener('change', syncMotion);
   syncMotion();
-})();
-
-// A visitor-controlled example of conversation → note → recall on the home page.
-(function () {
-  var board = document.querySelector('[data-memory-demo]');
-  if (!board) return;
-  var action = board.querySelector('.memory-action');
-  var count = board.querySelector('.memory-board-count');
-  var status = board.querySelector('.memory-board-status');
-  var steps = [
-    { count: '01 / 03', status: 'Start with a conversation. Finish it to save what matters.', action: 'Finish the chat' },
-    { count: '02 / 03', status: 'The detail is now in a project note you can read and edit.', action: 'Ask again later' },
-    { count: '03 / 03', status: 'The next conversation can use that saved context.', action: 'Play again' }
-  ];
-  var step = 0;
-  action.addEventListener('click', function () {
-    step = (step + 1) % steps.length;
-    board.dataset.step = String(step);
-    count.textContent = steps[step].count;
-    status.textContent = steps[step].status;
-    action.firstChild.textContent = steps[step].action + ' ';
-    action.querySelector('[aria-hidden]').textContent = step === 2 ? '↺' : '→';
-  });
-})();
-
-// Live GitHub stars and product downloads. Unauthenticated API (60 requests/hour
-// per visitor), so results are cached for ten minutes in sessionStorage.
-(function () {
-  var box = document.getElementById('repo-stats');
-  if (!box || !window.fetch) return;
-  var REPO = 'https://api.github.com/repos/raffaelefarinaro/ciaobot';
-  var KEY = 'ciaobot-repo-stats-v2';
-  function show(d) {
-    var fmt = new Intl.NumberFormat('en', { notation: d.downloads > 9999 ? 'compact' : 'standard' });
-    box.querySelector('[data-stat="stars"]').textContent = fmt.format(d.stars);
-    box.querySelector('[data-stat="downloads"]').textContent = fmt.format(d.downloads);
-    box.hidden = false;
-  }
-  try {
-    var c = JSON.parse(sessionStorage.getItem(KEY) || 'null');
-    if (c && Date.now() - c.at < 600000) return show(c);
-  } catch (e) {}
-  function releases(page, total) {
-    return fetch(REPO + '/releases?per_page=100&page=' + page).then(function (r) {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    }).then(function (list) {
-      list.forEach(function (rel) {
-        rel.assets.forEach(function (a) {
-          // Count engine wheels and historical desktop downloads (including
-          // updates), not installers, signatures, manifests or server hosts.
-          if (/^ciaobot-.*\.whl$|\.app\.tar\.gz$|\.dmg$/.test(a.name)) total += a.download_count;
-        });
-      });
-      return list.length === 100 && page < 5 ? releases(page + 1, total) : total;
-    });
-  }
-  Promise.all([
-    fetch(REPO).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }),
-    releases(1, 0)
-  ]).then(function (res) {
-    var d = { stars: res[0].stargazers_count, downloads: res[1], at: Date.now() };
-    try { sessionStorage.setItem(KEY, JSON.stringify(d)); } catch (e) {}
-    show(d);
-  }).catch(function () {});
 })();
