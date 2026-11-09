@@ -1366,6 +1366,65 @@ def test_apply_drain_timeout_cancels_and_leaves_engine(tmp_path: Path) -> None:
     assert not (state / UPDATER_PLIST_NAME).exists()
 
 
+def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
+    """An unattended apply names its owner on the drain and on the cancel."""
+    _, state, _, engine = _staged(tmp_path)
+    engine.busy = True  # the drain can never finish, so the cancel must land
+    seen: list[tuple[str, dict[str, Any] | None]] = []
+
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        seen.append((url, body))
+        return engine.post(url)
+
+    with pytest.raises(UpdateError, match="left untouched"):
+        apply_update(
+            state_dir=state,
+            port=PORT,
+            http_post=post,
+            launchctl=engine.launchctl,
+            uid=501,
+            sleep=lambda seconds: None,
+            clock=_FakeClock(),
+            drain_timeout=5.0,
+            drain_owner="auto-1",
+        )
+
+    # Every request the handshake made — the drain, each poll and the cancel —
+    # carries the owner, so the engine can refuse a cancel from anything else.
+    assert seen
+    assert all(body == {"owner": "auto-1"} for _url, body in seen)
+    assert seen[-1][0] == f"{BASE}/api/admin/drain/cancel"
+    assert {url for url, _body in seen} == {
+        f"{BASE}/api/admin/drain",
+        f"{BASE}/api/admin/drain/cancel",
+    }
+
+    # A manual apply sends no body at all, so its handshake is byte-identical
+    # to the one it has always sent.
+    _, manual_state, _, manual_engine = _staged(tmp_path / "manual")
+    manual_engine.busy = True
+    manual_seen: list[tuple[str, dict[str, Any] | None]] = []
+
+    def manual_post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        manual_seen.append((url, body))
+        return manual_engine.post(url)
+
+    with pytest.raises(UpdateError, match="left untouched"):
+        apply_update(
+            state_dir=manual_state,
+            port=PORT,
+            http_post=manual_post,
+            launchctl=manual_engine.launchctl,
+            uid=501,
+            sleep=lambda seconds: None,
+            clock=_FakeClock(),
+            drain_timeout=5.0,
+        )
+
+    assert manual_seen
+    assert all(body is None for _url, body in manual_seen)
+
+
 def _apply_with_post(engine: _FakeEngine, state: Path, post: Any) -> Operation:
     return apply_update(
         state_dir=state,

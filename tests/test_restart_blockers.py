@@ -140,3 +140,88 @@ def test_claude_background_task_reports_background_work(tmp_path: Path) -> None:
     manager._providers[cid] = service  # type: ignore[assignment]
 
     assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["background_work"]}]
+
+
+# ── The unattended-update idle snapshot and its claim ───────────────────
+#
+# `update_idle_reasons` is the conservative proof an automatic update needs: it
+# must see the work `restart_blockers` deliberately leaves out, and
+# `claim_for_update` closes admission only when that proof is complete.
+
+
+def test_update_idle_reasons_report_parked_work_without_a_provider(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    assert manager.update_idle_reasons() == []
+    cid = _chat(manager)
+    # No provider was ever attached: the parked queue and the card are all the
+    # chat has, and a restart would strand both.
+    manager._chats[cid].pending_queue = [{"text": "later"}]
+    manager._chats[cid].pending_question = json.dumps({"questions": [{"id": "q1"}]})
+
+    reasons = manager.update_idle_reasons()
+
+    assert f"pending_queue in chat {cid}" in reasons
+    assert f"open_question in chat {cid}" in reasons
+    # The restart view is narrower by design, which is why the snapshot cannot
+    # be built from it alone.
+    assert manager.restart_blockers() == []
+
+
+def test_update_idle_reasons_treat_aged_out_background_work_as_busy(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    cid = _chat(manager)
+    provider = _attach(manager, cid)
+    provider.background_work_outstanding = True
+    # Old enough for the idle reaper to stop counting (its cap is a day), not
+    # old enough to cut off: an unattended update must not use the ageing rule.
+    provider.background_activity_age = 10 * 24 * 3600.0
+
+    assert manager.restart_blockers() == []
+    assert manager.update_idle_reasons() == [f"background_work in chat {cid}"]
+
+
+def test_claim_fails_closed_when_the_snapshot_raises(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    _chat(manager)
+
+    def boom() -> list[str]:
+        raise RuntimeError("provider state unreadable")
+
+    monkeypatch.setattr(manager, "update_idle_reasons", boom)
+
+    assert manager.claim_for_update("auto-1") is False
+    # Unknown is busy: nothing was closed and no owner was written, so work
+    # that arrives now still starts.
+    assert manager.restart_draining is False
+    assert manager._drain_owner == ""
+
+
+def test_registered_probe_reason_is_part_of_the_idle_snapshot(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.register_update_blocker_probe(lambda: ["memory pass queued in chat m-1"])
+
+    assert manager.update_idle_reasons() == ["memory pass queued in chat m-1"]
+    # A probe with work blocks the claim exactly as a chat reason does.
+    assert manager.claim_for_update("auto-1") is False
+    assert manager.restart_draining is False
+
+
+def test_raising_probe_makes_the_claim_fail_closed(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+
+    def boom() -> list[str]:
+        raise RuntimeError("schedule state unreadable")
+
+    manager.register_update_blocker_probe(boom)
+
+    # Unknown is busy: the snapshot raises, the claim refuses, and neither the
+    # flag nor the owner was written.
+    assert manager.claim_for_update("auto-2") is False
+    assert manager.restart_draining is False
+    assert manager.drain_owner == ""

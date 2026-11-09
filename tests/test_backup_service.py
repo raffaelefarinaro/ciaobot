@@ -1715,3 +1715,62 @@ async def test_a_pause_taken_during_a_setup_is_respected(tmp_path: Path) -> None
     assert status.state == backup_service.STATE_PAUSED
     assert status.reason == "backup is paused"
     assert service._store.settings.backup_enabled is False
+
+
+# ── Admission closed: an update claim defers the whole run ──────────────────
+#
+# An unattended update closes admission before it restarts the engine. A backup
+# that starts now would be interrupted mid-commit, so both entry paths defer
+# before the lock and before any git read, and the run is still owed afterwards.
+
+
+async def test_admission_closed_defers_backup_without_running_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _world(tmp_path)
+    closed = {"value": True}
+    store = AppSettingsStore(world.config.state_path.parent / "app_settings.json")
+    service = BackupService(
+        world.config,
+        store,
+        node_state=lambda: LegacyNodeState(kind="host"),
+        now=_Clock(),
+        admission_closed=lambda: closed["value"],
+    )
+    world.note("day-1.md", "one\n")
+
+    # Every git read a run does goes through `_target` first (branch and
+    # origin); reaching it would mean the gate let the run through.
+    targets: list[str] = []
+    real_target = service._target  # noqa: SLF001
+
+    async def recording_target(root: Path) -> tuple[str, str]:
+        targets.append(str(root))
+        return await real_target(root)
+
+    monkeypatch.setattr(service, "_target", recording_target)
+    git_calls: list[tuple[str, ...]] = []
+    real_run_git = local_session.run_git
+
+    async def recording_run_git(workspace, *args, timeout=None):
+        git_calls.append(tuple(args))
+        return await real_run_git(workspace, *args, timeout=timeout)
+
+    monkeypatch.setattr(local_session, "run_git", recording_run_git)
+
+    status = await service.run_backup()
+
+    assert status.state == backup_service.STATE_DEFERRED
+    assert "update" in status.reason
+    assert targets == []
+    assert git_calls == []
+    # Not an attempt: the stamp is untouched, so the overdue check still owes
+    # this run the moment the claim is released.
+    assert store.settings.backup_last_attempt_at == ""
+
+    closed["value"] = False
+    ran = await service.run_backup()
+
+    assert ran.state == backup_service.STATE_READY, ran.reason
+    assert git_calls != []
+    assert store.settings.backup_last_attempt_at != ""

@@ -806,6 +806,12 @@ class MemoryPassCoordinator:
     def pump(self, workspace: str) -> None:
         """Start the oldest queued pass in *workspace*, if nothing is running."""
         host = self._host
+        if host.restart_draining:
+            # An update claim holds admission closed. Leave every pass in the
+            # state it is already in — a queued one stays queued, so it starts
+            # once the claim is released — rather than starting a turn the
+            # restart would interrupt.
+            return
         passes = self._passes_in(workspace)
         queued: list[ChatInfo] = []
         for chat in passes:
@@ -838,6 +844,36 @@ class MemoryPassCoordinator:
                 chat.chat_id,
             )
             self.pump(workspace)
+
+    def update_idle_reasons(self) -> list[str]:
+        """Why the memory-pass queue is not idle, empty when it is.
+
+        Read by an update claim's idle snapshot: a queued pass still waiting for
+        its turn and a pass whose turn is streaming are both work a restart
+        would interrupt. A record that cannot be read is reported as a reason
+        rather than raised — unknown is busy, so the claim defers instead of
+        closing admission over a pass it could not see.
+        """
+        reasons: list[str] = []
+        for chat in list(self._host._chats.values()):
+            if chat.archived:
+                continue
+            try:
+                helper = self._helper(chat)
+            except Exception:  # noqa: BLE001 — unknown is busy, not idle
+                reasons.append(f"unreadable memory pass in chat {chat.chat_id}")
+                continue
+            if helper.get("kind") != MEMORY_PASS_KIND:
+                raw = chat.helper
+                if isinstance(raw, dict) and raw.get("kind") == MEMORY_PASS_KIND:
+                    # A pass-shaped helper the normalizer refused: the queue
+                    # cannot tell what it is doing, so it counts as busy.
+                    reasons.append(f"unreadable memory pass in chat {chat.chat_id}")
+                continue
+            state = helper.get("state")
+            if state in {"queued", "running"}:
+                reasons.append(f"memory pass {state} in chat {chat.chat_id}")
+        return reasons
 
     def on_turn_started(self, chat: ChatInfo) -> None:
         """Reclaim the workspace slot when the owner continues a stopped pass.

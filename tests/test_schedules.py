@@ -2164,3 +2164,100 @@ def test_an_unknown_day_is_refused_naming_the_accepted_ones(bad) -> None:
 def test_a_non_text_day_is_refused(bad) -> None:
     with pytest.raises(ValueError):
         normalize_days_of_week(bad)
+
+
+# ── Admission closed: an update claim defers, never consumes ────────────────
+#
+# An unattended update closes admission synchronously before it restarts the
+# engine. Every path that can start work has to defer on that flag *before* it
+# prepares a chat, stamps a dispatch, creates a task or deletes a one-shot:
+# a deferred run must be indistinguishable from one that was never due.
+
+
+async def test_admission_closed_defers_every_entry_path_without_consuming(
+    store: ScheduleStore,
+) -> None:
+    closed = {"value": True}
+    dispatched: list[str] = []
+    prepared: list[str] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(entry.schedule_id)
+
+    def prepare_chat(entry, prompt, model, mode, provider):
+        prepared.append(entry.schedule_id)
+        return f"chat-{entry.schedule_id}"
+
+    at_slot = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    once = store.create(
+        daily_time_utc="08:00",
+        prompt="one-shot due during the claim",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="once",
+        run_at_date="2026-06-15",
+        timezone_name="UTC",
+    )
+    daily = store.create(
+        daily_time_utc="08:00",
+        prompt="daily slot due during the claim",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+        timezone_name="UTC",
+    )
+    interval = store.create(
+        daily_time_utc="",
+        prompt="interval due during the claim",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="interval",
+        interval_minutes=15,
+        timezone_name="UTC",
+    )
+    for entry in (once, daily, interval):
+        _set_created_at(store, entry)
+
+    mgr = ScheduleManager(
+        store=store,
+        dispatch_to_web=dispatch,
+        prepare_chat=prepare_chat,
+        admission_closed=lambda: closed["value"],
+    )
+
+    # The clock tick and the startup catch-up both find due work.
+    await mgr.tick(now=at_slot)
+    assert await mgr.catch_up(now=at_slot) == []
+    # Run now, for an interval entry and for a one-shot, is refused rather than
+    # queued: the caller gets a retryable answer and nothing is dispatched.
+    interval_now = await mgr.dispatch_now(interval.schedule_id)
+    once_now = await mgr.dispatch_now(once.schedule_id)
+
+    assert dispatched == []
+    assert prepared == []
+    assert interval_now["status"] == "busy"
+    assert once_now["status"] == "busy"
+    assert "update" in once_now["error"]
+
+    # Nothing consumed, nothing stamped, nothing left claiming a chat.
+    assert store.get(once.schedule_id) is not None
+    assert store.get(once.schedule_id).last_triggered_on == ""
+    assert store.get(daily.schedule_id).last_triggered_on == ""
+    assert store.get(interval.schedule_id).last_dispatched_at == ""
+    assert store.get(interval.schedule_id).last_status == ""
+    assert mgr._inflight == set()
+    assert mgr._claimed_chats == set()
+
+    closed["value"] = False
+    await mgr.tick(now=at_slot)
+    await asyncio.sleep(0.05)
+
+    # Every deferred entry ran exactly once after admission reopened, and the
+    # one-shot that was due during the claim is consumed now, not twice.
+    assert dispatched.count(once.schedule_id) == 1
+    assert store.get(once.schedule_id) is None
+    assert dispatched.count(interval.schedule_id) == 1
+    assert dispatched.count(daily.schedule_id) == 1
