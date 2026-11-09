@@ -1,8 +1,7 @@
-# Windows (preview)
+# Windows
 
-Ciaobot's engine runs natively on Windows 11. This is a **preview**: it is the
-same engine and the same PWA as on macOS, installed per user, and the first
-Windows releases may still have rough edges. Report problems at
+Ciaobot's engine runs natively on Windows 11 and is supported. It uses the same
+PWA as on macOS and is installed per user. Report problems at
 <https://github.com/raffaelefarinaro/ciaobot/issues> and say you are on Windows.
 
 ## Requirements

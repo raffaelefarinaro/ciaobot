@@ -1,6 +1,7 @@
 // Client and formatters for GET /api/stats (the Usage page and Home's Today rows).
 // Every numeric field may be null, so every response goes through normalizeUsageStats.
 import { api } from './api'
+import { modelDisplayName } from './modelLabels'
 
 export const STATS_RANGES = [7, 30, 90, 365] as const
 export type StatsRange = (typeof STATS_RANGES)[number]
@@ -109,3 +110,63 @@ export function formatDelta(current: number | null, previous: number | null): st
 
 export function periodLabel(rangeDays: number): string { return rangeDays === 365 ? 'previous year' : `previous ${rangeDays} days` }
 export function rangeLabel(range: StatsRange): string { return range === 365 ? 'Year' : `${range} days` }
+
+export type HeatLevel = 0 | 1 | 2 | 3 | 4
+export interface HeatCell { date: string | null; count: number | null; level: HeatLevel }
+export interface ModelShare { model: string; label: string; turns: number | null; percent: number }
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+export function heatLevel(count: number | null, max: number): HeatLevel {
+  if (count === null || count <= 0 || max <= 0) return 0
+  return Math.min(4, Math.max(1, Math.ceil((count / max) * 4))) as HeatLevel
+}
+
+export function weekdayIndex(date: string): number {
+  const [y, m, d] = date.split('-').map(Number)
+  return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7
+}
+
+export function formatDay(date: string): string {
+  const [y, m, d] = date.split('-').map(Number)
+  return `${WEEKDAYS[weekdayIndex(date)]} ${d} ${MONTHS[m - 1]} ${y}`
+}
+
+export function heatmapCells(days: UsageDay[]): HeatCell[] {
+  if (!days.length) return []
+  const max = Math.max(0, ...days.map(d => d.count ?? 0))
+  const pad: HeatCell[] = Array.from({ length: weekdayIndex(days[0].date) }, () => ({ date: null, count: null, level: 0 }))
+  return [...pad, ...days.map(d => ({ date: d.date, count: d.count, level: heatLevel(d.count, max) }))]
+}
+
+export function heatCellLabel(cell: HeatCell): string {
+  if (!cell.date) return ''
+  const what = cell.count === null ? 'no data' : `${formatCount(cell.count)} message${cell.count === 1 ? '' : 's'}`
+  return `${formatDay(cell.date)}: ${what}`
+}
+
+export function barPercent(value: number | null, max: number): string {
+  if (value === null || max <= 0) return '0%'
+  return `${Math.round((Math.max(0, value) / max) * 1000) / 10}%`
+}
+
+export function busiestHour(hours: Array<number | null>): number | null {
+  let best: number | null = null
+  hours.forEach((v, h) => { if (v !== null && v > 0 && (best === null || v > (hours[best] ?? 0))) best = h })
+  return best
+}
+
+export function topProjects(projects: UsageProject[], limit = 8): UsageProject[] {
+  return [...projects].sort((a, b) => (b.messages ?? -1) - (a.messages ?? -1)).slice(0, limit)
+}
+
+export function modelShares(models: UsageModel[]): ModelShare[] {
+  const total = models.reduce((sum, m) => sum + Math.max(0, m.turns ?? 0), 0)
+  return [...models].sort((a, b) => (b.turns ?? 0) - (a.turns ?? 0)).map(m => ({
+    model: m.model, label: modelDisplayName(m.model) || m.model, turns: m.turns,
+    percent: total > 0 ? Math.round((Math.max(0, m.turns ?? 0) / total) * 100) : 0,
+  }))
+}
+
+export function periodText(rangeDays: number): string { return rangeDays === 365 ? 'year' : `${rangeDays} days` }

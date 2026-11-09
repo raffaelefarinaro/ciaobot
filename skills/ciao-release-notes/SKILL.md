@@ -72,7 +72,7 @@ GitHub Desktop, Obsidian):
 8. **Group, don't enumerate.** Five PRs that together make the task board better
    are one or two lines, not five.
 9. **Platform tags** in parentheses only when an item is platform-specific:
-   "(Linux)", "(Windows preview)".
+   "(Linux)", "(Windows)".
 10. **Order by how many users it touches**, most first, within each section.
 11. **Plain words, present tense, no hype, no emoji.** British/American mix is
     fine; consistency within a release is not optional.

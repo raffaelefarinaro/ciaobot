@@ -1690,6 +1690,29 @@ class CiaoControlPlane:
         data: dict[str, Any] = await asyncio.to_thread(_collect)
         return _ok(data)
 
+    async def usage_stats(
+        self, principal: AgentPrincipal, *, range_days: int = 30
+    ) -> dict[str, Any]:
+        """Usage statistics for the caller's workspace (``ciao stats``).
+
+        The same payload ``GET /api/stats`` returns, scoped to the principal's
+        workspace. Registry facts are copied here on the event loop; the file
+        reads run in a worker thread.
+        """
+        from ciao import usage_stats as stats
+
+        workspace = self._workspace(principal)
+        if range_days not in stats.RANGES:
+            raise ControlPlaneError(
+                "invalid_range",
+                f"range must be one of {', '.join(str(r) for r in stats.RANGES)}",
+            )
+        sources = stats.snapshot_sources(self.config, self.pcm, workspace)
+        data: dict[str, Any] = await asyncio.to_thread(
+            stats.compute_usage_stats, sources, range_days
+        )
+        return _ok(data)
+
     def gws_status(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Report Google Workspace connection status for the active workspace.
 

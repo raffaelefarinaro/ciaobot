@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ import pytest
 from ciao import agent_paths
 from ciao import behavioral_eval
 from ciao import cli
+from ciao import fts_search
 from ciao import task_eval as te
 
 
@@ -1482,6 +1484,141 @@ def test_comparison_shows_each_side_mode() -> None:
 
     assert "Baseline mode" in table.splitlines()[0]
     assert "| E2-recall-guest-count | auto | bypass |" in table
+
+
+def test_compare_pools_every_run_of_a_task_across_rounds() -> None:
+    # Three --repeats 3 rounds appended into one file: repeat numbers recur and the
+    # rounds ran at different code revisions. compare must use all nine runs.
+    def run(status: str, revision: str, repeat: int, context_total: int) -> dict[str, Any]:
+        return {**_row(label="candidate", status=status, context_total=context_total),
+                "code_revision": revision, "repeat": repeat, "mode": "auto"}
+
+    candidate = [
+        run("failed", "rev-b", 1, 100), run("failed", "rev-b", 2, 100), run("passed", "rev-b", 3, 100),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+        run("passed", "rev-a", 1, 300), run("passed", "rev-a", 2, 300), run("passed", "rev-a", 3, 300),
+    ]
+    baseline = [{**_row(status="passed" if i else "failed"), "repeat": i % 3 + 1, "mode": "auto"} for i in range(9)]
+
+    item = te.compare(baseline, candidate)[0]
+
+    cand = item["candidate"]
+    assert cand["n"] == 9
+    assert cand["passed"] == 7
+    assert cand["pass_rate"] == pytest.approx(7 / 9)
+    assert cand["median_context_total"] == 300
+    assert cand["mode"] == "auto"
+    assert cand["code_revision"] == "rev-a,rev-b"
+    assert item["baseline"]["pass_rate"] == pytest.approx(8 / 9)
+    assert item["delta"]["pass_rate"] == pytest.approx(-1 / 9)
+
+    table = te.render_comparison([item])
+    header = table.splitlines()[0]
+    assert "Baseline n" in header and "Candidate n" in header
+    assert "| 0.89 (8/9) | 0.78 (7/9) |" in table
+    assert "| 9 | 9 |" in table
+
+
+def test_compare_reports_mixed_modes_on_one_side() -> None:
+    candidate = [{**_row(label="candidate"), "mode": "auto"}, {**_row(label="candidate"), "mode": "bypass"}]
+
+    item = te.compare([_row()], candidate)[0]
+
+    assert item["candidate"]["n"] == 2
+    assert item["candidate"]["mode"] == "auto,bypass"
+    assert item["baseline"]["mode"] == "-"
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> Path:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path
+
+
+def test_compare_refuses_a_side_that_mixes_models() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}]
+
+    with pytest.raises(te.MixedRunsError) as excinfo:
+        te.compare([_row()], candidate)
+
+    message = str(excinfo.value)
+    assert "candidate" in message
+    assert "E2-recall-guest-count" in message
+    assert "haiku,sonnet" in message
+    assert "--allow-mixed" in message
+
+
+def test_compare_refuses_a_side_that_mixes_providers() -> None:
+    baseline = [_row(), {**_row(), "provider": "opencode"}]
+
+    with pytest.raises(te.MixedRunsError, match="claude,opencode"):
+        te.compare(baseline, [_row(label="candidate")])
+
+
+def test_compare_does_not_refuse_mixed_revisions() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "code_revision": "rev-b"}]
+
+    item = te.compare([_row()], candidate)[0]
+
+    assert item["candidate"]["code_revision"] == "rev-a,rev-b"
+    assert te.mixed_runs([item]) == []
+
+
+def test_compare_cli_refuses_mixed_models(tmp_path: Path) -> None:
+    base = _write_jsonl(tmp_path / "base.jsonl", [_row()])
+    cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand)])
+
+    assert "E2-recall-guest-count" in str(excinfo.value.code)
+    assert "haiku,sonnet" in str(excinfo.value.code)
+
+
+def test_compare_cli_allow_mixed_warns_and_shows_provider_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = _write_jsonl(tmp_path / "base.jsonl", [_row()])
+    cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
+
+    code = cli.main(
+        ["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand), "--allow-mixed"]
+    )
+
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "warning" in err.lower()
+    assert "E2-recall-guest-count" in err and "haiku,sonnet" in err
+    header = out.splitlines()[0]
+    assert "Baseline model" in header and "Candidate model" in header
+    assert "Baseline provider" in header and "Candidate provider" in header
+    assert "| haiku | haiku,sonnet |" in out
+
+
+def test_comparison_table_hides_provider_model_and_revision_when_uniform() -> None:
+    table = te.render_comparison(te.compare([_row()], [_row(label="candidate")]))
+
+    header = table.splitlines()[0]
+    assert "provider" not in header.lower()
+    assert "model |" not in header.lower()
+    assert "revision" not in header.lower()
+
+
+def test_comparison_table_shows_revision_when_a_side_mixes_revisions() -> None:
+    candidate = [_row(label="candidate"), {**_row(label="candidate"), "code_revision": "rev-b"}]
+
+    table = te.render_comparison(te.compare([_row()], candidate))
+
+    assert "Baseline revision" in table.splitlines()[0]
+    assert "| rev-a | rev-a,rev-b |" in table
+
+
+def test_compare_reports_missing_identity_like_summarize() -> None:
+    row = _row()
+    del row["code_revision"]
+
+    item = te.compare([row], [_row(label="candidate")])[0]
+
+    assert item["baseline"]["code_revision"] == te.summarize([row])[0]["code_revision"] == "None"
 
 
 def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> None:
@@ -3376,3 +3513,68 @@ def test_m2_project_exists_accepts_havent_created(tmp_path: Path) -> None:
 def test_host_project_name_does_not_reveal_the_eval() -> None:
     source = Path(te.__file__).read_text(encoding="utf-8")
     assert "Task eval host" not in source and "Not a real project" not in source
+
+
+# --- H11: the current value sits below the search snippet ---------------------------------------
+
+H11_ID = "H11-recall-value-below-snippet"
+H11_NOTE = "memory-vault/Documents/allotment.md"
+
+
+def _grade_h11(root: Path, answer: str, snapshot: te.Snapshot | None = None) -> list[te.CheckResult]:
+    ctx = _ctx(root, answer=answer, snapshot=snapshot)
+    return [te.CHECKS[str(spec["kind"])](ctx, spec) for spec in _task(H11_ID).checks]
+
+
+def test_h11_snippet_keeps_the_stale_rent_and_drops_the_current_fee(tmp_path: Path) -> None:
+    """The shape this task pins: a search for the question's words returns the note, but its 32-token
+    snippet carries only the old rent; the current fee sits in a later section no query word reaches."""
+    root = _seed(tmp_path, H11_ID)
+    note = (root / H11_NOTE).read_text(encoding="utf-8")
+    assert "CHF 180" in note and "CHF 240" in note
+    assert note.index("CHF 240") > note.index("## Changes") > note.index("CHF 180")
+
+    conn = sqlite3.connect(tmp_path / "fts.db")
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, root / "memory-vault", path_base=tmp_path)
+        for query in ("allotment rent", "yearly rent allotment plot", "allotment plot rent now"):
+            rows = fts_search.search_vault(conn, query, limit=5)
+            by_name = {Path(row["path"]).name: row["snippet"] for row in rows}
+            assert "180" in by_name["allotment.md"], query
+            assert "240" not in by_name["allotment.md"], query
+            assert "310" in by_name["allotment-waitlist.md"], query
+    finally:
+        conn.close()
+
+
+def test_h11_checks_pass_on_the_current_fee_and_fail_on_the_snippet_answer(tmp_path: Path) -> None:
+    root = _seed(tmp_path, H11_ID)
+    saved = {H11_NOTE: (root / H11_NOTE).read_bytes()}
+    files = tuple(
+        path.relative_to(root).as_posix() for path in (root / "memory-vault").rglob("*") if path.is_file()
+    )
+    snap = _snapshot(files=files, saved=saved)
+
+    for answer in (
+        "Your allotment rent is now **CHF 240** a year: the 2026 general assembly raised it from CHF 180.",
+        "CHF 240 per year from this season, invoiced in February.",
+        "The note says 'Yearly rent: CHF 180', but its Changes section sets the fee at CHF 240 from this season.",
+    ):
+        results = _grade_h11(root, answer, snap)
+        assert all(result.ok for result in results), [(r.kind, r.detail) for r in results if not r.ok]
+
+    # Untouched: no answer at all.
+    assert not all(result.ok for result in _grade_h11(root, "", snap))
+    # The snippet-only answer, and the distractor plot's rent.
+    for wrong in (
+        "Your yearly allotment rent is CHF 180, paid each spring.",
+        "The yearly rent is CHF 310.",
+        "You pay CHF 180 a year; I couldn't confirm whether that changed.",
+    ):
+        assert not all(result.ok for result in _grade_h11(root, wrong, snap)), wrong
+
+    # A recall that edits the note it read fails even with the right figure.
+    _append_note(root, H11_NOTE, "\nChecked 2026-11: fee is CHF 240.\n")
+    results = _grade_h11(root, "It is CHF 240 a year now.", snap)
+    assert [r.kind for r in results if not r.ok] == ["unchanged"]

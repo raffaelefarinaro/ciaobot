@@ -197,6 +197,7 @@ carried by the session.
   `/api/workspace-open`, and starting a `system_setting` needs-you card (which runs `open` on a constant System Settings URL), check the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
+- **Usage statistics are session-gated and workspace-checked.** `GET /api/stats` is an ordinary session-gated route, not loopback-only; its `workspace` query value is checked against the registry. The `usage_stats` agent operation is principal-scoped and takes no workspace argument. Both return aggregates, project names and ids only, never transcript text.
 
 - **Memory handover widens what unattended text can reach.** At `memory_handover: all`
   (operator-only, `PATCH /api/workspaces/{name}`), the nightly run may accept a

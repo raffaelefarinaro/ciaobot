@@ -39,9 +39,12 @@ from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
         "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
-        "workspace", "repo", "webhook", "context", "help",
+        "workspace", "repo", "webhook", "context", "stats", "help",
     }
 )
+#: Days `ciao stats --range` accepts; must equal `ciao.usage_stats.RANGES`
+#: (not imported: this module stays import-light).
+STATS_RANGES: tuple[int, ...] = (7, 30, 90, 365)
 _REPO_HELP = "Absolute path (or one relative to this shell) of a local git checkout's top level; \"\" unlinks."
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
     "gws": frozenset({"status"}),
@@ -206,6 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
     logs = context.add_parser("logs", help="Return Ciaobot's version and recent workspace-scoped failed job runs.")
     logs.add_argument("--lines", type=int, default=200, help="Retained compatibility count, 1-1000; no log tail is read.")
+
+    stats = nouns.add_parser("stats", help="Usage statistics for the active workspace.")
+    stats.add_argument(
+        "--range", dest="range_days", type=int, choices=STATS_RANGES, default=30,
+        help="Days covered: 7, 30, 90 or 365 (default 30).",
+    )
 
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")
@@ -679,6 +688,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     noun, verb = args.noun, getattr(args, "verb", None)
     if noun == "help":
         return None
+    if noun == "stats":
+        return "usage_stats", {"range_days": args.range_days}
     if noun == "context":
         if verb == "logs":
             return "context_logs", {"lines": args.lines}
