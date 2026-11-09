@@ -56,10 +56,16 @@
           <template v-else>
             <div class="mcp-actions">
               <button
-                v-if="showSignIn(server)"
+                v-if="needsAuth(server)"
                 type="button"
-                class="mcp-signin"
-                :class="needsAuth(server) ? 'btn-primary' : 'btn-small'"
+                class="mcp-signin btn-primary"
+                :aria-disabled="signingIn !== null ? 'true' : undefined"
+                @click="signInInChat(current.provider, server.name, signInChat(server)!)"
+              >{{ signingIn === moreKey(server) ? 'Starting…' : 'Sign in' }}</button>
+              <button
+                v-else-if="showSignIn(server)"
+                type="button"
+                class="mcp-signin btn-small"
                 @click="runCommand(serverCommand(current.provider, 'login', server.name))"
               >Sign in in terminal</button>
               <div class="mcp-more" @keydown.esc.stop="closeMenu(true)" @focusout="onFocusOut">
@@ -79,7 +85,8 @@
               </div>
               <span v-if="menuCopied === moreKey(server)" class="hint" role="status">Copied</span>
             </div>
-            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+            <p v-if="signInError === moreKey(server)" class="action-result --error" role="alert">{{ SIGN_IN_ERROR }}</p>
+            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in finishes in the open chat, which connects as soon as you complete it; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
           </template>
         </div>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
@@ -121,10 +128,12 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import TabBar from '../TabBar.vue'
 import type { McpServersController } from '../../composables/useMcpServers'
 import { useRunInTerminal } from '../../composables/useRunInTerminal'
+import { safeExternalUrl } from '../../lib/chatActions'
 import { writeClipboard } from '../../lib/codeCopy'
 import { groupMcpConnections } from '../../lib/mcpConnections'
 import { mcpCommand, serverUrlError, validServerName, type McpAction } from '../../lib/shellQuote'
 import type { McpConnection, McpNativeServer, McpProviderInventory } from '../../lib/types'
+import { useProjectStore } from '../../stores/projects'
 
 type Provider = McpProviderInventory['provider']
 
@@ -132,6 +141,7 @@ const props = defineProps<{ mcp: McpServersController; defaultProvider?: string 
 const emit = defineEmits<{ (e: 'ask-ciao'): void }>()
 const { status, loading, error, fetchStatus } = props.mcp
 const terminal = useRunInTerminal()
+const projectStore = useProjectStore()
 
 const providers = computed<McpProviderInventory[]>(() => {
   const all = status.value?.providers ?? []
@@ -199,6 +209,39 @@ async function runCommand(cmd: string | null, opts?: { enter?: boolean }): Promi
 
 async function copyCommand(cmd: string | null): Promise<void> {
   if (cmd && await writeClipboard(cmd)) flashNote('Copied')
+}
+
+/** The open chat to sign in through: the first one that reports this server needs a sign-in. */
+function signInChat(server: McpNativeServer): string | null {
+  return server.connections.find(c => c.state === 'needs_auth')?.chat_id ?? null
+}
+const signingIn = ref<string | null>(null)
+const signInError = ref<string | null>(null)
+const SIGN_IN_ERROR = 'The sign-in could not be started. Open the chat and try again.'
+/** Sign in through the chat's own live session, using its needs-you card, then go to that card. */
+async function signInInChat(provider: Provider, serverName: string, chatId: string): Promise<void> {
+  if (signingIn.value) return
+  const key = menuKey(provider, serverName)
+  signingIn.value = key
+  signInError.value = null
+  try {
+    let action = await projectStore.requestMcpAuth(chatId, serverName)
+    if (action && (action.state === 'open' || action.state === 'failed')) {
+      try {
+        action = await projectStore.startChatAction(chatId, action.id)
+      } catch {
+        // The card in the chat shows why it failed.
+      }
+    }
+    const target = action?.state === 'waiting' ? safeExternalUrl(action.params.url) : null
+    if (target) window.open(target, '_blank', 'noopener,noreferrer')
+    const { router } = await import('../../router')
+    await router.push(`/chat/${encodeURIComponent(chatId)}`)
+  } catch {
+    signInError.value = key
+  } finally {
+    signingIn.value = null
+  }
 }
 
 const openMenu = ref<string | null>(null)

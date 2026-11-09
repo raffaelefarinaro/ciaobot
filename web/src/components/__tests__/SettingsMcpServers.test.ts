@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, RouterLinkStub, type DOMWrapper } from '@vue/test-utils'
 import SettingsMcpServers from '../settings/SettingsMcpServers.vue'
 import { useMcpServers } from '../../composables/useMcpServers'
@@ -8,8 +9,18 @@ import type { McpStatus } from '../../lib/types'
 
 const runMock = vi.hoisted(() => vi.fn())
 const writeClipboard = vi.hoisted(() => vi.fn())
+const apiPost = vi.hoisted(() => vi.fn())
+const routerPush = vi.hoisted(() => vi.fn(async () => {}))
 vi.mock('../../composables/useRunInTerminal', () => ({ useRunInTerminal: () => ({ run: runMock, busy: ref(false) }) }))
 vi.mock('../../lib/codeCopy', () => ({ writeClipboard }))
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), post: apiPost, patch: vi.fn(), del: vi.fn(), postForm: vi.fn() } }))
+vi.mock('../../router', () => ({ router: { push: routerPush } }))
+
+beforeEach(() => {
+  setActivePinia(createPinia())
+  apiPost.mockReset()
+  routerPush.mockClear()
+})
 
 const PREFIX = 'cd -- /workspace/personal && '
 
@@ -157,7 +168,7 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.text()).toContain('Copied. Paste it into the terminal.')
     wrapper.unmount()
   })
-  it('shows sign in for every server and emphasises needs_auth', async () => {
+  it('signs in through the open chat that needs it, and in the terminal otherwise', async () => {
     runMock.mockReset().mockResolvedValue('typed')
     const { wrapper } = panel()
     const quiet = button(wrapper, 'Sign in in terminal')
@@ -165,11 +176,63 @@ describe('Settings MCP native inventory', () => {
     await quiet.trigger('click')
     expect(runMock).toHaveBeenLastCalledWith(`${PREFIX}claude mcp login notion`, undefined)
     await tab(wrapper, 'OpenCode').trigger('click')
-    const loud = button(wrapper, 'Sign in in terminal')
-    expect(loud.classes()).toContain('btn-primary')
+    expect(wrapper.findAll('.mcp-signin').map(b => b.text())).toEqual(['Sign in'])
+    expect(button(wrapper, 'Sign in')!.classes()).toContain('btn-primary')
     expect(wrapper.text()).toContain('Sign-in required')
-    await loud.trigger('click')
-    expect(runMock).toHaveBeenLastCalledWith(`${PREFIX}opencode mcp auth notion`, undefined)
+    expect(wrapper.text()).toContain('only reaches chats started after it')
+    apiPost
+      .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'notion', provider: 'opencode' }, error: '', created_at: 1 } })
+      .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'waiting', params: { server: 'notion', provider: 'opencode', url: 'https://auth.example/authorize' }, error: '', created_at: 1 } })
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    runMock.mockClear()
+    await button(wrapper, 'Sign in')!.trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenNthCalledWith(1, '/api/chats/chat-two/actions/mcp-auth', { server: 'notion' })
+    expect(apiPost).toHaveBeenNthCalledWith(2, '/api/chats/chat-two/actions/a1/start', {})
+    expect(open).toHaveBeenCalledWith('https://auth.example/authorize', '_blank', 'noopener,noreferrer')
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    expect(runMock).not.toHaveBeenCalled()
+    open.mockRestore()
+    wrapper.unmount()
+  })
+  it('does not restart a sign-in that is already waiting', async () => {
+    apiPost.mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'waiting', params: { server: 'notion', provider: 'opencode', url: 'https://auth.example/authorize' }, error: '', created_at: 1 } })
+    const { wrapper } = panel()
+    await tab(wrapper, 'OpenCode').trigger('click')
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    await button(wrapper, 'Sign in')!.trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledWith('https://auth.example/authorize', '_blank', 'noopener,noreferrer')
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    open.mockRestore()
+    wrapper.unmount()
+  })
+  it('still goes to the chat when the start is refused', async () => {
+    apiPost
+      .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'notion', provider: 'opencode' }, error: '', created_at: 1 } })
+      .mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
+    const { wrapper } = panel()
+    await tab(wrapper, 'OpenCode').trigger('click')
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    await button(wrapper, 'Sign in')!.trigger('click')
+    await flushPromises()
+    expect(open).not.toHaveBeenCalled()
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    open.mockRestore()
+    wrapper.unmount()
+  })
+  it('says so when the sign-in card cannot be raised', async () => {
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }))
+    const { wrapper } = panel()
+    await tab(wrapper, 'OpenCode').trigger('click')
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    await button(wrapper, 'Sign in')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toBe('The sign-in could not be started. Open the chat and try again.')
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(button(wrapper, 'Sign in')).toBeDefined()
+    open.mockRestore()
     wrapper.unmount()
   })
   it('copies the remove command from the more menu', async () => {

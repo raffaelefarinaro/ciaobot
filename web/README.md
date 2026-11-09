@@ -586,9 +586,15 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   copying it when the terminal is locked or unavailable. `composables/useMcpServers.ts`
   owns status and usage reads, while `components/settings/SettingsMcpServers.vue`
   renders provider configuration and per-chat connection states.
-  Settings never edits native MCP configuration, handles secret values, probes
-  servers, or starts a provider/MCP process; commands run only in the terminal
-  the user is watching. The selected workspace scopes
+  Settings never edits native MCP configuration, handles secret values or probes
+  servers; commands run only in the terminal the user is watching. A server that
+  needs a sign-in in an open chat gets **Sign in** instead of **Sign in in
+  terminal** (which stays in the ··· menu): `store.requestMcpAuth` raises that
+  chat's `mcp_auth` card (`POST /api/chats/{chat_id}/actions/mcp-auth`),
+  `store.startChatAction` starts it as the card's own button does (for OpenCode
+  this may start the chat's server), the sign-in page opens and the page goes to
+  the chat. A terminal sign-in cannot update a running chat: OpenCode V2 has no
+  reconnect route. The selected workspace scopes
   `/api/mcp/status`; only already running chats in that workspace contribute
   connection states. An empty connections list means unchecked, and unreadable
   configuration/provider state is unknown. Claude's workspace server allowlist
