@@ -99,6 +99,26 @@ def test_propose_below_threshold_exits_2(tmp_path: Path, capsys: pytest.CaptureF
     assert cli.main(_run("observation-propose", row["id"])) == 2
 
 
+def test_propose_drop_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], _workspace: Path
+) -> None:
+    for chat in ("chat-a", "chat-b", "chat-c"):
+        assert _add(tmp_path, chat) == 0
+    capsys.readouterr()
+    assert cli.main(_run("observations", "--json")) == 0
+    (row,) = json.loads(capsys.readouterr().out)["observations"]
+
+    assert cli.main(_run("observation-propose", row["id"], "--drop", "--json")) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["queued"] is False and result["dropped"] is True
+    queue = _workspace / "Workspace" / "Memory-Proposals.md"
+    assert not queue.exists() or "[profile]" not in queue.read_text(encoding="utf-8")
+
+    assert cli.main(_run("observations", "--json")) == 0
+    (row,) = json.loads(capsys.readouterr().out)["observations"]
+    assert row["section"] == "promoted"
+
+
 def test_prune_reports_archived_ids(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(_run("observation-prune", "--json")) == 0
     assert json.loads(capsys.readouterr().out) == {"archived": []}
