@@ -2,7 +2,7 @@
   "id": "H11-recall-value-below-snippet",
   "tier": "hard",
   "category": "recall",
-  "prompt": "How much is the yearly rent on my allotment plot now?",
+  "prompt": "What is the yearly rent on my allotment plot?",
   "entry": {"kind": "prompt"},
   "setup": [],
   "requires": [],
