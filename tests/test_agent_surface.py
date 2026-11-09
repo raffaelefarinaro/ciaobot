@@ -92,6 +92,19 @@ def test_unknown_operation_and_bad_arguments_are_envelopes_with_telemetry(tmp_pa
     assert records[-1]["surface"] == "cli"
 
 
+def test_deeply_nested_body_is_an_invalid_request_envelope(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        deep = client.post(
+            "/agent/v1/vault_search",
+            headers={"Authorization": f"Bearer {token}"},
+            content=b'{"q":' * 20000 + b"0" + b"}" * 20000,
+        )
+    assert deep.status_code == 400
+    assert deep.json()["error"]["code"] == "invalid_request"
+
+
 def test_plan_mode_gate_applies_through_the_cli_surface(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, mode="plan")
     token = _token(service)

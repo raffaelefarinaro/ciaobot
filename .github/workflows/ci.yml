@@ -13,14 +13,16 @@ permissions:
 
 # Linux is the gate every PR waits on, split into two parallel jobs:
 # `linux-server` (mypy, pytest -n auto, package smoke) and `linux-web` (vitest
-# and the PWA build). `test` is the full macOS job — coverage, browser tests,
-# the launchd service, and an engine wheel built from this branch, installed
-# into a throwaway venv and cold-started. It is the only place the launchd,
-# installer, engine-update and migration machinery runs on the real platform,
-# and nothing here needs a diff to decide that: it runs on every push to
-# develop and on every PR to main (release cuts). A macOS-only regression in a
-# develop PR therefore surfaces on the post-merge push run instead, before any
-# release can ship it.
+# and the PWA build). `linux-server-latest-python` runs the same backend gates
+# on the newest Python `requires-python` admits (3.14); it runs on every PR in
+# parallel but is not a required check. `test` is the full macOS job —
+# coverage, browser tests, the launchd service, and an engine wheel built from
+# this branch, installed into a throwaway venv and cold-started. It is the only
+# place the launchd, installer, engine-update and migration machinery runs on
+# the real platform, and nothing here needs a diff to decide that: it runs on
+# every push to develop and on every PR to main (release cuts). A macOS-only
+# regression in a develop PR therefore surfaces on the post-merge push run
+# instead, before any release can ship it.
 #
 # `windows` follows the same split. On a develop PR it runs only the fast
 # gates — every module imports and `mypy ciao` passes natively on win32, which
@@ -42,6 +44,25 @@ jobs:
       run: python -m pip install -e '.[test]'
     - name: Python static type check
       run: mypy ciao
+    - name: Linux backend tests
+      run: pytest -n auto tests/
+
+  # `requires-python` admits every release from 3.12 up, and installers pick
+  # the newest interpreter, so the backend gates also run on the newest Python
+  # Ciaobot supports. A separate job (not a matrix) keeps the required
+  # `linux-server` check name unchanged.
+  linux-server-latest-python:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.14'
+        cache: 'pip'
+    - name: Install Python dependencies
+      run: python -m pip install -e '.[test]'
+    - name: Python static type check
+      run: mypy --python-version 3.14 ciao
     - name: Linux backend tests
       run: pytest -n auto tests/
 

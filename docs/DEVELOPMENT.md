@@ -1031,7 +1031,9 @@ while the server is running, because the live schedule store may be writing it.
   Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
   `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
-  minutes). The
+  minutes). `linux-server-latest-python` repeats the `linux-server` gates on
+  Python 3.14, the newest interpreter `requires-python` admits; it is not a
+  required check. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 from typing import Any
 
@@ -10,6 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Match
 
+from ciao.jsonio import json_nesting_exceeds, loads_untrusted
 from ciao.web.auth import _setup_finish_refusal
 
 DEFAULT_BODY_LIMIT = 1024 * 1024
@@ -22,6 +22,14 @@ REPLAY_CHUNK_SIZE = 64 * 1024
 
 
 def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
+    """The body cap and policy for the route ``scope`` resolves to.
+
+    Every body whose policy is not a multipart one is depth-scanned for JSON
+    nesting. A route that takes a raw binary body would need a policy of its
+    own here: stray bracket bytes in random data exceed the depth limit more
+    often the longer the body (about 9 in 10 at 1 MiB), so scanning them would
+    refuse ordinary uploads. No route does today.
+    """
     path = scope.get("path", "")
     method = scope.get("method", "").upper()
     if not path.startswith("/api/"):
@@ -103,18 +111,24 @@ class ApiRequestBodyLimitMiddleware:
                     break
 
             media_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
-            # The PWA labels every request JSON, bodiless GETs included, so an
-            # empty body is no body rather than malformed JSON.
-            if size and policy != "multipart_only" and (
-                media_type == b"application/json" or media_type.endswith(b"+json")
-            ):
+            # Handlers read the body with `request.json()` whatever the declared
+            # type, so every body is checked for deep nesting unless its route
+            # parses multipart (`request.form()`). The route decides, never the
+            # caller's Content-Type: a body labelled multipart on a JSON route
+            # is still JSON to its handler. Only a body declared as JSON must
+            # also parse. The PWA labels every request JSON, bodiless GETs
+            # included, so an empty body is no body rather than malformed JSON.
+            if size and policy not in ("multipart_only", "skill_import"):
                 spool.seek(0)
+                raw = spool.read()
                 try:
-                    json.loads(spool.read())
-                except (ValueError, RecursionError, UnicodeDecodeError):
+                    if media_type == b"application/json" or media_type.endswith(b"+json"):
+                        loads_untrusted(raw)
+                    elif json_nesting_exceeds(raw):
+                        raise ValueError("nested too deeply")
+                except ValueError:
                     await JSONResponse({"error": "bad json"}, status_code=400)(scope, receive, send)
                     return
-                spool.seek(0)
 
             # Non-JSON bodies need the same rewind as parsed JSON bodies before
             # a handler starts consuming the replay stream.
