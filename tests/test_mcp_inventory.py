@@ -12,11 +12,6 @@ from ciao.web.mcp_inventory import _jsonc_to_json, _shell_prefix, provider_inven
 _key = agent_paths.claude_config_project_key
 
 
-def _assume_no_git_above(tmp_path: Path) -> None:
-    if any((parent / ".git").exists() for parent in tmp_path.resolve().parents):
-        pytest.skip("tmp_path is inside a git repo")
-
-
 class _NoRuntime:
     async def provider_mcp_runtime_connections(self, _workspace, _names):
         return {"claude": {}, "opencode": {}}

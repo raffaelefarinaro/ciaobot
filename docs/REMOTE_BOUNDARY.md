@@ -214,6 +214,8 @@ carried by the session.
   its lease to reset the cap, as it could edit the registry; the file-tool deny
   patterns and the operator's Undo are the remaining controls.
 
+- **MCP on/off writes provider config (`POST /api/mcp/servers/enabled`).** It is gated like `PATCH /api/workspaces/{name}`: the session cookie and the same-origin check, with no agent bearer token. It takes no path from the client; the workspace root and the environment give the paths. It writes only Claude Code's `disabledMcpServers` list in the global config's project entry for the workspace folder, or the OpenCode `disabled`/`enabled` flag on one server entry. It takes Claude Code's `.claude.json.lock` without stealing it, and makes a one-time owner-only (0600) `.ciao-bak` copy before the first write.
+
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
 

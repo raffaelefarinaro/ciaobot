@@ -5290,14 +5290,15 @@ class ProjectChatManager:
         the live-stream check. Busy or blocked chats are returned as ``pending``.
         """
         _project_ids, chat_ids = self.workspace_scope(workspace)
-        active = set(self.active_chat_ids())
         reloaded: list[str] = []
         pending: list[str] = []
         for chat_id in sorted(chat_ids):
             chat = self._chats.get(chat_id)
             if chat is None or chat.provider != provider or chat_id not in self._providers:
                 continue
-            if chat_id in active or not await self.reload_provider(chat_id):
+            # Checked per chat: each await below yields, so a turn may have started meanwhile.
+            # A pending chat keeps its old provider until it is idle and reloaded again.
+            if chat_id in self.active_chat_ids() or not await self.reload_provider(chat_id):
                 pending.append(chat_id)
             else:
                 reloaded.append(chat_id)

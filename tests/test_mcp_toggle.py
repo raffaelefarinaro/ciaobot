@@ -23,11 +23,6 @@ from ciao.web.mcp_toggle import (
 _key = agent_paths.claude_config_project_key
 
 
-def _assume_no_git_above(tmp_path: Path) -> None:
-    if any((parent / ".git").exists() for parent in tmp_path.resolve().parents):
-        pytest.skip("tmp_path is inside a git repo")
-
-
 def _paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "home", tmp_path / "ws"
 
@@ -212,7 +207,8 @@ def test_release_leaves_a_lock_it_did_not_create(tmp_path: Path) -> None:
     lock = home / ".claude.json.lock"
 
     with _claude_config_lock(config):
-        os.rmdir(lock)
+        # Keep the old directory allocated (renamed aside) so the new one cannot reuse its inode.
+        os.rename(lock, home / "aside")
         os.mkdir(lock)
 
     assert lock.exists()
@@ -412,3 +408,243 @@ def test_forget_mcp_auth_decline(tmp_path: Path) -> None:
     manager.forget_mcp_auth_decline("work", "claude", "notion")
 
     assert manager.declined_mcp_auth == {("work", "claude", action_key("mcp_auth", {"server": "linear"}))}
+
+
+def _turn_off_into(name: str, root: Path, errors: list[BaseException]) -> None:
+    try:
+        set_mcp_server_enabled(provider="claude", server=name, agent_root=root, enabled=False)
+    except BaseException as exc:
+        errors.append(exc)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs a privilege on Windows")
+def test_symlinked_settings_file_uses_the_real_files_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home, root = _paths(tmp_path)
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "real.json"
+    real.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+    os.chmod(real, 0o640)
+    config = home / ".claude.json"
+    config.symlink_to(real)
+    monkeypatch.setattr("ciao.web.mcp_toggle.CLAUDE_LOCK_WAIT_S", 0.1)
+    held = store / "real.json.lock"
+    os.mkdir(held)
+    try:
+        with pytest.raises(McpToggleError) as caught:
+            set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
+        assert caught.value.reason == "config_busy"
+    finally:
+        os.rmdir(held)
+
+    result = set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
+
+    assert result.changed is True
+    assert config.is_symlink()
+    assert _claude_list(real, root) == ["notion"]
+    assert (store / "real.json.ciao-bak").exists()
+    assert stat.S_IMODE(real.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs a privilege on Windows")
+def test_backup_never_follows_a_dangling_link(tmp_path: Path) -> None:
+    home, root = _paths(tmp_path)
+    config = _write_claude(home, {"projects": {}})
+    victim = tmp_path / "victim"
+    (home / ".claude.json.ciao-bak").symlink_to(victim)
+
+    set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
+
+    assert not victim.exists()
+    assert _claude_list(config, root) == ["notion"]
+
+
+def test_lock_is_removed_when_it_cannot_be_inspected_after_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, _root = _paths(tmp_path)
+    config = home / ".claude.json"
+    config.write_text("{}", encoding="utf-8")
+    lock = home / ".claude.json.lock"
+    real_stat = os.stat
+
+    def stat_or_refuse(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(str(path)) == lock:
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("ciao.web.mcp_toggle.os.stat", stat_or_refuse)
+
+    with pytest.raises(McpToggleError) as caught:
+        with _claude_config_lock(config):
+            pass
+    assert caught.value.reason == "unreadable_config"
+    assert not os.path.lexists(lock)
+
+
+def test_text_that_cannot_be_encoded_is_unreadable(tmp_path: Path) -> None:
+    home, root = _paths(tmp_path)
+    config = home / ".claude.json"
+    config.write_text('{"projects": {}, "uni": "\\ud800"}', encoding="utf-8")
+    original = config.read_bytes()
+
+    with pytest.raises(McpToggleError) as caught:
+        set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
+
+    assert caught.value.reason == "unreadable_config"
+    assert caught.value.message == UNREADABLE_MESSAGE
+    assert config.read_bytes() == original
+    assert not list(home.glob(".claude.json.*.tmp"))
+
+
+def test_config_that_does_not_round_trip_is_refused_before_any_backup(tmp_path: Path) -> None:
+    home, root = _paths(tmp_path)
+    config = home / ".claude.json"
+    config.write_text('{"projects": {}, "x": NaN}', encoding="utf-8")
+    original = config.read_bytes()
+
+    with pytest.raises(McpToggleError) as caught:
+        set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
+
+    assert caught.value.reason == "unreadable_config"
+    assert config.read_bytes() == original
+    assert not (home / ".claude.json.ciao-bak").exists()
+
+
+def test_a_held_lock_makes_a_writer_wait(tmp_path: Path) -> None:
+    home, root = _paths(tmp_path)
+    config = _write_claude(home, {"projects": {}})
+    errors: list[BaseException] = []
+
+    with _claude_config_lock(config):
+        thread = threading.Thread(target=_turn_off_into, args=("notion", root, errors))
+        thread.start()
+        time.sleep(0.2)
+        assert thread.is_alive()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert _claude_list(config, root) == ["notion"]
+    assert not (home / ".claude.json.lock").exists()
+
+
+def test_two_writers_released_together_both_land(tmp_path: Path) -> None:
+    home, root = _paths(tmp_path)
+    config = _write_claude(home, {"projects": {}})
+    original = config.read_bytes()
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def run(name: str) -> None:
+        try:
+            barrier.wait(timeout=10)
+            set_mcp_server_enabled(provider="claude", server=name, agent_root=root, enabled=False)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(name,)) for name in ("x", "y")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert sorted(_claude_list(config, root)) == ["x", "y"]
+    assert (home / ".claude.json.ciao-bak").read_bytes() == original
+
+
+def _refuse(*_args: object, **_kwargs: object) -> None:
+    raise PermissionError("denied")
+
+
+@pytest.mark.parametrize(
+    "case", ["lock_mkdir", "read_error", "invalid_json", "projects_not_dict", "entry_not_dict", "opencode_replace"]
+)
+def test_os_and_shape_failures_are_unreadable_and_leave_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    home, root = _paths(tmp_path)
+    provider, server, target = "claude", "notion", home / ".claude.json"
+    if case == "invalid_json":
+        target.write_text("{ not json", encoding="utf-8")
+    elif case == "projects_not_dict":
+        _write_claude(home, {"projects": []})
+    elif case == "entry_not_dict":
+        _write_claude(home, {"projects": {_key(root): []}})
+    elif case == "opencode_replace":
+        provider, server = "opencode", "linear"
+        target = root / "opencode.json"
+        target.write_text(
+            json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid"}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("ciao.web.mcp_toggle.os.replace", _refuse)
+    else:
+        _write_claude(home, {"projects": {}})
+    if case == "lock_mkdir":
+        monkeypatch.setattr("ciao.web.mcp_toggle.os.mkdir", _refuse)
+    if case == "read_error":
+        real_read_text = Path.read_text
+
+        def read_text_or_refuse(self: Path, *args: object, **kwargs: object) -> str:
+            if self.name == ".claude.json":
+                raise PermissionError("denied")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", read_text_or_refuse)
+    original = target.read_bytes()
+
+    with pytest.raises(McpToggleError) as caught:
+        set_mcp_server_enabled(provider=provider, server=server, agent_root=root, enabled=False)
+
+    assert caught.value.reason == "unreadable_config"
+    assert caught.value.message == UNREADABLE_MESSAGE
+    assert target.read_bytes() == original
+    assert not list(home.glob(".claude.json.*.tmp"))
+    assert not list(root.glob(".opencode.json.*.tmp"))
+
+
+def test_opencode_url_with_double_slash_survives_a_toggle(tmp_path: Path) -> None:
+    _home, root = _paths(tmp_path)
+    path = root / "opencode.jsonc"
+    path.write_text(
+        json.dumps({"mcp": {"servers": {"linear": {"type": "remote", "url": "https://x.invalid/a//b"}}}}),
+        encoding="utf-8",
+    )
+
+    result = set_mcp_server_enabled(provider="opencode", server="linear", agent_root=root, enabled=False)
+
+    assert result.changed is True
+    entry = json.loads(path.read_text(encoding="utf-8"))["mcp"]["servers"]["linear"]
+    assert entry == {"type": "remote", "url": "https://x.invalid/a//b", "disabled": True}
+
+
+@pytest.mark.asyncio
+async def test_reload_skips_a_chat_that_starts_a_turn_mid_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_chat_actions_runtime import make_manager
+
+    manager = make_manager(tmp_path)
+    project = manager.create_project("P", workspace="work")
+    first, second = sorted(
+        manager.create_chat(project.project_id, title=title, provider="claude").chat_id for title in ("x", "y")
+    )
+    for chat_id in (first, second):
+        manager._providers[chat_id] = SimpleNamespace()
+    busy: list[str] = []
+    monkeypatch.setattr(manager, "active_chat_ids", lambda: list(busy))
+    calls: list[str] = []
+
+    async def reload(chat_id: str) -> bool:
+        calls.append(chat_id)
+        busy.append(second)  # the other chat starts a turn while this reload awaits
+        return True
+
+    monkeypatch.setattr(manager, "reload_provider", reload)
+
+    result = await manager.reload_workspace_providers("work", "claude")
+
+    assert calls == [first]
+    assert result == {"reloaded": [first], "pending": [second]}

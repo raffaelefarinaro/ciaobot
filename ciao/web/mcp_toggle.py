@@ -85,29 +85,50 @@ def _claude_config_lock(config_path: Path) -> Iterator[None]:
         except OSError:
             raise _unreadable() from None
     try:
-        inode = os.stat(lock).st_ino
+        created = os.stat(lock)
     except OSError:
+        with contextlib.suppress(OSError):
+            os.rmdir(lock)
         raise _unreadable() from None
+    identity = (created.st_ino, created.st_mtime_ns)
     try:
         yield
     finally:
         with contextlib.suppress(OSError):
-            if os.stat(lock).st_ino == inode:
+            current = os.stat(lock)
+            if (current.st_ino, current.st_mtime_ns) == identity:
                 os.rmdir(lock)
 
 
 def _backup_once(path: Path) -> None:
+    """Copy the original bytes once, owner-only, without following a link at the backup path."""
     backup = path.with_name(path.name + BACKUP_SUFFIX)
-    if not backup.exists():
-        shutil.copyfile(path, backup)
-        os.chmod(backup, 0o600)
+    try:
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        return
+    try:
+        with os.fdopen(fd, "wb") as handle, path.open("rb") as source:
+            shutil.copyfileobj(source, handle)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(backup)
+        raise
 
 
-def _write_json_atomic(path: Path, data: Any) -> None:
-    target = path.resolve()
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+def _json_text(data: Any) -> str:
+    """The exact text to write, refused unless it reads back as the same data."""
+    try:
+        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    except ValueError:  # NaN or Infinity: the decoder's shared NaN object hides it from the comparison
+        raise _unreadable() from None
     if json.loads(text) != data:
         raise _unreadable()
+    return text
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    target = path.resolve()
     mode = stat.S_IMODE(target.stat().st_mode)
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
     try:
@@ -151,9 +172,10 @@ def _claude_edit(config_path: Path, key: str, server: str, enabled: bool) -> boo
         new = names if server in names else [*names, server]
     changed = new != names
     if changed:
-        _backup_once(config_path)
         entry["disabledMcpServers"] = new
-        _write_json_atomic(config_path, data)
+        text = _json_text(data)
+        _backup_once(config_path)
+        _write_text_atomic(config_path, text)
     return changed
 
 
@@ -165,11 +187,13 @@ def _set_claude(server: str, agent_root: Path, enabled: bool, config_path: Path 
     config_path = config_path or claude_global_config_path()
     if not config_path.is_file():
         raise _unreadable()
+    # Lock, backup and write the real file, as Claude Code does (realpath), so a symlink keeps its link.
+    config_path = config_path.resolve()
     key = claude_config_project_key(agent_root)
     try:
         with _claude_config_lock(config_path):
             changed = _claude_edit(config_path, key, server, enabled)
-    except OSError:
+    except (OSError, ValueError):
         raise _unreadable() from None
     effective_on = server not in set(claude_disabled_servers(agent_root, config_path))
     warning = (
@@ -251,9 +275,10 @@ def _set_opencode(server: str, agent_root: Path, enabled: bool) -> McpToggleResu
         else:
             entry.pop("disabled", None)
             entry["enabled"] = enabled
+        text = _json_text(data)
         try:
-            _write_json_atomic(path, data)
-        except OSError:
+            _write_text_atomic(path, text)
+        except (OSError, ValueError):
             raise _unreadable() from None
         return McpToggleResult(
             "opencode", server, enabled, True, str(path), _opencode_warning(server, agent_root, enabled)
