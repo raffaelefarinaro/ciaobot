@@ -187,6 +187,12 @@ def _modified_since(path: Path, start: datetime) -> bool:
         return False
 
 
+def _failed(failures: list[str] | None, source: str) -> None:
+    # A read error that degraded to empty: the day must not be cached as final.
+    if failures is not None:
+        failures.append(source)
+
+
 # ── Snapshot (event loop) ────────────────────────────────────────────────
 
 
@@ -247,7 +253,9 @@ def snapshot_sources(config: Any, pcm: Any, workspace: str) -> StatsSources:
 # ── Event collection (worker thread) ─────────────────────────────────────
 
 
-def _chat_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _chat_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     events: list[Event] = []
     for chat in sources.chats:
         if not chat.person:
@@ -265,13 +273,13 @@ def _chat_events(sources: StatsSources, start: datetime, end: datetime) -> list[
                 path = sources.workspace_root / path
             if not _modified_since(path, start):
                 continue
-            ended = _archive_ended_at(path)
+            ended = _archive_ended_at(path, failures)
             if ended is not None and start <= ended < end:
                 events.append(Event("chat_archived", ended, project_id=chat.project_id))
     return events
 
 
-def _archive_ended_at(path: Path) -> datetime | None:
+def _archive_ended_at(path: Path, failures: list[str] | None = None) -> datetime | None:
     try:
         with path.open(encoding="utf-8") as handle:
             for index, line in enumerate(handle):
@@ -280,12 +288,20 @@ def _archive_ended_at(path: Path) -> datetime | None:
                 match = _ENDED_RE.match(line.rstrip("\n"))
                 if match is not None:
                     return _parse_ts(match.group(1))
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _failed(failures, "transcripts")
+        return None
+    except UnicodeDecodeError:
+        # Corrupt content is permanent, not transient: cache the day as read.
         return None
     return None
 
 
-def _turn_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _turn_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     events: list[Event] = []
     seen: set[Path] = set()
 
@@ -302,7 +318,13 @@ def _turn_events(sources: StatsSources, start: datetime, end: datetime) -> list[
                     continue
                 try:
                     data = json.loads(live.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _failed(failures, "transcripts")
+                    continue
+                except ValueError:
+                    # Corrupt content is permanent, not transient: cache the day as read.
                     continue
                 turns = data.get("turns") if isinstance(data, dict) else None
                 for turn in turns if isinstance(turns, list) else []:
@@ -319,7 +341,13 @@ def _turn_events(sources: StatsSources, start: datetime, end: datetime) -> list[
                 seen.add(key)
                 try:
                     text = archive.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _failed(failures, "transcripts")
+                    continue
+                except UnicodeDecodeError:
+                    # Corrupt content is permanent, not transient: cache the day as read.
                     continue
                 for turn in parse_archive_turns(text):
                     tokens = sum(int(m.group(2)) for m in _USAGE_LINE_RE.finditer(turn["trailer"]))
@@ -327,7 +355,9 @@ def _turn_events(sources: StatsSources, start: datetime, end: datetime) -> list[
     return events
 
 
-def _proposal_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _proposal_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     queue = sources.vault_root.joinpath(*_PROPOSALS_RELATIVE)
     events: list[Event] = []
     for row in read_decisions(queue):
@@ -340,7 +370,13 @@ def _proposal_events(sources: StatsSources, start: datetime, end: datetime) -> l
             events.append(Event("proposal_decided", at, accepted=row["action"] == "accepted"))
     try:
         lines = queue.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
+        lines = []
+    except OSError:
+        _failed(failures, "proposals")
+        lines = []
+    except UnicodeDecodeError:
+        # Corrupt content is permanent, not transient: cache the day as read.
         lines = []
     batch: datetime | None = None
     for line in lines:
@@ -353,7 +389,9 @@ def _proposal_events(sources: StatsSources, start: datetime, end: datetime) -> l
     return events
 
 
-def _task_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _task_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     store = TaskBoardStore(
         workspace=sources.workspace,
         vault_root=sources.vault_root,
@@ -362,7 +400,12 @@ def _task_events(sources: StatsSources, start: datetime, end: datetime) -> list[
     )
     try:
         documents = store.list().tasks
+    except FileNotFoundError:
+        return []
     except (TaskBoardError, OSError) as exc:
+        # An unreadable board is transient; an unparseable one (TaskBoardError) is not.
+        if isinstance(exc, OSError):
+            _failed(failures, "tasks")
         logger.warning("usage stats: task board unreadable for %s: %s", sources.workspace, exc)
         return []
     events: list[Event] = []
@@ -373,10 +416,18 @@ def _task_events(sources: StatsSources, start: datetime, end: datetime) -> list[
     return events
 
 
-def _automation_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _automation_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     try:
         lines = sources.job_runs_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _failed(failures, "automations")
+        return []
+    except UnicodeDecodeError:
+        # Corrupt content is permanent, not transient: cache the day as read.
         return []
     events: list[Event] = []
     for line in lines:
@@ -395,7 +446,9 @@ def _automation_events(sources: StatsSources, start: datetime, end: datetime) ->
     return events
 
 
-def _note_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
+def _note_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
     events: list[Event] = []
     for row in read_receipts(journal_path(sources.vault_root)):
         if row.get("kind") != "note_apply" or row.get("status") != "applied":
@@ -408,15 +461,20 @@ def _note_events(sources: StatsSources, start: datetime, end: datetime) -> list[
     return events
 
 
-def collect_events(sources: StatsSources, start: datetime, end: datetime) -> list[Event]:
-    """Every event in ``[start, end)`` from every store."""
+def collect_events(
+    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
+) -> list[Event]:
+    """Every event in ``[start, end)`` from every store.
+
+    A store that exists but could not be read appends its name to *failures*.
+    """
     return [
-        *_chat_events(sources, start, end),
-        *_turn_events(sources, start, end),
-        *_proposal_events(sources, start, end),
-        *_task_events(sources, start, end),
-        *_automation_events(sources, start, end),
-        *_note_events(sources, start, end),
+        *_chat_events(sources, start, end, failures=failures),
+        *_turn_events(sources, start, end, failures=failures),
+        *_proposal_events(sources, start, end, failures=failures),
+        *_task_events(sources, start, end, failures=failures),
+        *_automation_events(sources, start, end, failures=failures),
+        *_note_events(sources, start, end, failures=failures),
     ]
 
 
@@ -569,14 +627,22 @@ def compute_usage_stats(
     past_days = _days(today - timedelta(days=1), span - 1)
     with _CACHE_LOCK:
         missing = [day for day in past_days if (sources.workspace, day) not in _DAY_CACHE]
+        filled: dict[date, DayBucket] = {}
         if missing:
+            failures: list[str] = []
             filled = bucket_events(
-                collect_events(sources, _day_start(missing[0], tz), _day_start(today, tz)), tz
+                collect_events(
+                    sources, _day_start(missing[0], tz), _day_start(today, tz), failures=failures
+                ),
+                tz,
             )
-            for day in missing:
-                _DAY_CACHE[(sources.workspace, day)] = filled.get(day) or DayBucket()
+            # A partial read would be cached as final; serve it once, retry next time.
+            if not failures:
+                for day in missing:
+                    _DAY_CACHE[(sources.workspace, day)] = filled.get(day) or DayBucket()
         buckets: dict[date, DayBucket] = {
-            day: _DAY_CACHE[(sources.workspace, day)] for day in past_days
+            day: _DAY_CACHE.get((sources.workspace, day)) or filled.get(day) or DayBucket()
+            for day in past_days
         }
     live = bucket_events(collect_events(sources, _day_start(today, tz), moment), tz)
     buckets[today] = live.get(today) or DayBucket()

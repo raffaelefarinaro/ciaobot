@@ -462,3 +462,136 @@ def test_cli_resolves_stats_command() -> None:
     )
     with pytest.raises(SystemExit):
         parser.parse_args(["stats", "--range", "14"])
+
+
+# ── R2 review fixes ──────────────────────────────────────────────────────
+
+
+def test_compute_does_not_cache_days_collected_with_a_read_failure(tmp_path: Path) -> None:
+    sources = _sources(tmp_path, (_chat(tmp_path, sent=("2026-11-08T10:00:00Z",)),))
+    queue = sources.vault_root / "Workspace" / "Memory-Proposals.md"
+    queue.mkdir(parents=True)  # a directory: read_text raises IsADirectoryError
+    compute_usage_stats(sources, 7, now=NOW, tz=UTC)
+    assert not [key for key in usage_stats._DAY_CACHE if key[0] == "work"]
+
+    queue.rmdir()
+    out = compute_usage_stats(sources, 7, now=NOW, tz=UTC)
+    assert [d["count"] for d in out["daily_messages"][-2:]] == [1, 0]
+    assert ("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE
+    assert ("work", TODAY - timedelta(days=181)) in usage_stats._DAY_CACHE
+
+
+def test_corrupt_store_content_is_cached_as_read(tmp_path: Path) -> None:
+    # Undecodable bytes are permanent: retrying every request would rescan forever.
+    sources = _sources(tmp_path)
+    queue = sources.vault_root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_bytes(b"\xff\xfe\xfa not utf-8")
+    compute_usage_stats(sources, 7, now=NOW, tz=UTC)
+    assert ("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE
+
+
+def test_missing_store_files_are_not_failures(tmp_path: Path) -> None:
+    compute_usage_stats(_sources(tmp_path), 7, now=NOW, tz=UTC)
+    assert ("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE
+    assert ("work", TODAY - timedelta(days=181)) in usage_stats._DAY_CACHE
+
+
+def test_snapshot_sources_excludes_automation_helper_system_and_origin_turns(tmp_path: Path) -> None:
+    config, pcm = _engine(tmp_path)
+    project = pcm.create_project("stats-work", workspace="work")
+    normal = pcm.create_chat(project.project_id, title="hello")
+    sent = "2026-11-09T10:00:00Z"
+    normal.user_turn_timings.update({"0": {"sent_at": sent}, "1": {"sent_at": sent},
+                                     "2": {"sent_at": sent}})
+    normal.user_turn_origin["1"] = "retry"
+    normal.user_turn_unattended["2"] = True
+    others = []
+    scheduled = pcm.create_chat(project.project_id, title="scheduled")
+    scheduled.schedule_id = "s1"
+    others.append(scheduled)
+    for kind in ("memory_pass", "update_task", "proposal"):
+        helper_chat = pcm.create_chat(project.project_id, title=kind)
+        helper_chat.helper = {"kind": kind}
+        others.append(helper_chat)
+    system = pcm.create_project("Claude Code CLI", workspace="work")
+    others.append(pcm.create_chat(system.project_id, title="system"))
+    for chat in others:
+        chat.user_turn_timings["0"] = {"sent_at": sent}
+
+    sources = usage_stats.snapshot_sources(config, pcm, "work")
+    by_id = {c.chat_id: c for c in sources.chats}
+    assert by_id[normal.chat_id].person is True
+    assert len(by_id[normal.chat_id].person_sent_at) == 1
+    for chat in others:
+        assert by_id[chat.chat_id].person is False
+        assert by_id[chat.chat_id].person_sent_at == ()
+    assert system.project_id not in sources.project_names
+
+
+def test_engine_helper_kinds_mirror_the_control_plane() -> None:
+    assert set(usage_stats._ENGINE_HELPER_KINDS) == set(CiaoControlPlane._ENGINE_HELPER_KINDS)
+
+
+def test_turn_events_include_non_person_chats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(transcripts_mod, "_now_iso", lambda: "2026-11-05T10:00:00Z")
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "Chats")
+    request = AgentRequest(prompt="hi", model="opus", mode="auto")
+    store.record_turn(request, ctx=ChatContext.for_web("h1"), response_text="yo",
+                      effective_model="claude-sonnet-4", session_id="s1",
+                      usage={"inputTokens": "7", "outputTokens": "3"}, quota={}, input_kind="text")
+    chat = _chat(tmp_path, "h1", person=False)
+    events = collect_events(_sources(tmp_path, (chat,)), *WINDOW)
+    assert [(e.kind, e.tokens) for e in events] == [("turn", 10)]
+
+
+def test_bucket_events_across_dst_change_uses_local_midnight() -> None:
+    events = [
+        Event("message", datetime(2026, 10, 24, 22, 0, tzinfo=UTC), project_id="p1"),  # 00:00 CEST 25 Oct
+        Event("message", datetime(2026, 10, 25, 22, 59, tzinfo=UTC), project_id="p1"),  # 23:59 CET 25 Oct
+        Event("message", datetime(2026, 10, 25, 23, 0, tzinfo=UTC), project_id="p1"),  # 00:00 26 Oct
+        Event("message", datetime(2026, 10, 25, 0, 30, tzinfo=UTC), project_id="p1"),  # 02:30 CEST 25 Oct
+    ]
+    buckets = bucket_events(events, ZoneInfo("Europe/Zurich"))
+    assert buckets[date(2026, 10, 25)].messages_sent == 3
+    assert buckets[date(2026, 10, 26)].messages_sent == 1
+    assert buckets[date(2026, 10, 25)].hours[2] == 1
+
+
+def test_compute_365_previous_window_spans_exactly_730_days(tmp_path: Path) -> None:
+    def at(days_ago: int) -> str:
+        return f"{(TODAY - timedelta(days=days_ago)).isoformat()}T12:00:00Z"
+
+    chat = _chat(tmp_path, sent=(at(364), at(365), at(729), at(730)))
+    out = compute_usage_stats(_sources(tmp_path, (chat,)), 365, now=NOW, tz=UTC)
+    assert out["totals"]["messages_sent"] == 1
+    assert out["previous"]["messages_sent"] == 2
+
+
+def test_collect_window_is_start_inclusive_end_exclusive(tmp_path: Path) -> None:
+    start, end = WINDOW
+    chat = _chat(tmp_path, sent=("2026-11-01T00:00:00Z", "2026-11-10T00:00:00Z",
+                                 "2026-10-31T23:59:59Z"))
+    events = collect_events(_sources(tmp_path, (chat,)), start, end)
+    assert [e.at for e in events if e.kind == "message"] == [start]
+
+
+def test_compute_rollover_freezes_yesterday_with_its_final_count(tmp_path: Path) -> None:
+    day = TODAY - timedelta(days=1)
+    today_noon = datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
+    next_noon = today_noon + timedelta(days=1)
+
+    def day_count(out: dict) -> int:
+        return {row["date"]: row["count"] for row in out["daily_messages"]}[day.isoformat()]
+
+    chat = _chat(tmp_path, sent=(f"{day}T09:00:00Z",))
+    out = compute_usage_stats(_sources(tmp_path, (chat,)), 7, now=today_noon, tz=UTC)
+    assert day_count(out) == 1
+
+    chat = _chat(tmp_path, sent=(f"{day}T09:00:00Z", f"{day}T10:00:00Z"))
+    out = compute_usage_stats(_sources(tmp_path, (chat,)), 7, now=next_noon, tz=UTC)
+    assert day_count(out) == 2
+
+    chat = _chat(tmp_path, sent=(f"{day}T09:00:00Z", f"{day}T10:00:00Z", f"{day}T11:00:00Z"))
+    out = compute_usage_stats(_sources(tmp_path, (chat,)), 7, now=next_noon, tz=UTC)
+    assert day_count(out) == 2
