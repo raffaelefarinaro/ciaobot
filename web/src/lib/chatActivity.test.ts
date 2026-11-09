@@ -256,6 +256,26 @@ describe('findFinalAnswerIndex', () => {
     ]
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
+
+  it('keeps a timestamped closing reply selected when bookkeeping follows it', () => {
+    // The server stamps the turn's last assistant text with its completion
+    // time. A bookkeeping tool run after it does not make it undelivered, so
+    // the earlier explicitly completed reply must not steal the closing slot.
+    const buffer = [
+      text("I've built it, and you can look at it now.", { phase: 'final_answer' }),
+      text('Now let me finish the housekeeping.'),
+      activity('$ Bash git status'),
+      text('Good — updated both files.', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('TodoWrite'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(3)
+    // The earlier reply stays a visible bubble; the closing reply is excluded
+    // for the caller to append with its footer and Outputs.
+    expect(buildTurnParts(buffer, 3)).toEqual([
+      { kind: 'assistant', msg: buffer[0] },
+      { kind: 'trace', steps: [buffer[1], buffer[2], buffer[4]] },
+    ])
+  })
 })
 
 describe('findFinalAnswerIndex with a reasoning tail', () => {

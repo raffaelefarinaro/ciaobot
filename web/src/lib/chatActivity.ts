@@ -269,15 +269,12 @@ export function findFinalAnswerIndex(
     const m = buffer[k]
     if (!isAssistantTextStep(m)) continue
     if (m.phase === 'commentary') continue
-    // History rows carry no `phase`, but the server stamps a timestamp on the
-    // closing row of a completed turn. A stamped row with no tool call after
-    // it is the delivered reply even when it opens like narration ("Good —
-    // updated both files."); an unstamped trailing "Now the docs:" is not.
-    if (
-      fallback < 0
-      && m.timestamp
-      && !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
-    ) return k
+    // History rows carry no `phase`, but the server stamps the turn's last
+    // assistant text with its completion time. A stamped row is the delivered
+    // closing reply even when it opens like narration ("Good — updated both
+    // files.") and even when bookkeeping tools run after it; an unstamped
+    // trailing "Now the docs:" is not delivered.
+    if (fallback < 0 && m.timestamp) return k
     if (fallback < 0) fallback = k
     if (m.phase === 'final_answer') return k
     if (!isProgressCommentary(m.content || '')) return k

@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -454,36 +455,51 @@ def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None
     def tagged() -> dict:
         return {**answer(), "phase": "final_answer"}
 
-    older = row("assistant", "An older answer.")
-    comments = row("assistant", NARRATION, phase="commentary")
-    empty = row("assistant", "   ")
-    tool_backed = row("assistant", "Read b.md", tool_name="_activity")
-    cases: list[tuple[list[dict], list[dict]]] = [
-        ([], []),
+    def older() -> dict:
+        return row("assistant", "An older answer.")
+
+    def comments() -> dict:
+        return row("assistant", NARRATION, phase="commentary")
+
+    def empty() -> dict:
+        return row("assistant", "   ")
+
+    def tool_backed() -> dict:
+        return row("assistant", "Read b.md", tool_name="_activity")
+
+    # Each case builds its actual and expected rows independently, so a helper
+    # that mutates an input row (say, the commentary note) cannot mutate the
+    # expectation it is compared against.
+    cases: list[tuple[Callable[[], list[dict]], Callable[[], list[dict]]]] = [
+        (lambda: [], lambda: []),
         (
-            [row("user", "q"), activity("Read a.md"), thinking("hmm"), filecard("a.md")],
-            [row("user", "q"), activity("Read a.md"), thinking("hmm"), filecard("a.md")],
+            lambda: [row("user", "q"), activity("Read a.md"), thinking("hmm"),
+                     filecard("a.md")],
+            lambda: [row("user", "q"), activity("Read a.md"), thinking("hmm"),
+                     filecard("a.md")],
         ),
         (
-            [answer(), row("user", "next"), activity("Read a.md")],
-            [answer(), row("user", "next"), activity("Read a.md")],
+            lambda: [answer(), row("user", "next"), activity("Read a.md")],
+            lambda: [answer(), row("user", "next"), activity("Read a.md")],
         ),
         (
-            [older, comments, activity("Read a.md")],
-            [older, comments, activity("Read a.md")],
+            lambda: [older(), comments(), activity("Read a.md")],
+            lambda: [older(), comments(), activity("Read a.md")],
         ),
         (
-            [answer(), activity("Read a.md"), thinking("hmm"), filecard("a.md"),
-             empty, tool_backed],
-            [tagged(), activity("Read a.md"), thinking("hmm"), filecard("a.md"),
-             empty, tool_backed],
+            lambda: [answer(), activity("Read a.md"), thinking("hmm"),
+                     filecard("a.md"), empty(), tool_backed()],
+            lambda: [tagged(), activity("Read a.md"), thinking("hmm"),
+                     filecard("a.md"), empty(), tool_backed()],
         ),
         (
-            [older, answer(), activity("Read a.md")],
-            [older, tagged(), activity("Read a.md")],
+            lambda: [older(), answer(), activity("Read a.md")],
+            lambda: [older(), tagged(), activity("Read a.md")],
         ),
     ]
-    for rows, expected in cases:
+    for build_rows, build_expected in cases:
+        rows = build_rows()
+        expected = build_expected()
         mark(rows)
         assert rows == expected
         # Idempotent: snapshot the exact rows, then a second call must leave
@@ -492,7 +508,7 @@ def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None
         mark(rows)
         assert rows == after_first
     # An older note before the eligible answer stays untagged.
-    rows = [older, answer(), activity("Read a.md")]
+    rows = [older(), answer(), activity("Read a.md")]
     mark(rows)
     assert "phase" not in rows[0]
     assert rows[1]["phase"] == "final_answer"
@@ -550,7 +566,16 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
                 _oc_user("Next question."),
             ],
         }
-        expected_phases = [ANSWER_ONE, second_answer]
+        expected_shape = [
+            ("user", None, None, 0, "First question."),
+            ("assistant", None, "final_answer", None, ANSWER_ONE),
+            ("assistant", None, "final_answer", None, second_answer),
+            ("assistant", None, None, None, NARRATION),
+            ("system", "_activity", None, None, None),
+            ("assistant", None, None, None, ANSWER_TWO),
+            ("user", None, None, 1, "Next question."),
+        ]
+        expected_assistant_content = [ANSWER_ONE, second_answer, NARRATION, ANSWER_TWO]
     else:
         claude_messages = [
             _Msg("user", "First question."),
@@ -579,7 +604,15 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
                 _oc_user("Next question."),
             ],
         }
-        expected_phases = [ANSWER_ONE]
+        expected_shape = [
+            ("user", None, None, 0, "First question."),
+            ("assistant", None, "final_answer", None, ANSWER_ONE),
+            ("assistant", None, None, None, NARRATION),
+            ("system", "_activity", None, None, None),
+            ("assistant", None, None, None, ANSWER_TWO),
+            ("user", None, None, 1, "Next question."),
+        ]
+        expected_assistant_content = [ANSWER_ONE, NARRATION, ANSWER_TWO]
 
     if reader == "claude":
         chat.session_id = "sess-consecutive"
@@ -587,11 +620,27 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
     else:
         rows = _render_opencode_thread(oc_thread, chat, workspace_root=tmp_path)
 
+    def shape(r: dict) -> tuple[object, ...]:
+        # Tool-row content differs by provider ("Read ..." vs "read ..."), so
+        # the provider-independent shape pins role, tool_name, phase and
+        # turn_index, with exact content for user/assistant rows.
+        return (
+            r["role"],
+            r.get("tool_name"),
+            r.get("phase"),
+            r.get("turn_index"),
+            r["content"] if r["role"] in ("user", "assistant") else None,
+        )
+
+    assert len(rows) == len(expected_shape)
+    assert [shape(r) for r in rows] == expected_shape
+    assert [r["content"] for r in rows if r["role"] == "assistant"] == expected_assistant_content
+    assert [(r["content"], r["turn_index"]) for r in rows if r["role"] == "user"] == [
+        ("First question.", 0),
+        ("Next question.", 1),
+    ]
     assert CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
     assert RELOAD_CONTINUE_PROMPT not in json.dumps(rows)
-    tagged = [r["content"] for r in rows if r.get("phase") == "final_answer"]
-    assert tagged == expected_phases
-    assert [r["turn_index"] for r in rows if r["role"] == "user"] == [0, 1]
     assert next(r for r in rows if r["content"] == ANSWER_TWO)["sent_at"] == COMPLETED_AT
 
 
