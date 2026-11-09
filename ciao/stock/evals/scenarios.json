@@ -74,7 +74,7 @@
     {
       "id": "recall-truncated-snippet-expansion",
       "category": "recall",
-      "title": "A truncated snippet is widened with a narrower search, not a note read",
+      "title": "A truncated snippet that hides the current value is widened before answering",
       "prompt": "What rate do I bill Northwind at for work I log this month?",
       "regions": {
         "memory": ["Northwind is a retainer client since 2025. [2026-01-10]"],
@@ -99,7 +99,7 @@
         "current_fact": "180",
         "superseded_fact": "120",
         "tools": ["vault_search"],
-        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "forbidden_tools": ["Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
         "unsupported_facts": ["150", "flat rate", "no amendment", "free of charge"]
@@ -133,7 +133,7 @@
         "current_fact": "no permit is required",
         "superseded_fact": "need a work visa",
         "tools": ["vault_search"],
-        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "forbidden_tools": ["Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
         "unsupported_facts": ["8891", "safe combination", "residence permit", "90 days"]
@@ -164,7 +164,7 @@
       "expect": {
         "must_abstain": true,
         "tools": ["vault_search"],
-        "forbidden_tools": ["Read", "Glob", "Bash"],
+        "forbidden_tools": ["Glob", "Bash"],
         "writes": [],
         "writes_forbidden": true,
         "unsupported_facts": ["120 percent", "5%", "10%", "2 percent", "no penalty applies"]

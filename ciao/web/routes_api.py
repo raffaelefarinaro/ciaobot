@@ -189,8 +189,6 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
             raise ValueError("file too large")
 
 
-_STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
-
 # Labels and example chips for the two account names that predate the account
 # registry. Nothing creates them any more — a fresh install starts with no
 # Google account — but an install that already has one keeps its wording.
@@ -8376,14 +8374,29 @@ async def debug_issues(request: Request) -> JSONResponse:
     return JSONResponse(report)
 
 
-async def cli_stats(request: Request) -> JSONResponse:
-    """Return Claude Code CLI stats from ~/.claude/stats-cache.json."""
-    if not _STATS_CACHE_PATH.exists():
-        return JSONResponse({"error": "stats-cache.json not found"}, status_code=404)
+async def usage_stats_endpoint(request: Request) -> JSONResponse:
+    """Usage statistics for one workspace: ``?workspace=<name>&range=7|30|90|365``.
+
+    Computed by :mod:`ciao.usage_stats` from the stores that already exist.
+    The registry facts are copied here on the event loop; the file reads run in
+    a worker thread. Completed days are cached in memory, today is live.
+    """
+    from ciao import usage_stats
+
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse(
+            {"error": "workspace must name a registered workspace"}, status_code=400
+        )
     try:
-        data = json.loads(_STATS_CACHE_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return JSONResponse({"error": "failed to read stats"}, status_code=500)
+        range_days = usage_stats.parse_range(request.query_params.get("range"))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    sources = usage_stats.snapshot_sources(
+        config, request.app.state.project_chat_manager, workspace
+    )
+    data = await asyncio.to_thread(usage_stats.compute_usage_stats, sources, range_days)
     return JSONResponse(data)
 
 
