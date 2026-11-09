@@ -22,6 +22,20 @@ function operation(phase: string, extra: Partial<EngineUpdateOperation> = {}): E
   }
 }
 
+/** The automatic updater's answer, shaped the way `status()` serves it. */
+function autoUpdate(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    supported: true,
+    unsupported_reason: '',
+    snooze_until: '',
+    outcome: '',
+    error: '',
+    attempted_at: '',
+    ...overrides,
+  }
+}
+
 /** How long the card waits between `/api/update/status` reads. */
 const POLL_MS = 2000
 
@@ -64,6 +78,7 @@ async function mountCard(
     throw new Error('Unrelated settings data unavailable in this test')
   })
   const post = vi.spyOn(api, 'post').mockResolvedValue({ started: true } as never)
+  const patch = vi.spyOn(api, 'patch').mockResolvedValue(autoUpdate() as never)
   const beginRestart = vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
   const wrapper = mount(SettingsView, {
     global: { plugins: [router], stubs: { Teleport: true } },
@@ -74,7 +89,7 @@ async function mountCard(
   // scoreboard: a run whose record has not landed yet is only visible as a read
   // that still happened.
   const statusReads = () => reads
-  return { wrapper, post, beginRestart, statusReads }
+  return { wrapper, post, patch, beginRestart, statusReads }
 }
 
 function buttonLabels(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
@@ -819,5 +834,154 @@ it('drops the in-flight line once the record settles', async () => {
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
+  }
+})
+
+/** The auto-update block on the Updates card, which is present on every state. */
+function autoPanel(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
+  return wrapper.get('.auto-update-panel')
+}
+
+it('shows automatic update policy and outcome', async () => {
+  // The policy is not a per-run detail: it stays on the card when the engine is
+  // up to date, which is exactly when the compact badge used to be all there was.
+  const attemptedAt = new Date(Date.now() - 5 * 60_000).toISOString()
+  const { wrapper } = await mountCard(
+    {
+      install_mode: 'installer',
+      can_update: true,
+      operation: null,
+      current_version: '0.20.0',
+      auto_update: autoUpdate({ outcome: 'applied', attempted_at: attemptedAt }),
+    },
+    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+  )
+  try {
+    const panel = autoPanel(wrapper)
+    const switchControl = panel.get('[role="switch"]')
+    expect(switchControl.attributes('aria-checked')).toBe('true')
+    expect(switchControl.attributes('aria-label')).toBe('Automatic updates')
+    // The installed version is named from the update route, not a second read.
+    expect(panel.text()).toContain('Installed version')
+    expect(panel.text()).toContain('0.20.0')
+    // The last attempt says what happened, when, and that the engine restarted.
+    expect(panel.text()).toContain('Last automatic attempt: Updated')
+    expect(panel.text()).toContain('5 minutes ago')
+    expect(panel.text()).toContain('Ciaobot restarted after updating.')
+    // The compact Updates state still holds: the policy did not turn the card
+    // into a full panel.
+    expect(wrapper.get('.card').find('.engine-update-panel').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('persists toggle and snooze', async () => {
+  const { wrapper, patch } = await mountCard({
+    install_mode: 'installer',
+    can_update: true,
+    operation: null,
+    current_version: '0.20.0',
+    auto_update: autoUpdate(),
+  })
+  try {
+    patch.mockResolvedValueOnce(autoUpdate({ enabled: false }) as never)
+    await autoPanel(wrapper).get('[role="switch"]').trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/update/settings', { enabled: false })
+    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('false')
+
+    // "Not now" is one PATCH of its own, and the card then waits out the hold
+    // rather than leaving a button that can only repeat it.
+    const snoozeUntil = new Date(Date.now() + 24 * 3600_000).toISOString()
+    patch.mockResolvedValueOnce(autoUpdate({ enabled: false, snooze_until: snoozeUntil }) as never)
+    await button(wrapper, 'Not now (24 hours)')!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenLastCalledWith('/api/update/settings', { snooze: true })
+    expect(autoPanel(wrapper).text()).toContain('Snoozed until')
+    expect(buttonLabels(wrapper)).not.toContain('Not now (24 hours)')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('explains unsupported automatic updates', async () => {
+  const { wrapper } = await mountCard({
+    install_mode: 'editable',
+    can_update: false,
+    operation: null,
+    current_version: '0.20.0',
+    auto_update: autoUpdate({
+      enabled: true,
+      supported: false,
+      unsupported_reason: 'this Ciaobot was not installed by the installer',
+    }),
+  })
+  try {
+    const panel = autoPanel(wrapper)
+    const switchControl = panel.get('[role="switch"]')
+    // The server's enabled default is not a policy this engine can carry out.
+    expect(switchControl.attributes('aria-checked')).toBe('false')
+    expect(switchControl.attributes('disabled')).toBeDefined()
+    expect(panel.text()).toContain('this Ciaobot was not installed by the installer')
+    // Nothing to snooze either: hiding the control keeps a dead write off the card.
+    expect(buttonLabels(wrapper)).not.toContain('Not now (24 hours)')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('reports a failed settings write', async () => {
+  const { wrapper, patch } = await mountCard({
+    install_mode: 'installer',
+    can_update: true,
+    operation: null,
+    current_version: '0.20.0',
+    auto_update: autoUpdate(),
+  })
+  try {
+    patch.mockRejectedValueOnce(new Error('Failed to fetch'))
+    await autoPanel(wrapper).get('[role="switch"]').trigger('click')
+    await flushPromises()
+
+    // The write did not land, so the switch goes back to the confirmed state
+    // rather than showing a decision the engine never took.
+    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('true')
+    expect(autoPanel(wrapper).get('.auto-update-error').text()).toContain('Failed to fetch')
+    const retry = button(wrapper, 'Try again')
+    expect(retry).toBeDefined()
+
+    // The retry repeats the same write, and a good answer clears the error.
+    patch.mockResolvedValueOnce(autoUpdate({ enabled: false }) as never)
+    await retry!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenLastCalledWith('/api/update/settings', { enabled: false })
+    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('false')
+    expect(autoPanel(wrapper).find('.auto-update-error').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('renders an unreadable settings error from the status', async () => {
+  // An unreadable settings file is served as `enabled: false` with the reason in
+  // `error`; the reason is the explanation for the switch beside it.
+  const { wrapper } = await mountCard({
+    install_mode: 'installer',
+    can_update: true,
+    operation: null,
+    current_version: '0.20.0',
+    auto_update: autoUpdate({
+      enabled: false,
+      error: 'could not read the automatic update settings: permission denied',
+    }),
+  })
+  try {
+    const panel = autoPanel(wrapper)
+    expect(panel.get('[role="switch"]').attributes('aria-checked')).toBe('false')
+    expect(panel.get('.auto-update-error').attributes('role')).toBe('alert')
+    expect(panel.get('.auto-update-error').text()).toContain('permission denied')
+  } finally {
+    wrapper.unmount()
   }
 })

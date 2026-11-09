@@ -107,6 +107,9 @@ JOB_LABEL = "Memory backup"
 #   while the loop or a manual trigger holds the lock).
 # - ``paused`` — this boot will not run a backup: turned off, paused, or not the
 #   host. The three are distinguished in ``reason``.
+# - ``deferred`` — an engine update holds admission closed, so this run did not
+#   start. Retryable by waiting: the same call runs once the claim is released,
+#   and the attempt stamp is deliberately not written.
 # - ``offline`` — the commit is safe locally and the push could not reach the
 #   remote. Retried on the backoff cadence; no local work is lost.
 # - ``needs_attention`` — a failure only the owner can fix: a credential-shaped
@@ -126,6 +129,7 @@ STATE_READY = "ready"
 STATE_PENDING = "pending"
 STATE_RUNNING = "running"
 STATE_PAUSED = "paused"
+STATE_DEFERRED = "deferred"
 STATE_OFFLINE = "offline"
 STATE_NEEDS_ATTENTION = "needs_attention"
 
@@ -443,6 +447,7 @@ class BackupService:
         *,
         node_state: Callable[[], LegacyNodeState],
         now: Callable[[], datetime] | None = None,
+        admission_closed: Callable[[], bool] | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -452,6 +457,10 @@ class BackupService:
         # of the tick.
         self._node_state = node_state
         self._now = now or _utcnow
+        # True while an engine update claim holds admission closed. Both entry
+        # paths (the loop and the manual trigger) defer on it rather than
+        # starting git work a restart would interrupt.
+        self._admission_closed = admission_closed
         self._lock = asyncio.Lock()
         self._running = False
         #: Why the cadence is backed off (``"auth"``, ``"unreachable"``,
@@ -588,6 +597,24 @@ class BackupService:
 
     # ── the run ─────────────────────────────────────────────────────────────
 
+    def _admission_refuses(self) -> bool:
+        """True while an engine update claim holds admission closed."""
+        if self._admission_closed is None:
+            return False
+        return bool(self._admission_closed())
+
+    def update_idle_reasons(self) -> list[str]:
+        """What a restart would interrupt here, empty when nothing is running.
+
+        Read by an unattended update's idle snapshot before it claims admission.
+        ``_running`` is set inside the lock, so a backup that has been admitted
+        but has not reached its first git read is reported too. Public so the
+        engine asks rather than reaching into the flag.
+        """
+        if not self._running:
+            return []
+        return ["a backup is running"]
+
     async def run_backup(self, *, source: str = "manual") -> BackupStatus:
         """One backup attempt, serialized; returns the state it left behind.
 
@@ -602,6 +629,15 @@ class BackupService:
         An unexpected fault is therefore a ``needs_attention`` status carrying
         its own type and message, logged once with a traceback.
         """
+        if self._admission_refuses():
+            # Ahead of the lock and every git read: an update is about to
+            # restart this engine, and a commit or push it interrupts is worse
+            # than one that waits. Nothing is stamped, so the overdue check
+            # still owes this run the moment the claim is released.
+            return self._status(
+                STATE_DEFERRED,
+                reason="a server update is pending; retry after the restart",
+            )
         async with self._lock:
             self._running = True
             self._run_extra = {}
@@ -937,7 +973,7 @@ class BackupService:
                 break
             # No other exception can reach here — ``run_backup`` converts one
             # into a status — so the loop cannot die of a fault in its own work.
-            if status.state == STATE_PAUSED:
+            if status.state in {STATE_PAUSED, STATE_DEFERRED}:
                 # A gate-refused run is not an attempt and stamps nothing, so the
                 # delay above was zero and nothing else here would yield: the loop
                 # would re-enter immediately, forever, and every iteration costs a
@@ -945,7 +981,9 @@ class BackupService:
                 # right cadence for "this boot will not back up" — it is a
                 # condition that only the owner or a restart changes, and it does
                 # not delay the run that follows an unpause, because the stamp is
-                # still absent and the delay is still zero then.
+                # still absent and the delay is still zero then. A deferred tick
+                # (an update claim holds admission closed) waits the same way
+                # rather than spinning on a status that never stamps its attempt.
                 if not await self._wait(stop, BACKUP_INTERVAL_S, sleep):
                     return
 

@@ -1341,11 +1341,38 @@ export interface EngineUpdateOperation {
   error?: string
 }
 
+/**
+ * The automatic updater's policy, install and last attempt
+ * (`ciao/auto_update.py:AutoUpdateCoordinator.status`).
+ *
+ * `outcome` is "" while an attempt is in flight; otherwise it is an operation
+ * phase (`applied`, `rolled_back`, `rollback_failed`, `failed`) or the
+ * pre-operation reason a run stopped at (`check_failed`, `stage_failed`,
+ * `failed`, `unknown`). `snooze_until` is an ISO-8601 UTC stamp or "", and can
+ * be in the past — an expired hold is not an active one. `enabled` is false
+ * when the settings file could not be read even if it says true, and `error`
+ * explains why. Every field is optional so an older engine's answer, or a test
+ * fixture written before this contract, still renders.
+ */
+export interface AutoUpdateStatus {
+  enabled: boolean
+  supported: boolean
+  unsupported_reason?: string
+  snooze_until?: string
+  outcome?: string
+  error?: string
+  attempted_at?: string
+}
+
 /** `GET /api/update/status` — the engine update coordinator's persisted job. */
 export interface EngineUpdateStatus {
   install_mode: string
   can_update: boolean
   operation: EngineUpdateOperation | null
+  /** What is installed right now, so the card can name it without a second request. */
+  current_version?: string
+  /** The automatic updater's policy and last attempt; absent on older engines. */
+  auto_update?: AutoUpdateStatus
   /** The server's background update task is alive (true between the two halves too). */
   running?: boolean
   /** A coordinator refusal that wrote no operation of its own. */

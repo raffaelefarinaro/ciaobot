@@ -23,6 +23,12 @@ whether a given machine backs up, and what it last managed to push, is
 only knowable at runtime. They are read on every gate check rather than
 cached, which is what lets a pause survive a restart and a resume take
 effect on the next tick.
+
+The automatic-update fields (:mod:`ciao.auto_update`) follow the same rule:
+the policy, the 24-hour hold and the last attempt are read on every gate, so
+turning the updater off is honoured immediately rather than at the next start.
+`load_error` is the one thing the store reports about itself, because an
+unattended writer may not treat an unreadable file as consent.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ import math
 import logging
 import re
 from dataclasses import asdict, dataclass, fields, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeGuard
 
@@ -91,6 +98,7 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_default_modes": _clean_default_modes,
 }
 _BOOLEAN_FIELDS = {
+    "auto_update_enabled",
     "backup_enabled",
     "backup_paused",
     "dev_mode",
@@ -102,6 +110,15 @@ _INTERNAL_FIELDS = {"legacy_env_imported"}
 # Booleans whose default is False and that are only written once true, so a
 # file never grows keys that say nothing.
 _SPARSE_BOOLEANS = {"dev_mode", "legacy_env_imported"}
+# The automatic-update clock fields (ciao/auto_update.py). Validated on read and
+# on write, because a hand-edited or truncated value must read as "no stamp" —
+# comparing a junk string against the wall clock is how an unattended updater
+# either retries in a tight loop or waits forever.
+_TIMESTAMP_FIELDS = {
+    "auto_update_snooze_until",
+    "auto_update_attempt_at",
+    "auto_update_next_check_at",
+}
 
 # The server's bind address when none is set: every interface, so the PWA is
 # reachable over LAN and Tailscale. The password and the login rate limit are
@@ -202,6 +219,23 @@ class AppSettings:
     backup_last_success_at: str = ""
     backup_last_success_commit: str = ""
     backup_remote: str = ""
+
+    # The automatic engine updater (ciao/auto_update.py). `auto_update_enabled`
+    # is the owner's standing decision and defaults on for every install; the
+    # coordinator refuses to act on a settings file it could not read, so a
+    # corrupt file never reads as consent. `auto_update_snooze_until` is a
+    # "Not now (24 hours)" hold, an ISO-8601 UTC stamp that expires at
+    # `now >= until`. The five fields under it are the coordinator's own record
+    # of its latest attempt: the operation id it claimed under, when it did,
+    # what came of it, why, and when it will look again. Only the coordinator
+    # writes them; a manual update never overwrites the last automatic outcome.
+    auto_update_enabled: bool = True
+    auto_update_snooze_until: str = ""
+    auto_update_attempt_id: str = ""
+    auto_update_attempt_at: str = ""
+    auto_update_outcome: str = ""
+    auto_update_error: str = ""
+    auto_update_next_check_at: str = ""
 
     # Per-runtime-provider default model for new chats, keyed by provider id.
     # There is no env-backed default: a missing entry means the provider's own
@@ -312,6 +346,26 @@ def _clean_custom_colors(value: object) -> dict[str, dict[str, str]] | None:
     return cleaned or None
 
 
+def _clean_timestamp(value: object) -> str:
+    """``value`` as a canonical UTC ISO-8601 stamp, or "" when it is not one.
+
+    A naive stamp is read as UTC, because the file only ever holds UTC and a
+    value typed by hand without an offset means the same thing. Everything
+    unparseable, and everything that is not a string, reads as "no stamp":
+    an automatic updater that cannot read its own clock fields must look like
+    it has never run, not crash the engine on the way to failing open.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        stamp = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC).isoformat(timespec="seconds")
+
+
 def _parse_settings(raw: object) -> AppSettings:
     """``raw`` (the decoded JSON file) as validated settings. No side effects."""
     settings = AppSettings()
@@ -363,6 +417,10 @@ def _parse_settings(raw: object) -> AppSettings:
         logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
         settings.pwa_host = ""
     settings.log_level = _normalize_log_level(settings.log_level)
+    # Read from the raw document, not from whatever the generic string pass
+    # stored, so a non-string value never reaches the clock comparisons.
+    for key in _TIMESTAMP_FIELDS:
+        setattr(settings, key, _clean_timestamp(raw.get(key)))
     _drop_retired_models(settings)
     return settings
 
@@ -431,19 +489,42 @@ class AppSettingsStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._explicit_fields: set[str] = set()
+        # Why the last load fell back to defaults, "" when it read cleanly.
+        # Set before `_load`, which is what fills it in.
+        self._load_error = ""
         self.settings = self._load()
         # Per-provider default models captured on the first apply_to_config()
         # call, so clearing an override restores the original value.
         self._defaults: dict[str, str] | None = None
 
+    @property
+    def load_error(self) -> str:
+        """Why the settings could not be read, "" when they could.
+
+        A caller that is about to act on the file rather than in response to a
+        person — the automatic updater — has to tell "there is no file, so the
+        defaults are the decision" from "there is a file and it is unreadable,
+        so nobody knows what the decision was". The second reads as an error
+        here, and it fails closed on the caller's side.
+        """
+        return self._load_error
+
     def _load(self) -> AppSettings:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            # Absent is healthy: a new install has no choices yet, and the
+            # documented defaults are the answer.
+            self._load_error = ""
             return AppSettings()
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
+            self._load_error = (
+                f"app settings at {self._path} could not be read ({exc}); "
+                "automatic updates wait until Settings saves again"
+            )
             return AppSettings()
+        self._load_error = ""
         if isinstance(raw, dict):
             self._explicit_fields.update(
                 key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
@@ -466,6 +547,10 @@ class AppSettingsStore:
         self._path.write_text(
             json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline=""
         )
+        # The file on disk is this store's own settings now, whatever was there
+        # before: an unreadable document is repaired by the first write that
+        # replaces it, and the caller may act on what it just saved.
+        self._load_error = ""
 
     def update(self, changes: dict[str, object]) -> AppSettings:
         """Validate and persist a partial update; returns the new settings.
@@ -567,6 +652,14 @@ class AppSettingsStore:
                         f"between {MIN_FONT_SCALE} and {MAX_FONT_SCALE}"
                     )
                 updated.font_scale = round(float(value), 2)
+                continue
+            if key in _TIMESTAMP_FIELDS:
+                if not isinstance(value, str):
+                    raise ValueError(f"{key} must be a string")
+                cleaned_stamp = _clean_timestamp(value)
+                if value.strip() and not cleaned_stamp:
+                    raise ValueError(f"{key} must be an ISO-8601 timestamp")
+                setattr(updated, key, cleaned_stamp)
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
