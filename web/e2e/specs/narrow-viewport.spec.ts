@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails } from '../support/app'
+import { expect, test, type Locator } from '@playwright/test'
+import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, seedInbox } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -14,6 +14,111 @@ import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails } from '..
 const PHONE = { width: 390, height: 844 }
 
 test.use({ viewport: PHONE, isMobile: true, hasTouch: true })
+
+const QUESTION_OPTIONS = [
+  { label: 'Recommended staged rollout', description: 'Start with a small pilot group, gather feedback, validate system behavior and expand the rollout to everyone only after the pilot is stable.' },
+  { label: 'All at once', description: 'Deploy to every user immediately and monitor the results with the support team available to respond to any problems.' },
+  { label: 'Wait for more evidence', description: 'Delay the change until we have enough data to understand the operational impact and agree on the best option.' },
+]
+const QUESTION = { questions: [{ id: 'rollout', question: 'Which rollout should we choose?', header: 'Approach', isOther: true, required: true, type: 'string', multiSelect: false, options: QUESTION_OPTIONS }] }
+
+async function seedQuestion(page: import('@playwright/test').Page, question = QUESTION) {
+  await seedInbox(page, { chats: { 'alpha-chat-1': { pending_question: JSON.stringify(question) } } })
+}
+
+async function injectQuestion(page: import('@playwright/test').Page, question = QUESTION) {
+  const response = await page.request.post('/__fixture__/chat-frame', { data: {
+    chat_id: 'alpha-chat-1',
+    frames: [{ type: 'tool_use', tool_name: 'AskUserQuestion', request_id: 'question-2601', session_id: 'session-2601', tool_input: JSON.stringify(question) }],
+  } })
+  expect(response.ok()).toBe(true)
+}
+
+async function expectQuestionSubmitVisible(page: import('@playwright/test').Page) {
+  const card = page.locator('.question-form-card')
+  const body = page.getByRole('region', { name: 'Question details' })
+  const button = card.getByRole('button', { name: 'Send answer' })
+  await expect(card).toBeVisible()
+  await expect(async () => {
+    const result = await page.evaluate(() => {
+      const card = document.querySelector('.question-form-card')!
+      const body = card.querySelector('.question-form-body')!
+      const button = card.querySelector('.question-card-actions .primary')!
+      const rect = (el: Element) => el.getBoundingClientRect()
+      const c = rect(card), b = rect(button), v = window.visualViewport
+      const left = v?.offsetLeft ?? 0, top = v?.offsetTop ?? 0
+      const right = left + (v?.width ?? innerWidth), bottom = top + (v?.height ?? innerHeight)
+      // Stay inside the painted button surface; a 2px inset falls in the
+      // rounded transparent corners and correctly hit-tests its parent.
+      const points = [[b.left + b.width / 2, b.top + b.height / 2], [b.left + 10, b.top + 10], [b.right - 10, b.top + 10], [b.left + 10, b.bottom - 10], [b.right - 10, b.bottom - 10]]
+      const hits = points.map(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit === button || button.contains(hit) })
+      const cancel = card.querySelector('.question-card-actions .btn-sm:not(.primary)')!
+      return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea')!), viewportBottom: bottom }
+    })
+    expect(result.visible, `Send answer must stay visible and hit-testable: ${JSON.stringify(result)}`).toBe(true)
+    expect(result.bodyHeight).toBeGreaterThanOrEqual(44)
+    expect(result.bodyWidth).toBeGreaterThan(0)
+    expect(result.buttonWidth).toBeGreaterThanOrEqual(44)
+    expect(result.buttonHeight).toBeGreaterThanOrEqual(44)
+    expect(result.cancelWidth).toBeGreaterThanOrEqual(44)
+    expect(result.cancelHeight).toBeGreaterThanOrEqual(44)
+    expect(result.composer.top).toBeGreaterThanOrEqual(-1)
+    expect(result.composer.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
+  }).toPass({ timeout: 5_000 })
+  await expect(card).toBeVisible()
+  await expect(body).toBeVisible()
+  await expect(button).toBeVisible()
+}
+
+async function expectQuestionFooterFocus(control: Locator) {
+  await expect(control).toBeFocused()
+  const style = await control.evaluate(el => {
+    const computed = getComputedStyle(el)
+    const b = el.getBoundingClientRect(), cardEl = el.closest('.question-card')!, card = cardEl.getBoundingClientRect(), cs = getComputedStyle(cardEl)
+    const extent = parseFloat(computed.outlineWidth) + parseFloat(computed.outlineOffset)
+    const visualViewport = window.visualViewport
+    const viewportLeft = visualViewport?.offsetLeft ?? 0, viewportTop = visualViewport?.offsetTop ?? 0
+    return {
+      outlineStyle: computed.outlineStyle,
+      outlineWidth: computed.outlineWidth,
+      outlineColor: computed.outlineColor,
+      outlineOffset: computed.outlineOffset,
+      focus: el === document.activeElement,
+      focusVisible: el.matches(':focus-visible'),
+      bounds: { left: b.left - extent, right: b.right + extent, top: b.top - extent, bottom: b.bottom + extent },
+      paddingBox: { left: card.left + parseFloat(cs.borderLeftWidth), right: card.right - parseFloat(cs.borderRightWidth), top: card.top + parseFloat(cs.borderTopWidth), bottom: card.bottom - parseFloat(cs.borderBottomWidth) },
+      viewport: { left: viewportLeft, right: viewportLeft + (visualViewport?.width ?? innerWidth), top: viewportTop, bottom: viewportTop + (visualViewport?.height ?? innerHeight) },
+    }
+  })
+  expect(style.outlineStyle, JSON.stringify(style)).toBe('solid')
+  expect(parseFloat(style.outlineWidth)).toBeGreaterThanOrEqual(2)
+  expect(style.outlineColor).not.toBe('rgba(0, 0, 0, 0)')
+  expect(parseFloat(style.outlineOffset)).toBeGreaterThanOrEqual(2)
+  expect(style.focus).toBe(true)
+  expect(style.focusVisible).toBe(true)
+  expect(style.bounds.left).toBeGreaterThanOrEqual(style.paddingBox.left - 1)
+  expect(style.bounds.right).toBeLessThanOrEqual(style.paddingBox.right + 1)
+  expect(style.bounds.top).toBeGreaterThanOrEqual(style.paddingBox.top - 1)
+  expect(style.bounds.bottom).toBeLessThanOrEqual(style.paddingBox.bottom + 1)
+  expect(style.bounds.left).toBeGreaterThanOrEqual(style.viewport.left - 1)
+  expect(style.bounds.right).toBeLessThanOrEqual(style.viewport.right + 1)
+  expect(style.bounds.top).toBeGreaterThanOrEqual(style.viewport.top - 1)
+  expect(style.bounds.bottom).toBeLessThanOrEqual(style.viewport.bottom + 1)
+}
+
+async function expectQuestionTargetsReachable(page: import('@playwright/test').Page) {
+  const body = page.getByRole('region', { name: 'Question details' })
+  for (const target of [body.locator('.question-option').last(), body.locator('.question-other').last()]) {
+    await target.evaluate(el => el.scrollIntoView({ block: 'nearest' }))
+    const geometry = await target.evaluate(el => {
+      const target = el.getBoundingClientRect(), body = el.closest('.question-form-body')!.getBoundingClientRect()
+      const v = window.visualViewport, left = v?.offsetLeft ?? 0, top = v?.offsetTop ?? 0
+      const right = left + (v?.width ?? innerWidth), bottom = top + (v?.height ?? innerHeight)
+      return { target: target.toJSON(), body: body.toJSON(), viewport: { left, top, right, bottom }, visible: target.width > 0 && target.height > 0 && target.left >= body.left - 1 && target.right <= body.right + 1 && target.top >= body.top - 1 && target.bottom <= body.bottom + 1 && target.left >= left - 1 && target.right <= right + 1 && target.top >= top - 1 && target.bottom <= bottom + 1 }
+    })
+    expect(geometry.visible, `Question field must be reachable by scrolling the details region: ${JSON.stringify(geometry)}`).toBe(true)
+  }
+}
 
 test.describe('narrow viewport', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -114,6 +219,129 @@ test.describe('narrow viewport', () => {
       overflow,
       `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
+  })
+
+  test('question submission stays visible with long options in portrait and landscape', async ({ page }, testInfo) => {
+    await seedQuestion(page)
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await injectQuestion(page)
+    await expectQuestionSubmitVisible(page)
+    await page.screenshot({ path: testInfo.outputPath('question-portrait.png') })
+    await page.getByRole('button', { name: /Recommended staged rollout/ }).click()
+    await expectQuestionSubmitVisible(page)
+    await page.getByRole('region', { name: 'Question details' }).evaluate(el => { el.scrollTop = el.scrollHeight })
+    await expectQuestionSubmitVisible(page)
+    await page.locator('.question-option').last().click()
+    await expectQuestionSubmitVisible(page)
+    await page.setViewportSize({ width: 844, height: 390 })
+    await expectQuestionSubmitVisible(page)
+    await page.screenshot({ path: testInfo.outputPath('question-landscape.png') })
+    const landscapeBody = page.getByRole('region', { name: 'Question details' })
+    const landscapeScroll = await landscapeBody.evaluate(el => {
+      el.scrollTop = el.scrollHeight
+      return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+    })
+    expect(landscapeScroll.scrollHeight).toBeGreaterThan(landscapeScroll.clientHeight)
+    expect(landscapeScroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
+    await expectQuestionSubmitVisible(page)
+    await page.setViewportSize({ width: 390, height: 500 })
+    await expectQuestionSubmitVisible(page)
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--app-h', '280px')
+      document.documentElement.classList.add('keyboard-open')
+    })
+    const keyboardLayout = await page.evaluate(() => {
+      const root = document.documentElement, card = document.querySelector('.question-form-card')!
+      return { className: root.className, appHeight: getComputedStyle(root).getPropertyValue('--app-h'), selectorMatches: card.matches(':root.keyboard-open .question-form-card'), maxHeight: getComputedStyle(card).maxHeight }
+    })
+    expect(keyboardLayout, JSON.stringify(keyboardLayout)).toMatchObject({ appHeight: '280px', selectorMatches: true, maxHeight: '168px' })
+    await expectQuestionSubmitVisible(page)
+    await page.evaluate(() => {
+      document.documentElement.classList.remove('keyboard-open')
+      document.documentElement.style.removeProperty('--app-h')
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expectQuestionSubmitVisible(page)
+    await page.screenshot({ path: testInfo.outputPath('question-desktop.png') })
+    await page.setViewportSize(PHONE)
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await expectQuestionSubmitVisible(page)
+    await page.screenshot({ path: testInfo.outputPath('question-portrait-dark.png') })
+  })
+
+  test('question submission stays visible with multiple blocks and enlarged text', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('ciao-font-scale', '1.5'))
+    const appearance = await page.request.patch('/api/settings/appearance', { data: { font_scale: 1.5 } })
+    expect(appearance.ok()).toBe(true)
+    const twoQuestions = { questions: [QUESTION.questions[0], { ...QUESTION.questions[0], id: 'timing', question: 'Which rollout timing should we choose?', header: 'Timing' }] }
+    await seedQuestion(page, twoQuestions)
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await injectQuestion(page, twoQuestions)
+    await expect.poll(() => page.locator('html').evaluate(el => getComputedStyle(el).getPropertyValue('--font-scale').trim())).toBe('1.5')
+    await expectQuestionSubmitVisible(page)
+    await page.locator('.question-block').nth(0).getByRole('button', { name: /Recommended staged rollout/ }).click()
+    await expectQuestionSubmitVisible(page)
+    await expect(page.getByRole('button', { name: 'Send answer' })).toBeDisabled()
+    await page.locator('.question-block').nth(1).getByRole('button', { name: /Recommended staged rollout/ }).click()
+    await expect(page.getByRole('button', { name: 'Send answer' })).toBeEnabled()
+    await expectQuestionSubmitVisible(page)
+    const body = page.getByRole('region', { name: 'Question details' })
+    const scroll = await body.evaluate(el => {
+      el.scrollTop = el.scrollHeight
+      return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+    })
+    expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight)
+    expect(scroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
+    await expectQuestionSubmitVisible(page)
+    await page.setViewportSize({ width: 844, height: 390 })
+    await expectQuestionSubmitVisible(page)
+    const landscapeScroll = await body.evaluate(el => {
+      el.scrollTop = el.scrollHeight
+      return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+    })
+    expect(landscapeScroll.scrollHeight).toBeGreaterThan(landscapeScroll.clientHeight)
+    expect(landscapeScroll.scrollTop).toBeGreaterThan(0)
+    await expectQuestionTargetsReachable(page)
+    await expectQuestionSubmitVisible(page)
+  })
+
+  test('a live question preserves composer focus and keyboard entry', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    const composer = page.locator('textarea')
+    await composer.focus()
+    await composer.fill('Draft remains')
+    await page.request.post('/__fixture__/chat-frame', { data: { chat_id: 'alpha-chat-1', frames: [{ type: 'tool_use', tool_name: 'AskUserQuestion', request_id: 'question-2601', session_id: 'session-2601', tool_input: JSON.stringify(QUESTION) }] } })
+    await expect(page.locator('.question-form-card')).toBeVisible()
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Draft remains')
+    const other = page.locator('.question-other')
+    await other.focus()
+    await page.keyboard.type('123')
+    await expect(other).toHaveValue('123')
+    await expect(page.locator('.question-option.selected')).toHaveCount(0)
+    await page.keyboard.press('Tab')
+    const cancel = page.getByRole('button', { name: 'Cancel' })
+    await expect(cancel).toBeFocused()
+    await expectQuestionFooterFocus(cancel)
+    await page.keyboard.press('Tab')
+    const submit = page.getByRole('button', { name: 'Send answer' })
+    await expect(submit).toBeFocused()
+    await expectQuestionFooterFocus(submit)
+    await page.locator('.question-option').first().focus()
+    await page.keyboard.press('Shift+Tab')
+    const body = page.getByRole('region', { name: 'Question details' })
+    await expect(body).toBeFocused()
+    await expect.poll(() => body.evaluate(el => el.matches(':focus-visible'))).toBe(true)
+    const bodyStyle = await body.evaluate(el => getComputedStyle(el))
+    expect(bodyStyle.outlineStyle).toBe('solid')
+    expect(parseFloat(bodyStyle.outlineWidth)).toBeGreaterThanOrEqual(2)
+    expect(bodyStyle.outlineColor).not.toBe('rgba(0, 0, 0, 0)')
+    expect(bodyStyle.outlineOffset).toBe('-2px')
+    await page.keyboard.press('Tab')
+    await expect(page.locator('.question-option').first()).toBeFocused()
+    await expectQuestionSubmitVisible(page)
   })
 
   test('the Repository section fits the Chat details drawer at 390px', async ({ page }) => {

@@ -1246,6 +1246,15 @@ class ProjectChatManager:
         # already-queued follow-ups) may finish, but idle chats must not start
         # new turns or the server could race a fresh provider request.
         self._restart_draining = False
+        # Which operation owns the drain, when one was claimed rather than
+        # requested by a Settings restart. Only the owner may cancel it, so a
+        # child process cannot reopen admission under newer work. Empty means
+        # a manual drain, which any caller may cancel as it could before.
+        self._drain_owner = ""
+        # Extra idle proof contributed by subsystems this manager does not own
+        # (schedules, backup, memory passes). Registered by the engine once
+        # those objects exist; see `register_update_blocker_probe`.
+        self._update_blocker_probes: list[Callable[[], list[str]]] = []
         # Set by begin_shutdown: the drive loop then keeps turn_owner stamps (#2128).
         self._shutting_down = False
         # Per-chat deferred quota retry loops. Each loop sleeps until the
@@ -4924,6 +4933,16 @@ class ProjectChatManager:
     async def resume_memory_passes(self) -> None:
         await self._memory_pass.resume()
 
+    @property
+    def memory_passes(self) -> MemoryPassCoordinator:
+        """The end-of-conversation pass queue, for the update idle snapshot.
+
+        Public because the engine wires its ``update_idle_reasons`` into the
+        claim, and reaching into ``_memory_pass`` from another module would make
+        that wiring depend on this manager's internals.
+        """
+        return self._memory_pass
+
     async def _memory_pass_turn_finished(self, chat_id: str) -> bool:
         try:
             finished: bool = await self._memory_pass.on_turn_finished(chat_id)
@@ -7698,30 +7717,130 @@ class ProjectChatManager:
             for cid in sorted(reasons)
         ]
 
-    def begin_restart_drain(self) -> None:
+    def update_idle_reasons(self) -> list[str]:
+        """Why the engine is not provably idle, empty when it is.
+
+        A superset of ``restart_blockers``: an unattended update must not cut
+        off work it cannot see either. Provider background work is read from
+        the raw ``background_work_outstanding`` flag rather than
+        ``_provider_background_busy``, which deliberately ages old work out for
+        the idle reaper. A queued follow-up, a parked question or a parked
+        permission card outlives its provider, so every chat is inspected
+        rather than only the ones with a live provider — and so is every
+        pending retry. ``job_runs`` (finished runs only) and browser presence
+        are not work and are left out on purpose.
+        """
+        reasons: dict[str, list[str]] = {}
+
+        def add(chat_id: str, reason: str) -> None:
+            tags = reasons.setdefault(chat_id, [])
+            if reason not in tags:
+                tags.append(reason)
+
+        for blocker in self.restart_blockers():
+            for reason in blocker["reasons"]:
+                add(str(blocker["chat_id"]), str(reason))
+        for chat_id, service in list(self._providers.items()):
+            if service.background_work_outstanding:
+                add(chat_id, "background_work")
+        for chat in list(self._chats.values()):
+            if chat.pending_queue:
+                add(chat.chat_id, "pending_queue")
+            if chat.pending_question:
+                add(chat.chat_id, "open_question")
+            if chat.pending_permission:
+                add(chat.chat_id, "open_permission")
+        for chat_id, task in list(self._retry_tasks.items()):
+            if not task.done():
+                add(chat_id, "retry")
+        extra: list[str] = []
+        for probe in list(self._update_blocker_probes):
+            # Deliberately not caught: a probe that cannot answer its question
+            # makes the snapshot unknown, and `claim_for_update` fails closed on
+            # that rather than assuming the subsystem it could not read is idle.
+            extra.extend(probe())
+        reasons_out = [
+            f"{reason} in chat {chat_id}"
+            for chat_id in sorted(reasons)
+            for reason in sorted(reasons[chat_id])
+        ]
+        for reason in extra:
+            if reason not in reasons_out:
+                reasons_out.append(reason)
+        return reasons_out
+
+    def register_update_blocker_probe(
+        self, probe: Callable[[], list[str]]
+    ) -> None:
+        """Add a subsystem's idle proof to :meth:`update_idle_reasons`.
+
+        The engine owns the schedules, the backup and the memory-pass queue, so
+        it registers their probes once those objects exist. Each returns one
+        human-readable reason per unit of work that a restart would interrupt;
+        raising is how a probe says "I cannot tell", which fails the claim.
+        """
+        self._update_blocker_probes.append(probe)
+
+    def claim_for_update(self, owner: str) -> bool:
+        """Close admission for an unattended update, owned by ``owner``.
+
+        Fully synchronous on purpose: the snapshot and the close happen with no
+        ``await`` between them, so no coroutine on this loop can observe an
+        open gate after the engine has been proved idle. The close *is* the
+        claim. A snapshot that raises is not an idle engine, so nothing is
+        closed and the caller defers.
+        """
+        if self._restart_draining:
+            return False
+        try:
+            reasons = self.update_idle_reasons()
+        except Exception:  # noqa: BLE001 — an unreadable snapshot must not claim
+            logger.exception("Update idle snapshot failed; refusing to claim")
+            return False
+        if reasons:
+            return False
+        self.begin_restart_drain()
+        self._drain_owner = owner
+        return True
+
+    def begin_restart_drain(self, owner: str = "") -> None:
         """Stop admitting new turns while existing chat work finishes.
 
         Publishes ``server_restarting`` so connected PWAs can show the restart
         overlay instead of treating later turn rejections as chat errors.
+        ``owner`` names the operation a claimed drain belongs to; a manual
+        drain clears it, which keeps the cancel semantics it always had.
         """
         if self._restart_draining:
             return
         self._restart_draining = True
+        self._drain_owner = owner
         self._events.publish({
             "type": "server_restarting",
             "message": RESTART_DRAIN_MESSAGE,
         })
 
-    def cancel_restart_drain(self) -> None:
-        """Reopen admission after an aborted drain (e.g. an update whose drain timed out)."""
+    def cancel_restart_drain(self, owner: str | None = None) -> bool:
+        """Reopen admission after an aborted drain (e.g. an update whose drain timed out).
+
+        ``owner`` is the operation asking. ``None`` keeps the legacy behaviour
+        — any caller may reopen a manual drain — while a named owner only
+        reopens the drain it claimed. Returns whether admission is open
+        afterwards, so a route can answer a refused owner instead of claiming a
+        cancel it did not make.
+        """
+        if owner is not None and self._restart_draining and owner != self._drain_owner:
+            return False
         if not self._restart_draining:
-            return
+            return True
         self._restart_draining = False
+        self._drain_owner = ""
         # Admission is open again, so the wakes the drain deferred are
         # deliverable now. Skipping this loses them: nothing restarts the
         # server any more to replay them at the next start().
         self.resume_after_cancelled_drain()
         self._events.publish({"type": "server_restart_cancelled"})
+        return True
 
     def resume_after_cancelled_drain(self) -> None:
         """Replay the wakes a cancelled drain deferred "to the next start".
@@ -7774,6 +7893,16 @@ class ProjectChatManager:
         reopen admission, and a Settings restart's must not.
         """
         return self._restart_draining
+
+    @property
+    def drain_owner(self) -> str:
+        """Which operation owns the closed admission, empty for a manual drain.
+
+        Read-only so the cancel route can tell an owned claim from the manual
+        drain a Settings restart or an operator created: only a request naming
+        this owner may reopen admission while it is set.
+        """
+        return self._drain_owner
 
     @property
     def background_agent_counts(self) -> dict[str, int]:

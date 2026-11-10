@@ -204,6 +204,14 @@ const STATE_DETAIL: Record<string, { label: string; tone: Tone; detail: string }
     tone: 'off',
     detail: 'No automatic backup is running. The copy on this computer is unaffected.',
   },
+  // Slice 1b: an engine update holds admission closed, so the run did not
+  // start. Nothing is wrong and nothing is lost; the next attempt after the
+  // claim is released backs up normally.
+  deferred: {
+    label: 'Backup deferred',
+    tone: 'off',
+    detail: 'A Ciaobot update is in progress, so this backup did not run. It runs after the update finishes.',
+  },
 }
 
 const PENDING_DETAIL =

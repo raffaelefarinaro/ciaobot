@@ -7541,6 +7541,23 @@ def _forbidden_host(request: Request) -> JSONResponse | None:
     return JSONResponse({"error": "forbidden host"}, status_code=403)
 
 
+async def _drain_owner(request: Request) -> str | None:
+    """The ``owner`` an update's drain carries, or None for a manual caller.
+
+    The body is optional and has always been empty, so a missing, empty or
+    malformed document is "no owner" rather than a refusal: an older updater
+    must keep working exactly as it did.
+    """
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    owner = body.get("owner")
+    return owner if isinstance(owner, str) and owner else None
+
+
 async def admin_drain(request: Request) -> JSONResponse:
     """Close admission for new turns (update drain); loopback-only, no session.
 
@@ -7549,6 +7566,10 @@ async def admin_drain(request: Request) -> JSONResponse:
     began cannot extend the downtime it is waiting out. The active chat IDs
     come back in the same response the engine already publishes, so the caller
     does not have to make a second request to find out what it is waiting for.
+
+    An optional ``{"owner": "<operation id>"}`` body names the operation the
+    drain belongs to, which is what lets only that owner cancel it. Without one
+    the drain is the manual drain it has always been.
 
     Refused while a Settings restart is already draining: that restart owns the
     same flag, and taking it over would let the update's cancel reopen
@@ -7561,10 +7582,11 @@ async def admin_drain(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    owner = await _drain_owner(request)
     if pcm.restart_draining and not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"error": "a restart is already draining"}, status_code=409)
     request.app.state.update_drain_active = True
-    pcm.begin_restart_drain()
+    pcm.begin_restart_drain(owner or "")
     return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
 
 
@@ -7576,6 +7598,10 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     meant to enable. Only an update's own drain is cancelled: one that is not
     the engine's to cancel is left exactly as it is and reported as such, so a
     caller cannot reopen admission under a pending Settings restart.
+
+    A body naming a different ``owner`` is refused with 409 and changes
+    nothing: the drain belongs to that operation, and reopening it here would
+    let a stale or unrelated caller drop a claim newer work is counting on.
     """
     refusal = _forbidden_host(request)
     if refusal is not None:
@@ -7583,10 +7609,22 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    owner = await _drain_owner(request)
     if not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"draining": pcm.restart_draining})
+    # An owned claim is not reopened by an ownerless caller: a bodyless cancel
+    # is how the manual path cancels its own drain, and during a claimed update
+    # it is exactly the steal the owner token exists to refuse.
+    claimed_owner = str(getattr(pcm, "drain_owner", "") or "")
+    if claimed_owner and owner != claimed_owner:
+        return JSONResponse(
+            {"error": "drain owned by another operation"}, status_code=409
+        )
+    if not pcm.cancel_restart_drain(owner):
+        return JSONResponse(
+            {"error": "drain owned by another operation"}, status_code=409
+        )
     request.app.state.update_drain_active = False
-    pcm.cancel_restart_drain()
     return JSONResponse({"draining": False})
 
 

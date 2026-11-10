@@ -36,7 +36,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Callable
+from typing import IO, Any, Callable, Protocol
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -130,7 +130,21 @@ _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 # `dest`.
 Fetch = Callable[..., None]
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-PostJson = Callable[[str], dict[str, Any]]
+
+
+class PostJson(Protocol):
+    """POST one drain-handshake request to the engine and return its JSON answer.
+
+    ``body`` is the JSON request body, or ``None`` when the caller names no
+    drain owner — which is what a manual update sends, byte-identical to the
+    empty POST this handshake has always used.
+    """
+
+    def __call__(
+        self, url: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]: ...
+
+
 GetJson = Callable[[str], "dict[str, Any] | None"]
 Sleep = Callable[[float], None]
 Clock = Callable[[], float]
@@ -665,15 +679,21 @@ def _decode_body(raw: bytes) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _post_json(url: str, *, opener: Opener = _LOCAL_OPENER.open) -> dict[str, Any]:
-    """POST an empty body to ``url`` and return the JSON object answer.
+def _post_json(
+    url: str,
+    body: dict[str, Any] | None = None,
+    *,
+    opener: Opener = _LOCAL_OPENER.open,
+) -> dict[str, Any]:
+    """POST ``body`` (or an empty body) to ``url`` and return the JSON object answer.
 
     ``opener`` is a parameter so the failure-injection tests never open a
     socket. The timeout is ``_DRAIN_REQUEST_TIMEOUT`` because the callers are
     talking to an engine that is busy draining, so a slow answer is not yet a
     dead one.
     """
-    request = urllib.request.Request(url, method="POST", data=b"")
+    data = b"" if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, method="POST", data=data)
     with opener(request, timeout=_DRAIN_REQUEST_TIMEOUT) as response:
         return _decode_body(response.read())
 
@@ -711,10 +731,18 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return f": {error}" if isinstance(error, str) else ""
 
 
-def _drain_request(post: PostJson, url: str, step: str) -> dict[str, Any]:
-    """POST one drain-handshake request, failing with a reason that names ``step``."""
+def _drain_request(
+    post: PostJson, url: str, step: str, owner: str = ""
+) -> dict[str, Any]:
+    """POST one drain-handshake request, failing with a reason that names ``step``.
+
+    ``owner`` names the operation claiming the drain; empty sends the same URL
+    with no body a manual update has always sent, which is also all an injected
+    one-argument transport is called with.
+    """
+    body = {"owner": owner} if owner else None
     try:
-        return post(url)
+        return post(url) if body is None else post(url, body)
     except urllib.error.HTTPError as exc:
         raise UpdateError(
             f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
@@ -768,8 +796,12 @@ def _drain_timeout_arg(value: str) -> float:
     return seconds
 
 
-def _reopen_admission(post: PostJson, base: str) -> str:
+def _reopen_admission(post: PostJson, base: str, owner: str = "") -> str:
     """Undo a drain and return why it failed, or ``""`` when it landed.
+
+    ``owner`` is the operation the drain belongs to. The engine refuses a
+    cancel from any other owner, which is the point: a stale child must not
+    reopen admission under work a newer claim is waiting on.
 
     The engine is either unreachable — in which case it is refusing nothing —
     or wedged, in which case the cancel is exactly what a retry needs. Neither
@@ -777,7 +809,7 @@ def _reopen_admission(post: PostJson, base: str) -> str:
     appends the returned text to the reason it records.
     """
     try:
-        _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel")
+        _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel", owner)
     except Exception as exc:  # noqa: BLE001 — best effort by definition
         return str(exc)
     return ""
@@ -891,6 +923,7 @@ def _previous_receipt(op: Operation) -> install_receipt.InstallReceipt | None:
 def apply_update(
     *,
     drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
+    drain_owner: str = "",
     state_dir: Path | None = None,
     port: int | None = None,
     http_post: PostJson | None = None,
@@ -918,6 +951,11 @@ def apply_update(
     ``host`` is the update host: the job that owns the swap, the interpreter it
     runs from, and the engine's port and label. Everything else here is the
     transaction, and is the same everywhere.
+
+    ``drain_owner`` names the operation claiming the drain when the coordinator,
+    not a person, started this apply. It rides every drain handshake so the
+    engine can refuse a cancel from anything else; empty keeps the manual
+    handshake exactly as it was.
 
     Everything is injectable so the tests exercise the handshake, the timeout
     and the handoff without launchd, a network, or a real engine. Note there is
@@ -965,7 +1003,7 @@ def apply_update(
 
             Returns the recorded message, which names a failed cancel too.
             """
-            cancel_error = _reopen_admission(post, base)
+            cancel_error = _reopen_admission(post, base, drain_owner)
             if cancel_error:
                 message = (
                     f"{message}; reopening chats also failed ({cancel_error}), "
@@ -979,7 +1017,7 @@ def apply_update(
 
         try:
             advance("draining")
-            _drain_request(post, f"{base}/api/admin/drain", "drain request")
+            _drain_request(post, f"{base}/api/admin/drain", "drain request", drain_owner)
             # Polled by re-POSTing the drain, not by reading
             # a separate chat list: the drain POST is loopback-only, so it always
             # answers for this machine, and `begin_restart_drain` is idempotent,
@@ -991,7 +1029,9 @@ def apply_update(
             deadline = clock() + drain_timeout
             idle = 0
             while True:
-                body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll")
+                body = _drain_request(
+                    post, f"{base}/api/admin/drain", "drain status poll", drain_owner
+                )
                 active = body.get("active_chat_ids") or []
                 idle = idle + 1 if not active else 0
                 if idle >= _IDLE_POLLS_REQUIRED:
@@ -1271,6 +1311,7 @@ def _service_disagreement(
 def run_apply(
     operation_id: str,
     *,
+    drain_owner: str = "",
     state_dir: Path | None = None,
     port: int | None = None,
     http_post: PostJson | None = None,
@@ -1320,7 +1361,7 @@ def run_apply(
         # The handoff lost to a second update. The engine is still running and
         # still drained, and this job is the only thing that knows it, so the
         # cancel goes out before the failure propagates.
-        _reopen_admission(post, base)
+        _reopen_admission(post, base, drain_owner)
         raise
     try:
         op = read_operation(root)
@@ -1329,10 +1370,10 @@ def run_apply(
             # rewrite, so this is the one failure with no phase of its own.
             # The engine is still up and still drained: reopen admission
             # before it propagates.
-            _reopen_admission(post, base)
+            _reopen_admission(post, base, drain_owner)
             raise UpdateError(f"no staged update with id {operation_id!r}")
         if op.phase != "applying":
-            _reopen_admission(post, base)
+            _reopen_admission(post, base, drain_owner)
             raise UpdateError(f"update {operation_id} is {op.phase}, not applying")
 
         def advance(phase: str) -> None:
@@ -1355,7 +1396,7 @@ def run_apply(
             # still drained by the foreground half, and nothing else reopens
             # it. Past the stop there is nothing left to reopen: the cancel is a
             # no-op against a dead engine, which is started again either way.
-            _reopen_admission(post, base)
+            _reopen_admission(post, base, drain_owner)
             return op
 
         # Pre-flight, while the engine is still serving: every one of these
@@ -1977,6 +2018,15 @@ def main(argv: list[str] | None = None) -> int:
             f"(default: {int(_DEFAULT_DRAIN_TIMEOUT)}, minimum: {int(_MIN_DRAIN_TIMEOUT)})"
         ),
     )
+    apply_cmd.add_argument(
+        "--drain-owner",
+        default="",
+        metavar="OPERATION_ID",
+        help=(
+            "own the drain as this operation, so only it may cancel; "
+            "omit for a manual apply"
+        ),
+    )
     apply_cmd.add_argument("--json", action="store_true", help="print the operation record")
 
     status = sub.add_parser("status", help="Print the current update record")
@@ -2065,7 +2115,11 @@ def main(argv: list[str] | None = None) -> int:
                 restore[sig] = signal.getsignal(sig)
                 signal.signal(sig, _interrupt)
         try:
-            op = apply_update(drain_timeout=args.drain_timeout, host=platform)
+            op = apply_update(
+                drain_timeout=args.drain_timeout,
+                drain_owner=args.drain_owner,
+                host=platform,
+            )
         except KeyboardInterrupt:
             # 130 is the conventional exit for SIGINT, and this is the same
             # event: the apply was interrupted, the record says why, and

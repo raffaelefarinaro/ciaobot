@@ -16,6 +16,7 @@ from typing import Any, Callable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao import __version__ as ENGINE_VERSION
 from ciao import engine_update
 from ciao.config import RESTART_EXIT_CODE
 from ciao.package_version import (
@@ -155,6 +156,40 @@ def _current_update_error(
     return ""
 
 
+#: What the card is told when no coordinator is running in this engine. The
+#: keys are the coordinator's own, because the PWA reads one shape: a missing
+#: key would render as "supported" or crash a computed property, and "enabled"
+#: is the documented default rather than a fact about this engine.
+_NO_AUTO_UPDATE: dict[str, Any] = {
+    "enabled": True,
+    "supported": False,
+    "unsupported_reason": "automatic updates are not running in this engine",
+    "snooze_until": "",
+    "outcome": "",
+    "error": "",
+    "attempted_at": "",
+}
+
+
+def _auto_update_state(request: Request) -> dict[str, Any]:
+    """The automatic updater's status: the policy, the install and the last try.
+
+    Read-only on purpose. This route is polled every few seconds; a status read
+    that ticked would turn opening Settings into an update decision. A
+    coordinator that raises is reported as an unsupported install with the
+    reason, never as a 500 on a polling endpoint.
+    """
+    coordinator = getattr(request.app.state, "auto_update", None)
+    status = getattr(coordinator, "status", None)
+    if not callable(status):
+        return dict(_NO_AUTO_UPDATE)
+    try:
+        state: dict[str, Any] = status()
+        return state
+    except Exception as exc:  # noqa: BLE001 — a card must still render
+        return {**_NO_AUTO_UPDATE, "error": str(exc)}
+
+
 def _engine_update_state(request: Request) -> dict[str, Any]:
     """The persisted job + install mode, as the Settings card needs it.
 
@@ -172,6 +207,12 @@ def _engine_update_state(request: Request) -> dict[str, Any]:
         # In-app updates swap the install the receipt describes, so there is
         # nothing to update for an editable checkout or a bundled app.
         "can_update": mode == "installer",
+        # What is installed right now, so the card can say "on 2.0.16" without
+        # a second request. The running process's own version is the truthful
+        # answer here; the release lookup in /api/package/status is a network
+        # call and this route is polled.
+        "current_version": ENGINE_VERSION,
+        "auto_update": _auto_update_state(request),
     }
     try:
         operation = read_fn()
@@ -329,6 +370,49 @@ def _stage_then_apply(
             apply_fn()
         except engine_update.UpdateError as exc:
             raise _ApplyRefused(before_apply, exc) from exc
+
+
+async def update_settings_endpoint(request: Request) -> JSONResponse:
+    """Change the automatic updater's policy from Settings.
+
+    Body: exactly one of ``{"enabled": true|false}`` or ``{"snooze": true}``.
+    Anything else — an extra key, both, the wrong type, a body that is not an
+    object — is a 400 naming the contract, because a settings write that half
+    applied is worse than one that was refused. ``snooze`` persists "not now"
+    for 24 hours; turning the updater on or off never touches an active hold.
+
+    The answer is the same ``auto_update`` object ``GET /api/update/status``
+    carries, so the card confirms the write from one shape rather than two.
+    """
+    body: object = None
+    with contextlib.suppress(ValueError):
+        body = await request.json()
+    if not isinstance(body, dict) or len(body) != 1:
+        return api_error('body must be exactly {"enabled": bool} or {"snooze": true}', 400)
+
+    coordinator = getattr(request.app.state, "auto_update", None)
+    if coordinator is None or not callable(getattr(coordinator, "status", None)):
+        return api_error("automatic updates are not running in this engine", 503)
+
+    key, value = next(iter(body.items()))
+    try:
+        if key == "enabled":
+            if not isinstance(value, bool):
+                return api_error('"enabled" must be true or false', 400)
+            coordinator.set_enabled(value)
+        elif key == "snooze":
+            if value is not True:
+                return api_error('"snooze" must be true', 400)
+            coordinator.snooze()
+        else:
+            return api_error(
+                'body must be exactly {"enabled": bool} or {"snooze": true}', 400
+            )
+    except (OSError, ValueError) as exc:
+        # Settings could not be written: the card has to say so and keep the
+        # state it last confirmed rather than pretend the policy changed.
+        return api_error(f"could not save the automatic update setting: {exc}", 500)
+    return JSONResponse(coordinator.status())
 
 
 async def update_start_endpoint(request: Request) -> JSONResponse:

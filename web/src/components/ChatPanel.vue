@@ -743,12 +743,13 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="questionCardVisible" class="question-card">
+    <div v-if="questionCardVisible" class="question-card question-form-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
+      <div class="question-form-body" role="region" aria-label="Question details" tabindex="0">
       <p v-if="activeQuestions[0]?.stale" class="question-card-note">The engine restarted. Your answer will be sent as a message.</p>
       <template v-for="(q, qi) in activeQuestions" :key="qi">
         <div v-if="isQuestionActive(qi, q)" class="question-block">
@@ -810,6 +811,7 @@
         </div>
       </template>
       <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
+      </div>
       <div class="question-card-actions">
         <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
         <button class="btn-sm primary" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
@@ -7400,6 +7402,32 @@ details[open] > .activity-summary::before {
   max-height: 50vh;
   overflow-y: auto;
 }
+.question-form-card {
+  overflow: hidden;
+  max-height: 60dvh;
+}
+.question-form-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.question-form-body > * { flex-shrink: 0; }
+.question-form-body:focus-visible,
+.question-form-body:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.question-form-card .question-card-actions .btn-sm:focus-visible,
+.question-form-card .question-card-actions .btn-sm:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.question-form-card > .question-card-header,
+.question-form-card > .question-card-actions { flex-shrink: 0; }
+:global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
 .question-card-header {
   display: flex;
   align-items: center;

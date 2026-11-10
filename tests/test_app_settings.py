@@ -132,6 +132,7 @@ def test_update_persists_and_roundtrips(tmp_path):
     store = AppSettingsStore(path)
     store.update({"dev_mode": True, "ignored": "x"})
     assert json.loads(path.read_text()) == {
+        "auto_update_enabled": True,
         "dev_mode": True,
         "backup_enabled": True,
         "backup_paused": False,
@@ -152,6 +153,62 @@ def test_resume_after_restart_defaults_on_and_round_trips(tmp_path):
 
     with pytest.raises(ValueError, match="must be a boolean"):
         store.update({"resume_after_restart": "no"})
+
+
+def test_auto_update_default_enabled_and_explicit_off_roundtrips(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    # A missing key means on: automatic updates ship enabled.
+    assert store.settings.auto_update_enabled is True
+
+    store.update({"auto_update_enabled": False})
+    # Non-sparse on purpose: an explicit opt-out has to survive a restart, so
+    # the file has to carry the false rather than omit it like a default.
+    assert json.loads(path.read_text())["auto_update_enabled"] is False
+    assert AppSettingsStore(path).settings.auto_update_enabled is False
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"auto_update_enabled": "no"})
+
+
+def test_auto_update_unreadable_settings_fail_closed(tmp_path):
+    path = tmp_path / "app_settings.json"
+    # Absent is healthy: a new install has no decision, so the documented
+    # default is the answer.
+    assert AppSettingsStore(path).load_error == ""
+
+    path.write_text("{not json")
+    store = AppSettingsStore(path)
+    # The defaults are "on", but nobody chose them. The store says it could not
+    # read the file, and leaves those bytes alone: rewriting them with the
+    # defaults would erase a decision nobody could read.
+    assert store.settings.auto_update_enabled is True
+    assert "could not be read" in store.load_error
+    assert path.read_text() == "{not json"
+
+
+def test_auto_update_timestamps_reject_junk(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "auto_update_snooze_until": "not a time",
+                "auto_update_attempt_at": 12345,
+                # Naive is read as UTC, which is what the file always holds.
+                "auto_update_next_check_at": "2026-11-10T00:00:00",
+            }
+        )
+    )
+    store = AppSettingsStore(path)
+    # Junk reads as "never set", never as a crash and never as a stamp.
+    assert store.settings.auto_update_snooze_until == ""
+    assert store.settings.auto_update_attempt_at == ""
+    assert store.settings.auto_update_next_check_at == "2026-11-10T00:00:00+00:00"
+
+    with pytest.raises(ValueError, match="ISO-8601"):
+        store.update({"auto_update_next_check_at": "soon"})
+    with pytest.raises(ValueError, match="must be a string"):
+        store.update({"auto_update_snooze_until": 5})
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -236,6 +293,7 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert config.provider_default_thinking == {"claude": "high"}
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
+        "auto_update_enabled": True,
         "backup_enabled": True,
         "backup_paused": False,
         "resume_after_restart": True,
