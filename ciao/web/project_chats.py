@@ -861,7 +861,9 @@ class ChatInfo:
     # `pinned_file_path` is a canonical POSIX host path (`Path.resolve()
     # .as_posix()`), never a display or relative form: paths are identity keys
     # here, so there is no fuzzy matching and no extension guessing. Empty
-    # means the panel is closed.
+    # means the panel is closed. A path ending in `/` is a folder pin (the
+    # canonical directory path plus one trailing slash), written by
+    # `_chat_pin_patch` and confined to the chat's browsable roots.
     # `dismissed_pin_paths` are the paths the user closed on purpose. Agent
     # surfacing (`surface_chat_file`) leaves a dismissed path alone; a manual
     # repin of that same path clears its own dismissal.
