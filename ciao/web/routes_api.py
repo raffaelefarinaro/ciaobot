@@ -2481,10 +2481,11 @@ def _chat_pin_request(body: dict) -> tuple[str, int]:
     raw_path = pin.get("path")
     if not isinstance(raw_path, str):
         raise ValueError("pin.path must be a string")
-    if "\x00" in raw_path or not raw_path.isprintable():
-        # Rejected here rather than left to the resolver: an empty path skips
-        # the resolver entirely, so this check has to live here for it to hold
-        # for both branches.
+    if any(unicodedata.category(c) == "Cc" for c in raw_path):
+        # Control characters only (NUL included), matching the folder listing.
+        # `str.isprintable()` would also refuse U+202F, the space macOS puts in
+        # screenshot names, so a folder the browser lists could not be pinned.
+        # The empty-path branch skips the resolver, so this check lives here.
         raise ValueError("pin.path contains characters that cannot be a path")
     revision = pin.get("expected_revision")
     # bool is an int subclass, so `True` must not be read as revision 1.
@@ -2641,6 +2642,7 @@ async def _chat_pin_patch(
 
     Sets or closes the chat's pinned file. Reuses the existing signed-session,
     origin-gated route: pins get no new endpoint and no auth exception.
+    A path ending in a slash pins a folder instead (see the branch below).
 
     Ordering is deliberate. Shape first (400), then existence (404) *before*
     any filesystem probing, then the resolver, and only then the write: a
@@ -2660,14 +2662,28 @@ async def _chat_pin_patch(
 
     path = ""
     if raw_path:
-        resolved = _resolve_pin_path(
-            request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
-        )
-        if isinstance(resolved, Response):
-            return resolved
-        # Store the canonical absolute POSIX identity: relative and `~` forms
-        # would not match a later surface or dismissal of the same file.
-        path = resolved.as_posix()
+        if raw_path.endswith(("/", "\\")):
+            # A trailing slash pins a folder: confined to the roots the folder
+            # browser lists (GET /api/workspace-dir?chat_id=), stored with one
+            # trailing "/" so every client can tell it from a file pin.
+            chat = pcm.get_chat(chat_id)  # non-None: checked above
+            candidates = _chat_dir_root_candidates(request.app.state.config, pcm, chat)
+            folder: tuple[Path, tuple[str, Path]] | Response = await asyncio.to_thread(
+                lambda: _resolve_dir_target(_distinct_dir_roots(candidates), raw_path)
+            )
+            if isinstance(folder, Response):
+                return folder
+            posix = folder[0].as_posix()
+            path = posix if posix.endswith("/") else f"{posix}/"
+        else:
+            resolved = _resolve_pin_path(
+                request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
+            )
+            if isinstance(resolved, Response):
+                return resolved
+            # Store the canonical absolute POSIX identity: relative and `~` forms
+            # would not match a later surface or dismissal of the same file.
+            path = resolved.as_posix()
 
     try:
         # Raises ChatPinConflictError before mutating anything when the quoted
@@ -3748,8 +3764,10 @@ def _distinct_dir_roots(candidates: list[tuple[str, Path]]) -> list[tuple[str, P
     return kept
 
 
-def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, Any] | Response:
-    """Resolve ``raw`` against the roots and list it, or return the error response."""
+def _resolve_dir_target(
+    roots: list[tuple[str, Path]], raw: str
+) -> tuple[Path, tuple[str, Path]] | Response:
+    """Resolve and classify a folder path against the browsable roots; shared by the listing and folder pins."""
     if any(unicodedata.category(c) == "Cc" for c in raw):
         return JSONResponse({"error": "bad path"}, status_code=400)
     raw = _LINE_SUFFIX_RE.sub("", raw.strip())
@@ -3780,6 +3798,15 @@ def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, An
     owner = next(((n, r) for n, r in roots if target == r or target.is_relative_to(r)), None)
     if owner is None:
         return JSONResponse({"error": "outside_roots"}, status_code=403)
+    return target, owner
+
+
+def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, Any] | Response:
+    """Resolve ``raw`` against the roots and list it, or return the error response."""
+    resolved = _resolve_dir_target(roots, raw)
+    if isinstance(resolved, Response):
+        return resolved
+    target, owner = resolved
     entries: list[dict[str, Any]] = []
     try:
         with os.scandir(target) as scanned:
@@ -3814,6 +3841,28 @@ def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, An
     }
 
 
+def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
+    """The chat's browsable roots: its agent root, workspace vault and linked repo.
+
+    Shared by the folder listing and folder pins, so the tile can never pin a
+    folder the browser would refuse to list.
+    """
+    workspace = pcm._workspace_for_chat(chat.chat_id)
+    try:
+        agent_root = config.agent_root(workspace)
+    except ValueError:  # no registered workspace name
+        agent_root = config.workspace_root
+    candidates: list[tuple[str, Path]] = [("workspace", agent_root)]
+    try:
+        candidates.append(("vault", config.workspace_vault_root(workspace)))
+    except ValueError:  # unresolvable vault: browse without it
+        pass
+    project = pcm.get_project(chat.project_id)
+    if project is not None and project.repo_path:
+        candidates.append(("repo", Path(project.repo_path)))
+    return candidates
+
+
 async def workspace_dir(request: Request) -> Response:
     """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`)."""
     config = request.app.state.config
@@ -3824,19 +3873,7 @@ async def workspace_dir(request: Request) -> Response:
         chat = pcm.get_chat(chat_id)
         if chat is None:
             return JSONResponse({"error": "chat not found"}, status_code=404)
-        workspace = pcm._workspace_for_chat(chat_id)
-        try:
-            agent_root = config.agent_root(workspace)
-        except ValueError:  # no registered workspace name
-            agent_root = config.workspace_root
-        candidates = [("workspace", agent_root)]
-        try:
-            candidates.append(("vault", config.workspace_vault_root(workspace)))
-        except ValueError:  # unresolvable vault: browse without it
-            pass
-        project = pcm.get_project(chat.project_id)
-        if project is not None and project.repo_path:
-            candidates.append(("repo", Path(project.repo_path)))
+        candidates = _chat_dir_root_candidates(config, pcm, chat)
     else:
         allowed = _allowed_roots(config)
         candidates = [("workspace", allowed[0])] + [("vault", r) for r in allowed[1:2]]
