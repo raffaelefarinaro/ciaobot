@@ -4345,9 +4345,12 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Non-final text lives in the one trace; only the final reply is a bubble.
+    // Earlier explicitly completed replies are bubbles of their own; the rest
+    // is Activity. Only the final reply owns the turn footer and Outputs.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
-      withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
+      part.kind === 'assistant'
+        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
+        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents and (when there's no answer bubble) file outputs
     // belong to the one Activity trace that sits right before the reply. Reuse
