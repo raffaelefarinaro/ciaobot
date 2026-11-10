@@ -3,8 +3,8 @@ import { COMPOSER, boot, isolate } from '../support/app'
 
 /**
  * Staged images and comments share one chip shape, and at least two chips fit
- * on a row: a long comment cannot take a row to itself. Layout only a real
- * browser can measure.
+ * on a row: a long comment cannot take a row to itself. An upload writes its
+ * [Image N] into the prompt, and a chip opens the image in the viewer.
  */
 const CHAT_ID = 'alpha-chat-1'
 const PNG_1X1 = Buffer.from(
@@ -64,9 +64,17 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 700 
       expect(r!.y).toBeGreaterThanOrEqual(c!.y)
       expect(r!.x + r!.width).toBeLessThanOrEqual(c!.x + c!.width + 0.5)
     }
-    // Clicking an image chip inserts its reference.
+    // Each upload wrote its reference into the prompt.
+    await expect(page.locator(COMPOSER)).toHaveValue('[Image 1] [Image 2] ')
+    // Clicking an image chip opens it in the viewer.
     await page.locator('.image-ref-chip').first().click()
-    await expect(page.locator(COMPOSER)).toHaveValue(/\[Image 1\]/)
+    const viewer = page.locator('.fv-modal')
+    await expect(viewer.locator('.fv-img')).toHaveAttribute('src', '/api/images/img_tray_1')
+    await page.keyboard.press('Escape')
+    await expect(viewer).toHaveCount(0)
+    // Removing image 1 drops its reference and renumbers image 2.
+    await page.locator('.image-preview-remove').first().click()
+    await expect(page.locator(COMPOSER)).toHaveValue('[Image 1] ')
     await page.locator('.composer-surface').screenshot({ path: testInfo.outputPath(`tray-${viewport.width}.png`) })
   })
 }

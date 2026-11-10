@@ -1099,12 +1099,13 @@
             class="pending-attachments"
           >
             <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="comment-chip image-preview">
-              <img :src="`/api/images/${ref}`" alt="" class="image-preview-thumb" />
+              <img :src="`/api/images/${ref}`" alt="" aria-hidden="true" class="image-preview-thumb" @click="openMessageImage(ref)" />
               <button
                 type="button"
                 class="comment-chip-body image-ref-chip"
-                @click.stop.prevent="insertImageRef(i + 1)"
-                :title="`Insert [Image ${i + 1}] at the cursor`"
+                @click.stop.prevent="openMessageImage(ref)"
+                :aria-label="`Open image ${i + 1}`"
+                title="Open image"
               ><span class="comment-chip-note">Image {{ i + 1 }}</span></button>
               <button type="button" class="comment-chip-remove image-preview-remove" :aria-label="`Remove image ${i + 1}`" title="Remove" @click="removePendingImage(i)">&times;</button>
             </span>
@@ -1712,7 +1713,6 @@ const {
   handleNativeFileDrop,
   handlePaste,
   handlePromptHistoryKey,
-  insertImageRef,
   removePendingImage,
   removePendingFile,
 } = composer
@@ -6651,8 +6651,10 @@ details[open] > .activity-summary::before {
 }
 
 /* An image is a chip like the others: a small thumbnail where the icon goes,
-   its "Image N" reference (click inserts it at the cursor), then remove. */
+   its "Image N" reference (inserted into the prompt on upload; click opens
+   the image in the viewer), then remove. */
 .image-preview { padding-left: 3px; }
+.image-preview-thumb, .image-ref-chip { cursor: zoom-in; }
 .image-preview-thumb {
   flex: none;
   width: 24px;
