@@ -1,7 +1,7 @@
 <template>
   <div class="login-page">
-    <div class="login-shell">
-      <div class="login-shell-bar">
+    <div class="login-shell" :class="{ 'native-bootstrap': nativeBootstrap }">
+      <div v-if="!nativeBootstrap" class="login-shell-bar">
         <span class="dot dot--r"></span>
         <span class="dot dot--y"></span>
         <span class="dot dot--g"></span>
@@ -12,11 +12,12 @@
 
       <!-- RESTARTING SCREEN -->
       <div v-if="isRestarting" class="login-body restarting-body">
-        <p class="line line--banner">
+        <p v-if="!nativeBootstrap" class="line line--banner">
           <span class="wordmark wordmark--md">restarting</span>
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
-        <p class="line line--sys">
+        <p v-if="nativeBootstrap" class="line line--sys">Setup saved. Ciaobot is starting on this Mac.</p>
+        <p v-else class="line line--sys">
           Ciaobot is finishing setup and moving to the background service. Keep the terminal that started it open until it says setup is complete, then you can close it.
         </p>
         <p class="line line--sys">
@@ -31,17 +32,17 @@
       <form v-else-if="isBootstrap" class="login-body setup-wizard" @submit.prevent="doFinish">
         <p class="line line--banner">
           <span class="wordmark wordmark--md">ciaobot setup</span>
-          <span class="banner-meta">// tour + local setup</span>
+          <span v-if="isBootstrap && !nativeBootstrap" class="banner-meta">// tour + local setup</span>
         </p>
 
-        <section class="setup-run-note" aria-label="First launch instructions">
+        <section v-if="!nativeBootstrap" class="setup-run-note" aria-label="First launch instructions">
           <span class="run-note-kicker">First launch from Terminal</span>
           <p>
             Keep the terminal that started Ciaobot open while you finish this setup. When setup completes, Ciaobot moves to the background service: you can close the terminal and keep using this tab.
           </p>
         </section>
 
-        <section class="setup-tour" aria-label="Ciaobot setup tour">
+        <section v-if="!nativeBootstrap" class="setup-tour" aria-label="Ciaobot setup tour">
           <p class="tour-title">Your coding-agent subscription, with a real interface and memory.</p>
           <ul class="tour-list">
             <li>
@@ -77,6 +78,7 @@
             <input
               id="setup-workspace"
               v-model="workspace"
+              @input="workspaceEdited = true"
               type="text"
               class="form-input"
               placeholder="~/ciaobot"
@@ -465,10 +467,12 @@ const bootstrapLoading = ref(true)
 const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
 const workspaceEdited = ref(false)
-watch(workspace, () => { workspaceEdited.value = true })
-watch(setupStatus, (status) => {
-  if (status?.suggested_workspace && !workspaceEdited.value) workspace.value = status.suggested_workspace
-}, { immediate: true })
+const nativeBootstrap = ref(false)
+function applySetupStatus(status: SetupStatus) {
+  if (status.native_bootstrap) nativeBootstrap.value = true
+  setupStatus.value = status
+  if (!workspaceEdited.value) workspace.value = status.suggested_workspace ?? (nativeBootstrap.value ? '~/Ciaobot' : '~/ciaobot')
+}
 const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
@@ -666,6 +670,7 @@ async function createPickerFolder() {
 function selectPickerFolder() {
   if (!pickerPath.value) return
   workspace.value = pickerPath.value
+  workspaceEdited.value = true
   pickerOpen.value = false
 }
 
@@ -771,7 +776,7 @@ async function doLogin() {
 async function fetchSetupStatus() {
   try {
     const status = await api.get<SetupStatus>('/api/setup-status')
-    setupStatus.value = status
+    applySetupStatus(status)
     isBootstrap.value = !!status.bootstrap
   } catch {
     isBootstrap.value = false
@@ -856,7 +861,7 @@ watch(isBootstrap, (newVal) => {
       pollInterval = setInterval(async () => {
         try {
           const status = await api.get<SetupStatus>('/api/setup-status')
-          setupStatus.value = status
+          applySetupStatus(status)
           isBootstrap.value = !!status.bootstrap
         } catch {
           // ignore transient poll errors
@@ -924,6 +929,14 @@ onUnmounted(() => {
     0 24px 48px rgba(0, 0, 0, 0.45),
     0 0 0 1px rgba(255, 77, 109, 0.08);
 }
+.native-bootstrap .form-input,
+.native-bootstrap .btn-small,
+.native-bootstrap .btn-primary {
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.native-bootstrap .form-input { font-size: 16px; }
+.native-bootstrap .form-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .login-shell-bar {
   display: flex;

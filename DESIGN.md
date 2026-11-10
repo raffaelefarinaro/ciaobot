@@ -199,6 +199,8 @@ Color is never the only state signal. Pair status colors with text, an icon, a s
 
 ## Typography
 
+Native installer setup uses a compact in-app hierarchy: retain the setup wordmark and form, while omitting terminal chrome, terminal-only instructions, and the product tour. Native setup controls keep 44px minimum touch height and 16px input text; visible keyboard focus and browser zoom/reflow remain available.
+
 The product uses a **hybrid typography system** (the proportional face is the opt-in **Body font** below): a clean system proportional sans-serif stack (`-apple-system`, `SF Pro`, `Segoe UI`, `Roboto`) for conversational chat prose and general UI, paired with a monospaced stack (**SF Mono**, **Fira Code**, **Cascadia Code**, `monospace`) for code blocks, badges, commands, schedules, timestamps, and terminal identifiers.
 
 - **Titles:** 15–16px, bold, with slightly tight tracking. Titles should remain visible when actions compete for space.
