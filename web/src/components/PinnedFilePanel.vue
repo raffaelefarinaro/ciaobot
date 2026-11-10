@@ -6,9 +6,19 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
+          <button
+            v-if="returnFolder && kind !== 'folder'"
+            type="button"
+            class="btn-icon pfp-back-btn"
+            :aria-label="`Back to ${returnFolderName}`"
+            :title="`Back to ${returnFolderName}`"
+            @click="backToFolder"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
           <div class="header-breadcrumb">
-            <span class="chat-title" :title="filePath">{{ basename }}</span>
-            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(cleanPath) }}</span>
+            <span class="chat-title" :title="currentPath">{{ headerTitle }}</span>
+            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(currentPath) }}</span>
           </div>
         </div>
       </template>
@@ -39,10 +49,10 @@
                 <DropdownMenuItem as-child @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child @select="showInFolder">
+                <DropdownMenuItem v-if="kind !== 'folder'" as-child @select="showInFolder">
                   <button type="button">Show in folder</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
+                <DropdownMenuItem v-if="kind !== 'folder'" as-child :disabled="loading || !!error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
@@ -56,13 +66,13 @@
           </DropdownMenuPortal>
         </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
-        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'" :disabled="closeDisabled" :aria-disabled="closeDisabled">
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :aria-label="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')":disabled="closeDisabled" :aria-disabled="closeDisabled">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
-      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
+      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv, 'pfp-body-folder': kind === 'folder' }" ref="bodyEl">
         <!-- A host's own context for the file (the memory map's stale-note
              callout), above the document. -->
         <slot name="lead" />
@@ -94,6 +104,14 @@
             <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
           </div>
         </div>
+        <FolderBrowser
+          v-else-if="kind === 'folder'"
+          :key="`${folderStart}:${folderKey}`"
+          :initial-path="folderStart"
+          :chat-id="projectsStore.activeChatId || ''"
+          @navigate="browsedFolder = $event"
+          @open-file="onFolderOpenFile"
+        />
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <div v-else-if="kind === 'image' && imageError" class="pfp-error" role="alert">{{ imageError }}</div>
         <img
@@ -353,12 +371,13 @@ import { handleAppLinkClick } from '../lib/appLinks'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
+import { fileViewerKindForPath, isFolderPin, isPinnableFilePath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
 import { router } from '../router'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
+const FolderBrowser = defineAsyncComponent(() => import('./FolderBrowser.vue'))
 
 const props = defineProps<{
   filePath: string
@@ -375,7 +394,7 @@ defineEmits<{ (e: 'close'): void }>()
 const projectsStore = useProjectStore()
 const fileViewer = useFileViewerStore()
 const memoryMapStore = useMemoryMapStore()
-const memoryPath = computed(() => /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
+const memoryPath = computed(() => !isFolder.value && /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
 
 async function openInMemoryMap(): Promise<void> {
   const target = memoryPath.value
@@ -415,7 +434,7 @@ function showInFolder(): void {
 
 async function copyPath(): Promise<void> {
   try {
-    await navigator.clipboard.writeText(cleanPath.value)
+    await navigator.clipboard.writeText(currentPath.value)
     copyState.value = 'ok'
     setTimeout(() => { copyState.value = 'idle' }, 1500)
   } catch {
@@ -481,7 +500,44 @@ const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
 
-const cleanPath = computed(() => props.filePath.replace(/:\d+$/, ''))
+const cleanPath = computed(() => props.filePath.replace(/:\d+$/, '').replace(/[/\\]+$/, ''))
+const isFolder = computed(() => isFolderPin(props.filePath))
+// The folder the docked browser is showing (it can move away from the pin).
+const browsedFolder = ref('')
+// Where the browser (re)mounts: the pin, or the shown folder on Refresh.
+const folderStart = ref('')
+const folderKey = ref(0)
+// The folder a docked file was opened from: the tile's Back returns there.
+const returnFolder = ref('')
+let pendingReturn: { folder: string; file: string } | null = null
+const currentPath = computed(() => (isFolder.value ? browsedFolder.value || cleanPath.value : cleanPath.value))
+const headerTitle = computed(() => currentPath.value.slice(currentPath.value.lastIndexOf('/') + 1))
+const returnFolderName = computed(() => returnFolder.value.slice(returnFolder.value.lastIndexOf('/') + 1))
+watch(() => props.filePath, () => {
+  browsedFolder.value = ''
+  folderStart.value = cleanPath.value
+  returnFolder.value = !isFolder.value && pendingReturn && pendingReturn.file === cleanPath.value
+    ? pendingReturn.folder
+    : ''
+  pendingReturn = null
+}, { immediate: true })
+// A dock aimed at the folder already pinned: show that folder again.
+watch(() => fileViewer.folderRedock.seq, () => {
+  if (isFolder.value && fileViewer.folderRedock.path === props.filePath) {
+    browsedFolder.value = ''
+    folderStart.value = cleanPath.value
+    folderKey.value++
+  }
+})
+async function onFolderOpenFile(path: string): Promise<void> {
+  const from = browsedFolder.value || cleanPath.value
+  const dockable = isPinnableFilePath(path)
+  pendingReturn = dockable ? { folder: from, file: path } : null
+  await fileViewer.openFromFolder(path, dockable ? projectsStore.activeChatId || '' : '', from)
+}
+function backToFolder(): void {
+  if (returnFolder.value) void fileViewer.openFolder(returnFolder.value, projectsStore.activeChatId || '')
+}
 const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(cleanPath.value)}&t=${imageTimestamp.value}`)
 // Why the current image URL failed to load; empty while it has not failed.
 const imageError = ref('')
@@ -498,11 +554,11 @@ const basename = computed(() => {
 })
 const fileBasenameForPop = computed(() => basename.value)
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
-const isCsv = computed(() => isCsvPath(cleanPath.value))
+const isCsv = computed(() => !isFolder.value && isCsvPath(cleanPath.value))
 
 const docDir = computed(() => {
-  const idx = cleanPath.value.lastIndexOf('/')
-  return idx === -1 ? '' : cleanPath.value.slice(0, idx + 1)
+  const idx = currentPath.value.lastIndexOf('/')
+  return idx === -1 ? '' : currentPath.value.slice(0, idx + 1)
 })
 
 const metadata = computed(() => buildVaultDocumentMetadata(content.value, cleanPath.value, markdownPaths.value))
@@ -537,6 +593,13 @@ async function load(): Promise<void> {
   // Images are the panel's own case (the store has openImage for them);
   // everything else comes from the shared classifier so this stays one
   // implementation of "what kind of file is this" rather than a second copy.
+  if (isFolder.value) {
+    kind.value = 'folder'
+    loading.value = false
+    error.value = ''
+    content.value = ''
+    return
+  }
   const isImg = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(props.filePath)
   if (isImg) {
     kind.value = 'image'
@@ -671,6 +734,11 @@ async function saveEdits(): Promise<void> {
 }
 
 function refresh(): void {
+  if (kind.value === 'folder') {
+    folderStart.value = currentPath.value
+    folderKey.value++
+    return
+  }
   refreshed.value = true
   load().then(() => {
     setTimeout(() => { refreshed.value = false }, 800)
@@ -707,7 +775,7 @@ function downloadFile(): void {
 async function openExternally(): Promise<void> {
   if (loading.value || error.value || openExternalState.value === 'loading') return
   openExternalState.value = 'loading'
-  const result = await openWorkspaceFileExternally(cleanPath.value)
+  const result = await openWorkspaceFileExternally(currentPath.value)
   if (result.ok) {
     openExternalState.value = 'ok'
     setTimeout(() => { openExternalState.value = '' }, 1200)
@@ -1415,6 +1483,7 @@ defineExpose({ isBusyAuthoring })
   min-width: 0;
   text-align: left;
 }
+.pfp-back-btn { flex: none; margin-right: 4px; }
 
 .close-btn {
   color: var(--fg2);
@@ -1512,6 +1581,8 @@ defineExpose({ isBusyAuthoring })
 .pfp-body-csv {
   overflow: hidden !important;
 }
+/* A docked folder is full-bleed: the browser owns its own scrolling. */
+.pfp-body.pfp-body-folder { padding: 0; overflow: hidden; }
 .pfp-error {
   padding: 24px;
   text-align: center;

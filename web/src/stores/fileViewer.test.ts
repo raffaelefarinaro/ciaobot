@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { flushPromises } from '@vue/test-utils'
-import { fileViewerKindForPath, useFileViewerStore } from './fileViewer'
+import { fileViewerKindForPath, isPinnableFilePath, useFileViewerStore } from './fileViewer'
 import { useProjectStore } from './projects'
 import { api } from '../lib/api'
 
@@ -559,6 +559,84 @@ describe('docking beside the chat', () => {
     await store.open('notes/today.md', null, 'chat-1')
     expect(projects.pinFile).not.toHaveBeenCalled()
     expect(store.isOpen).toBe(true)
+  })
+
+  test('a folder a chat opens docks into the tile', async () => {
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    expect(await store.openFolder('/ws/exports', 'chat-1')).toBe(true)
+    expect(store.isOpen).toBe(false)
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', '/ws/exports/')
+  })
+
+  test('Browse files resolves the root before docking', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ path: '/ws' }))))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.openFolder('', 'chat-1')
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', '/ws/')
+    expect(store.isOpen).toBe(false)
+  })
+
+  test('reopening the pinned folder resets the tile instead of pinning', async () => {
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinnedFileFor').mockReturnValue('/ws/exports/')
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    expect(await store.openFolder('/ws/exports', 'chat-1')).toBe(true)
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(false)
+    expect(store.folderRedock).toEqual({ path: '/ws/exports/', seq: 1 })
+  })
+
+  test('a failed folder pin falls back to the viewer', async () => {
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(false)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    expect(await store.openFolder('/ws/exports', 'chat-1')).toBe(true)
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('folder')
+    expect(store.path).toBe('/ws/exports')
+  })
+
+  test('a folder opened from another chat uses the viewer', async () => {
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.openFolder('/ws/exports', 'chat-2')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+  })
+
+  test('a file docked from a folder records no viewer Back', async () => {
+    vi.mocked(api.get).mockResolvedValue({ path: '/ws/exports/a.md' })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.openFromFolder('/ws/exports/a.md', 'chat-1', '/ws/exports')
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', '/ws/exports/a.md')
+    expect(store.isOpen).toBe(false)
+    expect(store.returnFolder).toBe('')
+  })
+
+  test('isPinnableFilePath mirrors the server allowlist', () => {
+    expect(isPinnableFilePath('a.md')).toBe(true)
+    expect(isPinnableFilePath('x/y.HTML')).toBe(true)
+    expect(isPinnableFilePath('b.csv:3')).toBe(true)
+    expect(isPinnableFilePath('p.png')).toBe(false)
+    expect(isPinnableFilePath('d.pdf')).toBe(false)
+    expect(isPinnableFilePath('w.docx')).toBe(false)
+    expect(isPinnableFilePath('Makefile')).toBe(false)
+    expect(isPinnableFilePath('dir/')).toBe(false)
   })
 })
 

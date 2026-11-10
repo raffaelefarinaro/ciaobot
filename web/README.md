@@ -362,6 +362,7 @@ file use. The tile has one occupant; the newest takes it.
   Esc in the second pane closes only that pane.
 - **File viewer:** `stores/fileViewer.ts` docks a file only into the chat that
   owns the tile. A file opened from the second pane opens the viewer.
+  Folders dock the same way (`dockFolderInstead`), pinned as `<abs>/`, the folder-pin identity (D1). Re-docking the pinned folder bumps `folderRedock`, and the tile remounts its browser. `PinnedFilePanel` renders `FolderBrowser` for a folder pin and docks only `isPinnableFilePath` files from it (mirror of `_WORKSPACE_FILE_EXTS`; keep the two in step).
 
 ### Folder browser
 

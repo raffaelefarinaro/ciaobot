@@ -154,7 +154,7 @@
                   <button
                     type="button"
                     class="narrow-pin-btn"
-                    :aria-label="`Open pinned file ${narrowSharedPinBase}`"
+                    :aria-label="`Open pinned ${isFolderPin(narrowSharedPin) ? 'folder' : 'file'} ${narrowSharedPinBase}`"
                     :title="narrowSharedPin"
                     @click="openNarrowSharedPin"
                   >
@@ -164,7 +164,7 @@
                   <button
                     type="button"
                     class="narrow-pin-close btn-icon"
-                    aria-label="Unpin file"
+                    :aria-label="isFolderPin(narrowSharedPin) ? 'Unpin folder' : 'Unpin file'"
                     :disabled="pinWritePending"
                     @click="unpinCurrent"
                   >
@@ -287,7 +287,7 @@ import { useProjectStore } from '../stores/projects'
 import { terminalPanelWanted } from '../lib/terminalPanel'
 import { readBesideChat, writeBesideChat } from '../lib/chatSplit'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
-import { useFileViewerStore } from '../stores/fileViewer'
+import { isFolderPin, useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
@@ -944,7 +944,7 @@ function focusPane(pane: 'main' | 'beside', moveFocus = false): void {
   if (moveFocus) (pane === 'beside' ? besidePanelRef.value : chatPanelRef.value)?.focusComposer?.()
 }
 const narrowSharedPinBase = computed(() => {
-  const p = narrowSharedPin.value
+  const p = narrowSharedPin.value.replace(/[/\\]+$/, '')
   const idx = p.lastIndexOf('/')
   return idx === -1 ? p : p.slice(idx + 1)
 })
@@ -952,6 +952,11 @@ function openNarrowSharedPin(): void {
   const key = activePinKey.value
   const path = narrowSharedPin.value
   if (!key || !path) return
+  if (isFolderPin(path)) {
+    // A folder is an ordinary viewer open here: openSharedPin would reconcile it as a file.
+    void fileViewer.openFolder(path.replace(/[/\\]+$/, ''), key)
+    return
+  }
   void fileViewer.openSharedPin(path, key)
 }
 async function unpinCurrent(): Promise<void> {
