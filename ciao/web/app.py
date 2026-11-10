@@ -190,6 +190,7 @@ from ciao.web.routes_api import (
     vault_markdown_paths,
     system_prompt,
     workspace_binary,
+    workspace_dir,
     workspace_file,
     workspace_html,
     workspace_file_write,
@@ -510,6 +511,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        # Read-only folder listing, confined to named roots (see workspace_dir).
+        Route("/api/workspace-dir", workspace_dir, methods=["GET"]),
         Route("/api/system-prompt", system_prompt, methods=["GET"]),
         # Preview side of the same file for artifacts: text/html under a
         # sandboxing CSP, so the panel can embed the rendered page.
