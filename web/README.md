@@ -258,8 +258,8 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   engine.
 
 - **One entry per surface, outside the repository.** A chat's Chat details
-  carries a *Terminal* section of its own — under *Repository*, above *Always
-  loaded* — and a project page carries one under its *Repository* section. The
+  carries a *Terminal* row in its *Open* section — above *Repository* and
+  *Context* — and a project page carries one under its *Repository* section. The
   terminal is not a repository feature: a chat with no linked folder still
   needs a shell (a provider sign-in, an install, an MCP server that stopped
   answering), so neither section lives inside the repository's, and a chat or

@@ -1320,8 +1320,18 @@
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
       </p>
+      <!-- Actions that leave the panel for another surface. Every chat has
+           them, repository or not; a later row (Files, …) joins this list. -->
+      <section class="cd-section cd-block chat-rail-open" :aria-labelledby="domId('chat-rail-open')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-open')" class="cd-heading">Open</h3></div>
+        <div class="cd-rows">
+          <div class="chat-rail-terminal">
+            <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
+          </div>
+        </div>
+      </section>
       <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
-      <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo" tabindex="-1">
+      <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
           :repo="project.repo"
           :location="chat.repo_location ?? null"
@@ -1331,16 +1341,9 @@
           :archived="!!chat.archived"
         />
       </div>
-      <!-- The terminal is not a repository feature. A chat with no linked
-           folder still needs a shell — a provider sign-in, an install, an MCP
-           server that stopped answering — so every chat has a terminal row,
-           outside the repository's block; the row is its own label. -->
-      <div class="chat-rail-terminal">
-        <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
-      </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
-      <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
+      <div ref="railContextEl" class="chat-rail-agent-context cd-block" tabindex="-1">
         <AgentContextSection
           :project="project"
           :code-mode="codeModeOn"
@@ -1356,31 +1359,31 @@
       <section
         v-if="runningRows.length"
         ref="railRunningEl"
-        class="rail-section chat-rail-running"
+        class="cd-section cd-block chat-rail-running"
         :aria-labelledby="domId('chat-rail-running')"
         tabindex="-1"
       >
-        <p :id="domId('chat-rail-running')" class="rail-label">Running</p>
-        <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
-        <template v-if="runningSubagents.length">
-          <p class="chat-rail-subhead">Agents</p>
-          <div class="rail-list">
-            <router-link
-              v-for="sub in runningSubagents"
-              :key="sub.agent_id"
-              :to="subagentPath(chat.chat_id, sub.agent_id)"
-              class="rail-item chat-rail-agent"
-            >
-              <ActivityGlyph kind="working" />
-              <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
-              <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
-              <span class="chat-rail-agent-arrow" aria-hidden="true">→</span>
-            </router-link>
-          </div>
-        </template>
-        <template v-if="runningShells.length">
-          <p class="chat-rail-subhead">Processes</p>
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-running')" class="cd-heading">Running</h3>
+          <span class="cd-count">{{ runningRows.length }}</span>
+        </div>
+        <!-- One list, agents first: an agent has a transcript to open, a shell only a Stop. -->
+        <div class="cd-rows">
+          <router-link
+            v-for="sub in runningSubagents"
+            :key="sub.agent_id"
+            :to="subagentPath(chat.chat_id, sub.agent_id)"
+            class="cd-row cd-row--link chat-rail-agent"
+          >
+            <span class="cd-icon"><ActivityGlyph kind="working" /></span>
+            <span class="cd-main">
+              <span class="cd-primary">{{ subagentLabel(sub) }}</span>
+              <span class="cd-detail">Agent<template v-if="sub.subagent_type"> · {{ sub.subagent_type }}</template></span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </router-link>
           <ShellRows
+            v-if="runningShells.length"
             variant="rail"
             :rows="runningShells"
             :now="nowTs"
@@ -1388,70 +1391,60 @@
             :stopping="store.stoppingTasks[chat.chat_id]"
             :errors="store.stopTaskErrors[chat.chat_id]"
           />
-        </template>
+        </div>
       </section>
-      <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" :aria-labelledby="domId('chat-rail-tools')">
-        <p :id="domId('chat-rail-tools')" class="rail-label">Skills and MCP used</p>
-        <div class="rail-kvs">
-          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="rail-kv">
-            <span class="chat-rail-tool" :title="tool.tools?.join(', ')"><small>{{ tool.kind === 'skill' ? 'Skill' : 'MCP' }}</small> {{ tool.name }}</span>
-            <strong v-if="tool.count > 1" :title="`${tool.count} calls`">×{{ tool.count }}</strong>
+      <section v-if="railTools.length" class="cd-section cd-block chat-rail-tools" :aria-labelledby="domId('chat-rail-tools')">
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-tools')" class="cd-heading">Skills and MCP</h3>
+          <span class="cd-count">{{ railTools.length }}</span>
+        </div>
+        <div class="cd-rows">
+          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="cd-row chat-rail-tool" :title="tool.tools?.join(', ')">
+            <AppIcon class="cd-icon" :name="tool.kind === 'skill' ? 'skill' : 'plug'" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ tool.name }}</span>
+              <span class="cd-detail">{{ tool.kind === 'skill' ? 'Skill' : 'MCP server' }}</span>
+            </span>
+            <span v-if="tool.count > 1" class="cd-trail cd-value" :title="`${tool.count} calls`">×{{ tool.count }}</span>
           </div>
         </div>
         <button
           v-if="railTools.length > RAIL_LIST_MAX"
           type="button"
-          class="chat-rail-more"
+          class="cd-action cd-more"
           :aria-expanded="railShowAll.tools"
           @click="railShowAll.tools = !railShowAll.tools"
         >{{ railShowAll.tools ? 'Show fewer' : `Show all ${railTools.length}` }}</button>
       </section>
-      <section class="rail-section" :aria-labelledby="domId('chat-rail-files')">
-        <p :id="domId('chat-rail-files')" class="rail-label">Files</p>
-        <div v-if="inspectorOutputs.length" class="rail-list">
+      <section class="cd-section cd-block chat-rail-files" :aria-labelledby="domId('chat-rail-files')">
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-files')" class="cd-heading">Files</h3>
+          <span v-if="railFiles.length" class="cd-count">{{ railFiles.length }}</span>
+        </div>
+        <div v-if="railFiles.length" class="cd-rows">
           <button
-            v-for="output in shownOutputs"
-            :key="`${output.action}:${output.file_path}`"
+            v-for="file in shownFiles"
+            :key="file.key"
             type="button"
-            class="rail-item chat-rail-file"
-            :title="output.file_path"
-            @click="openFileCard(output.file_path)"
+            class="cd-row cd-row--link chat-rail-file"
+            :title="file.path"
+            @click="openFileCard(file.path)"
           >
-            <span>{{ fileCardBasename(output.file_path) }}</span>
-            <small>{{ outputActionTag(output.action) }}<template v-if="shortDirname(output.file_path)"> · {{ shortDirname(output.file_path) }}</template></small>
+            <AppIcon class="cd-icon" name="file" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ fileCardBasename(file.path) }}</span>
+              <span class="cd-detail">{{ file.detail }}</span>
+            </span>
           </button>
         </div>
         <button
-          v-if="inspectorOutputs.length > RAIL_LIST_MAX"
+          v-if="railFiles.length > RAIL_LIST_MAX"
           type="button"
-          class="chat-rail-more"
+          class="cd-action cd-more"
           :aria-expanded="railShowAll.files"
           @click="railShowAll.files = !railShowAll.files"
-        >{{ railShowAll.files ? 'Show fewer' : `Show all ${inspectorOutputs.length}` }}</button>
-        <p v-if="!inspectorOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
-        <template v-if="mentionedFiles.length">
-          <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
-          <div class="rail-list">
-            <button
-              v-for="path in shownMentioned"
-              :key="`mentioned-${path}`"
-              type="button"
-              class="rail-item chat-rail-file"
-              :title="path"
-              @click="openFileCard(path)"
-            >
-              <span>{{ fileCardBasename(path) }}</span>
-              <small>{{ shortDirname(path) || 'workspace' }}</small>
-            </button>
-          </div>
-          <button
-            v-if="railMentioned.length > RAIL_LIST_MAX"
-            type="button"
-            class="chat-rail-more"
-            :aria-expanded="railShowAll.mentioned"
-            @click="railShowAll.mentioned = !railShowAll.mentioned"
-          >{{ railShowAll.mentioned ? 'Show fewer' : `Show all ${railMentioned.length}` }}</button>
-        </template>
+        >{{ railShowAll.files ? 'Show fewer' : `Show all ${railFiles.length}` }}</button>
+        <p v-else-if="!railFiles.length" class="cd-empty">None yet.</p>
       </section>
     </aside>
     </div>
@@ -2178,15 +2171,32 @@ const mentionedFiles = computed<string[]>(() => {
 // The rail's lists show the five most recent entries; the rest are one click
 // away. Turns are kept in order, so newest-first is the order reversed.
 const RAIL_LIST_MAX = 5
-const railShowAll = ref({ files: false, mentioned: false, tools: false })
-watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
+const railShowAll = ref({ files: false, tools: false })
+watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, tools: false } })
 const railMentioned = computed(() => [...mentionedFiles.value].reverse())
+/** Chat details' one Files list: what the chat touched, newest first, then
+ *  what its replies only mention (no turn recorded the write). */
+const railFiles = computed<{ key: string; path: string; detail: string }[]>(() => [
+  ...inspectorOutputs.value.map(output => {
+    const tag = outputActionTag(output.action)
+    const dir = shortDirname(output.file_path)
+    return {
+      key: `${output.action}:${output.file_path}`,
+      path: output.file_path,
+      detail: `${tag.charAt(0).toUpperCase()}${tag.slice(1)}${dir ? ` · ${dir}` : ''}`,
+    }
+  }),
+  ...railMentioned.value.map(path => ({
+    key: `mentioned-${path}`,
+    path,
+    detail: `Mentioned · ${shortDirname(path) || 'workspace'}`,
+  })),
+])
+const shownFiles = computed(() => railShowAll.value.files ? railFiles.value : railFiles.value.slice(0, RAIL_LIST_MAX))
 const railTools = computed(() => [
   ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
   ...toolUsage.value.mcp.map(server => ({ ...server, kind: 'mcp' as const })),
 ])
-const shownOutputs = computed(() => railShowAll.value.files ? inspectorOutputs.value : inspectorOutputs.value.slice(0, RAIL_LIST_MAX))
-const shownMentioned = computed(() => railShowAll.value.mentioned ? railMentioned.value : railMentioned.value.slice(0, RAIL_LIST_MAX))
 const shownTools = computed(() => railShowAll.value.tools ? railTools.value : railTools.value.slice(0, RAIL_LIST_MAX))
 
 // How full the model's context window was at the end of the latest turn, from
@@ -5440,6 +5450,13 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 
+/* Chat details' sections: each direct child section is a block with the
+   same padding, and one hairline rule separates two blocks (none above the
+   first). Rows and headings come from chatDetails.css. */
+.chat-rail > .cd-block { padding: 14px 0 12px; }
+.chat-rail > .cd-block + .cd-block { border-top: 1px solid var(--border); }
+.chat-rail-head + .cd-block { padding-top: 2px; }
+
 .chat-rail-origin {
   display: flex;
   gap: 10px;
@@ -5504,44 +5521,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   border-radius: var(--radius-xs);
 }
 
-.chat-rail-tool {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg);
-}
-.chat-rail-tool small {
-  margin-right: 4px;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-.chat-rail-sublabel { margin-top: var(--space-3); }
-/* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
-   (the focus target for "See what Ciao knows") sits between two of them. */
-.chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
-/* The terminal row closes the repository block, a little tighter than the
-   gap between sections; with no repository it starts the rail. */
-.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-3); }
-.chat-rail-terminal + .chat-rail-agent-context { margin-top: var(--space-5); }
-.chat-rail-more {
-  margin-top: var(--space-1);
-  padding: 4px 0;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-xs);
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.chat-rail-more:hover { color: var(--fg); text-decoration-color: currentColor; }
-.chat-rail-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-@media (pointer: coarse) {
-  .chat-rail-more { min-height: var(--touch); }
-}
 .chat-rail-repo:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -5552,37 +5531,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   outline-offset: 4px;
   border-radius: var(--radius-xs);
 }
-.chat-rail-subagent {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-rail-subhead {
-  margin: var(--space-3) 0 var(--space-1);
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.chat-rail-running .rail-label + .chat-rail-subhead { margin-top: var(--space-1); }
-
-.chat-rail-file { min-width: 0; max-width: 100%; }
-.chat-rail-file > span,
-.chat-rail-file > small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* .rail-item stacks its children; an agent row reads as one line. */
-.chat-rail-agent {
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-start;
-  gap: var(--space-2);
-}
-.chat-rail-agent small { flex-shrink: 0; font-family: var(--font-mono); }
-.chat-rail-agent-arrow { flex-shrink: 0; margin-left: auto; color: var(--fg3); }
 
 
 .drop-overlay {
@@ -8224,3 +8172,4 @@ details[open] > .activity-summary::before {
 <!-- The shared naming placeholder: the same bar the sidebar shows while the
      engine names a chat. -->
 <style scoped src="./titleShimmer.css"></style>
+<style scoped src="./chatDetails.css"></style>

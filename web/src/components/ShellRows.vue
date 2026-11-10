@@ -1,32 +1,52 @@
 <template>
   <div class="shell-rows" :class="`shell-rows--${variant}`">
     <template v-for="shell in rows" :key="shell.agent_id">
-      <div class="shell-row">
-        <!-- A shell has no transcript to open, so it is never a link. In the
-             popover the label is a button that opens Chat details; Stop is its
-             sibling, because a button cannot hold a button. -->
-        <component
-          :is="variant === 'popover' ? 'button' : 'div'"
-          class="shell-row-main"
-          :type="variant === 'popover' ? 'button' : undefined"
-          :title="subagentLabel(shell)"
-          @click="variant === 'popover' && emit('open')"
-        >
-          <ActivityGlyph kind="run" />
-          <span class="shell-row-label">{{ subagentLabel(shell) }}</span>
-          <small v-if="minutesSince(shell.started_at || '', now)" class="shell-row-age">{{ minutesSince(shell.started_at || '', now) }}</small>
-        </component>
-        <button
-          v-if="stopTask && shell.stoppable"
-          type="button"
-          class="shell-row-stop"
-          :aria-label="`Stop ${subagentLabel(shell)}`"
-          :data-stop-id="shell.agent_id"
-          :aria-disabled="isStopping(shell) ? 'true' : undefined"
-          @click="stop(shell)"
-        >{{ isStopping(shell) ? 'Stopping…' : 'Stop' }}</button>
+      <div v-if="variant === 'rail'" class="cd-row shell-row">
+        <span class="cd-icon"><ActivityGlyph kind="run" /></span>
+        <span class="cd-main shell-row-main" :title="subagentLabel(shell)">
+          <span class="cd-primary shell-row-label">{{ subagentLabel(shell) }}</span>
+          <span v-if="errorFor(shell)" class="cd-detail cd-detail--error shell-row-note" role="alert">{{ errorFor(shell) }}</span>
+          <span v-else class="cd-detail">{{ kindWord(shell) }}<template v-if="minutesSince(shell.started_at || '', now)"> · <span class="cd-mono shell-row-age">{{ minutesSince(shell.started_at || '', now) }}</span></template></span>
+        </span>
+        <span v-if="stopTask && shell.stoppable" class="cd-trail">
+          <button
+            type="button"
+            class="cd-action shell-row-stop"
+            :aria-label="`Stop ${subagentLabel(shell)}`"
+            :data-stop-id="shell.agent_id"
+            :aria-disabled="isStopping(shell) ? 'true' : undefined"
+            @click="stop(shell)"
+          >{{ isStopping(shell) ? 'Stopping…' : 'Stop' }}</button>
+        </span>
       </div>
-      <p v-if="errorFor(shell)" class="shell-row-note" role="alert">{{ errorFor(shell) }}</p>
+      <template v-else>
+        <div class="shell-row">
+          <!-- A shell has no transcript to open, so it is never a link. In the
+               popover the label is a button that opens Chat details; Stop is its
+               sibling, because a button cannot hold a button. -->
+          <component
+            :is="variant === 'popover' ? 'button' : 'div'"
+            class="shell-row-main"
+            :type="variant === 'popover' ? 'button' : undefined"
+            :title="subagentLabel(shell)"
+            @click="variant === 'popover' && emit('open')"
+          >
+            <ActivityGlyph kind="run" />
+            <span class="shell-row-label">{{ subagentLabel(shell) }}</span>
+            <small v-if="minutesSince(shell.started_at || '', now)" class="shell-row-age">{{ minutesSince(shell.started_at || '', now) }}</small>
+          </component>
+          <button
+            v-if="stopTask && shell.stoppable"
+            type="button"
+            class="shell-row-stop"
+            :aria-label="`Stop ${subagentLabel(shell)}`"
+            :data-stop-id="shell.agent_id"
+            :aria-disabled="isStopping(shell) ? 'true' : undefined"
+            @click="stop(shell)"
+          >{{ isStopping(shell) ? 'Stopping…' : 'Stop' }}</button>
+        </div>
+        <p v-if="errorFor(shell)" class="shell-row-note" role="alert">{{ errorFor(shell) }}</p>
+      </template>
     </template>
   </div>
 </template>
@@ -41,7 +61,7 @@ const props = defineProps<{
   /** Process rows from the running-subagent poll (`shell` / `monitor`). */
   rows: RunningSubagent[]
   now: number
-  /** Where the rows are drawn: the composer popover or the Chat details rail. */
+  /** Where the rows are drawn: the composer popover, or Chat details' Running list (row grammar). */
   variant: 'popover' | 'rail'
   /** Asks the engine to stop a process row by its bare id; omitted, no row offers Stop. */
   stopTask?: (taskId: string) => unknown
@@ -53,6 +73,7 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [] }>()
 
 const isStopping = (shell: RunningSubagent) => Boolean(props.stopping?.[shellTaskId(shell.agent_id)])
+const kindWord = (shell: RunningSubagent) => (shell.subagent_type === 'monitor' ? 'Monitor' : 'Shell')
 const errorFor = (shell: RunningSubagent) => props.errors?.[shellTaskId(shell.agent_id)]
 
 // `aria-disabled`, not `disabled`: a disabled button drops focus to the body.
@@ -64,10 +85,11 @@ function stop(shell: RunningSubagent) {
 
 <style scoped>
 .shell-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+.shell-rows--rail { gap: 0; }
 
-.shell-row { display: flex; align-items: center; min-width: 0; }
+.shell-rows--popover .shell-row { display: flex; align-items: center; min-width: 0; }
 
-.shell-row-main {
+.shell-rows--popover .shell-row-main {
   display: flex;
   flex: 1 1 0;
   align-items: center;
@@ -84,13 +106,13 @@ function stop(shell: RunningSubagent) {
   font-size: var(--text-sm);
   text-align: left;
 }
-button.shell-row-main { cursor: pointer; }
-button.shell-row-main:hover { background: var(--bg3); }
-button.shell-row-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shell-rows--popover button.shell-row-main { cursor: pointer; }
+.shell-rows--popover button.shell-row-main:hover { background: var(--bg3); }
+.shell-rows--popover button.shell-row-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
-.shell-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shell-rows--popover .shell-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.shell-row-age {
+.shell-rows--popover .shell-row-age {
   flex-shrink: 0;
   margin-left: auto;
   color: var(--fg3);
@@ -100,7 +122,7 @@ button.shell-row-main:focus-visible { outline: 2px solid var(--accent); outline-
 
 /* Text action on the row's own line, in neutral tones: a process outcome stays
    off the semantic palette. */
-.shell-row-stop {
+.shell-rows--popover .shell-row-stop {
   flex: 0 0 auto;
   min-height: 36px;
   padding: 0 var(--space-2);
@@ -113,12 +135,12 @@ button.shell-row-main:focus-visible { outline: 2px solid var(--accent); outline-
   font-weight: 500;
   cursor: pointer;
 }
-.shell-row-stop:hover,
-.shell-row-stop:focus-visible { background: var(--bg3); color: var(--fg); }
-.shell-row-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.shell-row-stop[aria-disabled="true"] { color: var(--fg3); cursor: default; background: none; }
+.shell-rows--popover .shell-row-stop:hover,
+.shell-rows--popover .shell-row-stop:focus-visible { background: var(--bg3); color: var(--fg); }
+.shell-rows--popover .shell-row-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shell-rows--popover .shell-row-stop[aria-disabled="true"] { color: var(--fg3); cursor: default; background: none; }
 
-.shell-row-note {
+.shell-rows--popover .shell-row-note {
   margin: 0;
   padding: 0 var(--space-2) var(--space-1);
   color: var(--fg3);
@@ -126,8 +148,11 @@ button.shell-row-main:focus-visible { outline: 2px solid var(--accent); outline-
 }
 
 @media (pointer: coarse) {
-  .shell-row-main,
-  .shell-row-stop { min-height: var(--touch); }
-  .shell-row-stop { min-width: var(--touch); }
+  .shell-rows--popover .shell-row-main,
+  .shell-rows--popover .shell-row-stop,
+  .shell-rows--rail .shell-row-stop { min-height: var(--touch); }
+  .shell-rows--popover .shell-row-stop,
+  .shell-rows--rail .shell-row-stop { min-width: var(--touch); }
 }
 </style>
+<style scoped src="./chatDetails.css"></style>

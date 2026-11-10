@@ -105,7 +105,7 @@ def test_subagent_reference_points_at_composer_activity_and_chat_details_running
     assert "composer" in bullet.lower()
     assert "**1 agent**" in bullet and "**N agents**" in bullet
     assert "count alone" in bullet.lower()
-    assert "Chat details → **Running** → **Agents**" in bullet
+    assert "Chat details → **Running**" in bullet
     assert "**Processes**" in bullet
 
 

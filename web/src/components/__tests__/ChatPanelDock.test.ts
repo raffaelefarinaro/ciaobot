@@ -210,7 +210,7 @@ describe('ChatPanel automation origin', () => {
     wrapper.unmount()
   })
 
-  it('splits Running into Agents above Processes in Chat details', async () => {
+  it('lists agents above shells in one Running list in Chat details', async () => {
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
       private cb: ResizeObserverCallback
@@ -233,18 +233,49 @@ describe('ChatPanel automation origin', () => {
     await nextTick()
 
     const rail = wrapper.get('#chat-work-rail')
-    expect(rail.findAll('.chat-rail-running .chat-rail-subhead').map(t => t.text())).toEqual(['Agents', 'Processes'])
+    expect(rail.find('.chat-rail-subhead').exists()).toBe(false)
+    expect(rail.get('.chat-rail-running .cd-heading').text()).toBe('Running')
+    expect(rail.get('.chat-rail-running .cd-count').text()).toBe('2')
     const agent = rail.findAllComponents(RouterLinkStub).find((l: { classes: () => string[] }) => l.classes().includes('chat-rail-agent'))!
     expect(agent.props('to')).toBe('/chat/chat-1/subagent/a1')
     expect(agent.text()).toContain('Explore repo layout')
     expect(agent.text()).toContain('Explore')
+    expect(agent.get('.cd-detail').text()).toBe('Agent · Explore')
     expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('working')
     const shells = rail.getComponent({ name: 'ShellRows' })
     expect(shells.props('variant')).toBe('rail')
     expect(shells.text()).toContain('npm run dev')
     expect(shells.get('.shell-row-age').text()).toBe('2m')
+    expect(shells.get('.cd-detail').text()).toBe('Shell · 2m')
     expect(shells.find('a').exists()).toBe(false)
     expect(agent.element.compareDocumentPosition(shells.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  it('stacks Open, Running and Files in that order under one heading style', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const { wrapper } = await mountPanel(store => {
+      store.runningSubagents = {
+        'chat-1': [{ agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running', started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true }],
+      } as unknown as typeof store.runningSubagents
+    })
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const rail = wrapper.get('#chat-work-rail')
+    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Open', 'Running', 'Files'])
+    expect(rail.find('.chat-rail-open .chat-rail-terminal').exists()).toBe(true)
+    expect(rail.get('.chat-rail-open').element.compareDocumentPosition(rail.get('.chat-rail-agent-context').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
