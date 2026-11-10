@@ -97,6 +97,48 @@ describe('FileViewerModal', () => {
     expect(wrapper!.get('.fv-body').classes()).toContain('fv-body-html')
   })
 
+  it('gives an artifact selection the Markdown Comment button and type-to-comment', async () => {
+    // The bridge used to draw its own orange pill inside the frame, and keys
+    // typed into the frame never reached the page's type-to-comment listener.
+    const store = openViewer()
+    store.kind = 'html'
+    store.path = 'Workspace/dashboard.html'
+    store.htmlView = 'preview'
+    await settle()
+    const { default: HtmlArtifactViewer } = await import('../HtmlArtifactViewer.vue')
+    for (let i = 0; i < 4; i++) await settle()
+    const viewer = wrapper!.findComponent(HtmlArtifactViewer)
+    expect(viewer.exists()).toBe(true)
+    const frame = viewer.get('iframe').element
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+    frame.getBoundingClientRect = () => ({ top: 100, left: 50, bottom: 700, right: 650, width: 600, height: 600, x: 50, y: 100, toJSON: () => ({}) }) as DOMRect
+
+    viewer.vm.$emit('selection', {
+      selector: 'body > h2:nth-of-type(1)',
+      quote: 'Revenue rose',
+      startOffset: 0,
+      endOffset: 12,
+      elementTag: 'h2',
+      rect: { top: 20, left: 30, bottom: 40, right: 120 },
+    })
+    await nextTick()
+    const trigger = wrapper!.get('.fv-comment-trigger')
+    expect(trigger.text()).toBe('Comment')
+
+    viewer.vm.$emit('type-comment', { text: 'W' })
+    await settle()
+
+    expect(wrapper!.find('.fv-comment-trigger').exists()).toBe(false)
+    const textarea = document.querySelector('.compose textarea') as HTMLTextAreaElement
+    expect(textarea?.value).toBe('W')
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
+    const pushes = postMessage.mock.calls.filter(c => c[0]?.type === 'ciao:apply-comments')
+    expect(pushes[pushes.length - 1][0].comments).toEqual([
+      expect.objectContaining({ selector: 'body > h2:nth-of-type(1)', quote: 'Revenue rose' }),
+    ])
+  })
+
   it('renders shared vault metadata and resolves related notes in the viewer', async () => {
     const store = openViewer()
     store.path = 'notes/lv-order-capture.md'

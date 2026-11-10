@@ -121,7 +121,7 @@ describe('HtmlArtifactViewer', () => {
   })
 
   it('unlocks the in-frame compose half on ready', async () => {
-    // The bridge keeps its pill inert until a parent speaks. Relying on the
+    // The bridge keeps its compose half inert until a parent speaks. Relying on the
     // highlight push to double as that signal would leave compose dead
     // wherever the parent skips the push (outside Preview, non-artifact
     // files), so the viewer says it explicitly.
@@ -172,5 +172,92 @@ describe('HtmlArtifactViewer', () => {
       },
       '*',
     )
+  })
+
+  // The frame reports selections and keystrokes; the page owns the button and
+  // the composer, so the viewer's job is to validate and relay them.
+  function withFrame(wrapper: ReturnType<typeof mountViewer>) {
+    const postMessage = vi.fn()
+    const fakeWindow = { postMessage } as unknown as Window
+    Object.defineProperty(wrapper.get('iframe').element, 'contentWindow', { value: fakeWindow, configurable: true })
+    const send = (data: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
+      source: fakeWindow as unknown as MessageEventSource,
+      data: { frame: 'ciao-artifact', type: 'ciao:artifact-comment', ...data },
+    }))
+    return { postMessage, send }
+  }
+
+  it('relays a reported selection with its end box', async () => {
+    const wrapper = mountViewer()
+    const { send } = withFrame(wrapper)
+    send({
+      action: 'selection',
+      selector: 'body > table:nth-of-type(1)',
+      quote: 'Name Owner',
+      startOffset: 0,
+      endOffset: 20,
+      elementTag: 'tr',
+      rect: { top: 5, left: 6, bottom: 25, right: 80 },
+    })
+    // Malformed boxes are dropped: frame messages are untrusted.
+    send({ action: 'selection', selector: 'p', quote: 'x', startOffset: 0, endOffset: 1, rect: { top: 'a' } })
+    send({ action: 'selection-cleared' })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.emitted('selection')).toEqual([[{
+      selector: 'body > table:nth-of-type(1)',
+      quote: 'Name Owner',
+      startOffset: 0,
+      endOffset: 20,
+      elementTag: 'tr',
+      rect: { top: 5, left: 6, bottom: 25, right: 80 },
+    }]])
+    expect(wrapper.emitted('selection-cleared')).toHaveLength(1)
+  })
+
+  it('relays type-to-comment text only, capped, never files', async () => {
+    // Frame messages can be forged, and forwarded files would be uploaded as
+    // comment images with no user action.
+    const wrapper = mountViewer()
+    const { send } = withFrame(wrapper)
+    const image = new File(['x'], 'shot.png', { type: 'image/png' })
+    send({ action: 'type', text: 'R', files: [image] })
+    send({ action: 'type', text: '', files: [image] })
+    send({ action: 'type', text: 'z'.repeat(20_000) })
+    await wrapper.vm.$nextTick()
+
+    const emitted = wrapper.emitted('type-comment') as [{ text: string }][]
+    expect(emitted).toHaveLength(2)
+    expect(emitted[0]).toEqual([{ text: 'R' }])
+    expect(emitted[1][0].text).toHaveLength(10_000)
+  })
+
+  it('tells the frame when a composer is open, again after a reload', async () => {
+    const wrapper = mountViewer()
+    const { postMessage, send } = withFrame(wrapper)
+    wrapper.vm.setBusy(true)
+    expect(postMessage).toHaveBeenLastCalledWith({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: true }, '*')
+
+    postMessage.mockClear()
+    send({ action: 'ready' })
+    await wrapper.vm.$nextTick()
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: true }, '*')
+  })
+
+  it('clears the reported selection when the document goes away', async () => {
+    // Code view unmounts the frame and a reload swaps the document; neither
+    // sends selection-cleared, so the page's button would linger.
+    const wrapper = mountViewer()
+    await wrapper.setProps({ view: 'code' })
+    expect(wrapper.emitted('selection-cleared')).toHaveLength(1)
+    await wrapper.setProps({ view: 'preview', reloadToken: 43 })
+    expect(wrapper.emitted('selection-cleared')).toHaveLength(2)
+  })
+
+  it('clearSelection asks the frame to drop its native selection', () => {
+    const wrapper = mountViewer()
+    const { postMessage } = withFrame(wrapper)
+    wrapper.vm.clearSelection()
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
   })
 })
