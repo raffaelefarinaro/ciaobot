@@ -3749,6 +3749,7 @@ def _distinct_dir_roots(candidates: list[tuple[str, Path]]) -> list[tuple[str, P
 
 
 def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, Any] | Response:
+    """Resolve ``raw`` against the roots and list it, or return the error response."""
     if any(unicodedata.category(c) == "Cc" for c in raw):
         return JSONResponse({"error": "bad path"}, status_code=400)
     raw = _LINE_SUFFIX_RE.sub("", raw.strip())

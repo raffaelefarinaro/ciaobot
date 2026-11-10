@@ -165,6 +165,8 @@ def test_symlink_to_outside_dir_is_refused(ws: Path, tmp_path: Path) -> None:
     link = next(e for e in listing["entries"] if e["name"] == "link")
     assert link["type"] == "dir"
     assert client.get("/api/workspace-dir", params={"path": "link"}).status_code == 403
+    absolute = client.get("/api/workspace-dir", params={"path": str(ws / "link")})
+    assert absolute.status_code == 403
 
 
 def test_vault_outside_workspace_is_a_second_root(ws: Path, tmp_path: Path) -> None:
@@ -187,6 +189,8 @@ def test_vault_inside_workspace_is_not_a_second_root(ws: Path) -> None:
 
 def test_cap_applies_after_hidden_filter_and_sort(ws: Path, monkeypatch) -> None:
     monkeypatch.setattr(routes_api, "_WORKSPACE_DIR_MAX_ENTRIES", 3)
+    (ws / "c.txt").write_text("c", encoding="utf-8")
+    (ws / "d.txt").write_text("d", encoding="utf-8")
     client = _make_fake_client(_FakeConfig(workspace_root=ws))
     body = client.get("/api/workspace-dir").json()
     assert [e["name"] for e in body["entries"]] == ["alpha", "Beta", "a.txt"]
