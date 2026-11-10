@@ -88,7 +88,9 @@ LOCK_NAME = "update.lock"
 #
 # `SERVER_LABEL` is the label the installer registered for the engine's own
 # service. Imported, not re-spelled: a second literal here would drift silently
-# from the one the receipt and the installer both use.
+# from the one the receipt and the installer both use. It is the default for a
+# refusal message only: a host that knows its install's label names that one
+# (#2240), so the message names the job the operator's machine actually runs.
 SERVER_LABEL = macos_service.SERVER_LABEL
 # The live env renamed aside, kept until the next update succeeds, so exactly
 # one rollback generation is retained.
@@ -1281,6 +1283,9 @@ def _service_disagreement(
     command = host.server_command()
     if command is None:
         return ""
+    # The install's own job, not the default label: an isolated install runs
+    # beside the operator's engine and the refusal has to name the job it saw.
+    label: str = getattr(host, "label", SERVER_LABEL)
     try:
         parsed = parse_service_command(command)
     except ServerHostError:
@@ -1294,7 +1299,7 @@ def _service_disagreement(
         if _runs_the_receipt_install(Path(served), live_env, executable):
             return ""
         return (
-            f"the loaded {SERVER_LABEL} runs {parsed.program} serving {served}, "
+            f"the loaded {label} runs {parsed.program} serving {served}, "
             f"not the receipt's environment {live_env}; point the host at the "
             "install the receipt names, or reinstall, then apply again"
         )
@@ -1302,7 +1307,7 @@ def _service_disagreement(
     if _runs_the_receipt_install(Path(program), live_env, executable):
         return ""
     return (
-        f"the loaded {SERVER_LABEL} runs {program}, not the receipt's "
+        f"the loaded {label} runs {program}, not the receipt's "
         f"environment {live_env}; point the LaunchAgent at the install the "
         "receipt names, or reinstall, then apply again"
     )
