@@ -218,6 +218,80 @@
               </div>
             </template>
           </div>
+
+          <!-- Automatic updates (#2240). The policy, the installed version and
+               the last attempt are the card's own business, so they stay on
+               screen when the engine is up to date: turning automatic updates
+               off is a decision about this install, not about one run. An
+               automatic claim closes admission exactly like a Settings restart,
+               so the restart overlay above is the only one this path shows. -->
+          <div v-if="autoUpdate" class="auto-update-panel">
+            <div class="settings-switch-row">
+              <div class="auto-update-copy">
+                <span class="auto-update-title">Automatic updates</span>
+                <span id="auto-update-detail" class="auto-update-detail">
+                  Install new releases on a schedule, then restart Ciaobot once.
+                </span>
+              </div>
+              <button
+                type="button"
+                class="settings-switch"
+                role="switch"
+                :aria-checked="autoUpdateOn ? 'true' : 'false'"
+                aria-label="Automatic updates"
+                :aria-describedby="autoUpdateSupported ? 'auto-update-detail' : 'auto-update-detail auto-update-unsupported'"
+                :disabled="!autoUpdateSupported || autoUpdateWritePending"
+                @click="toggleAutoUpdate"
+              >
+                <span class="switch-word">{{ autoUpdateOn ? 'On' : 'Off' }}</span>
+                <span class="switch-track" aria-hidden="true"></span>
+              </button>
+            </div>
+
+            <p class="auto-update-meta">
+              Installed version
+              <span class="auto-update-version">{{ installedVersion || 'unknown' }}</span>
+            </p>
+
+            <!-- Not running in this engine, or an install it cannot update:
+                 the switch is flipped off and this is why. The route would
+                 accept the write anyway; the card owns the state. -->
+            <p v-if="autoUpdateUnsupportedReason" id="auto-update-unsupported" class="auto-update-note">
+              {{ autoUpdateUnsupportedReason }}
+            </p>
+
+            <!-- The settings file could not be read, or the last attempt left a
+                 reason. It is the explanation for the policy above, so it is
+                 not tucked away in a disclosure. -->
+            <p v-if="autoUpdate.error" class="auto-update-error" role="alert">{{ autoUpdate.error }}</p>
+
+            <p v-if="autoUpdateOutcomeLabel" class="auto-update-meta">
+              Last automatic attempt: {{ autoUpdateOutcomeLabel }}<template v-if="autoUpdateAttemptText"> &middot; {{ autoUpdateAttemptText }}</template><template v-if="autoUpdateRestartedAfterUpdate">. Ciaobot restarted after updating.</template>
+            </p>
+
+            <p v-if="autoUpdateWriteError" class="auto-update-error" role="alert">{{ autoUpdateWriteError }}</p>
+
+            <div v-if="autoUpdateSupported && !autoUpdateSnoozed" class="action-row settings-actions">
+              <button
+                type="button"
+                class="btn-secondary btn-small"
+                :disabled="autoUpdateWritePending"
+                @click="snoozeAutoUpdate"
+              >Not now (24 hours)</button>
+            </div>
+            <p v-else-if="autoUpdateSupported && autoUpdateSnoozed" class="auto-update-meta" role="status">
+              Snoozed until {{ autoUpdateSnoozeText }}.
+            </p>
+
+            <div v-if="autoUpdateWriteError && autoUpdateFailedWrite" class="action-row settings-actions">
+              <button
+                type="button"
+                class="btn-secondary btn-small"
+                :disabled="autoUpdateWritePending"
+                @click="retryAutoUpdateWrite"
+              >Try again</button>
+            </div>
+          </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
@@ -1327,6 +1401,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
+import { formatRelative, formatTime } from '../lib/time'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -1357,6 +1432,7 @@ import type {
   PackageChangelog,
   PackageUpdateResult,
   EngineUpdateStatus,
+  AutoUpdateStatus,
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
@@ -3231,9 +3307,128 @@ const updatesCompact = computed(() => {
   return true
 })
 
+// ── Automatic update policy (#2240) ───────────────────────────────────────────
+// The card draws the standing decision, the installed version and the last
+// automatic attempt. It stays visible when the engine is up to date, because
+// turning automatic updates off is a decision about this install rather than
+// about one run. The server is the source of truth: a write is drawn
+// optimistically, then replaced by the answer, and a failed write puts the last
+// confirmed state back instead of keeping a decision that was never taken.
+const autoUpdateConfirmed = ref<AutoUpdateStatus | null>(null)
+const autoUpdateState = ref<AutoUpdateStatus | null>(null)
+const autoUpdateWritePending = ref(false)
+const autoUpdateWriteError = ref('')
+// The write a "Try again" repeats, kept only while it has not succeeded.
+const autoUpdateFailedWrite = ref<AutoUpdateWrite | null>(null)
+// An expired snooze re-enables the button on a page that stays open past the
+// hold. `snooze_until` is compared with now rather than read as "active while
+// non-empty": the server serves past stamps too.
+const autoUpdateNow = ref(Date.now())
+const autoUpdateClock = window.setInterval(() => { autoUpdateNow.value = Date.now() }, 30_000)
+onUnmounted(() => window.clearInterval(autoUpdateClock))
+
+type AutoUpdateWrite = { enabled: boolean } | { snooze: true }
+
+const AUTO_UPDATE_SNOOZE_MS = 24 * 3600 * 1000
+
+/** The short wording for each outcome; "" while an attempt is in flight. */
+const AUTO_UPDATE_OUTCOME_LABEL: Record<string, string> = {
+  applied: 'Updated',
+  rolled_back: 'Rolled back',
+  rollback_failed: 'Rolled back, then the rollback failed',
+  failed: 'Failed',
+  check_failed: 'Could not check for a release',
+  stage_failed: 'Could not prepare the release',
+  unknown: 'Ended without a known outcome',
+}
+
+const autoUpdate = computed(() => autoUpdateState.value)
+// A missing `supported` is an older answer, not a refusal: the switch still
+// works and the engine decides.
+const autoUpdateSupported = computed(() => autoUpdate.value?.supported !== false)
+// An unsupported install has no policy to be "on": the enabled default the
+// server serves with its refusal is not a fact about this engine.
+const autoUpdateOn = computed(() => autoUpdateSupported.value && autoUpdate.value?.enabled === true)
+const autoUpdateUnsupportedReason = computed(() => {
+  if (!autoUpdate.value || autoUpdateSupported.value) return ''
+  return autoUpdate.value.unsupported_reason?.trim() || 'Automatic updates are not running in this engine.'
+})
+const installedVersion = computed(
+  () => updateStatus.value?.current_version || packageStatus.value?.current_version || '',
+)
+const autoUpdateSnoozeUntilMs = computed(() => {
+  const at = autoUpdate.value?.snooze_until?.trim() || ''
+  if (!at) return 0
+  const ms = Date.parse(at)
+  return Number.isFinite(ms) ? ms : 0
+})
+const autoUpdateSnoozed = computed(() => autoUpdateSnoozeUntilMs.value > autoUpdateNow.value)
+const autoUpdateSnoozeText = computed(() => formatTime(autoUpdate.value?.snooze_until))
+const autoUpdateOutcomeLabel = computed(() => {
+  const outcome = autoUpdate.value?.outcome?.trim() || ''
+  if (!outcome) return ''
+  return AUTO_UPDATE_OUTCOME_LABEL[outcome] ?? outcome
+})
+const autoUpdateRestartedAfterUpdate = computed(() => autoUpdate.value?.outcome === 'applied')
+const autoUpdateAttemptText = computed(() => {
+  const at = autoUpdate.value?.attempted_at?.trim() || ''
+  if (!at) return ''
+  const relative = formatRelative(at)
+  const exact = formatTime(at)
+  return relative && exact ? `${relative} (${exact})` : relative || exact
+})
+
+async function writeAutoUpdateSetting(body: AutoUpdateWrite) {
+  if (autoUpdateWritePending.value) return
+  autoUpdateFailedWrite.value = body
+  autoUpdateWriteError.value = ''
+  autoUpdateWritePending.value = true
+  // Optimistic: the switch moves before the round trip. The response below
+  // replaces the guess, so nothing here is kept once the engine answers.
+  if (autoUpdateState.value) {
+    autoUpdateState.value = 'enabled' in body
+      ? { ...autoUpdateState.value, enabled: body.enabled }
+      : { ...autoUpdateState.value, snooze_until: new Date(Date.now() + AUTO_UPDATE_SNOOZE_MS).toISOString() }
+  }
+  try {
+    const next = await api.patch<AutoUpdateStatus>('/api/update/settings', body)
+    autoUpdateConfirmed.value = next
+    autoUpdateState.value = next
+    autoUpdateFailedWrite.value = null
+  } catch (e) {
+    // A write that failed changed nothing on the engine, so the card goes back
+    // to the state it last confirmed rather than showing a decision nobody took.
+    autoUpdateState.value = autoUpdateConfirmed.value
+    autoUpdateWriteError.value = apiErrorMessage(e, 'Could not save the automatic update setting.')
+  } finally {
+    autoUpdateWritePending.value = false
+  }
+}
+
+function toggleAutoUpdate() {
+  if (!autoUpdateSupported.value) return
+  void writeAutoUpdateSetting({ enabled: !autoUpdateOn.value })
+}
+
+function snoozeAutoUpdate() {
+  if (!autoUpdateSupported.value) return
+  void writeAutoUpdateSetting({ snooze: true })
+}
+
+function retryAutoUpdateWrite() {
+  if (!autoUpdateFailedWrite.value) return
+  void writeAutoUpdateSetting(autoUpdateFailedWrite.value)
+}
+
 async function fetchUpdateStatus() {
   try {
-    updateStatus.value = await api.get<EngineUpdateStatus>('/api/update/status')
+    const next = await api.get<EngineUpdateStatus>('/api/update/status')
+    updateStatus.value = next
+    const confirmed = next.auto_update ?? null
+    autoUpdateConfirmed.value = confirmed
+    // A poll must not overwrite a write that has not answered yet; once it has,
+    // the response (or the confirmed state after a failure) is the answer.
+    if (!autoUpdateWritePending.value) autoUpdateState.value = confirmed
     reconcileUpdatePoll()
   } catch {
     // best-effort, exactly like the package status: an engine too old to have
@@ -3531,6 +3726,47 @@ onUnmounted(stopUpdatePoll)
 .engine-update-panel:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Automatic updates (#2240). A policy block, not a `.settings-form-panel`: the
+   compact Updates state is a title and a badge, and this row stays under it. */
+.auto-update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.auto-update-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.auto-update-title {
+  color: var(--fg);
+  font-size: var(--text-base, 14px);
+  font-weight: 600;
+}
+.auto-update-detail,
+.auto-update-note,
+.auto-update-meta {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.auto-update-meta { color: var(--fg2); }
+/* The installed version is technical metadata: mono, like an ID. */
+.auto-update-version {
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+/* A written setting that failed is an error, not a hint. */
+.auto-update-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--text-sm);
+  line-height: 1.5;
 }
 
 .shortcut-list {

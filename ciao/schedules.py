@@ -1837,6 +1837,7 @@ class ScheduleManager:
         chat_busy: Callable[[str], bool] | None = None,
         chat_dispatchable: Callable[[ScheduleEntry], bool] | None = None,
         target_refusal: Callable[[ScheduleEntry], str] | None = None,
+        admission_closed: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
@@ -1850,6 +1851,10 @@ class ScheduleManager:
         # scheduler asks before it dispatches: a run that never happens must
         # not consume a one-shot entry or run a command.
         self._target_refusal = target_refusal
+        # True while an update claim holds admission closed. A deferred entry is
+        # left exactly as it was: not stamped, not consumed, still eligible when
+        # admission reopens, and never left in `_inflight`/`_claimed_chats`.
+        self._admission_closed = admission_closed
         # Interval runs are awaited (not fire-and-forget) so their outcome can
         # be stamped, which means a long run can still be in flight when the
         # next tick comes due. Tracked here so the cadence skips instead of
@@ -2034,6 +2039,47 @@ class ScheduleManager:
             return ""
         return self._target_refusal(entry)
 
+    def _admission_refuses(self) -> bool:
+        """True while an update claim holds admission closed.
+
+        Asked at the top of every path that can start work, before the chat is
+        prepared, the dispatch is stamped, a task is created or a one-shot is
+        deleted. A deferred entry is left untouched, so it is due again as soon
+        as admission reopens.
+        """
+        if self._admission_closed is None:
+            return False
+        return bool(self._admission_closed())
+
+    def _deferred_result(self, entry: ScheduleEntry) -> dict:
+        """A manual run's answer while admission is closed: retryable, nothing done."""
+        return {
+            "schedule_id": entry.schedule_id,
+            "archive_policy": entry.archive_policy,
+            "status": "busy",
+            "error": "a server update is pending; retry after the restart",
+        }
+
+    def update_idle_reasons(self) -> list[str]:
+        """What a restart would interrupt here, empty when nothing is running.
+
+        Read by an unattended update's idle snapshot before it claims admission.
+        A run is tracked in ``_inflight`` from the moment the dispatch is
+        committed, and a chat is claimed slightly earlier, before the stream
+        exists; both mean a turn is under way or about to start, so either one
+        defers the claim. Public so the engine (and the wiring in
+        ``ciao.auto_update``) asks rather than reaching into the sets.
+        """
+        reasons = [
+            f"scheduled run {schedule_id} in flight"
+            for schedule_id in sorted(self._inflight)
+        ]
+        reasons.extend(
+            f"scheduled dispatch claimed chat {chat_id}"
+            for chat_id in sorted(self._claimed_chats)
+        )
+        return reasons
+
     def _begin_dispatch(
         self,
         entry: ScheduleEntry,
@@ -2152,6 +2198,10 @@ class ScheduleManager:
         so the entry is persisted here — otherwise the entry would forget the
         replacement and build a new chat every interval.
         """
+        if self._admission_refuses():
+            # Deferred, not skipped: nothing is stamped and the entry stays due,
+            # so the run happens after admission reopens.
+            return None
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
@@ -2275,6 +2325,10 @@ class ScheduleManager:
         self._store.replace(latest)
 
     async def _tick_interval(self, entry: ScheduleEntry, now: datetime) -> None:
+        if self._admission_refuses():
+            # No status, no stamp, no inflight claim: the entry must look
+            # exactly as it did before the deferred tick.
+            return
         if entry.schedule_id in self._inflight:
             return
         last = parse_dispatch_stamp(entry)
@@ -2299,6 +2353,8 @@ class ScheduleManager:
             "schedule_id": entry.schedule_id,
             "archive_policy": entry.archive_policy,
         }
+        if self._admission_refuses():
+            return self._deferred_result(entry)
         if not self._interval_dispatchable(entry):
             return {**result, "status": "missing-chat"}
         if self._interval_busy(entry):
@@ -2330,6 +2386,8 @@ class ScheduleManager:
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
+        if self._admission_refuses():
+            return self._deferred_result(entry)
         # Asked before the dispatch: a command entry is never prepared here,
         # so the dispatch's own check would come after a one-shot entry had
         # already been consumed.
@@ -2392,6 +2450,11 @@ class ScheduleManager:
         return result
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._admission_refuses():
+            # A claim holds admission closed. Nothing is evaluated, so nothing
+            # is stamped and no one-shot is consumed: every due entry is still
+            # due on the tick after the claim is released.
+            return
         if self._is_node_active is not None and not self._is_node_active():
             return
         current = now or _now_utc()
@@ -2577,6 +2640,11 @@ class ScheduleManager:
 
         Returns the list of schedule_ids that were fired.
         """
+        if self._admission_refuses():
+            # Deferred, not lost: a missed one-shot is still in the store and
+            # is caught up once admission reopens or on its next exact tick.
+            logger.info("Schedule catch-up deferred: a server update is pending")
+            return []
         if self._is_node_active is not None and not self._is_node_active():
             logger.info("Schedule catch-up skipped: legacy node state says this install is not the engine's own")
             return []

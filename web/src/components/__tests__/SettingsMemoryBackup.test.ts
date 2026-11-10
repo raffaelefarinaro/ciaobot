@@ -311,6 +311,27 @@ describe('SettingsMemoryBackup status states', () => {
     expect(view.find('.backup-reason').exists()).toBe(false)
   })
 
+  it('explains a backup deferred by an engine update', async () => {
+    // Slice 1b: an update claim holds admission closed, so this run did not
+    // start. Nothing is wrong with the backup, and the words have to say that
+    // rather than reading as a failure the owner should investigate.
+    apiGet.mockResolvedValue(
+      status({
+        state: 'deferred',
+        remote: 'https://github.com/p/m.git',
+        reason: 'an engine update is in progress',
+      }),
+    )
+    const view = await mountPanel()
+    expect(view.find('.backup-state-line').text()).toContain('Backup deferred')
+    expect(view.findAll('.backup-detail').map((p) => p.text()).join(' ')).toContain(
+      'A Ciaobot update is in progress, so this backup did not run.',
+    )
+    // Deferred is not a failure: no red state, and the service's own reason stays.
+    expect(view.find('.backup-dot--error').exists()).toBe(false)
+    expect(view.find('.backup-reason').text()).toBe('an engine update is in progress')
+  })
+
   it('does not promise a run that is gated behind a setup', async () => {
     // With a repository, "never" means a run is still due. Without one it means
     // the setup has not happened, and the unconfigured half owns that sentence.

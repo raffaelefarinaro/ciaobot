@@ -99,6 +99,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
+    "/api/update/settings": (
+        "browser Settings switch/Not now for the automatic updater; signed session, "
+        "writes only the policy or the hold, never starts an update"
+    ),
 }
 
 

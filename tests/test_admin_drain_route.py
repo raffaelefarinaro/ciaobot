@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao.config import CiaoConfig
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
 from ciao.web import auth
+from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import admin_drain, admin_drain_cancel
 
 
@@ -15,6 +20,7 @@ class _Manager:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self._restart_draining = False
+        self.owner = ""
 
     def active_chat_ids(self) -> list[str]:
         return ["c-1", "c-2"]
@@ -23,13 +29,22 @@ class _Manager:
     def restart_draining(self) -> bool:
         return self._restart_draining
 
-    def begin_restart_drain(self) -> None:
+    @property
+    def drain_owner(self) -> str:
+        return self.owner
+
+    def begin_restart_drain(self, owner: str = "") -> None:
         self.calls.append("begin")
         self._restart_draining = True
+        self.owner = owner
 
-    def cancel_restart_drain(self) -> None:
+    def cancel_restart_drain(self, owner: str | None = None) -> bool:
         self.calls.append("cancel")
+        if owner is not None and owner != self.owner:
+            return False
         self._restart_draining = False
+        self.owner = ""
+        return True
 
 
 def _manager() -> _Manager:
@@ -152,3 +167,112 @@ def test_drain_cancel_leaves_a_settings_restart_alone() -> None:
     assert resp.json() == {"draining": True}
     assert pcm.calls == ["restart-begin"]
     assert pcm.restart_draining is True
+
+
+# ── The engine-owned claim ──────────────────────────────────────────────
+#
+# An automatic update closes admission with `claim_for_update`, which takes the
+# idle snapshot and the close as one synchronous step. These tests run the real
+# manager, because the claim's idle proof and the refusal the route answers for
+# a competing caller are the behaviour under test.
+
+
+def _real_manager(tmp_path: Path) -> ProjectChatManager:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
+    pcm = _real_manager(tmp_path)
+    client = _client(pcm)
+
+    # An idle engine is claimed in one synchronous call: the close *is* the
+    # claim, so no coroutine can see an open gate after the snapshot.
+    assert pcm.claim_for_update("auto-1") is True
+    assert pcm.restart_draining is True
+
+    # A manual drain cannot take the claim. It gets the same 409 a Settings
+    # restart gets, and admission stays exactly as the claim left it.
+    resp = client.post("/api/admin/drain")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "a restart is already draining"}
+    assert pcm.restart_draining is True
+
+    # Released by its owner, admission reopens and a drain succeeds: the claim
+    # never leaked past the operation that made it.
+    assert pcm.cancel_restart_drain("auto-1") is True
+    assert pcm.restart_draining is False
+    resp = client.post("/api/admin/drain")
+    assert resp.status_code == 200
+    assert resp.json() == {"draining": True, "active_chat_ids": []}
+    # A body that is not JSON is "no owner", not a refusal: the manual caller
+    # never sent one and must keep working.
+    assert client.post("/api/admin/drain", content=b"{oops").status_code == 200
+
+
+def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
+    pcm = _real_manager(tmp_path)
+    client = _client(pcm)
+
+    # The update's own drain names the operation that owns it.
+    resp = client.post("/api/admin/drain", json={"owner": "auto-7"})
+    assert resp.status_code == 200
+    assert pcm.restart_draining is True
+    assert pcm._drain_owner == "auto-7"
+
+    # Another caller's cancel is refused and changes nothing: reopening here
+    # would drop a claim newer work is waiting on.
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "someone-else"})
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "drain owned by another operation"}
+    assert pcm.restart_draining is True
+    assert pcm._drain_owner == "auto-7"
+
+    # The owner reopens it.
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "auto-7"})
+    assert resp.status_code == 200
+    assert resp.json() == {"draining": False}
+    assert pcm.restart_draining is False
+    assert pcm._drain_owner == ""
+
+
+def test_bodyless_cancel_cannot_reopen_an_owned_claim(tmp_path: Path) -> None:
+    """The manual cancel has no owner, and an owned claim is not its to reopen.
+
+    A bodyless cancel is what the operator path sends; during a claimed update
+    it must be the 409 the mismatch already earns, not a silent steal.
+    """
+    pcm = _real_manager(tmp_path)
+    client = _client(pcm)
+
+    resp = client.post("/api/admin/drain", json={"owner": "auto-9"})
+    assert resp.status_code == 200
+    assert pcm.restart_draining is True
+    assert pcm.drain_owner == "auto-9"
+
+    resp = client.post("/api/admin/drain/cancel")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "drain owned by another operation"}
+    assert pcm.restart_draining is True
+    assert pcm.drain_owner == "auto-9"
+
+    # A body that is not JSON is still "no owner", so it cannot reopen either.
+    assert client.post("/api/admin/drain/cancel", content=b"{oops").status_code == 409
+    assert pcm.restart_draining is True
+
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "auto-9"})
+    assert resp.status_code == 200
+    assert resp.json() == {"draining": False}
+    assert pcm.restart_draining is False
