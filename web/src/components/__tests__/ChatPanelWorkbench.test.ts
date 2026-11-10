@@ -224,9 +224,11 @@ describe('ChatPanel aligned layout', () => {
     ])
     observers.forEach(fire => fire())
     await nextTick()
-    const files = wrapper.get('#chat-work-rail').findAll('.rail-item.chat-rail-file')
+    const files = wrapper.get('#chat-work-rail').findAll('.cd-row.chat-rail-file')
     expect(files).toHaveLength(2)
     expect(files[0].attributes('title')).toContain(long)
+    expect(files[0].get('.cd-detail').text()).toBe('New · Workspace')
+    expect(files[1].get('.cd-detail').text()).toBe('Mentioned · notes')
     wrapper.unmount()
   })
 
