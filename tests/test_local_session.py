@@ -662,6 +662,148 @@ def _remote_refs(repo: Path, pattern: str) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
+def _ignored_file_world(tmp_path: Path, *, local_text: str, remote_text: str = "stale\n") -> tuple[Path, Path]:
+    """origin adds state/x.json; local has its own copy, ignored via .git/info/exclude, and an unpushed commit."""
+    local, origin = _make_world(tmp_path)
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "state" / "x.json", remote_text)
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "remote store")
+    _git(other, "push", "-q")
+    exclude = local / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write("state/\n")
+    _write(local / "state" / "x.json", local_text)
+    _write(local / "note.md", "note\n")
+    _git(local, "add", "note.md")
+    _git(local, "commit", "-q", "-m", "local note")
+    return local, origin
+
+
+async def test_push_branch_refuses_a_merge_that_would_overwrite_an_ignored_file(tmp_path: Path) -> None:
+    from ciao.local_session import is_diverged_backup, push_branch
+
+    local, _ = _ignored_file_world(tmp_path, local_text="live\n")
+    head = _git(local, "rev-parse", "HEAD")
+
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is True
+    assert is_diverged_backup(detail)
+    assert "state/x.json" in detail
+    assert (local / "state" / "x.json").read_text(encoding="utf-8") == "live\n"
+    assert not (local / ".git" / "MERGE_HEAD").exists()
+    assert _git(local, "rev-parse", "HEAD") == head
+    assert len(_remote_refs(local, "refs/heads/backup/main-*")) == 1
+
+
+async def test_push_branch_merges_when_the_ignored_file_matches_origin(tmp_path: Path) -> None:
+    from ciao.local_session import is_diverged_backup, push_branch
+
+    local, origin = _ignored_file_world(tmp_path, local_text="stale\n")
+
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is True
+    assert not is_diverged_backup(detail)
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", "-q", str(origin), str(check))
+    assert (check / "note.md").exists()
+    assert (local / "state" / "x.json").read_text(encoding="utf-8") == "stale\n"
+
+
+async def test_resync_refuses_a_merge_that_would_overwrite_an_ignored_file(tmp_path: Path) -> None:
+    local, _ = _ignored_file_world(tmp_path, local_text="live\n")
+
+    ok, detail = await resync_branch(local, branch="main")
+    assert ok is False
+    assert "state/x.json" in detail
+    assert (local / "state" / "x.json").read_text(encoding="utf-8") == "live\n"
+
+
+async def test_sync_refuses_a_pull_that_would_overwrite_an_ignored_file(tmp_path: Path) -> None:
+    from unittest.mock import ANY
+
+    local, _ = _ignored_file_world(tmp_path, local_text="live\n")
+
+    result = await sync_branch(local, branch="main")
+    assert result == {"ok": False, "step": "merge", "error": ANY}
+    assert "state/x.json" in result["error"]
+    assert (local / "state" / "x.json").read_text(encoding="utf-8") == "live\n"
+
+
+async def test_merge_would_overwrite_ignores_untracked_paths_origin_does_not_add(tmp_path: Path) -> None:
+    from ciao.local_session import _merge_would_overwrite
+
+    local, origin = _make_world(tmp_path)
+    exclude = local / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write("state/\n")
+    _write(local / "state" / "x.json", "live\n")
+    _advance_origin(tmp_path, origin, "remote-commit")
+    _git(local, "fetch", "-q", "origin")
+
+    assert await _merge_would_overwrite(local, "origin/main") == []
+
+
+async def test_merge_would_overwrite_leaves_tracked_add_add_conflicts_to_git(tmp_path: Path) -> None:
+    from ciao.local_session import _merge_would_overwrite
+
+    local, origin = _make_world(tmp_path)
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "day.md", "R\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "remote day")
+    _git(other, "push", "-q")
+    _write(local / "day.md", "L\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "local day")
+    _git(local, "fetch", "-q", "origin")
+
+    assert await _merge_would_overwrite(local, "origin/main") == []
+
+    result = await sync_branch(local, branch="main")
+    assert result["ok"] is True
+    assert result.get("conflict") is True
+
+
+async def test_push_branch_refuses_a_modify_delete_merge_over_an_ignored_file(tmp_path: Path) -> None:
+    from ciao.local_session import is_diverged_backup, push_branch
+
+    local, origin = _make_world(tmp_path)
+    _write(local / "state" / "x.json", "v1\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "store v1")
+    _git(local, "push", "-q")
+    # Local stops tracking the store and ignores it; that commit stays unpushed.
+    _git(local, "rm", "-q", "--cached", "state/x.json")
+    exclude = local / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write("state/\n")
+    _git(local, "commit", "-q", "-m", "untrack store")
+    _write(local / "state" / "x.json", "live\n")
+    # Origin modifies the file local no longer tracks.
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "state" / "x.json", "v2\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "store v2")
+    _git(other, "push", "-q")
+
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is True
+    assert is_diverged_backup(detail)
+    assert "state/x.json" in detail
+    assert (local / "state" / "x.json").read_text(encoding="utf-8") == "live\n"
+    assert not (local / ".git" / "MERGE_HEAD").exists()
+
+
 async def test_push_branch_merge_conflict_falls_back_to_backup_ref(tmp_path: Path) -> None:
     from ciao.local_session import is_diverged_backup, push_branch
 

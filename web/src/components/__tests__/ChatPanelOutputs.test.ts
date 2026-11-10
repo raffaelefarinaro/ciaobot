@@ -367,9 +367,9 @@ describe('ChatPanel Outputs section', () => {
     await wrapper.get('.work-inspector-trigger').trigger('click')
     await flushPromises()
     const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
-    const rows = files.findAll('.rail-item')
+    const rows = files.findAll('.chat-rail-file')
     expect(rows).toHaveLength(2)
-    expect(new Set(rows.map(row => row.get('small').text().split(' · ')[0])).size).toBe(2)
+    expect(new Set(rows.map(row => row.get('.cd-detail').text().split(' · ')[0])).size).toBe(2)
   })
 
   it('lists the five newest files first and keeps the rest behind Show all', async () => {
@@ -391,10 +391,10 @@ describe('ChatPanel Outputs section', () => {
     await wrapper.get('.work-inspector-trigger').trigger('click')
     await flushPromises()
     const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
-    const names = () => files.findAll('.rail-item').map(row => row.get('span').text())
+    const names = () => files.findAll('.chat-rail-file').map(row => row.get('.cd-primary').text())
     expect(names()).toHaveLength(5)
     expect(names()[0]).toBe('g.md')
-    const more = files.get('.chat-rail-more')
+    const more = files.get('.cd-more')
     expect(more.attributes('aria-expanded')).toBe('false')
     expect(more.text()).toMatch(/^Show all \d+$/)
     await more.trigger('click')
@@ -410,9 +410,21 @@ describe('ChatPanel Outputs section', () => {
     await wrapper.get('.work-inspector-trigger').trigger('click')
     await flushPromises()
     const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
-    expect(files.findAll('.rail-item').length).toBeGreaterThan(0)
-    expect(files.find('.rail-note').exists()).toBe(false)
-    expect(files.find('.chat-rail-more').exists()).toBe(false)
+    expect(files.findAll('.chat-rail-file').length).toBeGreaterThan(0)
+    expect(files.find('.cd-empty').exists()).toBe(false)
+    expect(files.find('.cd-more').exists()).toBe(false)
+  })
+
+  it('shows "None yet." in an empty Files section', async () => {
+    const { wrapper } = await mountPanel()
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    expect(files.get('.cd-empty').text()).toBe('None yet.')
+    expect(files.find('.cd-count').exists()).toBe(false)
+    expect(files.get('.cd-heading').text()).toBe('Files')
   })
 
   it('leaves Always loaded closed on a plain Chat details open', async () => {
@@ -467,6 +479,44 @@ describe('ChatPanel Outputs section', () => {
     const link = wrapper.get('.chat-origin-link')
     expect(link.text()).toBe('Planning notes')
     await link.trigger('click')
+    expect(open).toHaveBeenCalledWith('archive/src-1.md')
+  })
+
+  it('opens the memory source from its Origin row in Chat details', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    const viewer = useFileViewerStore(pinia)
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
+    store.chats = [{
+      ...makeChat('pass-1'),
+      helper: {
+        kind: 'memory_pass',
+        source_chat_id: 'src-1',
+        source_title: 'Stale title',
+        source_project: 'General',
+        archive_path: '',
+        doc_path: '',
+        state: 'done',
+        archive_policy: 'when_clean',
+      } as never,
+      memory_source: {
+        chat_id: 'src-1',
+        title: 'Planning notes',
+        created_at: '',
+        last_activity_at: '',
+        archive_path: 'archive/src-1.md',
+      },
+    }]
+    store.activeChatId = 'pass-1'
+    await wrapper.setProps({ chatId: 'pass-1' })
+    await flushPromises()
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+
+    const row = wrapper.get('#chat-work-rail .chat-rail-memory')
+    expect(row.get('.cd-primary').text()).toBe('Planning notes')
+    expect(row.get('.cd-detail').text()).toBe('Memory insight')
+    expect(wrapper.get('#chat-work-rail .chat-rail-origin .cd-heading').text()).toBe('Origin')
+    await row.trigger('click')
     expect(open).toHaveBeenCalledWith('archive/src-1.md')
   })
 

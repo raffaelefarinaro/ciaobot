@@ -46,6 +46,39 @@ describe('ShellRows', () => {
     pop.unmount()
   })
 
+  it('draws a rail row in the row grammar', () => {
+    const wrapper = mountRows()
+    expect(wrapper.find('.cd-row.shell-row').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('run')
+    expect(wrapper.get('.cd-primary').text()).toBe('cmd b1')
+    expect(wrapper.get('.cd-detail').text()).toBe('Shell · 2m')
+    expect(wrapper.find('.cd-trail .shell-row-stop').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('names a Monitor row by its kind', () => {
+    const wrapper = mountRows({ rows: [shell('m1', { subagent_type: 'monitor' })] })
+    expect(wrapper.get('.cd-detail').text()).toBe('Monitor · 2m')
+    wrapper.unmount()
+  })
+
+  it("puts a stop error in the rail row's detail line", () => {
+    const wrapper = mountRows({ errors: { b1: 'Could not stop' } })
+    const alert = wrapper.get('[role="alert"]')
+    expect(alert.classes()).toContain('cd-detail')
+    expect(alert.classes()).toContain('cd-detail--error')
+    expect(wrapper.text()).not.toContain('Shell ·')
+    expect(alert.element.closest('.cd-row')?.querySelector('.shell-row-stop')).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('leaves the popover rows outside the row grammar', () => {
+    const wrapper = mountRows({ variant: 'popover' })
+    expect(wrapper.find('.cd-row').exists()).toBe(false)
+    expect(wrapper.find('button.shell-row-main').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('asks for a stop by bare task id and holds no stop state of its own', async () => {
     const stopTask = vi.fn().mockResolvedValue(undefined)
     const wrapper = mountRows({ stopTask })

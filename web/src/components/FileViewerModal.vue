@@ -172,6 +172,9 @@
               @compose-comment="onArtifactCompose"
               @open-comment="onArtifactOpenComment"
               @bridge-ready="onArtifactBridgeReady"
+              @selection="artifactSelection.onSelection"
+              @selection-cleared="artifactSelection.clear"
+              @type-comment="onArtifactTypeComment"
             />
             <template v-else>
             <!-- Document properties from YAML frontmatter: a quiet header in
@@ -270,11 +273,11 @@
 
         <!-- Floating "Comment" button anchored near the active selection. -->
         <button
-          v-if="selectionAnchor"
+          v-if="commentTrigger"
           class="fv-comment-trigger"
-          :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
+          :style="{ top: commentTrigger.top + 'px', left: commentTrigger.left + 'px' }"
           @mousedown.prevent
-          @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
+          @click="onCommentTriggerClick"
           type="button"
           :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
         >
@@ -353,6 +356,7 @@ import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useArtifactSelection } from '../composables/useArtifactSelection'
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -919,6 +923,9 @@ function onArtifactCompose(a: {
   frameY: number
 }): void {
   if (commentDraft.value || editingCommentId.value) return
+  // Whatever selection the frame reported is spent: an Alt+Click compose
+  // supersedes it, and the selection path took it already.
+  artifactSelection.clear()
   // Close any read popover first, as the pinned panel already does: without
   // this, clicking an existing highlight and then selecting other text in the
   // frame floated the read and compose popovers over it at the same time.
@@ -949,8 +956,12 @@ function onArtifactCompose(a: {
     startOffset: a.startOffset,
     endOffset: a.endOffset,
     wholeElement: a.wholeElement,
+    draft: true,
   }
   pushArtifactHighlights()
+  // Drop the frame's native selection, whichever path composed: the draft
+  // highlight shows instead, and the frame stops reporting it.
+  artifactViewerRef.value?.clearSelection()
 }
 
 // The shared cancel knows nothing about the artifact draft; without this the
@@ -1016,6 +1027,81 @@ useTypeToComment({
   },
   addImages: (files: File[]) => addDraftImages(files),
 })
+
+// ── Artifact selection → the same Comment button ─────────────────────
+// The frame reports its selections (it cannot render the page's button, and
+// a pill of its own looked and behaved differently from the Markdown one), so
+// the button below is the Markdown trigger, placed from the reported box.
+const artifactSelection = useArtifactSelection({
+  containerEl: modalEl,
+  frameEl: () => artifactViewerRef.value?.frameEl,
+})
+
+// One floating button for both: a Markdown/text/CSV selection, else an
+// artifact selection. Hidden while a draft is open, as the Markdown one is.
+const commentTrigger = computed(() =>
+  selectionAnchor.value
+    ?? (commentDraft.value || editingCommentId.value ? null : artifactSelection.trigger.value),
+)
+
+function onCommentTriggerClick(): void {
+  if (selectionAnchor.value) {
+    if (isCsv.value) openCommentForCsvCell()
+    else openCommentForSelection()
+    return
+  }
+  openArtifactCommentForSelection()
+}
+
+// The artifact counterpart of openCommentForSelection: compose on the
+// reported selection, seeded with what was typed or pasted, at the button's
+// spot.
+function openArtifactCommentForSelection(initialText = ''): void {
+  if (commentDraft.value || editingCommentId.value) return
+  const taken = artifactSelection.take()
+  if (!taken) return
+  const s = taken.selection
+  onArtifactCompose({
+    selector: s.selector,
+    quote: s.quote,
+    startOffset: s.startOffset,
+    endOffset: s.endOffset,
+    elementTag: s.elementTag,
+    frameX: s.rect.left,
+    frameY: s.rect.bottom,
+  })
+  if (!commentDraft.value) return
+  if (taken.trigger) draftAnchor.value = comments.toViewportAnchor(taken.trigger)
+  composeText.value = initialText
+  artifactDraftFromType = !!initialText
+}
+
+// Type-to-comment from inside the frame: the bridge forwards the keystroke or
+// paste, since the page-level listener above never hears keys typed there.
+// Pasted files are not forwarded (see artifactBridge.ts), so this is text only.
+//
+// A fast typist's next letters can still be forwarded after the first opened
+// the composer and before its textarea has focus; they belong to the same
+// note, so they are appended rather than dropped.
+let artifactDraftFromType = false
+function onArtifactTypeComment(p: { text: string }): void {
+  if (commentDraft.value) {
+    const focused = document.activeElement?.closest?.('.compose')
+    if (artifactDraft && artifactDraftFromType && !focused) composeText.value += p.text
+    return
+  }
+  openArtifactCommentForSelection(p.text)
+}
+
+// While a composer is open the frame takes no keys: typing in an artifact
+// with a selection must not be swallowed for a comment that cannot open.
+watch(
+  () => !!(commentDraft.value || editingCommentId.value),
+  busy => {
+    if (!busy) artifactDraftFromType = false
+    artifactViewerRef.value?.setBusy(busy)
+  },
+)
 
 const imageSrc = computed(() => store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
 // Why the current image URL failed to load; empty while it has not failed.

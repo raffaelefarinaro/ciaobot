@@ -165,6 +165,75 @@ def test_discover_runtime_keeps_argv0_for_a_legacy_direct_shape(
     assert runtime.python_path == "/opt/ciao/bin/python3-intel64"
 
 
+def test_discover_runtime_and_start_stop_take_a_label(tmp_path: Path) -> None:
+    # An isolated test install registers its own LaunchAgent (#2240). The label
+    # picks which definition is read and which job the start/stop targets, while
+    # the default keeps selecting `com.ciao.server`.
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    (agents / "com.ciao.isotest.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "ProgramArguments": ["/isotest/python", "-m", "ciao.main"],
+                "EnvironmentVariables": {"CIAO_PORT": "9557"},
+            }
+        )
+    )
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "ProgramArguments": ["/server/python", "-m", "ciao.main"],
+                "EnvironmentVariables": {"CIAO_PORT": "8443"},
+            }
+        )
+    )
+
+    labelled = macos_service.discover_runtime(
+        launch_agents_dir=agents, environ={}, label="com.ciao.isotest"
+    )
+    default = macos_service.discover_runtime(launch_agents_dir=agents, environ={})
+
+    assert labelled.port == 9557
+    assert labelled.server_plist == str(agents / "com.ciao.isotest.plist")
+    assert labelled.python_path == "/isotest/python"
+    assert default.port == 8443
+    assert default.server_plist == str(agents / "com.ciao.server.plist")
+
+    calls: list[list[str]] = []
+    started = macos_service.start_service(
+        runtime=labelled,
+        uid=501,
+        runner=_runner(calls),
+        label="com.ciao.isotest",
+    )
+    stopped = macos_service.stop_service(
+        runtime=labelled,
+        force=True,
+        uid=501,
+        runner=_runner(calls),
+        label="com.ciao.isotest",
+    )
+    default_stopped = macos_service.stop_service(
+        runtime=default,
+        force=True,
+        uid=501,
+        runner=_runner(calls),
+    )
+
+    assert started.ok is True
+    assert stopped.ok is True
+    assert default_stopped.ok is True
+    assert calls[:3] == [
+        ["launchctl", "enable", "gui/501/com.ciao.isotest"],
+        ["launchctl", "bootstrap", "gui/501", labelled.server_plist],
+        ["launchctl", "kickstart", "-k", "gui/501/com.ciao.isotest"],
+    ]
+    assert calls[-2:] == [
+        ["launchctl", "bootout", "gui/501/com.ciao.isotest"],
+        ["launchctl", "bootout", "gui/501/com.ciao.server"],
+    ]
+
+
 def test_start_service_uses_explicit_launchctl_argv(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     calls: list[list[str]] = []

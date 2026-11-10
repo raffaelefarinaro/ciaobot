@@ -58,7 +58,7 @@ describe('AgentContextSection', () => {
   it('lists the Ciaobot system prompt first, with its tokens in the total', async () => {
     const wrapper = await mountWithSystemPrompt(promptOk)
     const row = wrapper.get('.agent-context-system')
-    expect(wrapper.get('.rail-list').element.firstElementChild).toBe(row.element)
+    expect(wrapper.get('.agent-context-rows').element.firstElementChild).toBe(row.element)
     expect(row.text()).toContain('Ciaobot system prompt')
     expect(row.text()).toContain('1.4k tokens')
     expect(row.text()).toContain("Added to the provider's own system prompt")
@@ -146,7 +146,8 @@ describe('AgentContextSection', () => {
     expect(summary.get('.agent-context-summary-label').text()).toBe('Always loaded')
     // The guide (1k) and the brief together, so the closed row still says what it costs.
     expect(summary.get('.agent-context-meta').text()).toMatch(/tokens$/)
-    expect(details.find('.rail-list').exists()).toBe(true)
+    expect(details.find('.agent-context-rows').exists()).toBe(true)
+    expect(summary.classes()).toContain('cd-row')
   })
 
   it('remembers an opened Always loaded and opens when pointed at', async () => {
@@ -163,15 +164,15 @@ describe('AgentContextSection', () => {
     expect(closed.get('details.agent-context-loaded').attributes('open')).toBeDefined()
   })
 
-  it('gives context usage its own heading, apart from Always loaded', async () => {
+  it('puts the meter and Always loaded under one Context heading', async () => {
     const wrapper = await mountSection({ contextPct: 42 })
-    const usage = wrapper.get('section.rail-section')
-    const usageLabel = usage.get('.rail-label')
-    expect(usageLabel.text()).toBe('Context usage')
-    expect(usage.attributes('aria-labelledby')).toBe(usageLabel.attributes('id'))
-    // The file list belongs to the always-loaded group, not to the usage one.
-    expect(usage.find('.rail-list').exists()).toBe(false)
-    expect(wrapper.get('details.agent-context-loaded').find('.rail-list').exists()).toBe(true)
+    const section = wrapper.get('section.agent-context')
+    expect(section.get('.cd-heading').text()).toBe('Context')
+    expect(section.attributes('aria-labelledby')).toBe(section.get('.cd-heading').attributes('id'))
+    expect(section.find('[role="meter"]').exists()).toBe(true)
+    expect(section.find('details.agent-context-loaded').exists()).toBe(true)
+    expect(wrapper.findAll('section')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('Context usage')
   })
 
   it('shows reported context usage once, as the meter figure', async () => {
@@ -183,13 +184,14 @@ describe('AgentContextSection', () => {
 
   it('keeps the section and Compact button but no meter when a compaction left usage unknown', async () => {
     const wrapper = await mountSection({ contextPct: null, compacted: true })
-    expect(wrapper.get('.rail-label').text()).toBe('Context usage')
+    expect(wrapper.get('.cd-heading').text()).toBe('Context')
     expect(wrapper.find('[role="meter"]').exists()).toBe(false)
     expect(wrapper.get('.agent-context-compact').text()).toBe('Compact')
   })
 
   it('keeps usage unknown rather than inventing a percentage', async () => {
     const wrapper = await mountSection({ contextPct: null })
+    expect(wrapper.get('.cd-heading').text()).toBe('Context')
     expect(wrapper.find('.agent-context-usage-note').exists()).toBe(false)
     expect(wrapper.find('[role="meter"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('of context window used')
@@ -242,7 +244,7 @@ describe('AgentContextSection', () => {
 
   it('shows the context used from a string percentage', async () => {
     const wrapper = await mountSection({ contextPct: 13.2 })
-    expect(wrapper.get('[role="meter"]').text()).toBe('13%')
+    expect(wrapper.get('[role="meter"]').text()).toBe('13% used')
   })
 
   it('says the guide could not be read, with a retry, instead of dropping the row', async () => {
@@ -270,12 +272,12 @@ describe('AgentContextSection', () => {
     expect(wrapper.text()).toContain('AGENTS.md')
   })
 
-  it('puts a Compact button beside the context meter and emits compact', async () => {
+  it('puts Compact in the Context heading and emits compact', async () => {
     const wrapper = await mountSection({ contextPct: 42 })
-    const button = wrapper.get('.agent-context-meter-row button')
+    const button = wrapper.get('.cd-head .agent-context-compact')
     expect(button.text()).toBe('Compact')
+    expect(button.classes()).toContain('cd-action')
     expect(button.attributes('disabled')).toBeUndefined()
-    expect(wrapper.get('[role="meter"]').element.parentElement).toBe(button.element.parentElement)
     await button.trigger('click')
     expect(wrapper.emitted('compact')).toHaveLength(1)
   })

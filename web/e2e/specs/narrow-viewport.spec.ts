@@ -53,7 +53,7 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
       const points = [[b.left + b.width / 2, b.top + b.height / 2], [b.left + 10, b.top + 10], [b.right - 10, b.top + 10], [b.left + 10, b.bottom - 10], [b.right - 10, b.bottom - 10]]
       const hits = points.map(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit === button || button.contains(hit) })
       const cancel = card.querySelector('.question-card-actions .btn-sm:not(.primary)')!
-      return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea')!), viewportBottom: bottom }
+      return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea.chat-input')!), composerBar: rect(document.querySelector('.composer-bar')!), viewportBottom: bottom }
     })
     expect(result.visible, `Send answer must stay visible and hit-testable: ${JSON.stringify(result)}`).toBe(true)
     expect(result.bodyHeight).toBeGreaterThanOrEqual(44)
@@ -64,6 +64,8 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
     expect(result.cancelHeight).toBeGreaterThanOrEqual(44)
     expect(result.composer.top).toBeGreaterThanOrEqual(-1)
     expect(result.composer.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
+    // The whole composer, send/stop included, stays on screen (#2774).
+    expect(result.composerBar.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
   }).toPass({ timeout: 5_000 })
   await expect(card).toBeVisible()
   await expect(body).toBeVisible()
@@ -247,6 +249,11 @@ test.describe('narrow viewport', () => {
     await expectQuestionSubmitVisible(page)
     await page.setViewportSize({ width: 390, height: 500 })
     await expectQuestionSubmitVisible(page)
+    // lib/viewport.ts re-measures on resize and again 50/200/500ms later
+    // (RESETTLE_DELAYS_MS); a late re-measure removed the hand-set keyboard
+    // state below (#2775). Let the resize land and the settling pass end first.
+    await expect.poll(() => page.evaluate(() => innerHeight)).toBe(500)
+    await page.waitForTimeout(600)
     await page.evaluate(() => {
       document.documentElement.style.setProperty('--app-h', '280px')
       document.documentElement.classList.add('keyboard-open')
@@ -305,6 +312,19 @@ test.describe('narrow viewport', () => {
     expect(landscapeScroll.scrollTop).toBeGreaterThan(0)
     await expectQuestionTargetsReachable(page)
     await expectQuestionSubmitVisible(page)
+  })
+
+  test('a short pane folds the composer under a question and closes its model picker', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.locator('.composer-model .model-picker-summary').click()
+    await expect(page.locator('.model-selector')).toBeVisible()
+    await injectQuestion(page)
+    await expect(page.locator('.question-form-card')).toBeVisible()
+    await expect(page.locator('.model-selector')).toHaveCount(0)
+    await expect(page.locator('.composer-model')).toBeHidden()
+    await expect(page.locator('.image-btn')).toBeHidden()
+    await expect(page.locator('.send-btn')).toBeInViewport({ ratio: 1 })
   })
 
   test('a live question preserves composer focus and keyboard entry', async ({ page }) => {

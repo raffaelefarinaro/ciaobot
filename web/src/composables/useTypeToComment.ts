@@ -32,7 +32,9 @@ function isEditableTarget(target: EventTarget | null): boolean {
 /** True for a keystroke that should start a comment: one printable character,
  *  no modifiers, not a space (which stays a scroll key) and not mid-IME. */
 function isTypeThrough(e: KeyboardEvent): boolean {
-  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return false
+  // Safari reports a key that starts IME composition as keyCode 229 without
+  // setting isComposing.
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229) return false
   if (e.key === ' ') return false
   return Array.from(e.key).length === 1
 }

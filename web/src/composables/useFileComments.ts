@@ -36,6 +36,26 @@ export type FileComment = {
   createdAt: string
 }
 
+/** Where the floating "Comment" button goes for a selection whose end box is
+ *  `endRect` (viewport coordinates): just past the end, relative to
+ *  `container`, clamped so it never spills past the container's right edge (a
+ *  no-op in the wide modal, required in the narrow pinned panel). Shared by
+ *  the Markdown/text selection and the HTML artifact selection, so both put
+ *  the same button in the same place. */
+export function placeCommentTrigger(
+  endRect: { top: number; bottom: number; left: number; right: number },
+  container: HTMLElement,
+): Anchor {
+  const containerRect = container.getBoundingClientRect()
+  const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
+  const panelPad = 8
+  const top = endRect.bottom - containerRect.top + 2
+  const idealLeft = endRect.right - containerRect.left + 6
+  const maxLeft = container.clientWidth - triggerWidth - panelPad
+  const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
+  return { top, left }
+}
+
 export type CommentDraft = {
   selection: string
   text: string
@@ -297,14 +317,7 @@ export function useFileComments(options: UseFileCommentsOptions) {
       return
     }
 
-    const containerRect = container.getBoundingClientRect()
-    const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
-    const panelPad = 8
-    const top = endRect.bottom - containerRect.top + 2
-    const idealLeft = endRect.right - containerRect.left + 6
-    const maxLeft = container.clientWidth - triggerWidth - panelPad
-    const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
-    selectionAnchor.value = { top, left }
+    selectionAnchor.value = placeCommentTrigger(endRect, container)
   }
 
   // Track the live selection for the floating trigger. Only reacts to

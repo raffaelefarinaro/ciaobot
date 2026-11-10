@@ -16,11 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
-from ciao import update_host
+from ciao import install_receipt, macos_service, update_host
 from ciao.engine_update import (
     PREVIOUS_ENV_NAME,
     UpdateError,
@@ -30,7 +30,7 @@ from ciao.engine_update import (
     recover_interrupted_apply,
     run_apply,
 )
-from ciao.install_receipt import read_receipt
+from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.update_host import (
     MacUpdateHost,
     UnsupportedPlatformError,
@@ -676,6 +676,139 @@ def test_mac_update_host_start_engine_is_the_service_helper(
     # the helper that already owns starting the engine.
     assert result.ok is True
     assert seen == [Path("no-runtime")]
+
+
+# ── the label the host controls: the install's, not a literal (#2240) ───
+
+
+ISOTEST_LABEL = "com.ciao.isotest"
+
+
+def _write_install_receipt(service_label: str) -> None:
+    """The receipt an installer leaves: the one place a host learns its job."""
+    write_receipt(
+        InstallReceipt(
+            version="2.0.16",
+            executable="/opt/ciao/bin/ciao",
+            python=sys.executable,
+            service_backend="launchd",
+            service_label=service_label,
+            installed_at="2026-11-01T00:00:00+00:00",
+        ),
+        install_receipt.default_receipt_path(),
+    )
+
+
+def _record_label_calls(calls: list[list[str]]) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    """A launchctl that records and answers "not loaded" for ``print``.
+
+    Both the host's own seam and the service helper's are driven through it, so
+    one list is the whole set of launchctl argv a host path produced. A print
+    that "found nothing" is what makes ``server_command`` fall back to the plist
+    on disk — the read whose label this test is about.
+    """
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        if args[0] == "print":
+            return subprocess.CompletedProcess(args, 113, "", "not found")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    return launchctl
+
+
+@mac_update_host
+def test_host_uses_the_receipt_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An isolated install registers its own LaunchAgent and records its label.
+    # Every job the update transaction touches has to be that one: the operator's
+    # real `com.ciao.server` engine must be neither stopped nor started.
+    _write_install_receipt(ISOTEST_LABEL)
+    agents = macos_service.default_launch_agents_dir()
+    agents.mkdir(parents=True, exist_ok=True)
+    labelled_plist = agents / f"{ISOTEST_LABEL}.plist"
+    labelled_plist.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": ISOTEST_LABEL,
+                "ProgramArguments": ["/isotest/bin/python", "-m", "ciao.main"],
+                "EnvironmentVariables": {"CIAO_PORT": "9557"},
+            }
+        )
+    )
+    calls: list[list[str]] = []
+    launchctl = _record_label_calls(calls)
+    # The service helper reaches launchd through the module seam, with the real
+    # `subprocess.run` bound as its default runner: patch the seam, never run
+    # the real launchctl from a test.
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, *, runner=subprocess.run: launchctl(args),
+    )
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+
+    host = MacUpdateHost(launchctl=launchctl, uid=501)
+
+    assert host.label == ISOTEST_LABEL
+    # Port discovery reads the labelled plist, not the default one.
+    assert host.engine_port() == 9557
+
+    # The plist read behind `server_command` is the labelled one, too.
+    assert host.server_command() == ("/isotest/bin/python", "-m", "ciao.main")
+
+    host.stop_engine()
+    assert calls[-1] == ["bootout", "gui/501/com.ciao.isotest"]
+
+    del calls[:]
+    assert host.start_engine().ok is True
+    # enable + bootstrap + kickstart of the labelled job, from the labelled
+    # plist. (The fourth call is `start_service`'s own bind-failure probe, which
+    # asks the service's default job and is a different question — see
+    # `port_in_use_reason`.)
+    assert calls[:3] == [
+        ["enable", "gui/501/com.ciao.isotest"],
+        ["bootstrap", "gui/501", str(labelled_plist)],
+        ["kickstart", "-k", "gui/501/com.ciao.isotest"],
+    ]
+
+
+def test_host_falls_back_to_the_server_label_without_a_receipt() -> None:
+    # An install that predates the field leaves no receipt this host can read,
+    # and it must keep running exactly the job it ran before.
+    assert not install_receipt.default_receipt_path().exists()
+    calls: list[list[str]] = []
+    host = MacUpdateHost(launchctl=_record_label_calls(calls), uid=501)
+
+    assert host.label == SERVER
+    host.stop_engine()
+
+    assert calls == [["bootout", "gui/501/com.ciao.server"]]
+
+
+def test_host_falls_back_to_the_server_label_with_an_empty_service_label() -> None:
+    # `service_backend: none` records an empty label: a valid receipt that names
+    # no job, so there is still nothing to control but the default one.
+    _write_install_receipt("")
+    calls: list[list[str]] = []
+    host = MacUpdateHost(launchctl=_record_label_calls(calls), uid=501)
+
+    assert host.label == SERVER
+    host.stop_engine()
+
+    assert calls == [["bootout", "gui/501/com.ciao.server"]]
+
+
+def test_named_label_argument_wins_over_the_receipt() -> None:
+    # The argument is the seam a caller that already knows its job uses; a
+    # receipt on the machine must not override it.
+    _write_install_receipt(ISOTEST_LABEL)
+    calls: list[list[str]] = []
+    host = MacUpdateHost(launchctl=_record_label_calls(calls), uid=501, label="com.ciao.named")
+
+    assert host.label == "com.ciao.named"
+    host.stop_engine()
+
+    assert calls == [["bootout", "gui/501/com.ciao.named"]]
 
 
 # ── a FakeHost: the ordering and rollback decisions part (b) reuses ─────

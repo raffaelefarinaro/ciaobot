@@ -66,6 +66,23 @@ def test_write_then_read_round_trips(tmp_path: Path) -> None:
     assert read_receipt(tmp_path / "r.json") == receipt
 
 
+# The update transaction controls the launchd job the receipt names (#2240), so
+# a label other than the default has to survive a write/read. A
+# `service_backend: none` install records an empty one, which names no job and
+# is a valid receipt rather than a corrupt one.
+def test_service_label_roundtrips_and_empty_is_optional(tmp_path: Path) -> None:
+    labelled = _receipt(service_label="com.ciao.isotest")
+    write_receipt(labelled, tmp_path / "labelled.json")
+    read_back = read_receipt(tmp_path / "labelled.json")
+    assert read_back is not None
+    assert read_back.service_label == "com.ciao.isotest"
+    assert read_back == labelled
+
+    empty = _receipt(service_backend="none", service_label="")
+    write_receipt(empty, tmp_path / "none.json")
+    assert read_receipt(tmp_path / "none.json") == empty
+
+
 # The backend is what a receipt is asked for first, so every value the installer
 # may legitimately write has to survive a write/read round trip.
 @pytest.mark.parametrize("backend", list(SERVICE_BACKENDS))
