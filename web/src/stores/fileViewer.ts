@@ -4,6 +4,8 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { fileLoadErrorMessage } from '../lib/fileLoadError'
 import { isImageFilePath } from '../lib/chatActivity'
+import { looksLikeFolderPath } from '../lib/filePaths'
+import { fetchWorkspaceDir } from '../lib/folderBrowserDriver'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -426,6 +428,22 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return close()
   }
 
+  /**
+   * Open what a link names. Anything that is not folder-shaped (a dotted
+   * extension, a known extensionless name like README) opens exactly as it
+   * always has, with no extra request. A folder-shaped one asks
+   * /api/workspace-dir once: a folder opens in the browser; anything else,
+   * a file included, takes the same open() it always took.
+   */
+  async function openLink(linkPath: string, lineNumber: number | null = null, chat: string = ''): Promise<boolean> {
+    const clean = linkPath.replace(/:\d+$/, '')
+    if (isImageFilePath(clean)) return openImage(linkPath, chat)
+    if (!looksLikeFolderPath(clean)) return open(linkPath, lineNumber, chat)
+    const probe = await fetchWorkspaceDir(clean, chat)
+    if (probe.ok) return openFolder(probe.listing.path, chat)
+    return open(linkPath, lineNumber, chat)
+  }
+
   async function close(force = false): Promise<boolean> {
     if (!force && isDirty.value) {
       if (!await askConfirm('You have unsaved file changes. Are you sure you want to close?', {
@@ -546,6 +564,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     open,
     openImage,
     openImageUrl,
+    openLink,
     openFolder,
     setFolderPath,
     openFromFolder,

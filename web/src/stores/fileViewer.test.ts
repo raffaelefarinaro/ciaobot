@@ -684,3 +684,86 @@ describe('folder browser', () => {
     expect(store.kind).toBe('image')
   })
 })
+
+describe('opening links', () => {
+  const dirListing = (path: string) => new Response(JSON.stringify({
+    path,
+    root: { name: 'workspace', path: '/ws' },
+    roots: [{ name: 'workspace', path: '/ws' }],
+    parent: '/ws/exports',
+    entries: [],
+    truncated: false,
+  }), { status: 200 })
+
+  test('a folder link opens the folder browser', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith('/api/workspace-dir')) return dirListing('/ws/exports/sloth-v5')
+      return new Response('', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.openLink('exports/sloth-v5', null, 'chat-1')
+    expect(store.kind).toBe('folder')
+    expect(store.path).toBe('/ws/exports/sloth-v5')
+    const probe = new URL(String(fetchMock.mock.calls[0]?.[0]), 'http://localhost')
+    expect(probe.pathname).toBe('/api/workspace-dir')
+    expect(probe.searchParams.get('path')).toBe('exports/sloth-v5')
+    expect(probe.searchParams.get('chat_id')).toBe('chat-1')
+  })
+
+  test("an extensionless file keeps today's open and its error", async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.startsWith('/api/workspace-dir')) {
+        return new Response(JSON.stringify({ error: 'not_a_directory', kind: 'file', path: '/ws/bin/run' }), { status: 400 })
+      }
+      return new Response('', { status: 415 })
+    }))
+    const store = useFileViewerStore()
+    await store.openLink('bin/run', null, '')
+    expect(store.kind).toBe('text')
+    expect(store.path).toBe('bin/run')
+    expect(store.error).toBe('Unsupported file type.')
+  })
+
+  test('a known extensionless name never probes', async () => {
+    const fetchMock = vi.fn(async (_url: string) => new Response('all:'))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.openLink('docs/Makefile', null, '')
+    const urls = fetchMock.mock.calls.map(call => String(call[0]))
+    expect(urls.some(url => url.startsWith('/api/workspace-dir'))).toBe(false)
+    expect(urls[0]).toBe('/api/workspace-file?path=docs%2FMakefile')
+  })
+
+  test("a missing folder falls back to the viewer's not-found message", async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string) => new Response('', { status: 404 })))
+    const store = useFileViewerStore()
+    await store.openLink('exports/gone', null, '')
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('text')
+    expect(store.error).toBe('File not found.')
+  })
+
+  test('a link with an extension skips the probe', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith('/api/vault-markdown-paths')) return new Response(JSON.stringify({ paths: [] }))
+      return new Response('note')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.openLink('notes/a.md', null, '')
+    const urls = fetchMock.mock.calls.map(call => String(call[0]))
+    expect(urls.some(url => url.startsWith('/api/workspace-dir'))).toBe(false)
+    expect(store.content).toBe('note')
+  })
+
+  test('an image link opens as an image', async () => {
+    const fetchMock = vi.fn(async (_url: string) => new Response(''))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.openLink('shots/a.png')
+    expect(store.kind).toBe('image')
+    const urls = fetchMock.mock.calls.map(call => String(call[0]))
+    expect(urls.some(url => url.startsWith('/api/workspace-dir'))).toBe(false)
+  })
+})

@@ -550,4 +550,14 @@ describe('PinnedFilePanel', () => {
     expect(wrapper.find('img.pfp-img').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('routes a folder link inside the pinned note through openLink without a chat', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/notes/today.md', content: '[out](../exports/x)' })
+    const openLink = vi.spyOn(useFileViewerStore(), 'openLink').mockResolvedValue(true)
+    await wrapper.get<HTMLAnchorElement>('.pfp-md a.file-link').trigger('click')
+    expect(openLink).toHaveBeenCalledWith('/ws/exports/x', null)
+    expect(openLink.mock.calls[0]?.length).toBe(2)
+    wrapper.unmount()
+  })
 })

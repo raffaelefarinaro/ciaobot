@@ -413,6 +413,16 @@ describe('FileViewerModal', () => {
     expect(confirm).toHaveBeenCalledTimes(2)
   })
 
+  it('opens a folder link inside a note through openLink', async () => {
+    const store = openViewer()
+    store.path = '/ws/notes/today.md'
+    store.content = '[out](../exports/x)'
+    await settle()
+    const openLink = vi.spyOn(store, 'openLink').mockResolvedValue(true)
+    await wrapper!.get<HTMLAnchorElement>('.fv-md a.file-link').trigger('click')
+    expect(openLink).toHaveBeenCalledWith('/ws/exports/x', null, 'chat-1')
+  })
+
   it('keeps the nested comment composer focusable and Escape-local', async () => {
     const store = openViewer()
     await settle()

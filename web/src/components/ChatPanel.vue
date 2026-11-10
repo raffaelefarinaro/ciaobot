@@ -4149,11 +4149,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   const lineAttr = a.getAttribute('data-line')
   const line = lineAttr ? parseInt(lineAttr, 10) : null
   const cid = chat.value?.chat_id || ''
-  if (isImageFilePath(path)) {
-    fileViewer.openImage(path, cid)
-  } else {
-    fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
-  }
+  void fileViewer.openLink(path, Number.isFinite(line as number) ? line : null, cid)
 }
 
 // One delegated listener at the panel root serves every clickable thing the

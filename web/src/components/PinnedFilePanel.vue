@@ -900,11 +900,7 @@ function onMdClick(e: MouseEvent): void {
     const linkedPath = fileLink.getAttribute('data-file-path') || ''
     const lineAttr = fileLink.getAttribute('data-line')
     const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
-    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
-      void fileViewer.openImage(linkedPath)
-    } else {
-      void fileViewer.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null)
-    }
+    void fileViewer.openLink(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null)
     return
   }
 
