@@ -258,7 +258,9 @@ describe('the ways into the browser terminal', () => {
     // One row that is its own label: no separate "Terminal" heading above it.
     expect(section.find('.rail-label').exists()).toBe(false)
     const button = section.get('button')
-    expect(button.get('span:nth-child(2)').text()).toBe('Open terminal')
+    expect(button.attributes('aria-label')).toBe('Open terminal')
+    expect(button.get('.cd-primary').text()).toBe('Terminal')
+    expect(wrapper.get('.chat-rail-open .cd-heading').text()).toBe('Open')
     await button.trigger('click')
     await flushPromises()
 
