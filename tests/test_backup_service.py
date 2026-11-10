@@ -363,6 +363,26 @@ async def test_the_automation_store_is_committed_and_pushed(tmp_path: Path) -> N
     assert world.remote_head() == world.head()
 
 
+async def test_an_info_exclude_rule_that_ignores_the_store_is_a_coverage_gap(tmp_path: Path) -> None:
+    world = _world(tmp_path)
+    exclude = world.workspace / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write(".runtime/\n")
+    _schedules(world, json.dumps({"schedules": [{"name": "weekly"}]}))
+    world.note("day-2.md", "x\n")
+
+    report = await local_session.preflight_scoped(world.config, world.workspace)
+    assert report["ignored_in_scope"] == [".runtime/schedules.json"]
+
+    status = await _service(world).run_backup()
+    assert status.state == backup_service.STATE_READY, status.reason
+    assert status.coverage_gap == 0
+    assert "ignored by git" in status.reason
+    assert ".runtime/schedules.json" in status.reason
+    assert world.head() == world.remote_head()
+
+
 async def test_a_credential_in_the_automation_store_stops_the_run_before_it_stages(
     tmp_path: Path,
 ) -> None:
@@ -425,9 +445,9 @@ async def test_a_data_repo_that_ignores_the_runtime_root_does_not_back_it_up(
     (``cli._WORKSPACE_GITIGNORE_ENTRIES``), and a repository that ignores a
     file never reports it: ``git status --porcelain`` does not list it, so the
     preflight never sees it at all. On such an install the carve-out changes
-    nothing — the automations are still not backed up, and unlike an
-    ignored-but-pending path there is not even a coverage gap to report,
-    because there is no pending work to report as uncovered.
+    nothing — the automations are still not backed up. The ignored store is
+    now reported as ``ignored_in_scope`` and named in the status reason, though
+    it is not counted as a coverage gap.
 
     The remedy belongs to the operator's own ignore rules (negate
     ``.runtime/schedules.json`` back out, as the issue's reporter has) rather
@@ -446,6 +466,7 @@ async def test_a_data_repo_that_ignores_the_runtime_root_does_not_back_it_up(
     assert backup_scope.is_eligible(".runtime/schedules.json", world.config) is True
     report = await local_session.preflight_scoped(world.config, world.workspace)
     assert ".runtime/schedules.json" not in report["eligible"]
+    assert report["ignored_in_scope"] == [".runtime/schedules.json"]
     assert _git(world.workspace, "status", "--porcelain", "--ignored").splitlines() == [
         "!! .runtime/"
     ]

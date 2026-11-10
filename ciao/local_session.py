@@ -342,6 +342,44 @@ async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
         return await _push_backup_ref(workspace, branch=branch)
 
 
+_OVERWRITE_NAMES = 5
+
+
+async def _merge_would_overwrite(workspace: Path, ref: str) -> list[str]:
+    """Local files git does not track that merging ``ref`` would replace.
+
+    Git refuses a merge over an untracked file that is not ignored, but it
+    overwrites an *ignored* one without asking, so a path origin adds that
+    already sits on disk with other bytes is lost silently (the incident this
+    guards against: a stale ``.runtime`` store committed upstream replaced the
+    live copy). Only paths ``ref`` adds, and whose local bytes differ from
+    ``ref``'s, are returned; an unreadable side counts as different.
+    """
+    rc, out, _err = await run_git(
+        workspace, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", f"HEAD...{ref}"
+    )
+    if rc != 0:
+        return []
+    risky: list[str] = []
+    for rel in sorted(p for p in out.split("\0") if p):
+        if not os.path.lexists(Path(workspace) / rel):
+            continue
+        rc_l, local_sha, _ = await _git(workspace, "hash-object", "--", rel)
+        rc_r, remote_sha, _ = await _git(workspace, "rev-parse", f"{ref}:{rel}")
+        if rc_l != 0 or rc_r != 0 or local_sha != remote_sha:
+            risky.append(rel)
+    return risky
+
+
+def _overwrite_detail(ref: str, paths: Sequence[str]) -> str:
+    names = ", ".join(paths[:_OVERWRITE_NAMES])
+    more = len(paths) - _OVERWRITE_NAMES
+    return (
+        f"merging {ref} would overwrite local file(s) git does not track: {names}"
+        + (f" (+{more} more)" if more > 0 else "")
+    )
+
+
 async def _push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     """Body of :func:`push_branch`; assumes the mutation lock is held.
 
@@ -353,7 +391,8 @@ async def _push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     :func:`is_diverged_backup`). This is deliberately not a rebase or a
     force-push: the shared branch is left exactly as diverged as it was, and
     a human resolves it later; the fallback only guarantees local state made
-    it off-device.
+    it off-device. A merge that would overwrite a local file git does not
+    track is refused the same way, before it starts.
     """
     rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=GIT_NETWORK_TIMEOUT)
     if rc != 0:
@@ -372,6 +411,24 @@ async def _push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
                 branch,
             )
             await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
+            clobbered = await _merge_would_overwrite(workspace, f"origin/{branch}")
+            if clobbered:
+                refusal = _overwrite_detail(f"origin/{branch}", clobbered)
+                bok, bdetail = await _push_backup_ref(workspace, branch=branch)
+                if bok:
+                    logger.warning(
+                        "Branch '%s': auto-merge refused, %s; %s", branch, refusal, bdetail
+                    )
+                    return (
+                        True,
+                        f"{_DIVERGED_BACKUP_MARKER}branch '{branch}' diverged from "
+                        f"origin/{branch} and the auto-merge was refused: {refusal}; {bdetail}",
+                    )
+                return (
+                    False,
+                    f"Push rejected (non-fast-forward) and the auto-merge was refused: "
+                    f"{refusal}; backup-ref fallback also failed: {bdetail}",
+                )
             rc_m, out_m, err_m = await _git(
                 workspace, "merge", "--no-edit", f"origin/{branch}"
             )
@@ -652,6 +709,13 @@ async def _sync_branch(workspace: Path, *, branch: str) -> dict:
     # nothing to merge and a bare pull would fail on missing upstream.
     rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
     if rc_ref == 0:
+        clobbered = await _merge_would_overwrite(workspace, f"origin/{branch}")
+        if clobbered:
+            return {
+                "ok": False,
+                "step": "merge",
+                "error": _overwrite_detail(f"origin/{branch}", clobbered),
+            }
         rc_pull, _, _ = await _git(
             workspace, "pull", "--no-rebase", "origin", branch, timeout=GIT_NETWORK_TIMEOUT
         )
@@ -705,6 +769,9 @@ async def _resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
     if rc_ref != 0:
         return True, "no remote branch to sync from"
+    clobbered = await _merge_would_overwrite(workspace, f"origin/{branch}")
+    if clobbered:
+        return False, _overwrite_detail(f"origin/{branch}", clobbered)
     rc, out, err = await _git(workspace, "merge", "--no-edit", f"origin/{branch}")
     if rc != 0:
         await _git(workspace, "merge", "--abort")
@@ -926,6 +993,27 @@ def _scan_eligible(root: Path, eligible: Sequence[str]) -> tuple[list[str], list
     return blockers, warnings
 
 
+def _carve_out_candidates(config, workspace: Path, root: Path) -> list[str]:
+    """Carve-out files on disk inside the scope, relative to ``workspace``."""
+    candidates: list[str] = []
+    for rel in backup_scope.ALLOWED_FILES:
+        path = root / rel
+        if not path.is_file() or not backup_scope.is_eligible(rel, config):
+            continue
+        try:
+            candidates.append(path.relative_to(workspace).as_posix())
+        except ValueError:
+            continue
+    return candidates
+
+
+async def _ignored_carve_outs(config, workspace: Path, root: Path) -> list[str]:
+    """Carve-out files on disk that git ignores, so no backup can include them."""
+    candidates = await asyncio.to_thread(_carve_out_candidates, config, workspace, root)
+    ignored = await _ignored_paths(workspace, candidates)
+    return [rel for rel in candidates if rel in ignored]
+
+
 async def preflight_scoped(config, workspace: Path) -> dict:
     """What a scoped backup commit would contain here, and what it refuses.
 
@@ -938,8 +1026,10 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     the whole tree, so setup has to be able to raise that as a blocker.
 
     ``ok`` is false whenever there is anything to raise: a failing
-    ``git status``, a credential in an eligible file, or a tracked file outside
-    the scope.
+    ``git status``, a credential in an eligible file, a tracked file outside
+    the scope, or an in-scope carve-out file that git ignores. The last is
+    reported as ``ignored_in_scope`` (always present, possibly empty) and as a
+    blocker; the caller decides whether a blocker stops the run.
 
     ``eligible`` is what a :func:`commit_scoped` call can really stage, so it
     has already been narrowed by git's own ignore rules
@@ -988,6 +1078,10 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     if ignored:
         excluded.extend(rel for rel in eligible if rel in ignored)
         eligible = [rel for rel in eligible if rel not in ignored]
+    # A carve-out file git ignores is in the scope yet can never be committed,
+    # and `git status` never lists it, so it is checked on its own.
+    ignored_in_scope = await _ignored_carve_outs(config, Path(workspace), root)
+    blockers.extend(f"Ignored by git but inside the backup scope: {rel}" for rel in ignored_in_scope)
     scan_blockers, warnings = await asyncio.to_thread(_scan_eligible, root, eligible)
     blockers.extend(scan_blockers)
 
@@ -999,6 +1093,7 @@ async def preflight_scoped(config, workspace: Path) -> dict:
         "eligible": eligible,
         "excluded": excluded,
         "tracked_excluded": tracked,
+        "ignored_in_scope": ignored_in_scope,
         "blockers": blockers,
         "warnings": warnings,
     }
