@@ -24,6 +24,7 @@ import { defineComponent, h } from 'vue'
 import { enableAutoUnmount, flushPromises, mount, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import { terminalPanelWanted } from '../../lib/terminalPanel'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useTerminalStore } from '../../stores/terminal'
@@ -270,6 +271,22 @@ describe('the ways into the browser terminal', () => {
     expect(terminalPanelWanted.value).toBe(true)
     // A chat with no shell gets one: the person asked for a terminal.
     expect(post).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1' })
+  })
+
+  it('opens the folder browser from the Open section', async () => {
+    const { wrapper } = await mountChat(makeProject())
+    const viewer = useFileViewerStore(pinia)
+    const openFolder = vi.spyOn(viewer, 'openFolder').mockResolvedValue(true)
+
+    const row = wrapper.get('.chat-rail-open .chat-rail-browse')
+    expect(row.attributes('aria-label')).toBe('Browse files')
+    expect(row.get('.cd-primary').text()).toBe('Browse files')
+    await row.trigger('click')
+    await flushPromises()
+
+    // An empty path lists the chat's first root: its workspace folder.
+    expect(openFolder).toHaveBeenCalledWith('', 'chat-1')
+    expect(wrapper.find('.chat-rail-open .chat-rail-terminal').exists()).toBe(true)
   })
 
   it('gives a chat with a repository exactly one terminal entry', async () => {
