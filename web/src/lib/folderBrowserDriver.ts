@@ -163,8 +163,8 @@ export function seedFolderBrowserConfig(storage: Pick<Storage, 'getItem' | 'setI
   storage.setItem(key, JSON.stringify({
     view: 'list', showThumbnails: false, expandTreeByDefault: false, showHiddenFiles: false,
     ...stored,
-    // A narrow screen always starts with the tree closed: a stored desktop choice would cover the list.
-    showTreeView: narrow ? false : (stored.showTreeView ?? true),
+    // Decided by the screen, not the stored value: a phone session must not hide the tree on desktop, nor the reverse.
+    showTreeView: !narrow,
     persist: false, fullScreen: false, path: '',
   }))
 }

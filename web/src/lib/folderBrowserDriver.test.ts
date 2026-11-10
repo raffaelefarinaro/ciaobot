@@ -184,7 +184,7 @@ describe('folder browser driver', () => {
     expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(false)
   })
 
-  it('seedFolderBrowserConfig keeps a stored tree choice on a wide screen', () => {
+  it('seedFolderBrowserConfig shows the tree on a wide screen even when a phone session stored it hidden', () => {
     const store = new Map<string, string>()
     const storage = {
       getItem: (key: string) => store.get(key) ?? null,
@@ -192,9 +192,6 @@ describe('folder browser driver', () => {
     }
     const key = 'vuefinder_config_ciao-folder-browser'
     store.set(key, JSON.stringify({ showTreeView: false }))
-    seedFolderBrowserConfig(storage, undefined, false)
-    expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(false)
-    store.delete(key)
     seedFolderBrowserConfig(storage, undefined, false)
     expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(true)
   })

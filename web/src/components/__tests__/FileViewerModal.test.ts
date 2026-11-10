@@ -308,6 +308,34 @@ describe('FileViewerModal', () => {
     trigger.remove()
   })
 
+  it('keeps a folder open for a press inside a VueFinder teleported menu, and still closes for an outside press', async () => {
+    // VueFinder teleports its breadcrumb overflow and context menus to <body>; a press on them is not a dismissal.
+    const themer = document.createElement('div')
+    themer.className = 'vuefinder__themer'
+    const menuItem = document.createElement('button')
+    themer.appendChild(menuItem)
+    document.body.appendChild(themer)
+
+    const store = openFolderViewer()
+    const dismiss = vi.spyOn(store, 'dismissSharedPin')
+    await settle()
+    menuItem.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
+    await flushPromises()
+    await settle()
+    expect(dismiss).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+
+    wrapper!.get<HTMLElement>('.fv-backdrop').element.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    }))
+    await flushPromises()
+    await settle()
+    expect(dismiss).toHaveBeenCalledTimes(1)
+    themer.remove()
+  })
+
   it('restores focus to the opener for each open while the modal stays mounted', async () => {
     const firstTrigger = document.createElement('button')
     const secondTrigger = document.createElement('button')

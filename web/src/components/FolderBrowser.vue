@@ -30,8 +30,8 @@ const error = ref('')
 const shownCount = ref(0)
 const truncated = ref(false)
 const coarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
-// The app's phone breakpoint: on a narrow screen the tree opens over the list.
-const narrow = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px)').matches
+// The app's phone breakpoint, or any touch screen (a phone in landscape is wider than 767px): the tree opens over the list.
+const narrow = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px), (pointer: coarse)').matches
 let aborter: AbortController | null = null
 
 function onListing(listing: WorkspaceDirListing): void {
