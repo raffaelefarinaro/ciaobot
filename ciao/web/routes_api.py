@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
@@ -3723,6 +3724,129 @@ async def chat_file_path(request: Request) -> Response:
     if result.suffix.lower() not in extensions:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
     return JSONResponse({"path": result.as_posix()})
+
+
+# The folder browser's listing. Unlike the file viewers above, browsing is
+# confined to named roots: a listing route that followed any absolute path
+# would let a session walk the whole disk one folder at a time.
+_WORKSPACE_DIR_MAX_ENTRIES = 2000
+
+
+def _distinct_dir_roots(candidates: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Resolve each candidate root; drop missing ones and any nested in an earlier root."""
+    kept: list[tuple[str, Path]] = []
+    for name, raw in candidates:
+        try:
+            root = raw.expanduser().resolve()
+        except (OSError, ValueError):
+            continue
+        if not root.is_dir():
+            continue
+        if any(root == prev or root.is_relative_to(prev) for _, prev in kept):
+            continue
+        kept.append((name, root))
+    return kept
+
+
+def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, Any] | Response:
+    """Resolve ``raw`` against the roots and list it, or return the error response."""
+    if any(unicodedata.category(c) == "Cc" for c in raw):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    raw = _LINE_SUFFIX_RE.sub("", raw.strip())
+    if not roots:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        if raw == "":
+            target = roots[0][1]
+        else:
+            candidate = Path(raw).expanduser()
+            if candidate.is_absolute():
+                target = candidate.resolve()
+            else:
+                target = (roots[0][1] / candidate).resolve()
+                for _, root in roots:
+                    if (root / candidate).exists():
+                        target = (root / candidate).resolve()
+                        break
+        if target.is_file():
+            return JSONResponse(
+                {"error": "not_a_directory", "kind": "file", "path": target.as_posix()},
+                status_code=400,
+            )
+        if not target.is_dir():
+            return JSONResponse({"error": "not found"}, status_code=404)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    owner = next(((n, r) for n, r in roots if target == r or target.is_relative_to(r)), None)
+    if owner is None:
+        return JSONResponse({"error": "outside_roots"}, status_code=403)
+    entries: list[dict[str, Any]] = []
+    try:
+        with os.scandir(target) as scanned:
+            children = list(scanned)
+    except OSError:
+        return JSONResponse({"error": "unreadable"}, status_code=403)
+    for entry in children:
+        if entry.name.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir()
+            st = entry.stat()
+        except OSError:  # broken symlink or vanished entry
+            continue
+        entries.append({
+            "name": entry.name,
+            "path": (target / entry.name).as_posix(),
+            "type": "dir" if is_dir else "file",
+            "size": None if is_dir else st.st_size,
+            "mtime": int(st.st_mtime),
+            "ext": "" if is_dir else Path(entry.name).suffix.lower().lstrip("."),
+        })
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].casefold(), e["name"]))
+    limit = _WORKSPACE_DIR_MAX_ENTRIES
+    return {
+        "path": target.as_posix(),
+        "root": {"name": owner[0], "path": owner[1].as_posix()},
+        "roots": [{"name": n, "path": r.as_posix()} for n, r in roots],
+        "parent": None if target == owner[1] else target.parent.as_posix(),
+        "entries": entries[:limit],
+        "truncated": len(entries) > limit,
+    }
+
+
+async def workspace_dir(request: Request) -> Response:
+    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`)."""
+    config = request.app.state.config
+    chat_id = request.query_params.get("chat_id", "").strip()
+    candidates: list[tuple[str, Path]]
+    if chat_id:
+        pcm = request.app.state.project_chat_manager
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "chat not found"}, status_code=404)
+        workspace = pcm._workspace_for_chat(chat_id)
+        try:
+            agent_root = config.agent_root(workspace)
+        except ValueError:  # no registered workspace name
+            agent_root = config.workspace_root
+        candidates = [("workspace", agent_root)]
+        try:
+            candidates.append(("vault", config.workspace_vault_root(workspace)))
+        except ValueError:  # unresolvable vault: browse without it
+            pass
+        project = pcm.get_project(chat.project_id)
+        if project is not None and project.repo_path:
+            candidates.append(("repo", Path(project.repo_path)))
+    else:
+        allowed = _allowed_roots(config)
+        candidates = [("workspace", allowed[0])] + [("vault", r) for r in allowed[1:2]]
+    roots = _distinct_dir_roots(candidates)
+    result = await asyncio.to_thread(
+        _list_workspace_dir, roots, request.query_params.get("path", "")
+    )
+    if isinstance(result, Response):
+        return result
+    return JSONResponse(result)
 
 
 async def system_prompt(request: Request) -> Response:
