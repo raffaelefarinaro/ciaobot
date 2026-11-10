@@ -41,7 +41,7 @@ ${BRIDGE}
   </table>
 </body></html>`
 
-async function openArtifact(page: Page, session: string) {
+async function openArtifact(page: Page, session: string, doc = TABLE_DOC) {
   await isolate(page, session)
   const canonical = '/fixture/work/memory-vault/Workspace/table.html'
   await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: [
@@ -49,8 +49,8 @@ async function openArtifact(page: Page, session: string) {
     { role: 'assistant', content: 'Open [table](memory-vault/Workspace/table.html).', turn_index: 0 },
   ] }))
   await page.route('**/api/chats/alpha-chat-1/file-path?*', route => route.fulfill({ json: { path: canonical } }))
-  await page.route('**/api/workspace-file?*', route => route.fulfill({ body: TABLE_DOC, contentType: 'text/html' }))
-  await page.route('**/api/workspace-html?*', route => route.fulfill({ body: TABLE_DOC, contentType: 'text/html' }))
+  await page.route('**/api/workspace-file?*', route => route.fulfill({ body: doc, contentType: 'text/html' }))
+  await page.route('**/api/workspace-html?*', route => route.fulfill({ body: doc, contentType: 'text/html' }))
   // A refused pin falls back to the file viewer modal.
   await page.route('**/api/chats/alpha-chat-1', route => route.request().method() === 'PATCH'
     ? route.fulfill({ status: 404, json: { error: 'not found' } })
@@ -60,7 +60,7 @@ async function openArtifact(page: Page, session: string) {
   await page.locator('a[data-file-path="memory-vault/Workspace/table.html"]').click()
   await expect(page.locator('.fv-modal .hav-frame')).toBeVisible()
   const frame = page.frameLocator('.fv-modal .hav-frame')
-  await expect(frame.locator('thead th').first()).toBeVisible()
+  await expect(frame.locator('body')).toBeVisible()
   return frame
 }
 
@@ -109,4 +109,44 @@ test('a selection across header cells comments like Markdown and keeps the table
   expect(await frame.locator('tbody tr').evaluate(tr => tr.children.length)).toBe(3)
 
   await page.screenshot({ path: testInfo.outputPath('artifact-comment.png'), fullPage: false })
+})
+
+const CONTROL_DOC = `<!doctype html><html><head><script>
+${BRIDGE}
+</script><style>body{font:16px/1.5 sans-serif;padding:16px}p{margin:0 0 12px}</style></head>
+<body>
+  <div id="box">
+    <p>First paragraph of the comment.</p>
+    <p>Second one with <button id="go" onclick="this.textContent='pressed'">Go</button> inside it.</p>
+  </div>
+</body></html>`
+
+test('a control inside a commented span keeps working', async ({ page }, testInfo) => {
+  // getClientRects on a range that contains whole elements returns their
+  // border boxes, so the whole commented block (and its button) used to
+  // open the comment and swallow the click.
+  const frame = await openArtifact(page, `artifact-controls-${testInfo.workerIndex}`, CONTROL_DOC)
+  const box = frame.locator('#box')
+  await frame.locator('#box p').first().click()
+  await box.evaluate(el => {
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    getSelection()?.removeAllRanges()
+    getSelection()?.addRange(range)
+  })
+  await expect(page.locator('.fv-comment-trigger')).toBeVisible()
+  await page.keyboard.press('N')
+  const dialog = page.getByRole('dialog', { name: 'Add comment', exact: true })
+  await expect(dialog.locator('textarea')).toHaveValue('N')
+  await dialog.locator('textarea').fill('Note')
+  await dialog.getByRole('button', { name: 'Add comment', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect.poll(() => box.evaluate(() => CSS.highlights.has('ciao-comment'))).toBe(true)
+
+  await frame.locator('#go').click()
+  await expect(frame.locator('#go')).toHaveText('pressed')
+
+  // The text itself still shows the pointer.
+  await frame.locator('#box p').first().hover({ position: { x: 20, y: 10 } })
+  await expect.poll(() => box.evaluate(() => document.documentElement.classList.contains('ciao-comment-hover'))).toBe(true)
 })

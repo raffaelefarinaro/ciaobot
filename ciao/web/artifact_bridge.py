@@ -18,10 +18,17 @@ page's own ``.fv-comment-trigger``, not a second pill drawn inside the frame.
   character offsets into that element's text, and the quote) and the box of
   the selection's end in frame-viewport coordinates — and ``'selection-cleared'``
   when it collapses. It re-reports on scroll so the page's button follows.
+  It re-reports on resize too, since the panel around the frame can change.
 - While a selection is reported, a printable keystroke or a paste inside the
   frame is swallowed and posted as ``action: 'type'``: the page's
   type-to-comment listener lives on the page's document and never sees keys
-  typed into the frame, so the frame has to forward them.
+  typed into the frame, so the frame has to forward them. Forwarding is
+  one-shot: after it the reported selection is spent, and only the keys that
+  follow before the page answers (``ciao:clear-selection`` or
+  ``ciao:comments-busy``) are forwarded too, so a fast typist's next letters
+  reach the composer instead of the artifact. While the page says it is busy
+  (a composer is open) no key or paste is taken. Pasted files are never
+  forwarded, only text.
 - Alt-clicking any element still posts ``action: 'compose'`` for the element
   itself rather than its text.
 - It re-applies durable comment highlights on request: the parent sends a
@@ -30,13 +37,20 @@ page's own ``.fv-comment-trigger``, not a second pill drawn inside the frame.
   leaves the document's DOM alone; wrapping text in ``<mark>`` is only the
   fallback for an engine without it, and even then never inside table
   structure (a ``<mark>`` directly under a ``<tr>`` renders as an extra cell).
+  The fallback stays because the API is recent: Safari only has it from 17.2,
+  and iOS 16/17.0-17.1 Safari and older desktop-shell webviews still open
+  artifacts.
   A whole-element anchor outlines the element instead — the node it points at
   (an SVG shape, a chart bar) may have no text to wrap at all.
 - A click on a highlight is consumed (the highlight can sit inside a link or
   a button, whose default action would otherwise fire too) and opens one
   comment. Painted ranges are not elements, so clicks are hit-tested against
-  their client rects. Several comments can share one spot, so repeated clicks
-  walk the list.
+  the client rects of one sub-range per text node: a range that contains
+  whole elements reports their full border boxes, which would turn a click
+  anywhere in a commented paragraph or cell into a comment. Clicks on form
+  controls, buttons and editable regions are never taken. Several comments can
+  share one spot, so repeated clicks walk the list. ``::highlight`` cannot set
+  a cursor, so a throttled mousemove runs the same hit-test to show a pointer.
 - It posts ``action: 'ready'`` once the DOM is parsed. That is the handshake
   the parent waits for before its first highlight push: the script itself runs
   from ``<head>``, so anything pushed earlier would query a tree with no
@@ -52,8 +66,11 @@ selection once the page has opened its composer.
 
 Trust model: the script is our code, but it shares a document with
 model-authored script, which could forge the same messages. That is
-acceptable — the worst case is a pending comment appearing in the composer,
-which the user reviews before sending. The bridge makes no network requests
+acceptable only because a forged message can do no more than open the
+composer with a note the user reviews before sending: it must never cause a
+request on the user's behalf. That is why pasted files are not forwarded (the
+page would upload them as comment images with no user action) and why ``type``
+text is capped. The bridge makes no network requests
 (impossible under the artifact CSP anyway) and touches nothing but the
 highlights it owns.
 """
@@ -100,6 +117,15 @@ BRIDGE_SCRIPT = r"""(function () {
   // One user-perceived printable character: a single UTF-16 unit or one
   // surrogate pair (what Array.from(key).length === 1 accepts on the page).
   var ONE_CHAR = /^(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\s\S])$/
+  // Longest text a `type` message carries (a paste): the composer is the
+  // destination, and forged messages should not be able to stuff it.
+  var MAX_TYPE_TEXT = 10000
+  // Never take a click or show the comment cursor over these: they are the
+  // artifact's own controls, and a comment highlight must not disable them.
+  var CONTROLS = 'input, textarea, select, button, [contenteditable=""], [contenteditable="true"]'
+  // Marks the root while the pointer is over a painted text highlight
+  // (::highlight cannot set a cursor).
+  var HOVER_CLASS = 'ciao-comment-hover'
 
   function hasHighlightApi() {
     return !!(window.CSS && window.CSS.highlights && typeof window.Highlight === 'function')
@@ -111,6 +137,7 @@ BRIDGE_SCRIPT = r"""(function () {
     'mark.' + MARK_CLASS + '{background:rgba(251,146,60,.28);color:inherit;' +
     'border-radius:2px;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}' +
     '.' + EL_CLASS + '{outline:2px solid rgba(251,146,60,.85);outline-offset:1px;cursor:pointer}' +
+    'html.' + HOVER_CLASS + ',html.' + HOVER_CLASS + ' *{cursor:pointer!important}' +
     // Last, and alone: an engine that cannot parse the pseudo-element drops
     // just this rule.
     '::highlight(' + HIGHLIGHT_NAME + '){background-color:rgba(251,146,60,.28)}'
@@ -271,6 +298,12 @@ BRIDGE_SCRIPT = r"""(function () {
   var current = null
   var selectTimer = null
   var scrollQueued = false
+  // The page has a composer open: take no keys or pastes at all.
+  var busy = false
+  // A key was just forwarded and the page has not answered yet: keep
+  // forwarding printable keys so a fast typist's next letters reach the
+  // composer instead of the artifact.
+  var burst = false
 
   function clearReported() {
     current = null
@@ -280,7 +313,8 @@ BRIDGE_SCRIPT = r"""(function () {
   }
 
   // Report the live selection. Each distinct selection goes out once; `moved`
-  // re-sends the current one with a fresh box (the frame scrolled under it).
+  // re-sends the current one with a fresh box (the frame scrolled or resized
+  // under it).
   function reportSelection(moved) {
     if (!enabled) return
     var sel = window.getSelection()
@@ -319,6 +353,14 @@ BRIDGE_SCRIPT = r"""(function () {
     reportSelection(false)
   }
 
+  // Forget the selection without telling the page (it asked, or it already
+  // took the selection with a forwarded key).
+  function dropSelection() {
+    if (selectTimer) { clearTimeout(selectTimer); selectTimer = null }
+    reportedKey = ''
+    current = null
+  }
+
   document.addEventListener('selectionchange', function () {
     if (!enabled) return
     if (selectTimer) clearTimeout(selectTimer)
@@ -328,8 +370,10 @@ BRIDGE_SCRIPT = r"""(function () {
     }, 150)
   })
 
-  // Capture, so a scroll inside any of the artifact's own scrollers counts.
-  window.addEventListener('scroll', function () {
+  // The page's button sits at the selection's end box, so re-report when that
+  // box moves: a scroll (capture, so the artifact's own scrollers count) or a
+  // resize of the frame (the panel around it was dragged, the window resized).
+  function onMoved() {
     if (!reportedKey || scrollQueued) return
     scrollQueued = true
     var run = function () {
@@ -338,54 +382,62 @@ BRIDGE_SCRIPT = r"""(function () {
     }
     if (window.requestAnimationFrame) window.requestAnimationFrame(run)
     else setTimeout(run, 16)
-  }, true)
+  }
+  window.addEventListener('scroll', onMoved, true)
+  window.addEventListener('resize', onMoved)
 
   // ── Type-to-comment ─────────────────────────────────────────────────
   // The page's type-to-comment listens on the page's document; keys typed
   // with focus in this frame never reach it. With a reported selection, the
   // first printable key or a paste is forwarded instead, and swallowed so it
-  // does not also act on the artifact.
-  function isEditable(target) {
+  // does not also act on the artifact. On window, capturing, so the
+  // artifact's own handlers never see a key that became a comment.
+  function inControl(target) {
     var el = elementOf(target)
     if (!el) return false
     if (el.isContentEditable) return true
-    return !!(el.closest && el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]'))
+    return !!(el.closest && el.closest(CONTROLS))
   }
 
-  document.addEventListener('keydown', function (e) {
-    if (!enabled || isEditable(e.target)) return
+  function forward(e, text) {
+    e.preventDefault()
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation()
+    else e.stopPropagation()
+    // One-shot: the selection is the page's now. Keys that follow before the
+    // page answers are part of the same comment (see burst).
+    dropSelection()
+    burst = true
+    post({ type: 'ciao:artifact-comment', action: 'type', text: clampLen(text, MAX_TYPE_TEXT) })
+  }
+
+  window.addEventListener('keydown', function (e) {
+    if (!enabled || busy || inControl(e.target)) return
     // Same rule as the page's isTypeThrough: one printable character, no
-    // modifier (Cmd/Ctrl+V arrives as a paste), not space, not mid-IME.
-    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return
+    // modifier (Cmd/Ctrl+V arrives as a paste), not space, not mid-IME
+    // (Safari reports a composing key as keyCode 229 without isComposing).
+    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229) return
     var key = e.key
     if (typeof key !== 'string' || key === ' ' || !ONE_CHAR.test(key)) return
-    flushSelection()
-    if (!current) return
-    e.preventDefault()
-    e.stopPropagation()
-    post({ type: 'ciao:artifact-comment', action: 'type', text: key })
+    if (!burst) {
+      flushSelection()
+      if (!current) return
+    }
+    forward(e, key)
   }, true)
 
-  document.addEventListener('paste', function (e) {
-    if (!enabled || isEditable(e.target)) return
-    flushSelection()
-    if (!current) return
+  // Text only. Forwarding pasted files would have the page upload them as
+  // comment images with no user action, and a forged message could do the same.
+  window.addEventListener('paste', function (e) {
+    if (!enabled || busy || inControl(e.target)) return
+    if (!burst) {
+      flushSelection()
+      if (!current) return
+    }
     var data = e.clipboardData
     if (!data) return
     var text = data.getData('text/plain') || ''
-    // Files cross postMessage by structured clone, so pasted screenshots can
-    // ride along to the composer the way they do on the page.
-    var files = []
-    var list = data.files || []
-    for (var i = 0; i < list.length; i++) {
-      if (list[i] && /^image\//.test(list[i].type || '')) files.push(list[i])
-    }
-    if (!text.trim() && !files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    var message = { type: 'ciao:artifact-comment', action: 'type', text: text }
-    if (files.length) message.files = files
-    post(message)
+    if (!text.trim()) return
+    forward(e, text)
   }, true)
 
   // ── Clicks ──────────────────────────────────────────────────────────
@@ -419,6 +471,8 @@ BRIDGE_SCRIPT = r"""(function () {
       })
       return
     }
+    // The artifact's own controls keep working under a highlight.
+    if (inControl(e.target)) return
     var anchor = e.target && e.target.closest
       ? e.target.closest('mark.' + MARK_CLASS + ', .' + EL_CLASS)
       : null
@@ -431,16 +485,16 @@ BRIDGE_SCRIPT = r"""(function () {
       // A drag that ends over a highlight is a selection, not a click on it.
       var sel = window.getSelection()
       if (sel && !sel.isCollapsed) return
-      var hit = hitTest(e.clientX, e.clientY)
+      var hit = hitTest(e.clientX, e.clientY, true)
       if (hit) {
         id = hit.id
         box = hit.rect
       }
     }
     if (!id) return
-    // Consume it. A highlight can sit inside a link or a button, and letting
-    // the click through would navigate the frame (or mutate the artifact)
-    // out from under the comment the user was opening.
+    // Consume it. A highlight can sit inside a link, and letting the click
+    // through would navigate the frame out from under the comment the user
+    // was opening.
     e.preventDefault()
     e.stopPropagation()
     post({
@@ -451,6 +505,32 @@ BRIDGE_SCRIPT = r"""(function () {
       y: Math.round(box.bottom)
     })
   }, true)
+
+  // ::highlight cannot set a cursor, so show the pointer by hit-testing the
+  // painted ranges as the mouse moves, at most once a frame.
+  var hoverQueued = false
+  var hoverPoint = null
+  document.addEventListener('mousemove', function (e) {
+    if (!painted.length && !hoverOn) return
+    hoverPoint = { x: e.clientX, y: e.clientY, target: e.target }
+    if (hoverQueued) return
+    hoverQueued = true
+    var run = function () {
+      hoverQueued = false
+      var p = hoverPoint
+      var on = !!(p && enabled && !inControl(p.target) && hitTest(p.x, p.y, false))
+      setHover(on)
+    }
+    if (window.requestAnimationFrame) window.requestAnimationFrame(run)
+    else setTimeout(run, 16)
+  })
+
+  var hoverOn = false
+  function setHover(on) {
+    if (on === hoverOn) return
+    hoverOn = on
+    setClass(document.documentElement, HOVER_CLASS, on)
+  }
 
   // Which comment a click on this anchor opens. An anchor usually holds one
   // id, but several whole-element comments can share one element, so the ids
@@ -474,26 +554,26 @@ BRIDGE_SCRIPT = r"""(function () {
     return out
   }
 
-  // Painted text ranges ({ id, range }) — not elements, so a click finds them
-  // by geometry. Overlapping comments all hit; repeated clicks on the same
-  // spot walk them, like nextId does for an element.
+  // Painted text ranges ({ id, ranges }) — not elements, so a click finds
+  // them by geometry. `ranges` holds one sub-range per text node: a range
+  // that contains whole elements reports their full border boxes from
+  // getClientRects, which would make every pixel of a commented paragraph or
+  // cell (and every button in it) open the comment. The draft is painted but
+  // not listed: it has no stored comment to open. Overlapping comments all
+  // hit; repeated clicks on the same spot walk them, like nextId does for an
+  // element.
   var painted = []
   var hitCursor = { key: '', next: 0 }
 
-  function hitTest(x, y) {
+  function hitTest(x, y, advance) {
     if (typeof x !== 'number' || typeof y !== 'number') return null
     var hits = []
     for (var i = 0; i < painted.length; i++) {
-      var rects = rectsOf(painted[i].range)
-      for (var j = 0; j < rects.length; j++) {
-        var r = rects[j]
-        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-          hits.push({ id: painted[i].id, rect: r })
-          break
-        }
-      }
+      var rect = hitRanges(painted[i].ranges, x, y)
+      if (rect) hits.push({ id: painted[i].id, rect: rect })
     }
     if (!hits.length) return null
+    if (!advance) return hits[0]
     var ids = []
     for (var k = 0; k < hits.length; k++) ids.push(hits[k].id)
     var key = ids.join(' ')
@@ -501,6 +581,17 @@ BRIDGE_SCRIPT = r"""(function () {
     var pick = hits[hitCursor.next % hits.length]
     hitCursor.next = (hitCursor.next + 1) % hits.length
     return pick
+  }
+
+  function hitRanges(ranges, x, y) {
+    for (var i = 0; i < ranges.length; i++) {
+      var rects = rectsOf(ranges[i])
+      for (var j = 0; j < rects.length; j++) {
+        var r = rects[j]
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return r
+      }
+    }
+    return null
   }
 
   // ── Highlight (re)application ───────────────────────────────────────
@@ -523,6 +614,7 @@ BRIDGE_SCRIPT = r"""(function () {
 
   function clearMarks() {
     painted = []
+    setHover(false)
     if (hasHighlightApi()) window.CSS.highlights['delete'](HIGHLIGHT_NAME)
     var marks = document.querySelectorAll('mark.' + MARK_CLASS)
     for (var i = 0; i < marks.length; i++) {
@@ -541,25 +633,28 @@ BRIDGE_SCRIPT = r"""(function () {
   }
 
   // A Range over [start, end) of el's text content, or null.
-  function rangeFor(el, start, end) {
+  // [start, end) of el's text content as one Range per text node it touches,
+  // whitespace-only nodes left out. Painted together they look like one
+  // highlight, and each reports only its own line boxes to getClientRects, so
+  // hit-testing never sees the border box of an element the span contains.
+  function textRanges(el, start, end) {
     var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null)
-    var range = document.createRange()
+    var out = []
     var pos = 0
-    var started = false
     var node
     while ((node = walker.nextNode())) {
       var len = node.nodeValue ? node.nodeValue.length : 0
-      if (!started && pos + len > start) {
-        range.setStart(node, start - pos)
-        started = true
+      var nodeEnd = pos + len
+      if (nodeEnd > start && pos < end && /\S/.test(node.nodeValue || '')) {
+        var range = document.createRange()
+        range.setStart(node, Math.max(0, start - pos))
+        range.setEnd(node, Math.min(len, end - pos))
+        if (!range.collapsed) out.push(range)
       }
-      if (started && pos + len >= end) {
-        range.setEnd(node, end - pos)
-        return range
-      }
-      pos += len
+      pos = nodeEnd
+      if (pos >= end) break
     }
-    return null
+    return out
   }
 
   // Whether the <mark> fallback may wrap this text node. Whitespace between
@@ -653,12 +748,16 @@ BRIDGE_SCRIPT = r"""(function () {
     if (!comments || !comments.length) return
     var api = hasHighlightApi()
     var highlight = api ? new window.Highlight() : null
+    var paintedAny = false
     for (var i = 0; i < comments.length; i++) {
       var c = comments[i]
       if (!c || !c.selector) continue
       var el = null
       try { el = document.querySelector(c.selector) } catch (e) { el = null }
       if (!el) continue
+      // The open draft is painted like any comment, but it has no stored
+      // comment to open, so it never takes a click.
+      var id = c.draft ? '' : String(c.id)
       // Whole-element anchors outline the element rather than painting text:
       // the case they exist for (an SVG shape, a chart bar) has no text to
       // paint, and an empty quote must still leave something clickable.
@@ -667,7 +766,7 @@ BRIDGE_SCRIPT = r"""(function () {
         // Append: two comments can anchor to the same element, and replacing
         // the attribute left the first one with nothing to click.
         var have = idsOf(el)
-        have.push(String(c.id))
+        if (id) have.push(id)
         el.setAttribute(ID_ATTR, have.join(' '))
         el.removeAttribute(CURSOR_ATTR)
         continue
@@ -676,15 +775,15 @@ BRIDGE_SCRIPT = r"""(function () {
       var span = resolveSpan(el.textContent || '', c)
       if (!span || span.end <= span.start) continue
       if (api) {
-        var range = rangeFor(el, span.start, span.end)
-        if (!range) continue
-        highlight.add(range)
-        painted.push({ id: String(c.id), range: range })
+        var ranges = textRanges(el, span.start, span.end)
+        for (var r = 0; r < ranges.length; r++) highlight.add(ranges[r])
+        if (ranges.length) paintedAny = true
+        if (ranges.length && id) painted.push({ id: id, ranges: ranges })
       } else {
-        wrapRange(el, span.start, span.end, String(c.id))
+        wrapRange(el, span.start, span.end, id)
       }
     }
-    if (api && painted.length) window.CSS.highlights.set(HIGHLIGHT_NAME, highlight)
+    if (api && paintedAny) window.CSS.highlights.set(HIGHLIGHT_NAME, highlight)
   }
 
   window.addEventListener('message', function (e) {
@@ -693,17 +792,24 @@ BRIDGE_SCRIPT = r"""(function () {
     if (data.type === 'ciao:comments-enable') { enabled = true; return }
     if (data.type === 'ciao:comments-disable') {
       clearReported()
+      burst = false
       enabled = false
       return
     }
     if (data.type === 'ciao:clear-selection') {
       // The page opened its composer on the reported selection; drop the
       // native one so the draft highlight shows and no stale report lingers.
-      if (selectTimer) { clearTimeout(selectTimer); selectTimer = null }
-      reportedKey = ''
-      current = null
+      // The page has answered, so a forwarded burst is over too.
+      dropSelection()
+      burst = false
       var sel = window.getSelection()
       if (sel) sel.removeAllRanges()
+      return
+    }
+    if (data.type === 'ciao:comments-busy') {
+      // A composer is open on the page: keys belong to it, not to comments.
+      busy = !!data.busy
+      burst = false
       return
     }
     if (data.type !== 'ciao:apply-comments') return

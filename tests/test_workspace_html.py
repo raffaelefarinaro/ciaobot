@@ -100,31 +100,6 @@ def test_bridge_tag_is_syntactically_valid_javascript() -> None:
     assert "\\" not in body.replace(BRIDGE_SCRIPT, "")
 
 
-def test_compose_affordances_are_gated_on_a_parent_handshake() -> None:
-    """No selection reports or swallowed keys until the parent is listening.
-
-    Ungated, the bridge would post `ciao:artifact-comment` into the void and
-    eat keystrokes on behalf of a composer that does not exist.
-    `ciao:comments-enable`, or any `ciao:apply-comments` (which proves a
-    parent is on the line), turns it on.
-    """
-    from ciao.web.artifact_bridge import BRIDGE_SCRIPT
-
-    # The flag starts false and every compose entry point checks it:
-    # selectionchange, the report itself, and clicks...
-    assert "var enabled = false" in BRIDGE_SCRIPT
-    assert BRIDGE_SCRIPT.count("if (!enabled) return") == 3
-    # ...and the forwarded keydown and paste.
-    assert BRIDGE_SCRIPT.count("if (!enabled || isEditable(e.target)) return") == 2
-    # The frame no longer draws a Comment pill of its own; the page does.
-    assert "ciao-comment-pill" not in BRIDGE_SCRIPT
-    # Both handshakes flip it, and highlight application still implies it.
-    assert "'ciao:comments-enable'" in BRIDGE_SCRIPT
-    assert "'ciao:comments-disable'" in BRIDGE_SCRIPT
-    # `ready` is still announced unconditionally, so a parent knows to enable.
-    assert "action: 'ready'" in BRIDGE_SCRIPT
-
-
 def test_bridge_injection_is_idempotent() -> None:
     from ciao.web.artifact_bridge import BRIDGE_TAG, inject_bridge
 

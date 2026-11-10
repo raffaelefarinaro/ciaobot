@@ -215,20 +215,33 @@ describe('HtmlArtifactViewer', () => {
     expect(wrapper.emitted('selection-cleared')).toHaveLength(1)
   })
 
-  it('relays type-to-comment from the frame, keeping only image files', async () => {
+  it('relays type-to-comment text only, capped, never files', async () => {
+    // Frame messages can be forged, and forwarded files would be uploaded as
+    // comment images with no user action.
     const wrapper = mountViewer()
     const { send } = withFrame(wrapper)
     const image = new File(['x'], 'shot.png', { type: 'image/png' })
-    const other = new File(['x'], 'notes.txt', { type: 'text/plain' })
-    send({ action: 'type', text: 'R' })
-    send({ action: 'type', text: '', files: [image, other, 'nope'] })
-    send({ action: 'type', text: '' })
+    send({ action: 'type', text: 'R', files: [image] })
+    send({ action: 'type', text: '', files: [image] })
+    send({ action: 'type', text: 'z'.repeat(20_000) })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.emitted('type-comment')).toEqual([
-      [{ text: 'R', files: [] }],
-      [{ text: '', files: [image] }],
-    ])
+    const emitted = wrapper.emitted('type-comment') as [{ text: string }][]
+    expect(emitted).toHaveLength(2)
+    expect(emitted[0]).toEqual([{ text: 'R' }])
+    expect(emitted[1][0].text).toHaveLength(10_000)
+  })
+
+  it('tells the frame when a composer is open, again after a reload', async () => {
+    const wrapper = mountViewer()
+    const { postMessage, send } = withFrame(wrapper)
+    wrapper.vm.setBusy(true)
+    expect(postMessage).toHaveBeenLastCalledWith({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: true }, '*')
+
+    postMessage.mockClear()
+    send({ action: 'ready' })
+    await wrapper.vm.$nextTick()
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: true }, '*')
   })
 
   it('clears the reported selection when the document goes away', async () => {

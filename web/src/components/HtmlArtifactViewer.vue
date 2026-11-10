@@ -26,15 +26,18 @@
 // become the same pending file comments the markdown viewer produces, and this
 // component re-sends durable highlights into the frame so they show.
 // Frame messages are untrusted (artifact script could forge them); the worst
-// case is a note in the user's own composer, which they review before send.
+// case must stay a note in the user's own composer, which they review before
+// send. Nothing relayed from here may trigger a request by itself, so a
+// forwarded keystroke carries capped text and never files (the composer would
+// upload those as comment images with no user action).
 //
 // Source is a separate, lazy fetch owned by the parent: an artifact that is
 // too large to read as text still renders fine, so a source failure must not
 // replace the frame with an error string.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  imageFilesOf,
   isArtifactCommentEvent,
+  MAX_ARTIFACT_TYPE_TEXT,
   parseArtifactRect,
   type ArtifactHighlight,
   type ArtifactSelection,
@@ -70,7 +73,7 @@ const emit = defineEmits<{
   (e: 'selection-cleared'): void
   // A printable key or paste inside the frame while a selection is reported:
   // open the composer on that selection, seeded with `text`.
-  (e: 'type-comment', payload: { text: string; files: File[] }): void
+  (e: 'type-comment', payload: { text: string }): void
   // Click on an existing highlight inside the frame.
   (e: 'open-comment', payload: { id: string; frameX: number; frameY: number }): void
   // The bridge in a freshly loaded frame has parsed the DOM and installed its
@@ -104,6 +107,7 @@ function onMessage(e: MessageEvent): void {
     // Unlock compose for this document before telling the parent, so the
     // Comment button works even if the parent has no highlights to push.
     enableComments()
+    if (busy) postToFrame({ type: 'ciao:comments-busy', busy: true })
     emit('selection-cleared')
     emit('bridge-ready')
   } else if (data.action === 'selection') {
@@ -121,10 +125,9 @@ function onMessage(e: MessageEvent): void {
   } else if (data.action === 'selection-cleared') {
     emit('selection-cleared')
   } else if (data.action === 'type') {
-    const files = imageFilesOf(data.files)
-    const text = typeof data.text === 'string' ? data.text : ''
-    if (!text && !files.length) return
-    emit('type-comment', { text, files })
+    const text = typeof data.text === 'string' ? data.text.slice(0, MAX_ARTIFACT_TYPE_TEXT) : ''
+    if (!text) return
+    emit('type-comment', { text })
   } else if (data.action === 'compose') {
     emit('compose-comment', {
       selector: data.selector,
@@ -185,7 +188,15 @@ onBeforeUnmount(() => {
   emit('selection-cleared')
 })
 
-defineExpose({ sendHighlights, enableComments, clearSelection, frameEl })
+// While the parent has a composer open the bridge takes no keys or pastes:
+// they belong to the composer (or to the artifact), not to a new comment.
+let busy = false
+function setBusy(value: boolean): void {
+  busy = value
+  postToFrame({ type: 'ciao:comments-busy', busy: value })
+}
+
+defineExpose({ sendHighlights, enableComments, clearSelection, setBusy, frameEl })
 </script>
 
 <template>

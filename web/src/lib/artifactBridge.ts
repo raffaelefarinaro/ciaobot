@@ -6,7 +6,9 @@
 // channel. Messages from the frame are untrusted (model-authored script could
 // forge them); this module only ever turns them into pending comments the
 // user reviews before sending, so forgery adds a note to their own composer
-// and nothing more.
+// and nothing more. Nothing a frame message carries may cause a request on
+// the user's behalf: that is why `type` carries text only (no files to
+// upload) and is capped.
 
 export interface ArtifactCommentAnchor {
   /** CSS selector path into the artifact document (bridge-generated). */
@@ -65,7 +67,8 @@ export type ArtifactCommentEvent =
   | (FromFrame & { action: 'selection-cleared' })
   // A printable key or a paste inside the frame while a selection is reported.
   // The page's type-to-comment listener cannot hear keys typed into the frame.
-  | (FromFrame & { action: 'type'; text: string; files?: File[] })
+  // Text only: forwarded files would be uploaded with no user action.
+  | (FromFrame & { action: 'type'; text: string })
   | (FromFrame & { action: 'open'; id: string; x: number; y: number })
 
 export function isArtifactCommentEvent(data: unknown): data is ArtifactCommentEvent {
@@ -87,11 +90,10 @@ export function parseArtifactRect(raw: unknown): ArtifactRect | null {
   return { top, left, bottom, right }
 }
 
-/** Image files forwarded with a `type` message; anything else is dropped. */
-export function imageFilesOf(raw: unknown): File[] {
-  if (!Array.isArray(raw) || typeof File === 'undefined') return []
-  return raw.filter((f): f is File => f instanceof File && f.type.startsWith('image/'))
-}
+/** Longest text a forwarded `type` message may seed the composer with. Same
+ *  cap as the bridge's MAX_TYPE_TEXT; enforced here too because the message
+ *  could be forged. */
+export const MAX_ARTIFACT_TYPE_TEXT = 10_000
 
 /** Durable comment shape the bridge needs to re-highlight after a reload. */
 export type ArtifactHighlight = {
@@ -101,6 +103,8 @@ export type ArtifactHighlight = {
   startOffset?: number | null
   endOffset?: number | null
   wholeElement?: boolean
+  /** The open draft: painted, but no click on it opens anything. */
+  draft?: boolean
 }
 
 /** Compact UI label for an artifact comment chip ("h2 · 'Quote…'"). */

@@ -357,13 +357,13 @@ describe('PinnedFilePanel', () => {
     viewer.vm.$emit('bridge-ready')
 
     // No selection reported: a forwarded key does nothing.
-    viewer.vm.$emit('type-comment', { text: 'x', files: [] })
+    viewer.vm.$emit('type-comment', { text: 'x' })
     await nextTick()
     expect(document.querySelector('.compose textarea')).toBeNull()
 
     viewer.vm.$emit('selection', FRAME_SELECTION)
     await nextTick()
-    viewer.vm.$emit('type-comment', { text: 'R', files: [] })
+    viewer.vm.$emit('type-comment', { text: 'R' })
     await nextTick()
     await nextTick()
     await flushPromises()
@@ -386,6 +386,39 @@ describe('PinnedFilePanel', () => {
         artifactEndOffset: 60,
       }),
     ])
+    wrapper.unmount()
+  })
+
+  it('marks the frame busy while a composer is open and keeps a typing burst', async () => {
+    const { wrapper, viewer, postMessage } = await mountArtifactPanel()
+    placeFrame(viewer)
+    viewer.vm.$emit('bridge-ready')
+    const busyCalls = () => postMessage.mock.calls
+      .map(c => c[0] as { type?: string; busy?: boolean })
+      .filter(m => m.type === 'ciao:comments-busy')
+      .map(m => m.busy)
+
+    viewer.vm.$emit('selection', FRAME_SELECTION)
+    await nextTick()
+    // Two keys forwarded before the composer's textarea took focus.
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    viewer.vm.$emit('type-comment', { text: 'R' })
+    viewer.vm.$emit('type-comment', { text: 'e' })
+    await nextTick()
+    expect(busyCalls()).toEqual([true])
+    await flushPromises()
+    const textarea = document.querySelector('.compose textarea') as HTMLTextAreaElement
+    expect(textarea.value).toBe('Re')
+
+    // Once the composer has focus, a stray forwarded key is not appended.
+    expect(document.activeElement).toBe(textarea)
+    viewer.vm.$emit('type-comment', { text: 'x' })
+    await nextTick()
+    expect(textarea.value).toBe('Re')
+
+    ;(document.querySelector('.compose .compose-btn:not(.primary)') as HTMLButtonElement).click()
+    await nextTick()
+    expect(busyCalls()).toEqual([true, false])
     wrapper.unmount()
   })
 

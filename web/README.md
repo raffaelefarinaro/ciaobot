@@ -228,6 +228,10 @@ falling under 16px. The desktop tightening override is gated on
 (iPad portrait/landscape) never get the smaller typography. Do not weaken
 either rule.
 
+### HTML artifact highlights
+
+Comment highlights inside an HTML artifact are painted with the CSS Custom Highlight API, which Safari only has from 17.2. Older iOS Safari and desktop-shell webviews still open artifacts, so the bridge (`ciao/web/artifact_bridge.py`) keeps a `<mark>` fallback for them. The fallback changes the document's DOM, and so it never wraps whitespace-only text or text that is a direct child of table structure. Keep the fallback until 17.2 is the floor.
+
 ### WebSocket suspension
 
 iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `readyState` may still report `OPEN` while no events flow. Listen for `visibilitychange` (visible) and `pageshow` (bfcache restore) on any view that depends on a WebSocket, and force-disconnect + reconnect.

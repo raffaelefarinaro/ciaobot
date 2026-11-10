@@ -956,8 +956,12 @@ function onArtifactCompose(a: {
     startOffset: a.startOffset,
     endOffset: a.endOffset,
     wholeElement: a.wholeElement,
+    draft: true,
   }
   pushArtifactHighlights()
+  // Drop the frame's native selection, whichever path composed: the draft
+  // highlight shows instead, and the frame stops reporting it.
+  artifactViewerRef.value?.clearSelection()
 }
 
 // The shared cancel knows nothing about the artifact draft; without this the
@@ -1051,9 +1055,8 @@ function onCommentTriggerClick(): void {
 
 // The artifact counterpart of openCommentForSelection: compose on the
 // reported selection, seeded with what was typed or pasted, at the button's
-// spot. The frame then drops its native selection so the draft highlight
-// shows.
-function openArtifactCommentForSelection(initialText = '', files: File[] = []): void {
+// spot.
+function openArtifactCommentForSelection(initialText = ''): void {
   if (commentDraft.value || editingCommentId.value) return
   const taken = artifactSelection.take()
   if (!taken) return
@@ -1070,15 +1073,35 @@ function openArtifactCommentForSelection(initialText = '', files: File[] = []): 
   if (!commentDraft.value) return
   if (taken.trigger) draftAnchor.value = comments.toViewportAnchor(taken.trigger)
   composeText.value = initialText
-  artifactViewerRef.value?.clearSelection()
-  if (files.length) void addDraftImages(files)
+  artifactDraftFromType = !!initialText
 }
 
 // Type-to-comment from inside the frame: the bridge forwards the keystroke or
 // paste, since the page-level listener above never hears keys typed there.
-function onArtifactTypeComment(p: { text: string; files: File[] }): void {
-  openArtifactCommentForSelection(p.text, p.files)
+// Pasted files are not forwarded (see artifactBridge.ts), so this is text only.
+//
+// A fast typist's next letters can still be forwarded after the first opened
+// the composer and before its textarea has focus; they belong to the same
+// note, so they are appended rather than dropped.
+let artifactDraftFromType = false
+function onArtifactTypeComment(p: { text: string }): void {
+  if (commentDraft.value) {
+    const focused = document.activeElement?.closest?.('.compose')
+    if (artifactDraft && artifactDraftFromType && !focused) composeText.value += p.text
+    return
+  }
+  openArtifactCommentForSelection(p.text)
 }
+
+// While a composer is open the frame takes no keys: typing in an artifact
+// with a selection must not be swallowed for a comment that cannot open.
+watch(
+  () => !!(commentDraft.value || editingCommentId.value),
+  busy => {
+    if (!busy) artifactDraftFromType = false
+    artifactViewerRef.value?.setBusy(busy)
+  },
+)
 
 const imageSrc = computed(() => store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
 // Why the current image URL failed to load; empty while it has not failed.

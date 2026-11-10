@@ -126,7 +126,7 @@ describe('FileViewerModal', () => {
     const trigger = wrapper!.get('.fv-comment-trigger')
     expect(trigger.text()).toBe('Comment')
 
-    viewer.vm.$emit('type-comment', { text: 'W', files: [] })
+    viewer.vm.$emit('type-comment', { text: 'W' })
     await settle()
 
     expect(wrapper!.find('.fv-comment-trigger').exists()).toBe(false)
