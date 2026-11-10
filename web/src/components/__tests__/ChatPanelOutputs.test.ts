@@ -482,6 +482,44 @@ describe('ChatPanel Outputs section', () => {
     expect(open).toHaveBeenCalledWith('archive/src-1.md')
   })
 
+  it('opens the memory source from its Origin row in Chat details', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    const viewer = useFileViewerStore(pinia)
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
+    store.chats = [{
+      ...makeChat('pass-1'),
+      helper: {
+        kind: 'memory_pass',
+        source_chat_id: 'src-1',
+        source_title: 'Stale title',
+        source_project: 'General',
+        archive_path: '',
+        doc_path: '',
+        state: 'done',
+        archive_policy: 'when_clean',
+      } as never,
+      memory_source: {
+        chat_id: 'src-1',
+        title: 'Planning notes',
+        created_at: '',
+        last_activity_at: '',
+        archive_path: 'archive/src-1.md',
+      },
+    }]
+    store.activeChatId = 'pass-1'
+    await wrapper.setProps({ chatId: 'pass-1' })
+    await flushPromises()
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+
+    const row = wrapper.get('#chat-work-rail .chat-rail-memory')
+    expect(row.get('.cd-primary').text()).toBe('Planning notes')
+    expect(row.get('.cd-detail').text()).toBe('Memory insight')
+    expect(wrapper.get('#chat-work-rail .chat-rail-origin .cd-heading').text()).toBe('Origin')
+    await row.trigger('click')
+    expect(open).toHaveBeenCalledWith('archive/src-1.md')
+  })
+
   it('opens the file viewer from a row link, as the old pill did', async () => {
     const { wrapper, store, pinia } = await mountPanel()
     const viewer = useFileViewerStore(pinia)

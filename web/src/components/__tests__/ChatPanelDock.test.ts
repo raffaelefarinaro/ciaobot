@@ -201,11 +201,37 @@ describe('ChatPanel automation origin', () => {
     expect(wrapper.find('.ctx-bar').exists()).toBe(false)
     const rail = wrapper.get('#chat-work-rail')
     expect(rail.element.firstElementChild?.classList.contains('chat-rail-head')).toBe(true)
-    expect(rail.element.children[1]?.classList.contains('chat-rail-origin')).toBe(true)
     const origin = rail.get('.chat-rail-origin')
-    expect(origin.text()).toBe('This chat comes from the automation schedule-1.')
-    expect(origin.getComponent(RouterLinkStub).props('to')).toBe('/schedules/schedule-1')
+    expect(rail.element.children[1]).toBe(origin.element)
+    expect(origin.get('.cd-heading').text()).toBe('Origin')
+    const row = origin.getComponent(RouterLinkStub)
+    expect(row.props('to')).toBe('/schedules/schedule-1')
+    expect(row.get('.cd-primary').text()).toBe('schedule-1')
+    expect(row.get('.cd-detail').text()).toBe('Automation')
     expect(origin.findAll('button')).toHaveLength(0)
+    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'Files'])
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  it('shows no Origin section for an ordinary chat', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const { wrapper } = await mountPanel(undefined, [])
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const rail = wrapper.get('#chat-work-rail')
+    expect(rail.find('.chat-rail-origin').exists()).toBe(false)
+    expect(rail.get('.cd-heading').text()).toBe('Open')
     vi.unstubAllGlobals()
     wrapper.unmount()
   })

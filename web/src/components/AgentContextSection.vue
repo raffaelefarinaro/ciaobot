@@ -1,115 +1,126 @@
 <template>
-  <!-- What the agent is given for this chat, each with when it is sent. Shared
-       by the Chat details rail and the narrow-pane drawer. -->
-  <section v-if="contextPct != null || compacted" class="rail-section agent-context" :aria-labelledby="usageLabelId">
-    <p :id="usageLabelId" class="rail-label">Context usage</p>
-    <div class="agent-context-meter-row">
-      <div
-        v-if="contextPct != null"
-        class="agent-context-meter"
-        role="meter"
-        :aria-valuenow="contextPct"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-label="Context window used"
-      >
-        <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
-        <strong>{{ contextPctLabel }}</strong>
-      </div>
+  <!-- What the agent is given for this chat: how full the context window is,
+       and what is sent with every turn. Shared by the rail and the drawer. -->
+  <section class="cd-section agent-context" :aria-labelledby="usageLabelId">
+    <div class="cd-head">
+      <h3 :id="usageLabelId" class="cd-heading">Context</h3>
       <button
+        v-if="contextPct != null || compacted"
         type="button"
-        class="btn-small agent-context-compact"
+        class="cd-action cd-head-action agent-context-compact"
         :disabled="compactDisabled"
         :aria-busy="compacting ? 'true' : undefined"
         title="Compact this chat's context into a shorter summary"
         @click="emit('compact')"
       >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
     </div>
-  </section>
-  <!-- Closed by default: these rows are the same every turn, so they are
-       reference, not news. The summary still says how much they cost. -->
-  <details class="rail-section agent-context agent-context-loaded" :open="loadedOpen" @toggle="onLoadedToggle">
-    <summary class="agent-context-summary">
-      <svg class="agent-context-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
-      <span class="agent-context-summary-label">Always loaded</span>
-      <span v-if="loadedTokens && totalComplete" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
-    </summary>
-    <div class="rail-list">
-      <div v-if="systemPrompt" class="rail-item agent-context-row agent-context-system">
-        <button
-          type="button"
-          class="agent-context-system-toggle"
-          :aria-expanded="systemPromptOpen"
-          :aria-controls="systemPromptOpen ? systemPromptId : undefined"
-          @click="systemPromptOpen = !systemPromptOpen"
-        >
-          <span class="agent-context-row-top">
-            <span class="agent-context-name">Ciaobot system prompt</span>
-            <span class="agent-context-meta">{{ formatTokens(systemPromptTokens) }} tokens</span>
+    <div
+      v-if="contextPct != null"
+      class="agent-context-meter"
+      role="meter"
+      :aria-valuenow="contextPct"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-label="Context window used"
+    >
+      <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
+      <span class="agent-context-pct">{{ contextPctLabel }} used</span>
+    </div>
+    <!-- Closed by default: these rows are the same every turn, so they are
+         reference, not news. The summary still says how much they cost. -->
+    <details class="agent-context-loaded" :open="loadedOpen" @toggle="onLoadedToggle">
+      <summary class="cd-row cd-row--link agent-context-summary">
+        <AppIcon class="cd-icon agent-context-chevron" name="chevron" />
+        <span class="cd-main"><span class="cd-primary agent-context-summary-label">Always loaded</span></span>
+        <span v-if="loadedTokens && totalComplete" class="cd-trail cd-value agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
+      </summary>
+      <div class="cd-rows cd-nested agent-context-rows">
+        <div v-if="systemPrompt" class="agent-context-row agent-context-system">
+          <button
+            type="button"
+            class="cd-row cd-row--link agent-context-system-toggle"
+            :aria-expanded="systemPromptOpen"
+            :aria-controls="systemPromptOpen ? systemPromptId : undefined"
+            @click="systemPromptOpen = !systemPromptOpen"
+          >
+            <AppIcon class="cd-icon" name="spark" />
+            <span class="cd-main">
+              <span class="cd-primary agent-context-name">Ciaobot system prompt</span>
+              <span class="cd-detail">Added to the provider's own system prompt · every session</span>
+            </span>
+            <span class="cd-trail cd-value agent-context-meta">{{ formatTokens(systemPromptTokens) }} tokens</span>
+          </button>
+          <div v-if="systemPromptOpen" :id="systemPromptId" class="agent-context-system-body">
+            <button type="button" class="cd-action agent-context-copy" aria-live="polite" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
+            <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
+          </div>
+        </div>
+        <div v-else-if="systemPromptState === 'failed'" class="cd-row agent-context-row agent-context-error agent-context-system-error" role="status">
+          <AppIcon class="cd-icon" name="warning" />
+          <span class="cd-main">
+            <span class="cd-primary">Ciaobot system prompt</span>
+            <span class="cd-detail cd-detail--wrap agent-context-error-text">Could not be read just now</span>
           </span>
-          <small>Added to the provider's own system prompt · every session</small>
+          <span class="cd-trail"><button type="button" class="cd-action" @click="retryNow(loadSystemPrompt)">Retry</button></span>
+        </div>
+        <button
+          v-if="guide.path"
+          type="button"
+          class="cd-row cd-row--link agent-context-row"
+          :title="`Open ${guide.path}`"
+          @click="emit('open-file', guide.path)"
+        >
+          <AppIcon class="cd-icon" name="doc" />
+          <span class="cd-main">
+            <span class="cd-primary agent-context-name">{{ guideName }}</span>
+            <span class="cd-detail">Workspace guide · read every turn</span>
+          </span>
+          <span class="cd-trail cd-value agent-context-meta">{{ formatTokens(guideTokens) }} tokens</span>
         </button>
-        <div v-if="systemPromptOpen" :id="systemPromptId" class="agent-context-system-body">
-          <button type="button" class="agent-context-link" aria-live="polite" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
-          <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
+        <div v-else-if="guide.error" class="cd-row agent-context-row agent-context-error" role="status">
+          <AppIcon class="cd-icon" name="warning" />
+          <span class="cd-main">
+            <span class="cd-primary">Workspace guide</span>
+            <span class="cd-detail cd-detail--wrap agent-context-error-text">Could not be read just now: {{ guide.error }}</span>
+          </span>
+          <span class="cd-trail"><button type="button" class="cd-action" @click="retryNow(loadGuide)">Retry</button></span>
+        </div>
+        <!-- General with no description or doc sends no brief at all. -->
+        <div v-if="project && briefText" class="cd-row agent-context-row agent-context-brief">
+          <AppIcon class="cd-icon" name="folder" />
+          <span class="cd-main">
+            <router-link :to="`/project/${project.project_id}`" class="cd-primary agent-context-name agent-context-project">{{ project.name }}</router-link>
+            <p
+              v-if="project.context"
+              class="agent-context-description"
+              @click="openContextFile"
+              v-html="contextHtml"
+            ></p>
+          </span>
+          <span class="cd-trail cd-value agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
+        </div>
+        <button
+          v-if="repoInstr"
+          type="button"
+          class="cd-row cd-row--link agent-context-row agent-context-repo"
+          :title="`Open ${repoInstrPath}`"
+          @click="emit('open-file', repoInstrPath)"
+        >
+          <AppIcon class="cd-icon" name="code" />
+          <span class="cd-main">
+            <span class="cd-primary agent-context-name">{{ repoInstrLabel }}</span>
+            <span class="cd-detail">Repository instructions</span>
+          </span>
+          <span class="cd-trail cd-value agent-context-meta">{{ formatTokens(tokensFor(repoInstr.chars)) }} tokens</span>
+        </button>
+        <div v-else-if="repoInstr === null" class="cd-row agent-context-row agent-context-repo" role="status">
+          <AppIcon class="cd-icon" name="code" />
+          <span class="cd-main"><span class="cd-primary">Repository instructions</span></span>
+          <span class="cd-trail cd-value agent-context-meta">not found</span>
         </div>
       </div>
-      <div v-else-if="systemPromptState === 'failed'" class="rail-item agent-context-row agent-context-error agent-context-system-error" role="status">
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">Ciaobot system prompt</span>
-          <button type="button" class="agent-context-link" @click="retryNow(loadSystemPrompt)">Retry</button>
-        </span>
-        <small>Could not be read just now</small>
-      </div>
-      <button
-        v-if="guide.path"
-        type="button"
-        class="rail-item agent-context-row"
-        :title="`Open ${guide.path}`"
-        @click="emit('open-file', guide.path)"
-      >
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">{{ guideName }}</span>
-          <span class="agent-context-meta">{{ formatTokens(guideTokens) }} tokens</span>
-        </span>
-        <small>Workspace guide · read every turn</small>
-      </button>
-      <div v-else-if="guide.error" class="rail-item agent-context-row agent-context-error" role="status">
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">Workspace guide</span>
-          <button type="button" class="agent-context-link" @click="retryNow(loadGuide)">Retry</button>
-        </span>
-        <small>Could not be read just now: {{ guide.error }}</small>
-      </div>
-      <!-- General with no description or doc sends no brief at all. -->
-      <div v-if="project && briefText" class="rail-item agent-context-row agent-context-brief">
-        <span class="agent-context-row-top">
-          <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
-          <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
-        </span>
-        <p
-          v-if="project.context"
-          class="agent-context-description"
-          @click="openContextFile"
-          v-html="contextHtml"
-        ></p>
-      </div>
-      <button v-if="repoInstr" type="button" class="rail-item agent-context-row agent-context-repo"
-        :title="`Open ${repoInstrPath}`" @click="emit('open-file', repoInstrPath)">
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">{{ repoInstrLabel }}</span>
-          <span class="agent-context-meta">{{ formatTokens(tokensFor(repoInstr.chars)) }} tokens</span>
-        </span>
-        <small>Repository instructions</small>
-      </button>
-      <div v-else-if="repoInstr === null" class="rail-item agent-context-row agent-context-repo" role="status">
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">Repository instructions</span>
-          <span class="agent-context-meta">not found</span>
-        </span>
-      </div>
-    </div>
-  </details>
+    </details>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -118,6 +129,7 @@ import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
 import { joinRepoPath, repoName } from '../lib/repo'
 import { writeClipboard } from '../lib/codeCopy'
+import AppIcon from './AppIcon.vue'
 import { fetchSystemPrompt } from '../lib/systemPrompt'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
@@ -139,7 +151,7 @@ const props = defineProps<{
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 
 // Unique per instance: the rail and the drawer are one component, and the
-// usage group's heading must not collide with anything else's.
+// Context heading must not collide with anything else's.
 const usageLabelId = useId()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
@@ -279,22 +291,8 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
-.agent-context-meter-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin: 4px 0 6px;
-}
-.agent-context-meter {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-.agent-context-compact { flex: none; white-space: nowrap; }
+.agent-context-meter { display: flex; align-items: center; gap: var(--space-3); min-height: 32px; }
 @media (pointer: coarse) {
-  .agent-context-compact { min-height: 44px; min-width: 44px; }
   /* A flex item, so line-height gives the 44px box and the ellipsis still works
      (inline-flex would put the text in an anonymous item that cannot truncate). */
   a.agent-context-name { line-height: var(--touch); }
@@ -302,7 +300,7 @@ const contextPctLabel = computed(() => {
 .agent-context-track {
   flex: 1;
   min-width: 0;
-  height: 6px;
+  height: 4px;
   border-radius: 999px;
   background: var(--bg3);
   overflow: hidden;
@@ -313,69 +311,16 @@ const contextPctLabel = computed(() => {
   border-radius: 999px;
   background: var(--fg2);
 }
-.agent-context-meter strong { font-variant-numeric: tabular-nums; }
-.agent-context-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 32px;
-  margin: 0 -4px;
-  padding: 0 4px;
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  list-style: none;
-  cursor: pointer;
-}
+.agent-context-pct { flex: none; min-width: 6ch; color: var(--fg2); font-variant-numeric: tabular-nums; text-align: right; }
+.agent-context-summary { list-style: none; }
 .agent-context-summary::-webkit-details-marker { display: none; }
-.agent-context-summary:hover { color: var(--fg); }
-.agent-context-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.agent-context-summary-label { flex: 1; min-width: 0; }
-.agent-context-chevron { flex: none; transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1); }
+.agent-context-chevron { transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1); }
 .agent-context-loaded[open] .agent-context-chevron { transform: rotate(90deg); }
-.agent-context-loaded[open] .agent-context-summary { margin-bottom: 4px; }
 @media (prefers-reduced-motion: reduce) {
   .agent-context-chevron { transition: none; }
 }
-@media (pointer: coarse) {
-  .agent-context-summary { min-height: var(--touch); }
-}
-.agent-context-row { gap: 1px; }
-.agent-context-row-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.agent-context-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-}
-.agent-context-meta {
-  flex: none;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-.agent-context-row small { line-height: 1.4; }
-.agent-context-system-toggle {
-  all: unset;
-  box-sizing: border-box;
-  display: block;
-  width: 100%;
-  cursor: pointer;
-}
-.agent-context-system-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (pointer: coarse) {
-  .agent-context-system-toggle { min-height: var(--touch); }
-}
-.agent-context-system { cursor: default; }
-.agent-context-system:hover { color: var(--fg); }
-.agent-context-system-body { display: flex; flex-direction: column; align-items: flex-end; margin-top: 4px; }
+.cd-detail.agent-context-error-text { color: var(--warning); }
+.agent-context-system-body { display: flex; flex-direction: column; align-items: flex-end; margin-top: 4px; padding-left: 26px; }
 .agent-context-system-text {
   align-self: stretch;
   max-height: 320px;
@@ -390,27 +335,13 @@ const contextPctLabel = computed(() => {
   font: calc(11px * var(--font-scale)) / 1.5 var(--font-mono);
   color: var(--fg2);
 }
-.agent-context-brief { cursor: default; }
-.agent-context-brief:hover { color: var(--fg); }
-.agent-context-repo[role='status'] { cursor: default; }
-.agent-context-repo[role='status']:hover { color: var(--fg); }
 .agent-context-description {
-  margin: 4px 0 0;
-  color: var(--fg2);
+  margin: 2px 0 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.agent-context-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--fg);
-  font: inherit;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 2px;
-  cursor: pointer;
 }
 .agent-context-description :deep(a.file-link) {
   color: inherit;
@@ -419,16 +350,7 @@ const contextPctLabel = computed(() => {
   text-underline-offset: 2px;
 }
 .agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
-.agent-context-link:hover,
-.agent-context-project:hover { text-decoration-color: currentColor; }
-@media (pointer: coarse) {
-  /* Below the base .agent-context-link rule it overrides. */
-  .agent-context-link { min-height: var(--touch); min-width: var(--touch); }
-}
-.agent-context-project {
-  color: var(--fg);
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-}
+.cd-primary.agent-context-project { color: var(--fg); text-decoration: none; }
+.cd-primary.agent-context-project:hover { text-decoration: underline; }
 </style>
+<style scoped src="./chatDetails.css"></style>

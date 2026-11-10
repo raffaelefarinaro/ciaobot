@@ -254,10 +254,9 @@ describe('ChatPanel aligned layout', () => {
     expect(rail.findComponent({ name: 'AgentContextSection' }).exists()).toBe(true)
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).not.toContain('Current state')
-    // The task origin note sits in the rail, and only there, while it shows.
-    const origins = wrapper.findAllComponents({ name: 'TaskOriginNote' })
-    expect(origins).toHaveLength(1)
-    expect(rail.findComponent({ name: 'TaskOriginNote' }).exists()).toBe(true)
+    // A chat with no origin has no Origin section, so no task origin note.
+    expect(wrapper.findAllComponents({ name: 'TaskOriginNote' })).toHaveLength(0)
+    expect(rail.find('.chat-rail-origin').exists()).toBe(false)
 
     // The header carries Archive only, as an icon button (labelled on wide
     // panes, icon-only on narrow); the toggle lives with Chat details.

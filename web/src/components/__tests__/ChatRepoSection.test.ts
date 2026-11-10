@@ -34,11 +34,11 @@ describe('ChatRepoSection', () => {
 
   it('shows name, branch and clean state for the main checkout', () => {
     const wrapper = mountSection(repo, {})
-    const heading = wrapper.get('.chat-repo-heading')
-    expect(heading.get('.rail-label').text()).toBe('Repository')
-    expect(heading.get('.chat-repo-name').text()).toBe('app')
+    expect(wrapper.get('.cd-heading').text()).toBe('Repository')
+    expect(wrapper.get('section').attributes('aria-labelledby')).toBe(wrapper.get('.cd-heading').attributes('id'))
     expect(wrapper.get('.chat-repo-name').text()).toBe('app')
-    expect(wrapper.get('.chat-repo-name').attributes('title')).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-path').attributes('title')).toBe('/r/app')
     // The summary carries the branch, not the folder; the folder is in the body.
     expect(wrapper.get('.chat-repo-branch').text()).not.toContain('/r/app')
     expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
@@ -47,54 +47,34 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('keeps a full branch behind a closed disclosure', async () => {
+  it('has no branch disclosure: the branch row holds no control', () => {
     const wrapper = mountSection(repo, {})
-    const toggle = wrapper.get('button.chat-repo-branch')
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
-    expect(body.isVisible()).toBe(false)
-    expect(toggle.text()).toContain('main')
-    // The whole branch and the folder the chat works in are one click away.
-    await toggle.trigger('click')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(body.isVisible()).toBe(true)
-    expect(body.get('.chat-repo-branch-value').text()).toBe('main')
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    expect(wrapper.find('button.chat-repo-branch').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-branch-body').exists()).toBe(false)
+    expect(wrapper.get('.chat-repo-branch-row').findAll('button, a, summary, [tabindex]')).toHaveLength(0)
+    expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
     wrapper.unmount()
   })
 
-  it('keeps the whole branch text in the body when the summary has to cut it', () => {
+  it("keeps the whole branch in the row's text", () => {
     const branch = 'feature/a-very-long-branch-name-for-the-rail'
     const wrapper = mountSection({ ...repo, branch }, {})
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(body.get('.chat-repo-branch-value').text()).toBe(branch)
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-branch').text()).toContain(branch)
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app')
     wrapper.unmount()
   })
 
   it('shows the actual location when the chat works away from the checkout', () => {
     const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(body.get('.chat-repo-branch-value').text()).toBe('feat-x')
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app-wt')
+    expect(wrapper.get('.chat-repo-branch').text()).toContain('feat-x')
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app-wt')
     wrapper.unmount()
   })
 
-  it('opens the branch details under the line, with the facts staying on it', () => {
+  it("puts the worktree fact in the branch row's detail line", () => {
     const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
-    const line = wrapper.get('.chat-repo-branch-line')
-    const body = wrapper.get('.chat-repo-branch-body')
-    // The body is a sibling below the line, not inside it, so it takes the
-    // section's full width instead of a column beside the facts.
-    expect(line.element.nextElementSibling).toBe(body.element)
-    expect(body.text()).toContain('feat-x')
-    expect(body.find('.chat-repo-kind').exists()).toBe(false)
-    expect(line.get('.chat-repo-kind').text()).toBe('worktree')
-    // Exactly one focusable control in the branch row: the disclosure itself.
-    const focusables = line.findAll('summary, button, a, input, select, textarea, [tabindex]')
-    expect(focusables).toHaveLength(1)
-    expect(focusables[0].element).toBe(wrapper.get('button.chat-repo-branch').element)
+    expect(wrapper.get('.chat-repo-branch-row .chat-repo-facts .chat-repo-kind').text()).toBe('worktree')
+    expect(wrapper.get('.chat-repo-branch-row').findAll('summary, button, a, input, select, textarea, [tabindex]')).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -134,7 +114,9 @@ describe('ChatRepoSection', () => {
   it('warns when the folder is missing and hides the copy button', () => {
     const wrapper = mountSection({ ...repo, missing: true }, {})
     expect(wrapper.get('.chat-repo-missing').text()).toContain('folder is missing')
-    expect(wrapper.find('.chat-repo-meta').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-branch-row').exists()).toBe(false)
+    expect(wrapper.findAll('.chat-repo-row')).toHaveLength(1)
+    expect(wrapper.find('[role=switch]').exists()).toBe(true)
     expect(wrapper.find('.chat-repo-copy').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -187,19 +169,14 @@ describe('ChatRepoSection', () => {
     vi.useRealTimers()
   })
 
-  it('keeps the code-mode hint behind the info button', async () => {
+  it("shows the code-mode explanation as the row's detail and describes the switch with it", () => {
     const wrapper = mountSection(repo, {})
-    const info = wrapper.get('.repo-code-info')
-    const hint = wrapper.get('.repo-code-hint').element.parentElement!
-    expect(info.attributes('aria-expanded')).toBe('false')
-    expect(hint.classList.contains('sr-only')).toBe(true)
-    expect(info.attributes('aria-controls')).toBe(hint.id)
-    const describedBy = wrapper.get('[role=switch]').attributes('aria-describedby')!
-    expect(wrapper.get('.repo-code-hint').element.id).toBe(describedBy)
-    await info.trigger('click')
-    expect(info.attributes('aria-expanded')).toBe('true')
-    expect(hint.classList.contains('sr-only')).toBe(false)
-    expect(document.getElementById(describedBy)).not.toBeNull()
+    expect(wrapper.find('.repo-code-info').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="About code mode"]').exists()).toBe(false)
+    const hint = wrapper.get('.repo-code-hint')
+    expect(hint.classes()).not.toContain('sr-only')
+    expect(hint.text()).toBe("Loads the repository's instructions, skills and write access in this chat.")
+    expect(wrapper.get('[role=switch]').attributes('aria-describedby')).toBe(hint.element.id)
     wrapper.unmount()
   })
 
@@ -233,6 +210,7 @@ describe('ChatRepoSection', () => {
     expect(sw.find('.repo-code-lock-note').exists()).toBe(false)
     expect(sw.attributes('aria-checked')).toBe('true')
     expect(sw.attributes('aria-disabled')).toBe('true')
+    expect(wrapper.get('.repo-code-hint').classes()).toContain('sr-only')
     wrapper.unmount()
   })
 
