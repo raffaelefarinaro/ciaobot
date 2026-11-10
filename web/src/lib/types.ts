@@ -1286,6 +1286,7 @@ export interface SetupCheck {
 
 /** `/api/setup-status`, from ciao/setup_status.py::setup_status. */
 export interface SetupStatus {
+  native_bootstrap: boolean
   configured: boolean
   bootstrap: boolean
   mode: string
