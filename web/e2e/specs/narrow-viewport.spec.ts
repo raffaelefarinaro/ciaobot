@@ -249,6 +249,11 @@ test.describe('narrow viewport', () => {
     await expectQuestionSubmitVisible(page)
     await page.setViewportSize({ width: 390, height: 500 })
     await expectQuestionSubmitVisible(page)
+    // lib/viewport.ts re-measures on resize and again 50/200/500ms later
+    // (RESETTLE_DELAYS_MS); a late re-measure removed the hand-set keyboard
+    // state below (#2775). Let the resize land and the settling pass end first.
+    await expect.poll(() => page.evaluate(() => innerHeight)).toBe(500)
+    await page.waitForTimeout(600)
     await page.evaluate(() => {
       document.documentElement.style.setProperty('--app-h', '280px')
       document.documentElement.classList.add('keyboard-open')
