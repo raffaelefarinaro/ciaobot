@@ -257,10 +257,23 @@ describe('findFinalAnswerIndex', () => {
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
 
-  it('keeps a timestamped closing reply selected when bookkeeping follows it', () => {
-    // The server stamps the turn's last assistant text with its completion
-    // time. A bookkeeping tool run after it does not make it undelivered, so
-    // the earlier explicitly completed reply must not steal the closing slot.
+  it('keeps a stamped non-progress reply followed by bookkeeping', () => {
+    // A delivered reply that does not read as progress stays the closing
+    // bubble even when a bookkeeping tool runs after it.
+    const buffer = [
+      text('Working on it.'),
+      activity('Edit a.vue'),
+      text('Done. The answer is here.', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(2)
+  })
+
+  it('keeps an earlier completed reply when stamped progress text is followed by bookkeeping', () => {
+    // The final rule: stamped progress-shaped text followed by a tool is
+    // ongoing narration even when an earlier explicit completion exists, so it
+    // stays in Activity and the completed answer closes the turn. This corrects
+    // the earlier contract that let "Good — updated both files." win here.
     const buffer = [
       text("I've built it, and you can look at it now.", { phase: 'final_answer' }),
       text('Now let me finish the housekeeping.'),
@@ -268,12 +281,9 @@ describe('findFinalAnswerIndex', () => {
       text('Good — updated both files.', { timestamp: '2026-11-09T13:31:41Z' }),
       activity('TodoWrite'),
     ]
-    expect(findFinalAnswerIndex(buffer)).toBe(3)
-    // The earlier reply stays a visible bubble; the closing reply is excluded
-    // for the caller to append with its footer and Outputs.
-    expect(buildTurnParts(buffer, 3)).toEqual([
-      { kind: 'assistant', msg: buffer[0] },
-      { kind: 'trace', steps: [buffer[1], buffer[2], buffer[4]] },
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2], buffer[3], buffer[4]] },
     ])
   })
 
@@ -315,6 +325,22 @@ describe('findFinalAnswerIndex', () => {
     const buffer = [
       text('Done. The answer is here.', { phase: 'final_answer' }),
       text('Now let me typecheck and run the tests.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
+
+  it('keeps an earlier completed answer when stamped "Okay" narration is followed by bookkeeping', () => {
+    // Any progress-shaped opener ("Okay, let me…") is ongoing narration after a
+    // bookkeeping tool, with no phrase list and no earlier-final exception.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Okay, let me typecheck and run the tests.', {
         timestamp: '2026-11-09T13:31:41Z',
       }),
       activity('Bash'),

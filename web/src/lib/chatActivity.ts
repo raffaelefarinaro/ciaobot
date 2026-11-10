@@ -257,21 +257,6 @@ export function isProgressCommentary(content: string): boolean {
   return false
 }
 
-/** First lines that open with planning/action language, so the row is still
- *  working even when the sentence ends with a period ("Now let me typecheck
- *  and run the tests."). "Good — updated both files." is deliberately absent:
- *  it reports completed work and may close the turn. */
-const ONGOING_NARRATION_RE = /^(now\b|let me\b|i['']ll\b|i will\b|looking\b|checking\b|searching\b|reading\b|next\b|updating\b|fixing\b|adding\b|writing\b|running\b|making\b|i['']m going\b|i am going\b|digging\b|inspecting\b|opening\b|creating\b|wiring\b|got it\b)/i
-
-/** Clear ongoing narration: a first nonblank line that opens with
- *  planning/action language or ends with a colon. Such a row stays in
- *  Activity; it can never be the delivered closing reply, even after an
- *  earlier explicit completion. */
-function isOngoingNarration(content: string): boolean {
-  const line = content.split('\n').map(part => part.trim()).find(Boolean) ?? ''
-  return /:\s*$/.test(line) || ONGOING_NARRATION_RE.test(line)
-}
-
 /** Index of the turn's user-facing final reply. Prefers the last non-progress
  *  assistant text (so a trailing "Now the docs:" after a real answer does not
  *  steal the final bubble); falls back to the last assistant text so a
@@ -285,27 +270,18 @@ export function findFinalAnswerIndex(
     if (!isAssistantTextStep(m)) continue
     if (m.phase === 'commentary') continue
     // History rows carry no `phase`, but the server stamps the turn's last
-    // assistant text with its completion time — sometimes trailing progress
-    // narration too ("Now run tests:"). A stamped row is the delivered closing
-    // reply unless a bookkeeping tool ran after it, it reads as progress
-    // narration, or an earlier explicit completion already answered the turn.
-    // The hidden-continuation exception: an earlier `final_answer` row means
-    // this stamped row closes the turn even when it opens like narration and
-    // tools run after it — but planning/action language or a colon-ending
-    // first line is clear ongoing narration, not a closing sentence, so it
-    // stays in Activity.
+    // assistant text with its completion time. A stamped row is the delivered
+    // closing reply only when no bookkeeping tool follows it, or when it is
+    // not progress commentary. Progress-shaped text plus a trailing tool is
+    // ongoing narration ("Now…", "Okay…", "Good…") and stays in Activity —
+    // there is no earlier-final exception: an explicit earlier completion does
+    // not turn later narration into an answer.
     if (
       fallback < 0
       && m.timestamp
       && (
         !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
         || !isProgressCommentary(m.content || '')
-        || (
-          !isOngoingNarration(m.content || '')
-          && buffer.slice(0, k).some(
-            r => r.role === 'assistant' && !r.tool_name && r.phase === 'final_answer'
-          )
-        )
       )
     ) return k
     if (fallback < 0) fallback = k
