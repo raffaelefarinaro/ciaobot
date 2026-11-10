@@ -224,13 +224,6 @@ describe('useChatComposer cursor insertion', () => {
     expect(composer.draft.value).toBe('`/tmp/a.md` ')
   })
 
-  it('inserts a numbered image reference', () => {
-    const { composer } = makeComposer()
-    attachTextarea(composer, '')
-
-    composer.insertImageRef(2)
-    expect(composer.draft.value).toBe('[Image 2] ')
-  })
 })
 
 describe('useChatComposer attachments', () => {
@@ -424,6 +417,41 @@ describe('useChatComposer attachments', () => {
 
     expect(composer.draft.value).toBe('look at [Image 2] [Image 3] ')
     el.parentElement?.remove()
+  })
+
+  it('inserts no reference when the chat changed during the upload', async () => {
+    let live = CHAT_ID
+    const { composer, store } = makeComposer({ chatId: () => live })
+    attachTextarea(composer, '')
+    store.uploadImages.mockImplementationOnce(async () => { live = 'other-chat'; return ['a'] })
+    store.pendingImagesFor.mockReturnValue(['a'])
+    const input = document.createElement('input')
+    input.type = 'file'
+    Object.defineProperty(input, 'files', { value: [imageFile()], configurable: true })
+
+    await composer.handleFileSelect({ target: input } as unknown as Event)
+
+    expect(composer.draft.value).toBe('')
+  })
+
+  it('does not move focus into an unfocused prompt when an upload lands', async () => {
+    const { composer, store } = makeComposer()
+    const el = attachTextarea(composer, '')
+    const other = document.createElement('button')
+    document.body.appendChild(other)
+    other.focus()
+    store.uploadImages.mockResolvedValueOnce(['a'])
+    store.pendingImagesFor.mockReturnValue(['a'])
+    const input = document.createElement('input')
+    input.type = 'file'
+    Object.defineProperty(input, 'files', { value: [imageFile()], configurable: true })
+
+    await composer.handleFileSelect({ target: input } as unknown as Event)
+    await nextTick()
+
+    expect(composer.draft.value).toBe('[Image 1] ')
+    expect(document.activeElement).toBe(other)
+    other.remove(); el.parentElement?.remove()
   })
 
   it('removing an image drops its reference and renumbers the later ones', () => {

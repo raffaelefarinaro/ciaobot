@@ -73,7 +73,6 @@ export interface ChatComposer {
    *  when the key was consumed. */
   handlePromptHistoryKey(e: KeyboardEvent): boolean
   insertTextAtCursor(token: string): void
-  insertImageRef(n: number): void
   /** Attach picked files: images stage as thumbnails, others as file chips. */
   handleFileSelect(e: Event): Promise<void>
   handlePaste(e: ClipboardEvent): Promise<void>
@@ -217,10 +216,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       el.selectionStart = el.selectionEnd = pos
       if (focus) el.focus()
     })
-  }
-
-  function insertImageRef(n: number): void {
-    insertTextAtCursor(`[Image ${n}]`)
   }
 
   function errorText(error: unknown): string {
@@ -395,7 +390,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     autoResize,
     handlePromptHistoryKey,
     insertTextAtCursor,
-    insertImageRef,
     handleFileSelect,
     handlePaste,
     handleDrop,

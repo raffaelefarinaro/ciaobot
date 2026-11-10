@@ -1099,7 +1099,7 @@
             class="pending-attachments"
           >
             <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="comment-chip image-preview">
-              <img :src="`/api/images/${ref}`" alt="" class="image-preview-thumb" @click="openMessageImage(ref)" />
+              <img :src="`/api/images/${ref}`" alt="" aria-hidden="true" class="image-preview-thumb" @click="openMessageImage(ref)" />
               <button
                 type="button"
                 class="comment-chip-body image-ref-chip"
