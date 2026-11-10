@@ -374,8 +374,18 @@ def _gap_count(report: dict) -> int:
     return len(list(report.get("tracked_excluded") or []))
 
 
-def _coverage_gap(tracked_excluded: list[str]) -> str:
-    """One line naming what git already tracks that the scope refuses, or "".
+def _named(paths: list[str]) -> str:
+    """The first few paths, then how many more, for a status line."""
+    more = len(paths) - _REASON_PATHS
+    return ", ".join(paths[:_REASON_PATHS]) + (f" (+{more} more)" if more > 0 else "")
+
+
+def _coverage_gap(report: dict) -> str:
+    """One line naming what the scope does not back up, or "".
+
+    Two kinds: what git already tracks that the scope refuses, and an in-scope
+    carve-out file that git itself ignores. The second is named here but not
+    counted in ``coverage_gap``, which is tracked-only by design.
 
     The paths are truncated: a developer checkout reports its whole application
     source, and a status line is not the place for three hundred of them. The
@@ -384,18 +394,24 @@ def _coverage_gap(tracked_excluded: list[str]) -> str:
     Prose for a reader only. The count behind it is ``coverage_gap``, and no
     surface parses this sentence (#733).
     """
-    if not tracked_excluded:
-        return ""
-    named = ", ".join(tracked_excluded[:_REASON_PATHS])
-    more = len(tracked_excluded) - _REASON_PATHS
-    return (
-        f"{len(tracked_excluded)} tracked path(s) outside the backup scope "
-        f"would not be backed up: {named}"
-        + (f" (+{more} more)" if more > 0 else "")
-    )
+    tracked_excluded = list(report.get("tracked_excluded") or [])
+    ignored = list(report.get("ignored_in_scope") or [])
+    parts: list[str] = []
+    if tracked_excluded:
+        parts.append(
+            f"{len(tracked_excluded)} tracked path(s) outside the backup scope "
+            f"would not be backed up: {_named(tracked_excluded)}"
+        )
+    if ignored:
+        parts.append(
+            f"{len(ignored)} path(s) in the backup scope are ignored by git "
+            f"(.gitignore, .git/info/exclude or core.excludesFile) and are not "
+            f"backed up: {_named(ignored)}"
+        )
+    return "; ".join(parts)
 
 
-def _coverage_blockers(tracked_excluded: list[str]) -> set[str]:
+def _coverage_blockers(report: dict) -> set[str]:
     """The ``preflight_scoped`` blockers that are exactly the coverage gap.
 
     ``preflight_scoped`` reports both kinds of blocker in one list, and this
@@ -403,16 +419,21 @@ def _coverage_blockers(tracked_excluded: list[str]) -> set[str]:
     gap to *report* (the commit is path-limited, so it cannot ride along, and
     blocking on it would refuse to back up anything on any repository that is
     also a checkout), while a credential inside the scope must stop the run
-    before it stages anything. Subtracting the gap's own blockers — which
-    ``preflight_scoped`` derives from the ``tracked_excluded`` it returns
-    alongside them — leaves exactly the blockers that stop a run.
+    before it stages anything. An in-scope carve-out file that git ignores is a
+    gap blocker for the same reason: no run could back it up, and stopping on it
+    would back up nothing. Subtracting the gap's own blockers — which
+    ``preflight_scoped`` derives from the ``tracked_excluded`` and
+    ``ignored_in_scope`` it returns alongside them — leaves exactly the blockers
+    that stop a run.
     """
-    return {f"Tracked but outside the backup scope: {rel}" for rel in tracked_excluded}
+    tracked = {f"Tracked but outside the backup scope: {rel}" for rel in report.get("tracked_excluded") or []}
+    ignored = {f"Ignored by git but inside the backup scope: {rel}" for rel in report.get("ignored_in_scope") or []}
+    return tracked | ignored
 
 
 def _hard_blockers(report: dict) -> list[str]:
     """Preflight blockers that stop a run, with the coverage gap removed."""
-    gap = _coverage_blockers(list(report.get("tracked_excluded") or []))
+    gap = _coverage_blockers(report)
     return [str(b) for b in (report.get("blockers") or []) if str(b) not in gap]
 
 
@@ -728,8 +749,7 @@ class BackupService:
             # and in the reason of a landed one, never as a state — so a read
             # and a run can never disagree about whether the repository is fully
             # covered.
-            excluded = list(report.get("tracked_excluded") or [])
-            gap = _coverage_gap(excluded)
+            gap = _coverage_gap(report)
             # The count every return below reports, derived through the same
             # helper ``status()`` uses rather than as a bare ``len`` at each
             # site: one place that says how the coverage gap is counted.
@@ -1446,7 +1466,7 @@ def _read_reason(report: dict, unpushed: int) -> str:
         if unpushed:
             pending.append(f"{unpushed} commit(s) not yet on origin")
         parts.append("waiting: " + ", ".join(pending))
-    gap = _coverage_gap(list(report.get("tracked_excluded") or []))
+    gap = _coverage_gap(report)
     if gap:
         parts.append(gap)
     return "; ".join(parts) if parts else "up to date"
