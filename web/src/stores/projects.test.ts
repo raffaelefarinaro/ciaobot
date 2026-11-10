@@ -4562,6 +4562,34 @@ describe('provider-neutral input state', () => {
     expect(store.questionSubmissions[chatId]?.pending).toBe(true)
   })
 
+  test('does not send a second native question response while acknowledgement is pending', () => {
+    const store = useProjectStore()
+    const chatId = 'duplicate-question-response'
+    store.chats = [{
+      chat_id: chatId, project_id: 'p1', title: 'Question response', model: 'gpt-test',
+      provider: 'opencode', mode: 'normal', session_id: 'session-1', created_at: '', archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'tool_use', tool_name: 'AskUserQuestion', request_id: 'form-1', session_id: 'session-1',
+      tool_input: JSON.stringify({ questions: [{ id: 'choice', question: 'Choose?' }] }),
+    }) })
+
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply', 'session-1')).toBe(true)
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply', 'session-1')).toBe(true)
+
+    expect(store.questionSubmissions[chatId]?.pending).toBe(true)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(socket.send.mock.calls.map(([raw]) => JSON.parse(raw)).filter((frame: { type?: string }) => frame.type === 'question_response')).toEqual([{
+      type: 'question_response', request_id: 'form-1', session_id: 'session-1', action: 'reply', answers: { choice: ['yes'] },
+    }])
+
+    socket.onmessage?.({ data: JSON.stringify({ type: 'question_response_result', request_id: 'form-1', session_id: 'session-1', ok: true }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.questionSubmissions[chatId]).toBeUndefined()
+  })
+
   test('ignores stale success frames when a provider reuses a request id in a new session', () => {
     const store = useProjectStore()
     const chatId = 'reused-request-session'
