@@ -128,6 +128,44 @@ export function isPlausibleFilePath(filePath: string): boolean {
   return EXTENSIONLESS_BASENAMES.has(base.toLowerCase())
 }
 
+// A first segment shaped like a host (`example.com/pricing`) is a web link
+// written without its scheme, not a folder. Accepted misses: `localhost/foo`
+// and a host whose "TLD" is a file extension (`example.sh/x`) read as folders.
+const DOMAIN_SEGMENT_RE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i
+const DOTTED_EXT_RE = /\.[^./\\]+$/
+
+/**
+ * True when a relative markdown link target names a folder: `exports/sloth-v5`, `exports/`.
+ * Not claimed: a dotted last segment (`exports/v1.2`, a file or a dotted folder),
+ * a known extensionless file name (`docs/Makefile`), and dot-only paths (`./`, `../`).
+ */
+export function isFolderLinkPath(href: string): boolean {
+  const raw = href.trim()
+  if (!raw || raw.startsWith('/') || raw.startsWith('#') || raw.startsWith('~')) return false
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return false
+  if (/[*?$`<>"|\n]/.test(raw)) return false
+  const trailing = /[/\\]$/.test(raw)
+  const segments = raw.replace(/[/\\]+$/, '').split(/[/\\]/)
+  if (segments.some(s => !s)) return false
+  if (segments.every(s => s === '.' || s === '..')) return false
+  if (segments.length < 2 && !trailing) return false
+  if (DOMAIN_SEGMENT_RE.test(segments[0]) && !hasKnownFileExtension(segments[0])) return false
+  if (trailing) return true
+  const last = segments[segments.length - 1]
+  return !DOTTED_EXT_RE.test(last) && !EXTENSIONLESS_BASENAMES.has(last.toLowerCase())
+}
+
+/** True when a clicked link might be a folder and is worth asking the engine about. */
+export function looksLikeFolderPath(filePath: string): boolean {
+  const clean = filePath.trim().replace(/:\d+$/, '')
+  if (!clean) return false
+  const segments = clean.replace(/[/\\]+$/, '').split(/[/\\]/)
+  if (segments.every(s => s === '' || s === '.' || s === '..')) return false
+  if (/[/\\]$/.test(clean)) return true
+  const base = basenameOf(clean)
+  return !DOTTED_EXT_RE.test(base) && !EXTENSIONLESS_BASENAMES.has(base.toLowerCase())
+}
+
 type KnownPathRule = { match: string; path: string; basenameOnly: boolean }
 
 /** Build longest-first literal match rules from agent-touched file paths. */

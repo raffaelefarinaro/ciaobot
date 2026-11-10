@@ -395,4 +395,16 @@ describe('the ways into the browser terminal', () => {
       expect(remounted.find('.terminal-pane').exists()).toBe(true)
     }, { timeout: 3000, interval: 20 })
   })
+
+  it('routes a clicked folder link through openLink', async () => {
+    const { wrapper } = await mountChat(makeProject())
+    const openLink = vi.spyOn(useFileViewerStore(pinia), 'openLink').mockResolvedValue(true)
+    const link = document.createElement('a')
+    link.className = 'file-link'
+    link.setAttribute('href', '#')
+    link.setAttribute('data-file-path', 'exports/sloth-v5')
+    wrapper.element.appendChild(link)
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(openLink).toHaveBeenCalledWith('exports/sloth-v5', null, 'chat-1')
+  })
 })

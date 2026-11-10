@@ -727,11 +727,7 @@ function onMdClick(e: MouseEvent): void {
     const lineAttr = fileLink.getAttribute('data-line')
     const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
     const cid = store.chatId || ''
-    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
-      void store.openImage(linkedPath, cid)
-    } else {
-      void store.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
-    }
+    void store.openLink(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
     return
   }
 
