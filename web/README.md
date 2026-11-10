@@ -363,6 +363,21 @@ file use. The tile has one occupant; the newest takes it.
 - **File viewer:** `stores/fileViewer.ts` docks a file only into the chat that
   owns the tile. A file opened from the second pane opens the viewer.
 
+### Folder browser
+
+`FolderBrowser.vue` is a read-only folder view on VueFinder 4.8.0, pinned exact.
+It sits behind the file viewer, which loads it with `defineAsyncComponent`.
+
+- **Chunk isolation:** `FolderBrowser.vue` is the only runtime importer of `vuefinder` and its CSS. `lib/folderBrowserDriver.ts` imports types only, so the store and node tests never load the package. VueFinder is the deliberate exception to "do not add a themed UI kit", kept to that chunk.
+- **Config trap:** VueFinder 4.8 merges config as `{...defaults, ...passed, ...stored}`, so the `config` prop cannot set persisted keys (`view`, `showTreeView`, `theme`, …). `seedFolderBrowserConfig` writes `localStorage['vuefinder_config_ciao-folder-browser']` before mount. It keeps what the user toggled since, and forces `persist:false`, `fullScreen:false`, `path:''`. Non-persisted keys go through the prop.
+- **First listing:** the component fetches the first folder itself (it needs the roots) and hands that listing to the driver as `initial`, so VueFinder's first `list()` does not fetch again. `onListing` reports each listing back for the "Showing the first N items." note, since `GET /api/workspace-dir` caps at 2000 entries.
+- **Global stylesheet:** `vuefinder.css` is Tailwind v4 output. Its preflight is scoped to `.vuefinder`, but its layered utilities (`.hidden`, `.flex`, `.disabled`, …) and its `@layer base` `*` border-colour rule reach the whole app once the chunk loads. Unlayered app CSS wins over the layered utilities, so this only matters for an element that uses a utility class name with no rule of its own. The planning audit found one: `ChatPanel.vue`'s `.input-bar` `disabled` class, now removed. The `.fade-*` transition rule also shortens `App.vue`'s startup fade if it runs after the chunk loads. Accepted; re-audit on upgrade.
+- **Teleports:** VueFinder teleports its breadcrumb dropdown and context menu to `<body>`. A Reka modal sets `pointer-events:none` on `<body>`, so the component's unscoped style restores `pointer-events:auto` on `body > .vuefinder__themer`.
+- **Search is off.** VueFinder 4.8's search modal teleports to `<body>`, outside the Reka focus trap, so its input cannot be typed into.
+- **Never pass `contextMenuItems: []`.** VueFinder's folder double-click navigates through the menu's `open` item, so the list is cut to `open` and `refresh`.
+- **Touch:** VueFinder opens items on double-click only. Under `(pointer: coarse)` a single file selection opens it.
+- **Font:** use `var(--font)`, never `var(--font-sans)`.
+
 ### Layout traps
 
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.

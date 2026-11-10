@@ -1064,7 +1064,7 @@
       @highlight="slash.highlight.value = $event"
     />
 
-    <div class="input-bar" :class="{ disabled: chat.archived }">
+    <div class="input-bar">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <div class="archived-notice-row">
