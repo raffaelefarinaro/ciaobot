@@ -311,7 +311,7 @@ def test_upload_rejects_hidden_filename(tmp_path: Path) -> None:
 
 
 # macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
-SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+SHOT = "Screenshot 2026-11-10 at 10.15.30\u202fAM"
 
 
 def test_upload_accepts_a_macos_screenshot_name(tmp_path: Path) -> None:
@@ -325,13 +325,44 @@ def test_upload_accepts_a_macos_screenshot_name(tmp_path: Path) -> None:
     assert (folder / f"{SHOT}.png").read_bytes() == b"png"
 
 
-def test_upload_rejects_control_characters(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("bad\x01name.md", id="c0-control"),
+        pytest.param("bad\x00name.md", id="nul"),
+        pytest.param("inv\u202egnp.png", id="bidi-rlo-spoof"),
+        pytest.param("a\u2066b.png", id="bidi-isolate"),
+        pytest.param("a\u200bb.png", id="zero-width-space"),
+        pytest.param("a\ufeffb.png", id="byte-order-mark"),
+        pytest.param("a\u2028b.png", id="line-separator"),
+        pytest.param("a\u2029b.png", id="paragraph-separator"),
+        pytest.param("a\u200eb.png", id="lrm"),
+    ],
+)
+def test_upload_rejects_control_characters(tmp_path: Path, name: str) -> None:
     _make_work_project(tmp_path, "2026-q2-foo")
     pcm = _make_manager(tmp_path)
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
-    for bad in ("bad\x01name.md", "bad\x00name.md"):
-        with pytest.raises(ValueError, match="invalid filename"):
-            pcm.save_project_file_upload(proj.project_id, b"x", bad)
+    with pytest.raises(ValueError, match="invalid filename"):
+        pcm.save_project_file_upload(proj.project_id, b"x", name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a\u202fb.png", id="narrow-no-break-space"),
+        pytest.param("\U0001f468\u200d\U0001f469.png", id="zwj-emoji"),
+    ],
+)
+def test_upload_accepts_space_and_emoji_joiner_names(tmp_path: Path, name: str) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"png", name)
+
+    assert entry["path"] == name
+    assert (folder / name).read_bytes() == b"png"
 
 
 def test_upload_rejects_unsupported_extension(tmp_path: Path) -> None:

@@ -85,7 +85,7 @@ def test_missing_path_returns_400(workspace: Path) -> None:
 
 
 # macOS names screenshots with U+202F (narrow no-break space) before AM.
-SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+SHOT = "Screenshot 2026-11-10 at 10.15.30\u202fAM"
 
 
 def test_macos_screenshot_name_is_served(workspace: Path) -> None:
@@ -108,6 +108,14 @@ def test_control_character_in_path_is_400(workspace: Path) -> None:
         resp = client.get("/api/workspace-file", params={"path": bad})
         assert resp.status_code == 400
         assert resp.json() == {"error": "bad path"}
+
+
+def test_bidi_override_in_read_path_is_not_refused_as_bad_path(workspace: Path) -> None:
+    # Reads accept format characters (only uploads refuse them, to stop spoofed
+    # names on disk), so a missing bidi-override path is a plain 404, not a 400.
+    client = _make_client(workspace)
+    resp = client.get("/api/workspace-file", params={"path": "docs/inv\u202egnp.md"})
+    assert resp.status_code == 404
 
 
 def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) -> None:

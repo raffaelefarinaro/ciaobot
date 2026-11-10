@@ -842,19 +842,19 @@ def test_folder_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> No
     """macOS puts U+202F in screenshot names; the browser lists such folders, so pins must take them."""
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "Shot A").mkdir()
+    (tmp_path / "Shot\u202fA").mkdir()
     client = _make_client(manager)
 
     response = client.patch(
-        f"/api/chats/{chat.chat_id}", json=_pin_body("Shot A/", 0)
+        f"/api/chats/{chat.chat_id}", json=_pin_body("Shot\u202fA/", 0)
     )
 
     assert response.status_code == 200
-    assert response.json()["pinned_file_path"].endswith("Shot A/")
+    assert response.json()["pinned_file_path"].endswith("Shot\u202fA/")
 
 
 # macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
-SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+SHOT = "Screenshot 2026-11-10 at 10.15.30\u202fAM"
 
 
 def test_file_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> None:

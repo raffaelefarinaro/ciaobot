@@ -91,6 +91,19 @@ class ChatActionConflictError(Exception):
         self.actions = actions
 
 
+def _unsafe_filename_char(char: str) -> bool:
+    """Control, format (bidi, zero-width) and line/paragraph separators; not Zs, so U+202F passes.
+
+    Writes refuse these because a name lands on disk and in the PWA and agent
+    prompt: a bidi override fakes an extension, U+2028 fakes a line break. Reads
+    accept them. ZWNJ and ZWJ stay allowed for emoji sequences.
+    """
+    category = unicodedata.category(char)
+    return category in ("Cc", "Zl", "Zp") or (
+        category == "Cf" and char not in "\u200c\u200d"
+    )
+
+
 def _restored_pin_paths(raw: Any) -> list[str]:
     """Canonical dismissed-pin paths out of a registry record.
 
@@ -10667,10 +10680,10 @@ class ProjectChatManager:
         vault_dir = self.project_vault_dir(project_id)
         if vault_dir is None:
             raise LookupError("project has no vault folder to upload into")
-        # Filename safety: basename only, no traversal, no hidden, no control
-        # characters (Cc, NUL included). Not `isprintable()`: macOS screenshot
-        # names carry U+202F (#2787).
-        if not filename or any(unicodedata.category(c) == "Cc" for c in filename):
+        # Filename safety: basename only, no traversal, no hidden, no control,
+        # format or line-separator characters (see _unsafe_filename_char). Not
+        # `isprintable()`: macOS screenshot names carry U+202F (#2787).
+        if not filename or any(_unsafe_filename_char(c) for c in filename):
             raise ValueError("invalid filename")
         base = Path(filename).name  # strips any directory component the browser sent
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:
