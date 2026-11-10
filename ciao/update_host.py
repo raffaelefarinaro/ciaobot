@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
-from ciao import macos_service
+from ciao import install_receipt, macos_service
 from ciao.os_support.private import make_private, mkstemp_private
 
 if TYPE_CHECKING:
@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # Imported, not re-spelled: the label the updater boots out has to be the one
 # the installer registered, and a second literal here would drift silently.
+# Since #2240 it is the *fallback* as well: :class:`MacUpdateHost` takes the
+# label from the install receipt and only answers this one when the machine has
+# no receipt that names a job, which is every install that predates the field.
 SERVER_LABEL = macos_service.SERVER_LABEL
 # The one-shot job that owns the swap. A sibling of `com.ciao.server`, not a
 # child: `launchctl bootout` on the engine must not take the updater with it.
@@ -446,8 +449,10 @@ def _loaded_program_argument(printed: str) -> str | None:
     return items[0] if items else None
 
 
-def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...] | None:
-    """``com.ciao.server``'s argv *as launchd would run it*, or ``None``.
+def _loaded_server_command(
+    launch: Launchctl, domain_uid: int, label: str = SERVER_LABEL
+) -> tuple[str, ...] | None:
+    """``<label>``'s argv *as launchd would run it*, or ``None``.
 
     This is the loaded job the acceptance criterion is about, and the on-disk
     plist cannot be trusted for it: launchd loads a job once, so a plist
@@ -467,7 +472,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     and only then may the on-disk plist answer instead.
     """
     try:
-        printed = launch(["print", f"gui/{domain_uid}/{SERVER_LABEL}"])
+        printed = launch(["print", f"gui/{domain_uid}/{label}"])
     except OSError:
         return None
     if printed.returncode != 0:
@@ -611,15 +616,55 @@ class MacUpdateHost:
     ``launchctl`` and ``uid`` are arguments rather than looked up, because they
     are the seam the tests inject and a caller that already knows its own domain
     should not have to be told what it is.
+
+    ``label`` is the launchd job the transaction controls, and it is the
+    *install's* and not a literal, so an isolated test install can run its own
+    engine beside the operator's real ``com.ciao.server``. Empty — the shape
+    every existing caller keeps — resolves it from the install receipt, and a
+    machine with no receipt (or one whose ``service_label`` is empty, which is
+    what a ``service_backend: none`` install records) falls back to
+    :data:`SERVER_LABEL`. An explicit argument wins over the receipt.
     """
 
-    def __init__(self, launchctl: Launchctl | None = None, uid: int | None = None) -> None:
+    def __init__(
+        self,
+        launchctl: Launchctl | None = None,
+        uid: int | None = None,
+        label: str = "",
+    ) -> None:
         self._launchctl: Launchctl = launchctl or macos_service._launchctl
         self._uid = macos_service._getuid() if uid is None else uid
+        self._label = label or self._receipt_label()
 
-    def _target(self, label: str) -> str:
-        """The launchd job ``label`` in this user's domain."""
-        return f"gui/{self._uid}/{label}"
+    @staticmethod
+    def _receipt_label() -> str:
+        """The label the install receipt names, or :data:`SERVER_LABEL`.
+
+        Read, never required: a missing, corrupt or pre-``service_label``
+        receipt reads as no receipt at all, and an empty ``service_label``
+        (a ``service_backend: none`` install) names no launchd job. Both mean
+        the hardcoded default, which is the label every install that predates
+        receipts already runs under.
+        """
+        receipt = install_receipt.read_receipt()
+        if receipt is not None and receipt.service_label:
+            return receipt.service_label
+        return SERVER_LABEL
+
+    @property
+    def label(self) -> str:
+        """The launchd job this host controls: the install's own engine."""
+        return self._label
+
+    def _target(self, label: str | None = None) -> str:
+        """The launchd job ``label`` in this user's domain.
+
+        ``label`` defaults to this install's engine (:attr:`label`), so the
+        engine's own target cannot be spelled with the wrong label; the jobs
+        that own the swap are named explicitly, because they are siblings with
+        labels of their own.
+        """
+        return f"gui/{self._uid}/{self._label if label is None else label}"
 
     def _domain(self) -> str:
         """This user's launchd domain, the parent of every job target here."""
@@ -642,13 +687,14 @@ class MacUpdateHost:
         """The port the engine answers on: its plist, its workspace .env, or the default.
 
         Resolved the same way every other launchd caller resolves it, so the
-        updater probes the same port the tray and the service helpers do.
+        updater probes the same port the tray and the service helpers do. The
+        plist asked for is this install's own job, not the default label's.
         """
-        return macos_service.discover_runtime().port
+        return macos_service.discover_runtime(label=self._label).port
 
     def start_engine(self) -> Any:
         """`launchctl enable` + `bootstrap` + `kickstart`, as the service helper does."""
-        return macos_service.start_service()
+        return macos_service.start_service(label=self._label)
 
     def stop_engine(self, wait: Callable[[], bool] | None = None) -> bool:
         """``launchctl bootout`` the engine, then run ``wait`` if it was given.
@@ -657,23 +703,24 @@ class MacUpdateHost:
         why the forward path waits at all; the rollback waits as a step of its
         own, so it asks for the bootout alone.
         """
-        self._launchctl(["bootout", self._target(SERVER_LABEL)])
+        self._launchctl(["bootout", self._target()])
         return wait() if wait is not None else True
 
     def server_command(self) -> tuple[str, ...] | None:
-        """What the loaded ``com.ciao.server`` runs, or the plist's, or ``None``.
+        """What the loaded engine job runs, or the plist's, or ``None``.
 
         The loaded job is the authority (see :func:`_loaded_server_command`): a
         service that is registered but not loaded is the only case where the
         on-disk plist may answer, and a missing, unreadable or argument-less
         plist answers ``None`` — evidence of nothing, which never refuses an
         update. The whole argument vector, because a hosted command names its
-        engine install by the interpreter it serves.
+        engine install by the interpreter it serves. Both the job asked about
+        and the plist read are this install's own label.
         """
-        command = _loaded_server_command(self._launchctl, self._uid)
+        command = _loaded_server_command(self._launchctl, self._uid, self._label)
         if command is not None:
             return command
-        loaded = macos_service.load_server_plist()
+        loaded = macos_service.load_server_plist(label=self._label)
         if loaded is None:
             return None
         arguments = loaded.get("ProgramArguments")
@@ -979,17 +1026,19 @@ def current_update_host() -> UpdateHost:
 
 
 def default_update_host(
-    *, launchctl: Launchctl | None = None, uid: int | None = None
+    *, launchctl: Launchctl | None = None, uid: int | None = None, label: str = ""
 ) -> UpdateHost:
     """The host the transaction uses when its caller names none.
 
-    A ``launchctl`` or ``uid`` is a request for the launchd host by name, so it
-    gets the macOS host on any OS: that is how the transaction's macOS tests
-    drive it on Linux and Windows CI. Otherwise Windows gets its own host, and
-    every other platform the macOS host, exactly as before Windows had one.
+    A ``launchctl``, ``uid`` or ``label`` is a request for the launchd host by
+    name, so it gets the macOS host on any OS: that is how the transaction's
+    macOS tests drive it on Linux and Windows CI. An empty ``label`` is
+    resolved from the install receipt by :class:`MacUpdateHost` itself.
+    Otherwise Windows gets its own host, and every other platform the macOS
+    host, exactly as before Windows had one.
     """
-    if launchctl is not None or uid is not None:
-        return MacUpdateHost(launchctl=launchctl, uid=uid)
+    if launchctl is not None or uid is not None or label:
+        return MacUpdateHost(launchctl=launchctl, uid=uid, label=label)
     if sys.platform == "win32":
         return current_update_host()
     return MacUpdateHost()

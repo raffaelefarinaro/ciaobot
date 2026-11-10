@@ -428,13 +428,17 @@ def parse_launchctl_last_exit_code(text: str) -> int | None:
         return None
 
 
-def load_server_plist(launch_agents_dir: Path | None = None) -> dict[str, Any] | None:
-    """The parsed ``com.ciao.server.plist``, or ``None`` when missing or unreadable.
+def load_server_plist(
+    launch_agents_dir: Path | None = None, label: str = SERVER_LABEL
+) -> dict[str, Any] | None:
+    """The parsed ``<label>.plist``, or ``None`` when missing or unreadable.
 
     The one reader of the server LaunchAgent. ``launch_agents_dir`` defaults
-    to :func:`default_launch_agents_dir`. A missing, unreadable, malformed or
-    half-written plist (``ExpatError`` is not a ``ValueError``) and one whose
-    root is not a dict all answer ``None``.
+    to :func:`default_launch_agents_dir`, and ``label`` to the engine's own
+    :data:`SERVER_LABEL`; a caller that owns an isolated install passes the
+    label its receipt names. A missing, unreadable, malformed or half-written
+    plist (``ExpatError`` is not a ``ValueError``) and one whose root is not a
+    dict all answer ``None``.
     """
     agents = (
         default_launch_agents_dir()
@@ -442,7 +446,7 @@ def load_server_plist(launch_agents_dir: Path | None = None) -> dict[str, Any] |
         else Path(launch_agents_dir).expanduser()
     )
     try:
-        with (agents / f"{SERVER_LABEL}.plist").open("rb") as handle:
+        with (agents / f"{label}.plist").open("rb") as handle:
             data: Any = plistlib.load(handle)
     except (OSError, ValueError, ExpatError):
         return None
@@ -766,8 +770,14 @@ def discover_runtime(
     *,
     launch_agents_dir: Path | None = None,
     environ: dict[str, str] | None = None,
+    label: str = SERVER_LABEL,
 ) -> DesktopRuntime:
-    """Resolve workspace, port, and runtime root using the desktop contract."""
+    """Resolve workspace, port, and runtime root using the desktop contract.
+
+    ``label`` names the LaunchAgent the runtime is read from, and defaults to
+    the engine's own :data:`SERVER_LABEL`; an isolated install resolves its own
+    service definition by passing the label its receipt names.
+    """
 
     env = os.environ if environ is None else environ
     agents = (
@@ -775,8 +785,8 @@ def discover_runtime(
         if launch_agents_dir is None
         else Path(launch_agents_dir).expanduser()
     )
-    plist_path = agents / f"{SERVER_LABEL}.plist"
-    plist: dict[str, Any] = load_server_plist(agents) or {}
+    plist_path = agents / f"{label}.plist"
+    plist: dict[str, Any] = load_server_plist(agents, label) or {}
 
     plist_env = plist.get("EnvironmentVariables")
     if not isinstance(plist_env, dict):
@@ -1213,8 +1223,13 @@ def start_service(
     runtime: DesktopRuntime | None = None,
     uid: int | None = None,
     runner: Runner = subprocess.run,
+    label: str = SERVER_LABEL,
 ) -> ServiceResult:
     """Start the engine, and say why if it could not bind its port.
+
+    ``label`` names the LaunchAgent this starts, and defaults to the engine's
+    own :data:`SERVER_LABEL`; an isolated install passes the label its receipt
+    names so it can start its own job beside the operator's.
 
     The engine records a bind failure where a reader outside it can find it
     (see :mod:`ciao.port_in_use`), because an engine that cannot bind
@@ -1222,7 +1237,7 @@ def start_service(
     earlier failure is cleared first, so what is read back belongs to this
     start and not to a run before it.
     """
-    runtime = runtime or discover_runtime()
+    runtime = runtime or discover_runtime(label=label)
     plist = Path(runtime.server_plist)
     if not plist.is_file():
         return ServiceResult(
@@ -1235,10 +1250,10 @@ def start_service(
     domain = f"gui/{resolved_uid}"
     clear_port_in_use()
     try:
-        _launchctl(["enable", f"{domain}/{SERVER_LABEL}"], runner=runner)
+        _launchctl(["enable", f"{domain}/{label}"], runner=runner)
         bootstrap = _launchctl(["bootstrap", domain, str(plist)], runner=runner)
         kickstart = _launchctl(
-            ["kickstart", "-k", f"{domain}/{SERVER_LABEL}"],
+            ["kickstart", "-k", f"{domain}/{label}"],
             runner=runner,
         )
     except OSError as exc:
@@ -1263,7 +1278,14 @@ def stop_service(
     force: bool = False,
     uid: int | None = None,
     runner: Runner = subprocess.run,
+    label: str = SERVER_LABEL,
 ) -> ServiceResult:
+    """Stop the engine job named ``label``, refused while chats are active.
+
+    ``label`` defaults to the engine's own :data:`SERVER_LABEL`; an isolated
+    install names its own job so stopping it leaves the operator's engine
+    alone.
+    """
     runtime = runtime or discover_runtime()
     refusal = restart_gate(runtime.port, "stop", force=force, details=asdict(runtime))
     if refusal is not None:
@@ -1271,7 +1293,7 @@ def stop_service(
     resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
-            ["bootout", f"gui/{resolved_uid}/{SERVER_LABEL}"],
+            ["bootout", f"gui/{resolved_uid}/{label}"],
             runner=runner,
         )
     except OSError as exc:
