@@ -58,7 +58,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body must be a JSON object: a body that is not JSON, or JSON that is not an object (a list, a string, a number, a boolean, `null`), is **400** with a static message (`{"error": "invalid JSON body"}` / `{"error": "body must be a JSON object"}`) before the chat is looked up, and the raw body is never echoed back. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below. A PATCH body may carry `code_mode: bool` (linked projects only; 400 when the project is unlinked or its repo is missing). `code_mode: false` is refused with 400 once the chat has messages (`ChatInfo.user_turn_count > 0`): code mode is one-way per chat, and only a project move turns it off afterwards |
+| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body must be a JSON object: a body that is not JSON, or JSON that is not an object (a list, a string, a number, a boolean, `null`), is **400** with a static message (`{"error": "invalid JSON body"}` / `{"error": "body must be a JSON object"}`) before the chat is looked up, and the raw body is never echoed back. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it; a path ending in `/` pins a folder); see **Chat pins** below. A PATCH body may carry `code_mode: bool` (linked projects only; 400 when the project is unlinked or its repo is missing). `code_mode: false` is refused with 400 once the chat has messages (`ChatInfo.user_turn_count > 0`): code mode is one-way per chat, and only a project move turns it off afterwards |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -88,6 +88,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-file` | Read allowed text file |
 | GET | `/api/system-prompt` | The text Ciaobot appends to every provider's system prompt (`ciao/system_prompt.md`): `{text, chars}`. Read-only; shown in Chat details → Always loaded |
 | GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
+| GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id`) the chat's agent root, vault and linked repo. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
 | GET | `/api/workspace-image` | Read allowed image file |
@@ -1742,12 +1743,12 @@ are written through the existing signed-session, origin-gated
 - **Validation**: the body must be `{"pin": {...}}` and nothing else — a pin
   cannot be combined with `title`/`model`/`provider`/`mode`/`project_id`/
   `thinking_level` (400), because the pin can conflict and a combined write
-  would leave the other fields applied. `pin.path` must be a printable string
-  with no NUL; `expected_revision` is required and must be a non-negative JSON
+  would leave the other fields applied. `pin.path` must be a string with no
+  control characters (Unicode category Cc, NUL included); `expected_revision` is required and must be a non-negative JSON
   integer (`true`/`false` are rejected even though Python would read them as
   `1`/`0`); unknown keys inside `pin` are rejected. `expected_revision` is
   compared before anything is mutated.
-- **Resolution**: a nonempty path goes through the same exact resolver as the
+- **Resolution**: a nonempty path not ending in `/` goes through the same exact resolver as the
   file viewer (`_allowed_roots` + `_resolve_workspace_path(allow_fuzzy=False)`),
   so pins have the viewer's existing permissions and no wider access, accept
   existing viewer-servable files, reject a directory (404) and a non-text type
@@ -1755,6 +1756,12 @@ are written through the existing signed-session, origin-gated
   fuzzy matching, since a pin is an identity key matched exactly against later
   dismissals and agent surfaces. An **empty path never touches the filesystem**,
   which is what lets a user close a pin whose file has since been deleted.
+  A nonempty path ending in `/` pins a **folder**, resolved like `GET /api/workspace-dir?chat_id=`
+  against the chat's agent root, workspace vault and linked repo, with symlinks resolved before
+  containment. It is stored as the canonical absolute POSIX path with exactly one trailing `/`,
+  which is how a client tells a folder pin from a file pin. A folder outside those roots is 403
+  `outside_roots`; a file is 400 `not_a_directory`; a missing folder is 404. On POSIX a trailing
+  `\` is part of a filename, so it resolves to nothing (404). Agent surfacing stays files-only.
 - **Responses**: success returns the ordinary full `ChatInfo` payload (which
   carries `pinned_file_path`, `dismissed_pin_paths`, `pin_revision`). A stale
   `expected_revision` is **409** `{"error": "pin_revision_conflict", "pin":
@@ -1872,6 +1879,10 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
 - Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. Resolution is exact and anchors relative paths to that chat's agent root. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. The workspace File access setting (`agent_fs_scope`) confines the agent and its shell, not these viewers. A failed manual or automatic pin leaves the viewer open.
+
+**Folder listing (`GET /api/workspace-dir`)**
+
+`path` and `chat_id` are both optional. An empty `path` lists the first root. A relative `path` is tried against each root in order, and the first root where it exists wins (otherwise 404). An absolute `path` is used as given. A trailing `:<digits>` is stripped and trailing slashes are normalised, so a folder literally named `foo:12` is not reachable, and on a case-insensitive filesystem an absolute path must use the on-disk case of the root. Without `chat_id` the roots are the workspace root and the vault root; with `chat_id` they are the chat's agent root, its workspace vault and the project's linked repository when set. A root that is missing or not a directory, or that sits inside an earlier root, is dropped. The 200 body is `{path, root:{name,path}, roots:[{name,path}], parent, entries, truncated}`, with absolute POSIX paths and `parent` null at the root. Each entry is `{name, path, type:"dir"|"file", size, mtime, ext}`: `mtime` is integer epoch seconds, `ext` is lowercase without a dot (`""` for directories), `size` is null for directories, and `type` follows symlinks. Names starting with `.` are hidden, and broken symlinks or entries that cannot be stat'ed are omitted. Order is directories first, then `name.casefold()`, then `name`. At most 2000 entries are returned, applied after the hidden filter and sort, and `truncated` is true when entries were cut. Errors: 400 `{"error":"bad path"}` for control or NUL characters; 400 `{"error":"not_a_directory","kind":"file","path":<abs>}` when the path is a file, inside or outside the roots; 403 `{"error":"outside_roots"}` for an existing directory outside every root; 403 `{"error":"unreadable"}` when the directory cannot be listed; 404 `{"error":"not found"}` for a missing path or no usable root; 404 `{"error":"chat not found"}` for an unknown `chat_id`. Unlike the file viewers, the listing is confined to its roots, and symlinks are resolved before the containment check.
 
 **HTML artifacts (`GET /api/workspace-html`)**
 
