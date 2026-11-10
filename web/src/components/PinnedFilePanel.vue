@@ -129,6 +129,9 @@
           @compose-comment="onArtifactCompose"
           @open-comment="onArtifactOpenComment"
           @bridge-ready="onArtifactBridgeReady"
+          @selection="artifactSelection.onSelection"
+          @selection-cleared="artifactSelection.clear"
+          @type-comment="onArtifactTypeComment"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -303,11 +306,11 @@
 
       <!-- Floating "Comment" button anchored near the active selection. -->
       <button
-        v-if="selectionAnchor"
+        v-if="commentTrigger"
         class="pfp-comment-trigger"
-        :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
+        :style="{ top: commentTrigger.top + 'px', left: commentTrigger.left + 'px' }"
         @mousedown.prevent
-        @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
+        @click="onCommentTriggerClick"
         type="button"
         :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
       >
@@ -338,6 +341,7 @@ import { imageLoadErrorMessage } from '../lib/fileLoadError'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useArtifactSelection } from '../composables/useArtifactSelection'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
@@ -1031,6 +1035,9 @@ function onArtifactCompose(a: {
   frameY: number
 }): void {
   if (commentDraft.value || editingCommentId.value) return
+  // Whatever selection the frame reported is spent: an Alt+Click compose
+  // supersedes it, and the selection path took it already.
+  artifactSelection.clear()
   closeCommentPopover()
   // Anchor the compose popover in viewport coordinates: CommentComposePopover
   // teleports to body as position: fixed and clamps itself. The bridge
@@ -1139,6 +1146,62 @@ useTypeToComment({
   },
   addImages: (files: File[]) => addDraftImages(files),
 })
+
+// ── Artifact selection → the same Comment button ─────────────────────
+// The frame reports its selections (it cannot render the page's button, and
+// a pill of its own looked and behaved differently from the Markdown one), so
+// the button below is the Markdown trigger, placed from the reported box.
+const artifactSelection = useArtifactSelection({
+  containerEl: mainEl,
+  frameEl: () => artifactViewerRef.value?.frameEl,
+})
+
+// One floating button for both: a Markdown/text/CSV selection, else an
+// artifact selection. Hidden while a draft is open, as the Markdown one is.
+const commentTrigger = computed(() =>
+  selectionAnchor.value
+    ?? (commentDraft.value || editingCommentId.value ? null : artifactSelection.trigger.value),
+)
+
+function onCommentTriggerClick(): void {
+  if (selectionAnchor.value) {
+    if (isCsv.value) openCommentForCsvCell()
+    else openCommentForSelection()
+    return
+  }
+  openArtifactCommentForSelection()
+}
+
+// The artifact counterpart of openCommentForSelection: compose on the
+// reported selection, seeded with what was typed or pasted, at the button's
+// spot. The frame then drops its native selection so the draft highlight
+// shows.
+function openArtifactCommentForSelection(initialText = '', files: File[] = []): void {
+  if (commentDraft.value || editingCommentId.value) return
+  const taken = artifactSelection.take()
+  if (!taken) return
+  const s = taken.selection
+  onArtifactCompose({
+    selector: s.selector,
+    quote: s.quote,
+    startOffset: s.startOffset,
+    endOffset: s.endOffset,
+    elementTag: s.elementTag,
+    frameX: s.rect.left,
+    frameY: s.rect.bottom,
+  })
+  if (!commentDraft.value) return
+  if (taken.trigger) draftAnchor.value = comments.toViewportAnchor(taken.trigger)
+  composeText.value = initialText
+  artifactViewerRef.value?.clearSelection()
+  if (files.length) void addDraftImages(files)
+}
+
+// Type-to-comment from inside the frame: the bridge forwards the keystroke or
+// paste, since the page-level listener above never hears keys typed there.
+function onArtifactTypeComment(p: { text: string; files: File[] }): void {
+  openArtifactCommentForSelection(p.text, p.files)
+}
 
 // Anything the user has half-written in the panel: a text edit, a new comment,
 // or an edit of an existing one. Auto-reloads hold off while it is true, so a

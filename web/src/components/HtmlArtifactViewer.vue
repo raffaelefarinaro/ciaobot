@@ -16,20 +16,29 @@
 //      or this page. With it, model-authored script would run with the user's
 //      full session.
 //
-// Comments: the bridge script inside the frame watches text selections (and
-// Alt+Click for whole elements) and posts anchors over postMessage — the only
-// channel an opaque-origin frame has. This component turns those into the
-// same pending file comments the markdown viewer produces, so they stage as
-// chips above the composer and ride along on the next message. It also
-// re-sends durable highlights into the frame so past comments show as marks.
+// Comments: the bridge script inside the frame reports text selections (and
+// Alt+Click for whole elements) over postMessage — the only channel an
+// opaque-origin frame has. The frame is a thin agent; the parents own the
+// Comment button (the same one a Markdown selection gets, placed from the
+// reported selection box), the composer and type-to-comment, so the
+// artifact behaves like any other file. Keys typed into the frame never reach
+// the page, so the bridge forwards them as `type` messages. Committed comments
+// become the same pending file comments the markdown viewer produces, and this
+// component re-sends durable highlights into the frame so they show.
 // Frame messages are untrusted (artifact script could forge them); the worst
 // case is a note in the user's own composer, which they review before send.
 //
 // Source is a separate, lazy fetch owned by the parent: an artifact that is
 // too large to read as text still renders fine, so a source failure must not
 // replace the frame with an error string.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { isArtifactCommentEvent, type ArtifactHighlight } from '../lib/artifactBridge'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  imageFilesOf,
+  isArtifactCommentEvent,
+  parseArtifactRect,
+  type ArtifactHighlight,
+  type ArtifactSelection,
+} from '../lib/artifactBridge'
 
 const props = defineProps<{
   filePath: string
@@ -42,7 +51,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:view', view: 'preview' | 'code'): void
-  // Selection/element comment captured in the frame: the parent panel opens
+  // Alt+Click element comment captured in the frame: the parent panel opens
   // its compose popover at (x, y) and saves through the shared comment path.
   (e: 'compose-comment', anchor: {
     selector: string
@@ -54,7 +63,15 @@ const emit = defineEmits<{
     frameX: number
     frameY: number
   }): void
-  // Click on an existing highlight mark inside the frame.
+  // A text selection in the frame (new, or moved by a scroll): the parent
+  // floats its Comment button at `rect`, in frame-viewport coordinates.
+  (e: 'selection', selection: ArtifactSelection): void
+  // The reported selection collapsed, or the frame's document went away.
+  (e: 'selection-cleared'): void
+  // A printable key or paste inside the frame while a selection is reported:
+  // open the composer on that selection, seeded with `text`.
+  (e: 'type-comment', payload: { text: string; files: File[] }): void
+  // Click on an existing highlight inside the frame.
   (e: 'open-comment', payload: { id: string; frameX: number; frameY: number }): void
   // The bridge in a freshly loaded frame has parsed the DOM and installed its
   // message listener. Parents MUST push their highlights from here: a push
@@ -82,24 +99,45 @@ function isFrameSource(e: MessageEvent): boolean {
 function onMessage(e: MessageEvent): void {
   if (!isFrameSource(e)) return
   if (!isArtifactCommentEvent(e.data)) return
-  if (e.data.action === 'ready') {
-    // Unlock compose for this document before telling the parent, so the pill
-    // works even if the parent has no highlights to push.
+  const data = e.data
+  if (data.action === 'ready') {
+    // Unlock compose for this document before telling the parent, so the
+    // Comment button works even if the parent has no highlights to push.
     enableComments()
+    emit('selection-cleared')
     emit('bridge-ready')
-  } else if (e.data.action === 'compose') {
-    emit('compose-comment', {
-      selector: e.data.selector,
-      quote: e.data.quote,
-      startOffset: e.data.startOffset,
-      endOffset: e.data.endOffset,
-      elementTag: e.data.elementTag,
-      wholeElement: e.data.wholeElement,
-      frameX: e.data.x,
-      frameY: e.data.y,
+  } else if (data.action === 'selection') {
+    const rect = parseArtifactRect(data.rect)
+    if (!rect || typeof data.selector !== 'string' || typeof data.quote !== 'string') return
+    if (typeof data.startOffset !== 'number' || typeof data.endOffset !== 'number') return
+    emit('selection', {
+      selector: data.selector,
+      quote: data.quote,
+      startOffset: data.startOffset,
+      endOffset: data.endOffset,
+      elementTag: typeof data.elementTag === 'string' ? data.elementTag : undefined,
+      rect,
     })
-  } else if (e.data.action === 'open') {
-    emit('open-comment', { id: e.data.id, frameX: e.data.x, frameY: e.data.y })
+  } else if (data.action === 'selection-cleared') {
+    emit('selection-cleared')
+  } else if (data.action === 'type') {
+    const files = imageFilesOf(data.files)
+    const text = typeof data.text === 'string' ? data.text : ''
+    if (!text && !files.length) return
+    emit('type-comment', { text, files })
+  } else if (data.action === 'compose') {
+    emit('compose-comment', {
+      selector: data.selector,
+      quote: data.quote,
+      startOffset: data.startOffset,
+      endOffset: data.endOffset,
+      elementTag: data.elementTag,
+      wholeElement: data.wholeElement,
+      frameX: data.x,
+      frameY: data.y,
+    })
+  } else if (data.action === 'open') {
+    emit('open-comment', { id: data.id, frameX: data.x, frameY: data.y })
   }
 }
 
@@ -115,9 +153,9 @@ function sendHighlights(highlights: ArtifactHighlight[]): void {
   postToFrame({ type: 'ciao:apply-comments', comments: highlights })
 }
 
-// The bridge keeps its Comment pill and Alt+Click inert until a parent proves
-// it is listening, so that an artifact served to something that cannot receive
-// the anchors does not float a pill that does nothing.
+// The bridge keeps selection reports, typing and Alt+Click inert until a
+// parent proves it is listening, so that an artifact served to something that
+// cannot receive them does not swallow keystrokes for nothing.
 //
 // `ciao:apply-comments` also flips that flag, but relying on it would tie
 // compose to the highlight push, which the parents skip outside Preview and
@@ -127,10 +165,27 @@ function enableComments(): void {
   postToFrame({ type: 'ciao:comments-enable' })
 }
 
-onMounted(() => window.addEventListener('message', onMessage))
-onBeforeUnmount(() => window.removeEventListener('message', onMessage))
+// Drop the frame's native selection once the parent has opened its composer
+// on it, so the draft highlight shows and the frame stops reporting it.
+function clearSelection(): void {
+  postToFrame({ type: 'ciao:clear-selection' })
+}
 
-defineExpose({ sendHighlights, enableComments, frameEl })
+// A reported selection belongs to the document that reported it. Code view
+// unmounts the frame and a reload replaces the document, and neither sends a
+// `selection-cleared`, so say it here or the parent's button would linger.
+watch(
+  () => [props.view, props.reloadToken, props.filePath],
+  () => emit('selection-cleared'),
+)
+
+onMounted(() => window.addEventListener('message', onMessage))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onMessage)
+  emit('selection-cleared')
+})
+
+defineExpose({ sendHighlights, enableComments, clearSelection, frameEl })
 </script>
 
 <template>

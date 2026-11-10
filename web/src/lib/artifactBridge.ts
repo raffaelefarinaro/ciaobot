@@ -19,11 +19,29 @@ export interface ArtifactCommentAnchor {
   wholeElement?: boolean
 }
 
+/** A box in the artifact frame's own viewport coordinates. */
+export interface ArtifactRect {
+  top: number
+  left: number
+  bottom: number
+  right: number
+}
+
+/** A live text selection in the frame, as the bridge reports it. `rect` is the
+ *  box of the selection's end, where the page floats its Comment button. */
+export interface ArtifactSelection extends ArtifactCommentAnchor {
+  rect: ArtifactRect
+}
+
+type FromFrame = { frame: 'ciao-artifact'; type: 'ciao:artifact-comment' }
+
+// The frame is a thin agent (the model is Ghostwriter's frame.js): it reports
+// selections, keystrokes and clicks, and paints highlights. The page owns the
+// Comment button, the composer and the keyboard.
 export type ArtifactCommentEvent =
-  | { frame: 'ciao-artifact'; type: 'ciao:artifact-comment'; action: 'ready' }
-  | {
-      frame: 'ciao-artifact'
-      type: 'ciao:artifact-comment'
+  | (FromFrame & { action: 'ready' })
+  // Alt+Click on an element: compose on the element straight away.
+  | (FromFrame & {
       action: 'compose'
       selector: string
       quote: string
@@ -33,20 +51,46 @@ export type ArtifactCommentEvent =
       wholeElement?: boolean
       x: number
       y: number
-    }
-  | {
-      frame: 'ciao-artifact'
-      type: 'ciao:artifact-comment'
-      action: 'open'
-      id: string
-      x: number
-      y: number
-    }
+    })
+  // A new non-empty selection, or the same one re-sent after a scroll.
+  | (FromFrame & {
+      action: 'selection'
+      selector: string
+      quote: string
+      startOffset: number
+      endOffset: number
+      elementTag?: string
+      rect: ArtifactRect
+    })
+  | (FromFrame & { action: 'selection-cleared' })
+  // A printable key or a paste inside the frame while a selection is reported.
+  // The page's type-to-comment listener cannot hear keys typed into the frame.
+  | (FromFrame & { action: 'type'; text: string; files?: File[] })
+  | (FromFrame & { action: 'open'; id: string; x: number; y: number })
 
 export function isArtifactCommentEvent(data: unknown): data is ArtifactCommentEvent {
   if (!data || typeof data !== 'object') return false
   const d = data as Record<string, unknown>
   return d.frame === 'ciao-artifact' && d.type === 'ciao:artifact-comment'
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+/** The rect of a `selection` message, or null when it is malformed (frame
+ *  messages are untrusted). */
+export function parseArtifactRect(raw: unknown): ArtifactRect | null {
+  if (!raw || typeof raw !== 'object') return null
+  const { top, left, bottom, right } = raw as Record<string, unknown>
+  if (!isFiniteNumber(top) || !isFiniteNumber(left) || !isFiniteNumber(bottom) || !isFiniteNumber(right)) return null
+  return { top, left, bottom, right }
+}
+
+/** Image files forwarded with a `type` message; anything else is dropped. */
+export function imageFilesOf(raw: unknown): File[] {
+  if (!Array.isArray(raw) || typeof File === 'undefined') return []
+  return raw.filter((f): f is File => f instanceof File && f.type.startsWith('image/'))
 }
 
 /** Durable comment shape the bridge needs to re-highlight after a reload. */

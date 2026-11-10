@@ -304,6 +304,91 @@ describe('PinnedFilePanel', () => {
     wrapper.unmount()
   })
 
+  // A selection inside the frame gets the same floating Comment button as a
+  // Markdown selection (the bridge used to draw its own pill), and typing with
+  // it opens the composer (keys typed into the frame never reach the page's
+  // type-to-comment listener, so the bridge forwards them).
+  const FRAME_SELECTION = {
+    selector: 'body > table:nth-of-type(1) > thead:nth-of-type(1) > tr:nth-of-type(1)',
+    quote: 'Name Owner Status',
+    startOffset: 9,
+    endOffset: 60,
+    elementTag: 'tr',
+    rect: { top: 20, left: 30, bottom: 40, right: 120 },
+  }
+
+  function placeFrame(viewer: { get: (s: string) => { element: Element } }): void {
+    const frameBox = { top: 100, left: 50, bottom: 700, right: 650, width: 600, height: 600, x: 50, y: 100, toJSON: () => ({}) }
+    viewer.get('iframe').element.getBoundingClientRect = () => frameBox as DOMRect
+  }
+
+  it('shows the Markdown Comment button for a selection in the artifact frame', async () => {
+    const { wrapper, viewer, postMessage } = await mountArtifactPanel()
+    placeFrame(viewer)
+    viewer.vm.$emit('bridge-ready')
+    expect(wrapper.find('.pfp-comment-trigger').exists()).toBe(false)
+
+    viewer.vm.$emit('selection', FRAME_SELECTION)
+    await nextTick()
+    const trigger = wrapper.get('.pfp-comment-trigger')
+    expect(trigger.attributes('title')).toBe('Comment on this selection')
+    expect(trigger.text()).toBe('Comment')
+
+    await trigger.trigger('click')
+    await nextTick()
+    await nextTick()
+
+    expect(wrapper.find('.pfp-comment-trigger').exists()).toBe(false)
+    expect(document.querySelector('.compose textarea')).not.toBeNull()
+    // The draft is highlighted in the frame and the native selection dropped.
+    expect(lastPush(postMessage)).toEqual([expect.objectContaining({ selector: FRAME_SELECTION.selector, quote: 'Name Owner Status' })])
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
+
+    viewer.vm.$emit('selection-cleared')
+    await nextTick()
+    ;(document.querySelector('.compose .compose-btn:not(.primary)') as HTMLButtonElement).click()
+    await nextTick()
+    wrapper.unmount()
+  })
+
+  it('opens the composer seeded with a key typed in the frame over a selection', async () => {
+    const { wrapper, viewer } = await mountArtifactPanel()
+    placeFrame(viewer)
+    viewer.vm.$emit('bridge-ready')
+
+    // No selection reported: a forwarded key does nothing.
+    viewer.vm.$emit('type-comment', { text: 'x', files: [] })
+    await nextTick()
+    expect(document.querySelector('.compose textarea')).toBeNull()
+
+    viewer.vm.$emit('selection', FRAME_SELECTION)
+    await nextTick()
+    viewer.vm.$emit('type-comment', { text: 'R', files: [] })
+    await nextTick()
+    await nextTick()
+    await flushPromises()
+
+    const textarea = document.querySelector('.compose textarea') as HTMLTextAreaElement
+    expect(textarea).not.toBeNull()
+    expect(textarea.value).toBe('R')
+    expect(document.activeElement).toBe(textarea)
+
+    textarea.value = 'Rename this column'
+    textarea.dispatchEvent(new Event('input'))
+    ;(document.querySelector('.compose .compose-btn.primary') as HTMLButtonElement).click()
+    await nextTick()
+    expect(useProjectStore().pendingComments).toEqual([
+      expect.objectContaining({
+        selection: 'Name Owner Status',
+        comment: 'Rename this column',
+        artifactSelector: FRAME_SELECTION.selector,
+        artifactStartOffset: 9,
+        artifactEndOffset: 60,
+      }),
+    ])
+    wrapper.unmount()
+  })
+
   it('shows document properties without repeating the heading or vault paths', async () => {
     const content = [
       '---',
