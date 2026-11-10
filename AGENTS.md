@@ -75,8 +75,11 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
      must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
      `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` run these on Linux (`linux-server` for the backend,
-  `linux-web` for vitest and the build, in parallel). On Windows a develop PR
+  PRs into `develop` run the Linux backend and frontend gates in parallel
+  (`linux-server` and `linux-web`). A develop PR whose diff changes `web/`
+  also runs the conditional `linux-e2e` Chromium check after `linux-web`.
+  `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
+  terminal harness before Playwright. On Windows a develop PR
   runs only the fast gates: every module importing and `python -m mypy ciao`
   (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
   outside a platform branch fails it). The Windows `pytest` and `npm test`
@@ -97,8 +100,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   budget a loaded machine can miss.
 - Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
   failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
-  that attempt's jobs, so the required `linux-server`, `linux-web` and
-  `windows` checks go missing and the PR shows BLOCKED while everything is green.
+  that attempt's jobs, so required checks such as `linux-server`, `linux-web`,
+  conditional `linux-e2e` and `windows` go missing and the PR shows BLOCKED
+  while everything is green.
 - Assert a guard where it acts, not only in the finished output. When a change
   bounds, redacts, filters or fences untrusted text, the test should observe the
   value at that seam (what is handed to the fence, filter or builder), and an
@@ -198,9 +202,10 @@ this file; the gates are the ones under Verification.
   tests/` (re-run only `--lf` before calling it red; latency tests flake under
   load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
   in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
-  also runs `npm run test:e2e` after the build: the Playwright suite runs in CI
-  only on the macOS job after merge, so a renamed button a spec still looks for
-  reaches `develop` red (#2279). The terminal-renderer specs need
+  also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
+  harness before the browser suite. Develop PRs changing `web/` run the
+  conditional Linux Chromium gate before merge, while the macOS job retains
+  browser coverage on develop pushes and PRs into `main`. The terminal-renderer specs need
   `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
   `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
