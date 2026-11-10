@@ -349,19 +349,25 @@ async def _merge_would_overwrite(workspace: Path, ref: str) -> list[str]:
     """Local files git does not track that merging ``ref`` would replace.
 
     Git refuses a merge over an untracked file that is not ignored, but it
-    overwrites an *ignored* one without asking, so a path origin adds that
-    already sits on disk with other bytes is lost silently (the incident this
-    guards against: a stale ``.runtime`` store committed upstream replaced the
-    live copy). Only paths ``ref`` adds, and whose local bytes differ from
-    ``ref``'s, are returned; an unreadable side counts as different.
+    overwrites an *ignored* one without asking, so a path origin adds or
+    modifies that already sits on disk untracked with other bytes is lost
+    silently (the incident this guards against: a stale ``.runtime`` store
+    committed upstream replaced the live copy). Only paths ``ref`` adds or
+    modifies, that HEAD does not track, and whose local bytes differ from
+    ``ref``'s, are returned; an unreadable side counts as different. A path HEAD
+    tracks is left to git's own conflict handling: it is a real merge conflict,
+    not a silent overwrite, and it stays a conflict the chat can resolve.
     """
     rc, out, _err = await run_git(
-        workspace, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", f"HEAD...{ref}"
+        workspace, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM", f"HEAD...{ref}"
     )
     if rc != 0:
         return []
     risky: list[str] = []
     for rel in sorted(p for p in out.split("\0") if p):
+        rc_h, _, _ = await _git(workspace, "cat-file", "-e", f"HEAD:{rel}")
+        if rc_h == 0:
+            continue
         if not os.path.lexists(Path(workspace) / rel):
             continue
         rc_l, local_sha, _ = await _git(workspace, "hash-object", "--", rel)
