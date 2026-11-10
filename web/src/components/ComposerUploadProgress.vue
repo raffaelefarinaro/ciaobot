@@ -29,7 +29,8 @@ function phaseLabel(u: ComposerUpload): string {
 </script>
 
 <style scoped>
-.composer-uploads { display: flex; flex-direction: column; gap: 6px; padding: 6px 4px 2px; }
+/* Same 12px inset as the chips and the textarea text below. */
+.composer-uploads { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2) 12px 0; }
 .composer-upload-row { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); color: var(--fg2); }
 .composer-upload-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-upload-pct { flex: none; font-variant-numeric: tabular-nums; }

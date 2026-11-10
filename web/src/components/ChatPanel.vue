@@ -1098,10 +1098,15 @@
             v-if="view.pendingImages.length || view.pendingFiles.length || view.pendingChatComments.length || view.pendingComments.length"
             class="pending-attachments"
           >
-            <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="image-preview">
-              <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
-              <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
-              <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
+            <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="comment-chip image-preview">
+              <img :src="`/api/images/${ref}`" alt="" class="image-preview-thumb" />
+              <button
+                type="button"
+                class="comment-chip-body image-ref-chip"
+                @click.stop.prevent="insertImageRef(i + 1)"
+                :title="`Insert [Image ${i + 1}] at the cursor`"
+              ><span class="comment-chip-note">Image {{ i + 1 }}</span></button>
+              <button type="button" class="comment-chip-remove image-preview-remove" :aria-label="`Remove image ${i + 1}`" title="Remove" @click="removePendingImage(i)">&times;</button>
             </span>
             <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip" :title="f.name">
               <AppIcon class="comment-chip-icon" name="doc" :size="14" />
@@ -6692,56 +6697,17 @@ details[open] > .activity-summary::before {
   overflow-y: auto;
 }
 
-.image-preview {
-  position: relative;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
+/* An image is a chip like the others: a small thumbnail where the icon goes,
+   its "Image N" reference (click inserts it at the cursor), then remove. */
+.image-preview { padding-left: 3px; }
 .image-preview-thumb {
-  height: 56px;
-  width: 56px;
+  flex: none;
+  width: 24px;
+  height: 24px;
   object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  border-radius: 5px;
   background: var(--bg);
 }
-
-.image-preview-remove {
-  position: absolute;
-  top: -12px;
-  right: -12px;
-  box-sizing: content-box;
-  width: 18px;
-  height: 18px;
-  padding: 13px;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: 14px;
-  line-height: 16px;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-
-.image-ref-chip {
-  min-height: var(--touch);
-  padding: 2px 6px;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--fg2);
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-  line-height: 1;
-}
-.image-ref-chip:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.image-ref-chip:active { background: var(--accent2); }
 
 .comment-chip {
   display: inline-flex;
@@ -6749,7 +6715,8 @@ details[open] > .activity-summary::before {
   gap: var(--space-2);
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
+  /* Half the row less half the gap: at least two chips always share a row. */
+  max-width: calc(50% - var(--space-2) / 2);
   min-height: 32px;
   padding: 0 var(--space-1) 0 var(--space-2);
   border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--border));
@@ -6783,8 +6750,9 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-body > * { min-width: 0; }
 .comment-chip-file {
-  flex: 0 1 auto;
-  max-width: 180px;
+  /* Yields width before the note: the note is what the user wrote. */
+  flex: 0 4 auto;
+  max-width: 60%;
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -6792,8 +6760,9 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-line { color: var(--fg2); font-weight: 400; }
 .comment-chip-quote {
-  flex: 0 1 auto;
-  max-width: 180px;
+  /* Yields width before the note: the note is what the user wrote. */
+  flex: 0 4 auto;
+  max-width: 60%;
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -6801,13 +6770,14 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-note {
   flex: 0 1 auto;
-  max-width: 160px;
+  /* A short note stays whole; the quote gives way first. */
+  min-width: min(6ch, 100%);
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-chip-name { flex: 0 1 auto; min-width: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.file-chip-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .comment-chip-remove {
   position: relative;
   flex-shrink: 0;
@@ -6823,6 +6793,8 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .comment-chip-remove:hover { background: var(--bg3); color: var(--fg); }
+.image-ref-chip:hover .comment-chip-note { color: var(--accent2); }
+.comment-chip-body:focus-visible, .comment-chip-remove:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; border-radius: 4px; }
 @media (pointer: coarse) {
   .comment-chip-remove::after { content: ''; position: absolute; inset: -10px; }
   .comment-chip { min-height: var(--touch); }
