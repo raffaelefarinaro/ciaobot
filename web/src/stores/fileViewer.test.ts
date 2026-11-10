@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
+import { flushPromises } from '@vue/test-utils'
 import { fileViewerKindForPath, useFileViewerStore } from './fileViewer'
 import { useProjectStore } from './projects'
 import { api } from '../lib/api'
@@ -579,5 +580,107 @@ describe('served images', () => {
     store.openImageUrl('/api/images/upload-sample.png', 'upload-sample.png')
     await store.openImage('photo.png')
     expect(store.imageUrl).toBe('')
+  })
+})
+
+describe('folder browser', () => {
+  test('openFolder shows a folder without fetching', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    expect(await store.openFolder('/ws/exports', 'chat-1')).toBe(true)
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('folder')
+    expect(store.path).toBe('/ws/exports')
+    expect(store.chatId).toBe('chat-1')
+    expect(store.loading).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('openFolder asks before discarding unsaved edits', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('x')))
+    const askConfirmModule = await import('../lib/confirm')
+    const spy = vi.spyOn(askConfirmModule, 'askConfirm').mockImplementation((async () => false) as never)
+    try {
+      const store = useFileViewerStore()
+      await store.open('/ws/a.txt')
+      store.editing = true
+      store.editBuffer = 'changed'
+      expect(await store.openFolder('/ws')).toBe(false)
+      expect(store.kind).toBe('text')
+      expect(store.editBuffer).toBe('changed')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('setFolderPath follows the browser only while a folder is shown', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
+    const store = useFileViewerStore()
+    await store.open('/ws/a.txt')
+    store.setFolderPath('/x')
+    expect(store.path).toBe('/ws/a.txt')
+    await store.openFolder('/ws')
+    store.setFolderPath('/ws/sub')
+    expect(store.path).toBe('/ws/sub')
+  })
+
+  test('Back from a file opened in the browser returns to the folder', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plain text')))
+    const store = useFileViewerStore()
+    await store.openFolder('/ws/notes', 'chat-1')
+    await store.openFromFolder('/ws/notes/a.txt', 'chat-1')
+    expect(store.kind).toBe('text')
+    expect(store.returnFolder).toBe('/ws/notes')
+
+    expect(await store.backOrClose()).toBe(false)
+    expect(store.kind).toBe('folder')
+    expect(store.path).toBe('/ws/notes')
+
+    expect(await store.backOrClose()).toBe(true)
+    expect(store.isOpen).toBe(false)
+    expect(store.returnFolder).toBe('')
+  })
+
+  test('Back while the file is still loading returns to the folder', async () => {
+    let finish: (r: Response) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { finish = resolve })))
+    const store = useFileViewerStore()
+    await store.openFolder('/ws/notes', 'chat-1')
+    const loading = store.openFromFolder('/ws/notes/a.txt', 'chat-1')
+    await flushPromises()
+    expect(store.returnFolder).toBe('/ws/notes')
+
+    expect(await store.backOrClose()).toBe(false)
+    expect(store.kind).toBe('folder')
+    finish(new Response('late text'))
+    await loading
+    expect(store.kind).toBe('folder')
+    expect(store.content).toBe('')
+  })
+
+  test('a link followed inside the file keeps the way back', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plain text')))
+    const store = useFileViewerStore()
+    await store.openFolder('/ws/notes', 'chat-1')
+    await store.openFromFolder('/ws/notes/a.txt', 'chat-1')
+    await store.open('/ws/notes/b.txt', null, 'chat-1')
+    expect(store.returnFolder).toBe('/ws/notes')
+  })
+
+  test('closing forgets the folder', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plain text')))
+    const store = useFileViewerStore()
+    await store.openFolder('/ws/notes', 'chat-1')
+    await store.openFromFolder('/ws/notes/a.txt', 'chat-1')
+    await store.close()
+    expect(store.returnFolder).toBe('')
+  })
+
+  test('a picture chosen in the browser opens as an image', async () => {
+    const store = useFileViewerStore()
+    await store.openFolder('/ws')
+    await store.openFromFolder('/ws/p.png')
+    expect(store.kind).toBe('image')
   })
 })

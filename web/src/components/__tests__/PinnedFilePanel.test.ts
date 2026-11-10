@@ -460,7 +460,23 @@ describe('PinnedFilePanel', () => {
     await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
     await flushPromises()
     const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
-    expect(items).toEqual(['Refresh', 'Copy path', 'Download', 'Open in default app', 'Open in memory map'])
+    expect(items).toEqual(['Refresh', 'Copy path', 'Show in folder', 'Download', 'Open in default app', 'Open in memory map'])
+    wrapper.unmount()
+  })
+
+  it('Show in folder opens the pinned file\'s folder in the viewer', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true })
+    const openFolder = vi.spyOn(useFileViewerStore(), 'openFolder').mockResolvedValue(true)
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const item = Array.from(document.querySelectorAll<HTMLElement>('.pfp-actions-menu button'))
+      .find(b => b.textContent?.trim() === 'Show in folder')!
+    item.click()
+    await flushPromises()
+
+    expect(openFolder).toHaveBeenCalledWith('/vault', 'chat-1')
     wrapper.unmount()
   })
 

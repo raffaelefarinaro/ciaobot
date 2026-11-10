@@ -12,6 +12,19 @@ import { OVERLAY_STATE_KEY } from '../../composables/useOverlayBackEntry'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 
+vi.mock('../FolderBrowser.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    __esModule: true,
+    default: defineComponent({
+      name: 'FolderBrowserStub',
+      props: ['initialPath', 'chatId'],
+      emits: ['navigate', 'open-file'],
+      setup: () => () => h('div', { class: 'folder-browser-stub' }),
+    }),
+  }
+})
+
 let wrapper: ReturnType<typeof mount> | null = null
 let router: Router
 let opener: HTMLButtonElement
@@ -134,6 +147,25 @@ describe('FileViewerModal and the Back button', () => {
     await back()
     expect(store.isOpen).toBe(false)
     expect(unpin).not.toHaveBeenCalled()
+  })
+
+  it('Back from a file opened in the folder browser returns to the folder', async () => {
+    const store = await openViewer()
+    store.path = '/ws/notes/today.md'
+    store.returnFolder = '/ws/notes'
+    const id = marker()
+    await back()
+    if (marker() === null) {
+      await nextPopstate()
+      await settle()
+    }
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('folder')
+    expect(store.path).toBe('/ws/notes')
+    expect(marker()).toBe(id)
+
+    await back()
+    expect(store.isOpen).toBe(false)
   })
 
   it('x removes the entry it added', async () => {
