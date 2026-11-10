@@ -307,6 +307,23 @@ describe('findFinalAnswerIndex', () => {
       { kind: 'trace', steps: [buffer[1], buffer[2]] },
     ])
   })
+
+  it('keeps an earlier completed answer when stamped planning narration is followed by bookkeeping', () => {
+    // Planning/action language ("Now let me…") is ongoing narration even
+    // without a trailing colon, so it stays in Activity after an earlier
+    // explicit completion rather than closing the turn.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Now let me typecheck and run the tests.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
 })
 
 describe('findFinalAnswerIndex with a reasoning tail', () => {

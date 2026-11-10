@@ -257,12 +257,19 @@ export function isProgressCommentary(content: string): boolean {
   return false
 }
 
-/** Clear ongoing narration: the first nonblank line ends with a colon
- *  ("Now run tests:"). The same shape `isProgressCommentary` treats as
- *  progress, so it can never be a delivered answer. */
-function endsWithNarrationColon(content: string): boolean {
+/** First lines that open with planning/action language, so the row is still
+ *  working even when the sentence ends with a period ("Now let me typecheck
+ *  and run the tests."). "Good — updated both files." is deliberately absent:
+ *  it reports completed work and may close the turn. */
+const ONGOING_NARRATION_RE = /^(now\b|let me\b|i['']ll\b|i will\b|looking\b|checking\b|searching\b|reading\b|next\b|updating\b|fixing\b|adding\b|writing\b|running\b|making\b|i['']m going\b|i am going\b|digging\b|inspecting\b|opening\b|creating\b|wiring\b|got it\b)/i
+
+/** Clear ongoing narration: a first nonblank line that opens with
+ *  planning/action language or ends with a colon. Such a row stays in
+ *  Activity; it can never be the delivered closing reply, even after an
+ *  earlier explicit completion. */
+function isOngoingNarration(content: string): boolean {
   const line = content.split('\n').map(part => part.trim()).find(Boolean) ?? ''
-  return /:\s*$/.test(line)
+  return /:\s*$/.test(line) || ONGOING_NARRATION_RE.test(line)
 }
 
 /** Index of the turn's user-facing final reply. Prefers the last non-progress
@@ -284,8 +291,9 @@ export function findFinalAnswerIndex(
     // narration, or an earlier explicit completion already answered the turn.
     // The hidden-continuation exception: an earlier `final_answer` row means
     // this stamped row closes the turn even when it opens like narration and
-    // tools run after it — but a colon-ending first line is clear ongoing
-    // narration, not a closing sentence, so it stays in Activity.
+    // tools run after it — but planning/action language or a colon-ending
+    // first line is clear ongoing narration, not a closing sentence, so it
+    // stays in Activity.
     if (
       fallback < 0
       && m.timestamp
@@ -293,7 +301,7 @@ export function findFinalAnswerIndex(
         !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
         || !isProgressCommentary(m.content || '')
         || (
-          !endsWithNarrationColon(m.content || '')
+          !isOngoingNarration(m.content || '')
           && buffer.slice(0, k).some(
             r => r.role === 'assistant' && !r.tool_name && r.phase === 'final_answer'
           )
