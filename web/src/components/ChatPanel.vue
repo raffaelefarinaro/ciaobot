@@ -2291,10 +2291,17 @@ const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
+  let lastWidth = -1
   panelObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width ?? 0
     isWidePane.value = width > 940
     if (isWidePane.value) inspectorOpen.value = false
+    // The prompt's height is sized to its wrapped text; a new width (rotation,
+    // a pinned pane) rewraps it, so re-fit or it keeps the old line count.
+    if (width !== lastWidth) {
+      lastWidth = width
+      void nextTick(autoResize)
+    }
   })
   panelObserver.observe(panelEl.value)
 })
