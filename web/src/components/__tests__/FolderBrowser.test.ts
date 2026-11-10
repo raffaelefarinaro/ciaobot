@@ -155,4 +155,19 @@ describe('FolderBrowser', () => {
     expect(localStorage.getItem(KEY)).toBeNull()
     expect(wrapper.emitted('navigate')).toBeUndefined()
   })
+
+  it('a file dropped on the browser is cancelled and never reaches VueFinder', async () => {
+    const wrapper = open()
+    await flushPromises()
+    const stubRoot = wrapper.find('.vf-stub').element
+    const reachedStub = vi.fn()
+    stubRoot.addEventListener('drop', reachedStub)
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: { types: ['Files'], files: [new File(['x'], 'a.txt')] } })
+    wrapper.find('.folder-browser').element.dispatchEvent(drop)
+
+    expect(drop.defaultPrevented).toBe(true)
+    expect(reachedStub).not.toHaveBeenCalled()
+  })
 })

@@ -79,7 +79,7 @@ function onPathChange(vfPath: string): void {
 </script>
 
 <template>
-  <div class="folder-browser">
+  <div class="folder-browser" @dragenter.capture.prevent.stop @dragover.capture.prevent.stop @drop.capture.prevent.stop>
     <p v-if="error" class="fbr-error" role="alert">{{ error }}</p>
     <template v-else-if="driver">
       <p v-if="truncated" class="fbr-note" role="status">Showing the first {{ shownCount }} items.</p>
