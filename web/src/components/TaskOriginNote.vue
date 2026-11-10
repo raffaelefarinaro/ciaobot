@@ -3,9 +3,10 @@
  * Where a chat's tasks come from: the board task it works on, and the board
  * tasks it is linked to.
  *
- * A small Task label with the agent's state as a status pill, then the task
- * title as one link to its editor on the board. When the agent reported done
- * and the result waits for review, one neutral **Approve Done** — the same
+ * Rows of Chat details' Origin section: the task title as one row linking to
+ * its editor on the board, the agent's state in its detail line. When the
+ * agent reported done and the result waits for review, **Approve Done**, the
+ * panel's one filled primary action, under that row — the same
  * completion the board's card makes (`POST /api/tasks/{id}/complete` at the
  * revision read), so the user can approve from where they read the result. A
  * task waiting on the user gets no button: the composer is the answer.
@@ -17,7 +18,7 @@
  * needs no second modal.
  *
  * A task the chat is only *linked* to (`task link-chat`) is named in its own
- * read-only row (a Linked task label and the title link), with no state and no completion: the chat did not run
+ * read-only row (the title, the detail Linked task), with no state and no completion: the chat did not run
  * that task, so it has nothing to report and nothing to close.
  *
  * Read from `taskSignals`, the app-wide view of the active workspace's tasks. A
@@ -198,14 +199,16 @@ function submitNote(): void {
 
 <template>
   <div v-if="taskId || linkedTasks.length" class="task-origin">
-    <AppIcon class="task-origin-icon" name="activity" :size="16" />
-    <div class="task-origin-body">
-      <template v-if="taskId">
-        <div class="task-origin-top">
-          <span class="task-origin-label">Task</span>
-          <span v-if="statusWords" class="task-origin-pill" :class="pillTone">{{ statusWords }}</span>
-        </div>
-        <a class="task-origin-link task-origin-title" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">{{ task ? (task.title || taskId) : 'A task on the board' }}<span class="task-origin-open"> · open on board</span></a>
+    <template v-if="taskId">
+      <a class="cd-row cd-row--link task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">
+        <AppIcon class="cd-icon" name="task" />
+        <span class="cd-main">
+          <span class="cd-primary cd-primary--wrap task-origin-title">{{ task ? (task.title || taskId) : 'A task on the board' }}</span>
+          <span class="cd-detail cd-detail--wrap task-origin-detail">Delegated task<template v-if="statusWords"> · <span class="task-origin-status" :class="pillTone">{{ statusWords }}</span></template></span>
+        </span>
+        <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+      </a>
+      <div v-if="noteOpen || canApprove || canMarkDone || approveError" class="task-origin-controls">
         <template v-if="noteOpen">
           <label class="task-origin-note-label" :for="resolutionId">How was it completed? <span class="task-origin-optional">(optional)</span></label>
           <textarea
@@ -232,7 +235,7 @@ function submitNote(): void {
           v-else-if="canApprove"
           ref="closureButton"
           type="button"
-          class="btn-small task-origin-approve"
+          class="btn-small btn-primary task-origin-approve"
           :disabled="approving"
           :aria-label="`Approve the result of ${task!.title} and mark it done`"
           @click="beginClosure"
@@ -247,72 +250,38 @@ function submitNote(): void {
           @click="beginClosure"
         >Mark done…</button>
         <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
-      </template>
-      <div v-for="linked in linkedTasks" :key="linked.id" class="task-origin-line">
-        <div class="task-origin-top"><span class="task-origin-label">Linked task</span></div>
-        <a class="task-origin-link task-origin-title" :href="`/tasks/${linked.id}`" @click="onTaskLink($event, linked.id)">{{ linked.title || linked.id }}<span class="task-origin-open"> · open on board</span></a>
       </div>
-    </div>
+    </template>
+    <a
+      v-for="linked in linkedTasks"
+      :key="linked.id"
+      class="cd-row cd-row--link task-origin-link task-origin-line"
+      :href="`/tasks/${linked.id}`"
+      @click="onTaskLink($event, linked.id)"
+    >
+      <AppIcon class="cd-icon" name="task" />
+      <span class="cd-main">
+        <span class="cd-primary cd-primary--wrap task-origin-title">{{ linked.title || linked.id }}</span>
+        <span class="cd-detail task-origin-detail">Linked task</span>
+      </span>
+      <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+    </a>
   </div>
 </template>
 
 <style scoped>
-/* The same shape as the automation and memory-pass origin notes in ChatPanel. */
-.task-origin {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg2);
-  line-height: 1.45;
-}
-.task-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
-.task-origin-body { min-width: 0; }
-.task-origin-line { margin: 0; overflow-wrap: anywhere; }
-.task-origin-line + .task-origin-line { margin-top: 10px; }
-.task-origin-top { display: flex; gap: 8px; align-items: center; }
-.task-origin-label {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--fg3);
-}
-.task-origin-pill {
-  --tone: var(--warning);
-  padding: 4px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--tone);
-  background: color-mix(in srgb, var(--tone) 13%, transparent);
-}
-.task-origin-pill.done { --tone: var(--success); }
-.task-origin-pill.muted { --tone: var(--fg3); }
-.task-origin-title { display: block; margin-top: 4px; overflow-wrap: anywhere; }
-.task-origin-open { color: var(--fg3); font-weight: 400; white-space: nowrap; }
+/* Rows of the Origin section; the section heading lives in ChatPanel. */
+.task-origin { display: flex; flex-direction: column; min-width: 0; }
+.task-origin-status.warn { color: var(--warning); }
+.task-origin-status.done { color: var(--success); }
+.task-origin-status.muted { color: var(--fg3); }
+/* Approve Done / Mark done… and the completion form sit under the task row,
+   indented to its text column (16px icon + 10px gap). */
+.task-origin-controls { padding: 0 0 var(--space-1) 26px; }
 .task-origin-conseq { margin: 6px 0 0; color: var(--fg3); font-size: var(--text-xs); }
 .task-origin-optional { color: var(--fg3); }
 .task-origin-cancel { margin-left: auto; }
-.task-origin-link {
-  color: var(--fg);
-  font-weight: 600;
-  text-decoration: none;
-  text-underline-offset: 3px;
-}
-.task-origin-link:hover { color: var(--fg); text-decoration: underline; }
-.task-origin-link:focus-visible {
-  text-decoration: underline;
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
-.task-origin-approve { margin-top: 8px; }
+.task-origin-approve { margin-top: 4px; }
 .task-origin-note-label {
   display: block;
   margin-top: 8px;
@@ -341,3 +310,4 @@ function submitNote(): void {
   .task-origin-actions .btn-small { min-height: 44px; }
 }
 </style>
+<style scoped src="./chatDetails.css"></style>

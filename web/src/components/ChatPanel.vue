@@ -1306,20 +1306,38 @@
           @click="closeDetails"
         ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
-      <!-- Where this chat came from, above everything else: one line naming the
-           automation that runs here, the board task a delegated chat works on,
-           and — for the one app-owned chat — the conversation its memory pass
-           is distilling. Its cadence and controls live on the automation's own
-           page. -->
-      <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
-        <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
-        <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
-      </p>
-      <TaskOriginNote :chat="chat" @marked-done="archiveAfterTaskDone" />
-      <p v-if="memoryPassOrigin" class="chat-rail-origin">
-        <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
-        <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
-      </p>
+      <!-- Where this chat came from, above everything else: the automation that
+           runs here, the board task a delegated chat works on (and tasks it is
+           linked to), and, for the one app-owned chat, the conversation its
+           memory pass is distilling. Cadence and controls live on the
+           automation's own page. -->
+      <section v-if="originShown" class="cd-section cd-block chat-rail-origin" :aria-labelledby="domId('chat-rail-origin')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-origin')" class="cd-heading">Origin</h3></div>
+        <div class="cd-rows">
+          <router-link
+            v-for="s in chatSchedules"
+            :key="`rail-sched-${s.schedule_id}`"
+            :to="`/schedules/${s.schedule_id}`"
+            class="cd-row cd-row--link chat-rail-origin-row"
+          >
+            <AppIcon class="cd-icon" name="clock" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ s.title || 'Automation' }}</span>
+              <span class="cd-detail">Automation</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </router-link>
+          <TaskOriginNote :chat="chat" @marked-done="archiveAfterTaskDone" />
+          <button v-if="memoryPassOrigin" type="button" class="cd-row cd-row--link chat-rail-memory" @click="openMemoryPassSource">
+            <AppIcon class="cd-icon" name="spark" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ memoryPassOrigin.title }}</span>
+              <span class="cd-detail">Memory insight</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </button>
+        </div>
+      </section>
       <!-- Actions that leave the panel for another surface. Every chat has
            them, repository or not; a later row (Files, …) joins this list. -->
       <section class="cd-section cd-block chat-rail-open" :aria-labelledby="domId('chat-rail-open')">
@@ -5240,6 +5258,15 @@ async function doArchive() {
 
 const taskSignals = useTaskSignalsStore()
 
+/** Chat details shows its Origin section only when one of its rows would
+ *  render: an automation, a task (as TaskOriginNote decides), or a memory pass. */
+const originShown = computed(() => {
+  const current = chat.value
+  if (chatSchedules.value.length || memoryPassOrigin.value) return true
+  const delegated = current.helper?.kind === 'task_delegation' && !!current.helper.task_id
+  return delegated || !!taskSignals.taskForChat(current) || taskSignals.linkedTasksForChat(current).length > 0
+})
+
 /**
  * The task this archived chat's attempt still holds, settled because the chat
  * was archived. Continuing it as a plain chat would lose the task: the new chat
@@ -5456,28 +5483,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .chat-rail > .cd-block { padding: 14px 0 12px; }
 .chat-rail > .cd-block + .cd-block { border-top: 1px solid var(--border); }
 .chat-rail-head + .cd-block { padding-top: 2px; }
-
-.chat-rail-origin {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg2);
-  line-height: 1.45;
-}
-.chat-rail-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
-.chat-rail-origin a {
-  color: var(--fg);
-  font-weight: 650;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-}
-.chat-rail-origin a:hover { text-decoration-color: currentColor; }
 
 /* The same origin sentence for a chat whose Chat details rail is hidden, above
    the transcript. Flat, and sharing the rail's link treatment: one sentence in
