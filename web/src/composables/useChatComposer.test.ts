@@ -7,7 +7,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { useChatComposer, type ComposerAttachmentStore } from './useChatComposer'
+import { renumberImageRefs, useChatComposer, type ComposerAttachmentStore } from './useChatComposer'
 import { recordSentPrompt, readChatDraft, writeChatDraft } from '../lib/chatDrafts'
 import type { FormPoster, UploadProgressHandler } from '../lib/chatAttachments'
 
@@ -18,6 +18,7 @@ function makeStore() {
     uploadImages: vi.fn(async (_chatId: string, _files: File[], _onProgress?: UploadProgressHandler) => [] as string[]),
     addPendingImageRefs: vi.fn(),
     removePendingImage: vi.fn(),
+    pendingImagesFor: vi.fn((_chatId: string) => [] as string[]),
     addPendingFiles: vi.fn(),
     removePendingFile: vi.fn(),
     pushErrorToast: vi.fn(),
@@ -407,6 +408,36 @@ describe('useChatComposer attachments', () => {
     const { composer, store } = makeComposer()
     composer.removePendingImage(2)
     expect(store.removePendingImage).toHaveBeenCalledWith(CHAT_ID, 2)
+  })
+
+  it('writes each uploaded image reference into the prompt', async () => {
+    const { composer, store } = makeComposer()
+    composer.draft.value = 'look at'
+    const el = attachTextarea(composer, 'look at')
+    store.uploadImages.mockResolvedValueOnce(['b', 'c'])
+    store.pendingImagesFor.mockReturnValue(['a', 'b', 'c'])
+    const input = document.createElement('input')
+    input.type = 'file'
+    Object.defineProperty(input, 'files', { value: [imageFile(), imageFile()], configurable: true })
+
+    await composer.handleFileSelect({ target: input } as unknown as Event)
+
+    expect(composer.draft.value).toBe('look at [Image 2] [Image 3] ')
+    el.parentElement?.remove()
+  })
+
+  it('removing an image drops its reference and renumbers the later ones', () => {
+    const { composer, store } = makeComposer()
+    composer.draft.value = 'see [Image 1] vs [Image 2] and [Image 3]'
+    composer.removePendingImage(1)
+    expect(store.removePendingImage).toHaveBeenCalledWith(CHAT_ID, 1)
+    expect(composer.draft.value).toBe('see [Image 1] vs and [Image 2]')
+  })
+
+  it('renumberImageRefs leaves lower references and surrounding text alone', () => {
+    expect(renumberImageRefs('[Image 1] hi', 1)).toBe('hi')
+    expect(renumberImageRefs('[Image 1] [Image 2]', 3)).toBe('[Image 1] [Image 2]')
+    expect(renumberImageRefs('a [Image 12] b', 2)).toBe('a [Image 11] b')
   })
 
   it('forwards a pending-file removal to the store', () => {
