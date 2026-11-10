@@ -84,6 +84,32 @@ def test_missing_path_returns_400(workspace: Path) -> None:
     assert resp.status_code == 400
 
 
+# macOS names screenshots with U+202F (narrow no-break space) before AM.
+SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+
+
+def test_macos_screenshot_name_is_served(workspace: Path) -> None:
+    (workspace / f"{SHOT}.md").write_text("shot\n", encoding="utf-8", newline="")
+    client = _make_client(workspace)
+    absolute = client.get(
+        "/api/workspace-file",
+        params={"path": (workspace / f"{SHOT}.md").as_posix()},
+    )
+    relative = client.get("/api/workspace-file", params={"path": f"{SHOT}.md"})
+    assert absolute.status_code == 200
+    assert absolute.text == "shot\n"
+    assert relative.status_code == 200
+    assert relative.text == "shot\n"
+
+
+def test_control_character_in_path_is_400(workspace: Path) -> None:
+    client = _make_client(workspace)
+    for bad in ("do\x01cs/readme.md", "docs/readme.md\x7f"):
+        resp = client.get("/api/workspace-file", params={"path": bad})
+        assert resp.status_code == 400
+        assert resp.json() == {"error": "bad path"}
+
+
 def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     # No workspace sandbox: a `../` relative path resolves and serves.
     outside = tmp_path / "secret.md"

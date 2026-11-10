@@ -853,6 +853,50 @@ def test_folder_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> No
     assert response.json()["pinned_file_path"].endswith("Shot A/")
 
 
+# macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
+SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+
+
+def test_file_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    target = tmp_path / f"{SHOT}.md"
+    target.write_text("n", encoding="utf-8")
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body(target.as_posix(), 0)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"] == target.resolve().as_posix()
+
+
+def test_chat_file_path_resolves_a_screenshot_name(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / f"{SHOT}.png").write_bytes(b"png")
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, workspace: root)
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": f"{SHOT}.png"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (root / f"{SHOT}.png").as_posix()}
+
+
+def test_control_character_in_a_file_pin_is_400(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("no\x01te.md", 0))
+
+    assert response.status_code == 400
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
 def test_folder_pin_inside_the_linked_repo(tmp_path: Path, tmp_path_factory) -> None:
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)

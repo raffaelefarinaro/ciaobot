@@ -310,6 +310,30 @@ def test_upload_rejects_hidden_filename(tmp_path: Path) -> None:
         pcm.save_project_file_upload(proj.project_id, b"x", ".env")
 
 
+# macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
+SHOT = "Screenshot 2026-11-10 at 10.15.30 AM"
+
+
+def test_upload_accepts_a_macos_screenshot_name(tmp_path: Path) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"png", f"{SHOT}.png")
+
+    assert entry["path"] == f"{SHOT}.png"
+    assert (folder / f"{SHOT}.png").read_bytes() == b"png"
+
+
+def test_upload_rejects_control_characters(tmp_path: Path) -> None:
+    _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+    for bad in ("bad\x01name.md", "bad\x00name.md"):
+        with pytest.raises(ValueError, match="invalid filename"):
+            pcm.save_project_file_upload(proj.project_id, b"x", bad)
+
+
 def test_upload_rejects_unsupported_extension(tmp_path: Path) -> None:
     _make_work_project(tmp_path, "2026-q2-foo")
     pcm = _make_manager(tmp_path)

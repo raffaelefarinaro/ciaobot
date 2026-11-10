@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import dataclasses
 import time
+import unicodedata
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
@@ -10666,8 +10667,10 @@ class ProjectChatManager:
         vault_dir = self.project_vault_dir(project_id)
         if vault_dir is None:
             raise LookupError("project has no vault folder to upload into")
-        # Filename safety: basename only, no traversal, no hidden, no NUL.
-        if not filename or "\x00" in filename or not filename.isprintable():
+        # Filename safety: basename only, no traversal, no hidden, no control
+        # characters (Cc, NUL included). Not `isprintable()`: macOS screenshot
+        # names carry U+202F (#2787).
+        if not filename or any(unicodedata.category(c) == "Cc" for c in filename):
             raise ValueError("invalid filename")
         base = Path(filename).name  # strips any directory component the browser sent
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:
