@@ -172,6 +172,33 @@ describe('folder browser driver', () => {
     expect(read().view).toBe('list')
   })
 
+  it('seedFolderBrowserConfig hides the tree on a narrow screen even when a desktop session stored it shown', () => {
+    const store = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+    }
+    const key = 'vuefinder_config_ciao-folder-browser'
+    store.set(key, JSON.stringify({ showTreeView: true }))
+    seedFolderBrowserConfig(storage, undefined, true)
+    expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(false)
+  })
+
+  it('seedFolderBrowserConfig keeps a stored tree choice on a wide screen', () => {
+    const store = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+    }
+    const key = 'vuefinder_config_ciao-folder-browser'
+    store.set(key, JSON.stringify({ showTreeView: false }))
+    seedFolderBrowserConfig(storage, undefined, false)
+    expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(false)
+    store.delete(key)
+    seedFolderBrowserConfig(storage, undefined, false)
+    expect(JSON.parse(store.get(key) ?? 'null').showTreeView).toBe(true)
+  })
+
   it('parentFolderOf returns the folder that holds a file', () => {
     expect(parentFolderOf('/ws/notes/a.md')).toBe('/ws/notes')
     expect(parentFolderOf('/ws/notes/a.md:12')).toBe('/ws/notes')

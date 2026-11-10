@@ -30,6 +30,8 @@ const error = ref('')
 const shownCount = ref(0)
 const truncated = ref(false)
 const coarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+// The app's phone breakpoint: on a narrow screen the tree opens over the list.
+const narrow = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px)').matches
 let aborter: AbortController | null = null
 
 function onListing(listing: WorkspaceDirListing): void {
@@ -45,7 +47,7 @@ onMounted(async () => {
     error.value = folderErrorMessage(first.status, first.error)
     return
   }
-  seedFolderBrowserConfig(localStorage)
+  seedFolderBrowserConfig(localStorage, FOLDER_BROWSER_ID, narrow)
   onListing(first.listing)
   const d = createWorkspaceDirDriver({ chatId: props.chatId, roots: first.listing.roots, initial: first.listing, onListing })
   startPath.value = toVfPath(first.listing.path, d.roots)
