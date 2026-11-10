@@ -1036,7 +1036,8 @@ while the server is running, because the live schedule store may be writing it.
   and runs `npm run test:e2e` from the PR merge checkout. That command's npm
   prehook builds both the PWA and terminal harness from the tested checkout.
   PRs without a `web/` change skip this job. Failed Linux browser runs upload
-  `linux-playwright-traces` when Playwright produced traces. `linux-server-latest-python` repeats the `linux-server` gates on
+  `linux-playwright-traces` when Playwright produced traces.
+  `linux-server-latest-python` repeats the `linux-server` gates on
   Python 3.14, the newest interpreter `requires-python` admits; it is not a
   required check. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
@@ -1233,8 +1234,9 @@ One-time GitHub setup for a fresh clone or repo admin:
 When run by an admin, the script sets `develop` as the default branch and
 applies protection to both branches. The checked-in declaration adds
 `linux-e2e` to develop's required contexts; GitHub skips that job on develop
-PRs without a `web/` change. `main`
-continues to require `linux-server`, `linux-web`, `windows` and macOS `test`.
+PRs without a `web/` change. Admins remain exempt on `develop` so the
+post-release sync PR can merge. `main` continues to require `linux-server`,
+`linux-web`, `windows` and macOS `test`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
 the workflow is present and `linux-e2e` has reported on a PR.
