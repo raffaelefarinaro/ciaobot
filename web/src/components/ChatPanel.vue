@@ -4985,11 +4985,22 @@ async function saveTitle() {
   }
   editingTitle.value = false
 }
+// A picker already open when the fold hides its chip closes with it.
+watch(() => questionCardVisible.value, visible => { if (visible && modelChipFolded()) showModelPicker.value = false })
+
+/** The short-pane fold (#2774) hides the composer's model chip while a
+ *  question card is open; the picker would open with no visible trigger. */
+const SHORT_PANE_QUERY = '(max-height: 500px)'
+function modelChipFolded(): boolean {
+  return questionCardVisible.value && typeof window.matchMedia === 'function' && window.matchMedia(SHORT_PANE_QUERY).matches
+}
+
 function toggleModelPicker() {
   if (showModelPicker.value) {
     showModelPicker.value = false
     return
   }
+  if (modelChipFolded()) return
   // The composer's chip is selection-only: a pick there changes the model
   // and never retries.
   pickerMode.value = 'normal'
@@ -7364,8 +7375,10 @@ details[open] > .activity-summary::before {
 :global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
 /* A short pane (a phone in landscape) cannot hold an open question card and
    the two-row composer (#2774). While the question waits, the composer folds
-   to one row: the prompt and the send/stop action. The model picker, attach
-   and hints come back when the card closes. */
+   to one row: the prompt and the send/stop action. The model picker, attach,
+   hints and Move to background come back when the card closes (answer or
+   cancel the question first). Keep the media query in sync with
+   SHORT_PANE_QUERY in the script. */
 @media (max-height: 500px) {
   .composer-surface--question {
     flex-direction: row;

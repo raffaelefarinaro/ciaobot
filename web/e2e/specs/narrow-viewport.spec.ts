@@ -309,6 +309,19 @@ test.describe('narrow viewport', () => {
     await expectQuestionSubmitVisible(page)
   })
 
+  test('a short pane folds the composer under a question and closes its model picker', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.locator('.composer-model .model-picker-summary').click()
+    await expect(page.locator('.model-selector')).toBeVisible()
+    await injectQuestion(page)
+    await expect(page.locator('.question-form-card')).toBeVisible()
+    await expect(page.locator('.model-selector')).toHaveCount(0)
+    await expect(page.locator('.composer-model')).toBeHidden()
+    await expect(page.locator('.image-btn')).toBeHidden()
+    await expect(page.locator('.send-btn')).toBeInViewport({ ratio: 1 })
+  })
+
   test('a live question preserves composer focus and keyboard entry', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     const composer = page.locator('textarea')
