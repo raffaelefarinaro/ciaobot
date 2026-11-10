@@ -5,7 +5,7 @@ import { askConfirm } from '../lib/confirm'
 import { fileLoadErrorMessage } from '../lib/fileLoadError'
 import { isImageFilePath } from '../lib/chatActivity'
 import { looksLikeFolderPath } from '../lib/filePaths'
-import { fetchWorkspaceDir } from '../lib/folderBrowserDriver'
+import { fetchWorkspaceDir, folderErrorMessage } from '../lib/folderBrowserDriver'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -435,12 +435,28 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
    * /api/workspace-dir once: a folder opens in the browser; anything else,
    * a file included, takes the same open() it always took.
    */
+  // Generation of the latest link click: a folder probe that answers after a
+  // newer click must not repaint the viewer with the folder it named.
+  let linkSeq = 0
   async function openLink(linkPath: string, lineNumber: number | null = null, chat: string = ''): Promise<boolean> {
+    const mySeq = ++linkSeq
     const clean = linkPath.replace(/:\d+$/, '')
     if (isImageFilePath(clean)) return openImage(linkPath, chat)
     if (!looksLikeFolderPath(clean)) return open(linkPath, lineNumber, chat)
     const probe = await fetchWorkspaceDir(clean, chat)
+    if (mySeq !== linkSeq) return false
     if (probe.ok) return openFolder(probe.listing.path, chat)
+    // A folder the browser may not show is named as such, not as an unsupported file.
+    if (probe.status === 403) {
+      if (!await canReplaceOpenFile(linkPath)) return false
+      _reset()
+      fetchSeq++ // a file fetch still in flight must not repaint the message
+      isOpen.value = true
+      path.value = linkPath
+      chatId.value = chat
+      error.value = folderErrorMessage(probe.status, probe.error)
+      return true
+    }
     return open(linkPath, lineNumber, chat)
   }
 

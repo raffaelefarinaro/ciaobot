@@ -744,6 +744,39 @@ describe('opening links', () => {
     expect(store.error).toBe('File not found.')
   })
 
+  test('a folder probe that resolves after a newer click cannot repaint the viewer', async () => {
+    let answerProbe: (resp: Response) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url.startsWith('/api/workspace-dir')) {
+        return new Promise<Response>(resolve => { answerProbe = resolve })
+      }
+      return Promise.resolve(new Response('note'))
+    }))
+    const store = useFileViewerStore()
+    const folder = store.openLink('exports/sloth', null, '')
+    await store.openLink('a.md')
+    answerProbe(dirListing('/ws/exports/sloth'))
+    await folder
+    expect(store.kind).toBe('text')
+    expect(store.path).toBe('a.md')
+  })
+
+  test('a folder outside the browsable roots says so instead of Unsupported file type', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith('/api/workspace-dir')) {
+        return new Response(JSON.stringify({ error: 'outside_roots' }), { status: 403 })
+      }
+      return new Response('', { status: 415 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.openLink('/elsewhere/dir', null, '')
+    expect(store.isOpen).toBe(true)
+    expect(store.error).toBe('This folder is outside the folders Ciaobot can browse.')
+    const urls = fetchMock.mock.calls.map(call => String(call[0]))
+    expect(urls.some(url => url.startsWith('/api/workspace-file'))).toBe(false)
+  })
+
   test('a link with an extension skips the probe', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.startsWith('/api/vault-markdown-paths')) return new Response(JSON.stringify({ paths: [] }))

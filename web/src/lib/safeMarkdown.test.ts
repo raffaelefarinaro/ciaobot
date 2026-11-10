@@ -417,6 +417,16 @@ describe('file markdown folder links', () => {
     expect(beside).toContain('data-file-path="notes/exports/a"')
   })
 
+  it('renders a folder link that collapses above the workspace as inert text', () => {
+    const html = renderFileMarkdown('[up](../x/..)', {
+      resolveImageSrc: h => h,
+      filePath: 'a/plan.md',
+    })
+    expect(html).toContain('<span class="markdown-dead-link">up</span>')
+    expect(html).not.toContain('<a ')
+    expect(html).not.toContain('target="_blank"')
+  })
+
   it('does not name a folder above the note it cannot reach', () => {
     const html = renderFileMarkdown('[up](../x/..)', {
       resolveImageSrc: h => h,

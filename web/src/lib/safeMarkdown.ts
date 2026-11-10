@@ -184,8 +184,11 @@ function chatFileHref(href: string): string {
   return decoded
 }
 
-/** A note's folder link, resolved against the note's own folder; '' when not a folder link. */
-function folderLinkTarget(href: string, notePath: string): string {
+/**
+ * A note's folder link, resolved against the note's own folder. null when the
+ * link is not a folder; '' when it is a folder that cannot be named from here.
+ */
+function folderLinkTarget(href: string, notePath: string): string | null {
   const raw = (href || '').trim().split('#')[0].split('?')[0]
   let decoded = raw
   try {
@@ -193,7 +196,7 @@ function folderLinkTarget(href: string, notePath: string): string {
   } catch {
     decoded = raw
   }
-  if (!isFolderLinkPath(decoded)) return ''
+  if (!isFolderLinkPath(decoded)) return null
   const rel = decoded.replace(/[/\\]+$/, '')
   const note = notePath.replace(/:\d+$/, '')
   const slash = note.lastIndexOf('/')
@@ -521,6 +524,10 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
       if (!isUsableHref(token.href)) return deadLinkHtml(this, token)
       // A folder opens in the folder browser, not in a new window (fileViewer.openLink).
       const folder = folderLinkTarget(token.href, filePath)
+      if (folder === '') {
+        // Nothing to open, and a plain anchor would open a new window on the PWA's own URL.
+        return `<span class="${DEAD_LINK_CLASS}">${this.parser.parseInline(token.tokens)}</span>`
+      }
       if (folder) {
         const label = this.parser.parseInline(token.tokens)
         return `<a class="file-link" href="#" data-file-path="${escapeAttr(folder)}">${label}</a>`
