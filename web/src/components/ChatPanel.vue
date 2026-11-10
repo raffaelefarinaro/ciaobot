@@ -1345,13 +1345,22 @@
         </div>
       </section>
       <!-- Actions that leave the panel for another surface. Every chat has
-           them, repository or not; a later row (Files, …) joins this list. -->
+           them, repository or not: Terminal, and Browse files (the folder
+           browser at the chat's workspace folder). -->
       <section class="cd-section cd-block chat-rail-open" :aria-labelledby="domId('chat-rail-open')">
         <div class="cd-head"><h3 :id="domId('chat-rail-open')" class="cd-heading">Open</h3></div>
         <div class="cd-rows">
           <div class="chat-rail-terminal">
             <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
           </div>
+          <button type="button" class="cd-row cd-row--link chat-rail-browse" aria-label="Browse files" @click="openWorkspaceFolder">
+            <AppIcon class="cd-icon" name="folder" />
+            <span class="cd-main">
+              <span class="cd-primary">Browse files</span>
+              <span class="cd-detail">Folders in this workspace</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </button>
         </div>
       </section>
       <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
@@ -1901,6 +1910,10 @@ const injectedPrompts = computed(() => {
 function openMemoryPassSource(): void {
   const archivePath = chat.value.memory_source?.archive_path
   if (archivePath) void fileViewer.open(archivePath)
+}
+/** Chat details › Open › Browse files: the folder browser at the chat's workspace folder. */
+function openWorkspaceFolder(): void {
+  void fileViewer.openFolder('', chat.value?.chat_id || '')
 }
 watch(() => chat.value.provider, () => {
   void slash.load(chat.value.provider || '', project.value?.workspace || store.activeWorkspace || '')
@@ -4149,11 +4162,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   const lineAttr = a.getAttribute('data-line')
   const line = lineAttr ? parseInt(lineAttr, 10) : null
   const cid = chat.value?.chat_id || ''
-  if (isImageFilePath(path)) {
-    fileViewer.openImage(path, cid)
-  } else {
-    fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
-  }
+  void fileViewer.openLink(path, Number.isFinite(line as number) ? line : null, cid)
 }
 
 // One delegated listener at the panel root serves every clickable thing the

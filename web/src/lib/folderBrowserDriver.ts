@@ -153,7 +153,7 @@ export function createWorkspaceDirDriver(opts: {
 
 // VueFinder 4.8 merges config as {...defaults, ...passed, ...stored}, so a passed
 // `view` or `persist` loses to what the user last stored. Seed localStorage instead.
-export function seedFolderBrowserConfig(storage: Pick<Storage, 'getItem' | 'setItem'>, id = FOLDER_BROWSER_ID): void {
+export function seedFolderBrowserConfig(storage: Pick<Storage, 'getItem' | 'setItem'>, id = FOLDER_BROWSER_ID, narrow = false): void {
   const key = `vuefinder_config_${id}`
   let stored: Record<string, unknown> = {}
   try {
@@ -161,8 +161,10 @@ export function seedFolderBrowserConfig(storage: Pick<Storage, 'getItem' | 'setI
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed as Record<string, unknown>
   } catch { /* corrupt entry: keep defaults */ }
   storage.setItem(key, JSON.stringify({
-    view: 'list', showTreeView: true, showThumbnails: false, expandTreeByDefault: false, showHiddenFiles: false,
+    view: 'list', showThumbnails: false, expandTreeByDefault: false, showHiddenFiles: false,
     ...stored,
+    // Decided by the screen, not the stored value: a phone session must not hide the tree on desktop, nor the reverse.
+    showTreeView: !narrow,
     persist: false, fullScreen: false, path: '',
   }))
 }
