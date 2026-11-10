@@ -66,7 +66,7 @@
           </DropdownMenuPortal>
         </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
-        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :aria-label="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')":disabled="closeDisabled" :aria-disabled="closeDisabled">
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :aria-label="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :disabled="closeDisabled" :aria-disabled="closeDisabled">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
