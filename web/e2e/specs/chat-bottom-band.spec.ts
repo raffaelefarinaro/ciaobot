@@ -16,6 +16,10 @@ test('the phone chat fills the screen and the composer sits on the safe-area edg
   await page.request.post('/__fixture__/transcript', { data: {} })
   await page.reload()
   await expect(page.locator('.messages-content .message-wrap').last()).toBeVisible()
+  // The transcript pins itself to the bottom a frame or so after the last row
+  // renders; measuring before that read the row ~46px low (#2777). The gap
+  // under test is the pinned layout, so wait for the pin.
+  await expect.poll(() => page.locator('.messages').evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1)
 
   const measured = await page.evaluate(async () => {
     const root = document.documentElement
