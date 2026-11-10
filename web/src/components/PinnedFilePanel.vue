@@ -39,6 +39,9 @@
                 <DropdownMenuItem as-child @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
+                <DropdownMenuItem as-child @select="showInFolder">
+                  <button type="button">Show in folder</button>
+                </DropdownMenuItem>
                 <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
@@ -337,6 +340,7 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
+import { parentFolderOf } from '../lib/folderBrowserDriver'
 import { imageLoadErrorMessage } from '../lib/fileLoadError'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
@@ -404,6 +408,11 @@ const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const copyState = ref<'idle' | 'ok'>('idle')
+// The pinned path is always absolute, so it always has a folder to show.
+function showInFolder(): void {
+  void fileViewer.openFolder(parentFolderOf(cleanPath.value), projectsStore.activeChatId || '')
+}
+
 async function copyPath(): Promise<void> {
   try {
     await navigator.clipboard.writeText(cleanPath.value)

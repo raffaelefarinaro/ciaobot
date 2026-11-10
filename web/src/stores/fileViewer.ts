@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { fileLoadErrorMessage } from '../lib/fileLoadError'
+import { isImageFilePath } from '../lib/chatActivity'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -12,7 +13,7 @@ import { useProjectStore } from './projects'
 // The viewer has one reading surface: the current on-disk preview (which also
 // becomes the editing surface when editing is available).
 
-export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
+export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html' | 'folder'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
 export type HtmlArtifactView = 'preview' | 'code'
@@ -53,6 +54,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // reconciles only this surface, and only for this chat; a user close of it
   // unpins through the server, whereas an ordinary dismiss stays local.
   const sharedPinChatId = ref('')
+
+  // The folder a file was opened from in the folder browser; Back returns
+  // there. Deliberately NOT cleared by _reset(): a link followed inside that
+  // file keeps it. close() and openFolder() clear it.
+  const returnFolder = ref('')
 
   // Where a file opens docked instead of in this viewer: the pin key of the
   // chat on screen, set by ChatLayout while its split view is available (a
@@ -380,6 +386,46 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
+  /** Show a folder in the viewer. '' lists the first browsable root. */
+  async function openFolder(dirPath: string, chat: string = ''): Promise<boolean> {
+    if (!await canReplaceOpenFile(dirPath)) return false
+    _reset()
+    returnFolder.value = ''
+    fetchSeq++ // a file fetch still in flight must not repaint the folder
+    isOpen.value = true
+    kind.value = 'folder'
+    path.value = dirPath
+    chatId.value = chat
+    loadToken.value++
+    return true
+  }
+
+  /** The browser moved to another folder: keep the header and Copy path on it. */
+  function setFolderPath(dirPath: string): void {
+    if (kind.value === 'folder') path.value = dirPath
+  }
+
+  /** Open a file chosen in the folder browser, remembering the folder for Back. */
+  async function openFromFolder(filePath: string, chat: string = ''): Promise<boolean> {
+    const folder = kind.value === 'folder' ? path.value : ''
+    // Recorded before the load so Back pressed while the file loads still
+    // returns to the folder (backOrClose ignores it while a folder is shown).
+    if (folder && isOpen.value) returnFolder.value = folder
+    const ok = isImageFilePath(filePath) ? await openImage(filePath, chat) : await open(filePath, null, chat)
+    if (ok && folder && isOpen.value && kind.value !== 'folder') returnFolder.value = folder
+    return ok
+  }
+
+  /** Back: return to the folder a file was opened from (and stay open), else close. */
+  async function backOrClose(): Promise<boolean> {
+    const folder = returnFolder.value
+    if (folder && kind.value !== 'folder') {
+      await openFolder(folder, chatId.value)
+      return false
+    }
+    return close()
+  }
+
   async function close(force = false): Promise<boolean> {
     if (!force && isDirty.value) {
       if (!await askConfirm('You have unsaved file changes. Are you sure you want to close?', {
@@ -394,6 +440,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     fetchSeq++
     path.value = ''
     chatId.value = ''
+    returnFolder.value = ''
     _reset()
     return true
   }
@@ -481,6 +528,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     loadToken,
     chatId,
     sharedPinChatId,
+    returnFolder,
     dockTarget,
     editing,
     isDirty,
@@ -498,6 +546,10 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     open,
     openImage,
     openImageUrl,
+    openFolder,
+    setFolderPath,
+    openFromFolder,
+    backOrClose,
     openSharedPin,
     setDockTarget,
     loadSource,

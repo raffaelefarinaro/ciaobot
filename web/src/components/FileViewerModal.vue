@@ -17,7 +17,7 @@
           <div class="fv-modal" :class="{ 'fv-modal--doc': isProse }" tabindex="-1">
             <header :ref="setModalEl" class="fv-header">
               <div class="fv-titles">
-                <DialogTitle as="div" class="fv-title" :title="store.path">{{ basename }}</DialogTitle>
+                <DialogTitle as="div" class="fv-title" :title="store.path">{{ titleText }}</DialogTitle>
                 <!-- The folder, shortened as the pinned tile shows it; the
                      full path stays in the description for screen readers. -->
                 <DialogDescription as="div" class="fv-subtitle" :title="store.path">
@@ -47,7 +47,7 @@
             @click="store.startEditing"
           >Edit</button>
           <button
-            v-if="store.path && !store.imageUrl"
+            v-if="store.path && !store.imageUrl && store.kind !== 'folder'"
             type="button"
             class="fv-text-btn fv-discuss-btn"
             title="Discuss in chat"
@@ -73,19 +73,22 @@
             <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
               <div class="fv-actions-menu">
                 <!-- On a phone Discuss moves here, so the filename keeps the bar. -->
-                <DropdownMenuItem v-if="store.path && !store.imageUrl" as-child class="fv-menu-discuss" @select="discussInChat">
+                <DropdownMenuItem v-if="store.path && !store.imageUrl && store.kind !== 'folder'" as-child class="fv-menu-discuss" @select="discussInChat">
                   <button type="button">Discuss in chat</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="!!store.imageUrl" @select.prevent="copyPath">
+                <DropdownMenuItem v-if="!!store.path" as-child :disabled="!!store.imageUrl" @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
+                <DropdownMenuItem v-if="canShowInFolder" as-child @select="showInFolder">
+                  <button type="button">Show in folder</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="store.kind !== 'folder'" as-child :disabled="store.loading || !!store.error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="canShareFile" as-child :disabled="store.loading || !!store.error" @select="shareFile">
+                <DropdownMenuItem v-if="canShareFile && store.kind !== 'folder'" as-child :disabled="store.loading || !!store.error" @select="shareFile">
                   <button type="button">Share file…</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
+                <DropdownMenuItem v-if="canOpenExternally && !!store.path" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="memoryPath" as-child @select="openInMemoryMap">
@@ -101,7 +104,7 @@
       </header>
 
       <div class="fv-main" ref="mainEl">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html' }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html', 'fv-body-folder': store.kind === 'folder' }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <div v-else-if="store.kind === 'image' && imageError" class="fv-error" role="alert">{{ imageError }}</div>
@@ -111,6 +114,14 @@
             :src="imageSrc"
             :alt="basename"
             @error="onImageError"
+          />
+          <FolderBrowser
+            v-else-if="store.kind === 'folder'"
+            :key="store.loadToken"
+            :initial-path="store.path"
+            :chat-id="store.chatId"
+            @navigate="store.setFolderPath"
+            @open-file="onFolderOpenFile"
           />
           <!-- Edit mode: replaces the preview body with a textarea + actions.
                No history/diff while editing — finish or cancel first. -->
@@ -354,6 +365,7 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
+import { parentFolderOf } from '../lib/folderBrowserDriver'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { useArtifactSelection } from '../composables/useArtifactSelection'
@@ -367,10 +379,11 @@ import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+const FolderBrowser = defineAsyncComponent(() => import('./FolderBrowser.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
-useOverlayBackEntry(() => store.isOpen, () => store.close())
+useOverlayBackEntry(() => store.isOpen, () => store.backOrClose())
 const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
 const opener = ref<HTMLElement | null>(props.opener)
 watch(() => store.isOpen, (open, wasOpen) => {
@@ -422,11 +435,13 @@ function onEscapeKeyDown(event: KeyboardEvent) {
 function onPointerDownOutside(event: PointerDownOutsideEvent) {
   event.preventDefault()
   const original = event.detail.originalEvent
+  if (original.target instanceof Element && original.target.closest('.vuefinder__themer')) return // VueFinder's teleported dropdowns
   if (original.button !== 0 || original.ctrlKey) return
   void requestClose()
 }
 
 const memoryPath = computed(() => {
+  if (store.kind === 'folder') return ''
   const path = store.path.replace(/:\d+$/, '')
   return /\.(md|markdown)$/i.test(path) ? path : ''
 })
@@ -793,7 +808,10 @@ const canOpenExternally = computed(() => isLoopbackPage() && !store.imageUrl)
 // anywhere else would put the file beside a chat that is not shown.
 const activePinKey = computed(() => store.dockTarget)
 // A served image has no workspace path to pin, copy, or open elsewhere.
-const canPin = computed(() => !!activePinKey.value && !store.imageUrl)
+const canPin = computed(() => !!activePinKey.value && !store.imageUrl && store.kind !== 'folder')
+// A bare relative name ('today.md', no chat to resolve it) has no folder to show.
+const canShowInFolder = computed(() => !!store.path && !store.imageUrl && store.kind !== 'folder'
+  && parentFolderOf(store.path) !== '')
 const isPinned = computed(() => {
   if (!activePinKey.value) return false
   return projectsStore.pinnedFileFor(activePinKey.value) === cleanPath(store.path)
@@ -1120,7 +1138,8 @@ const basename = computed(() => {
 })
 
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
-const isCsv = computed(() => isCsvPath(store.path))
+const titleText = computed(() => (store.kind === 'folder' ? basename.value || 'Files' : basename.value))
+const isCsv = computed(() => store.kind !== 'folder' && isCsvPath(store.path))
 // A text document reads at its measure, so the window is sized to it rather
 // than leaving the prose on the left of a 1200px box. Images, PDFs, artifacts
 // and CSV tables keep the wide window.
@@ -1242,6 +1261,14 @@ watch(
   { immediate: true },
 )
 
+function showInFolder(): void {
+  void store.openFolder(parentFolderOf(store.path), store.chatId)
+}
+
+function onFolderOpenFile(path: string): void {
+  void store.openFromFolder(path, store.chatId)
+}
+
 async function copyPath(): Promise<void> {
   const copied = await writeClipboard(store.path)
   if (!copied) return
@@ -1339,7 +1366,8 @@ watch(
     const wasStreaming = oldValues ? oldValues[3] : false
     // A served image has no workspace path: re-opening it as one on stream end
     // would replace the picture with a file-not-found error.
-    if (isOpen && path && chatId && !store.imageUrl && wasStreaming && !isStreaming) {
+    // A folder is not a file to reload either: it would replace the listing with a file-not-found error.
+    if (isOpen && path && chatId && !store.imageUrl && store.kind !== 'folder' && wasStreaming && !isStreaming) {
       store.open(path, store.line, chatId)
     }
   }
@@ -1557,6 +1585,14 @@ watch(
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* The folder browser fills the body; the doubled class beats the ≤640px padding. */
+.fv-body.fv-body-folder {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  min-height: min(70vh, 640px);
 }
 .fv-img {
   max-width: 100%;
