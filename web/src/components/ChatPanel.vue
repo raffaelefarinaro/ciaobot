@@ -1088,7 +1088,7 @@
         <!-- The command surface: staged attachments, the prompt, then one bar
              with the model, attach and the forward action. Same
              shape as Home's composer so the two read as one control. -->
-        <div class="composer-surface">
+        <div class="composer-surface" :class="{ 'composer-surface--question': questionCardVisible }">
           <!-- Staged attachments. Images, chat comments and file comments share one
                lifecycle (staged here, sent with the next message, cleared on send),
                so they share one row above the input. A chip is a summary; clicking a
@@ -7362,6 +7362,26 @@ details[open] > .activity-summary::before {
 .question-form-card > .question-card-header,
 .question-form-card > .question-card-actions { flex-shrink: 0; }
 :global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
+/* A short pane (a phone in landscape) cannot hold an open question card and
+   the two-row composer (#2774). While the question waits, the composer folds
+   to one row: the prompt and the send/stop action. The model picker, attach
+   and hints come back when the card closes. */
+@media (max-height: 500px) {
+  .composer-surface--question {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 4px;
+  }
+  .composer-surface--question > .pending-attachments,
+  .composer-surface--question > .composer-uploads { flex: 1 0 100%; }
+  .composer-surface--question > .chat-input { flex: 1 1 0; width: auto; min-width: 0; }
+  .composer-surface--question > .composer-bar { flex: none; padding: 0; border-top: 0; }
+  .composer-surface--question .composer-model,
+  .composer-surface--question .image-btn,
+  .composer-surface--question .composer-kbd,
+  .composer-surface--question .composer-move-bg { display: none; }
+}
 .question-card-header {
   display: flex;
   align-items: center;

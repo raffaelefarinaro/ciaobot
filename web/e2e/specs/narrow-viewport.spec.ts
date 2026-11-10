@@ -53,7 +53,7 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
       const points = [[b.left + b.width / 2, b.top + b.height / 2], [b.left + 10, b.top + 10], [b.right - 10, b.top + 10], [b.left + 10, b.bottom - 10], [b.right - 10, b.bottom - 10]]
       const hits = points.map(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit === button || button.contains(hit) })
       const cancel = card.querySelector('.question-card-actions .btn-sm:not(.primary)')!
-      return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea')!), viewportBottom: bottom }
+      return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea.chat-input')!), composerBar: rect(document.querySelector('.composer-bar')!), viewportBottom: bottom }
     })
     expect(result.visible, `Send answer must stay visible and hit-testable: ${JSON.stringify(result)}`).toBe(true)
     expect(result.bodyHeight).toBeGreaterThanOrEqual(44)
@@ -64,6 +64,8 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
     expect(result.cancelHeight).toBeGreaterThanOrEqual(44)
     expect(result.composer.top).toBeGreaterThanOrEqual(-1)
     expect(result.composer.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
+    // The whole composer, send/stop included, stays on screen (#2774).
+    expect(result.composerBar.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
   }).toPass({ timeout: 5_000 })
   await expect(card).toBeVisible()
   await expect(body).toBeVisible()
