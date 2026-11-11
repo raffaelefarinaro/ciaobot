@@ -10667,8 +10667,8 @@ class ProjectChatManager:
         """Save an uploaded file into the project's vault folder.
 
         Validates filename (no traversal, no leading dot, no path separators),
-        checks extension against the union of viewer/image/binary allowlists,
-        enforces a 50 MB size cap, and resolves name collisions by appending
+        accepts any file type (the agent gets the path and decides how to read
+        it), enforces a 50 MB size cap, and resolves name collisions by appending
         ``-2``, ``-3`` etc. Returns the same shape as ``list_project_files``
         entries plus ``absolute_path``, which lets a remote client insert the
         new host-side path into a chat prompt.
@@ -10689,8 +10689,6 @@ class ProjectChatManager:
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:
             raise ValueError("invalid filename")
         ext = Path(base).suffix.lower()
-        if ext not in chat_service._PROJECT_UPLOAD_EXTS:
-            raise ValueError(f"unsupported file type: {ext or '(none)'}")
         if len(data) > chat_service._PROJECT_UPLOAD_MAX_BYTES:
             raise ValueError("file too large")
         # Collision: foo.png -> foo-2.png -> foo-3.png ...

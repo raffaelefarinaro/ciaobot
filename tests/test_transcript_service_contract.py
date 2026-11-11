@@ -1278,13 +1278,17 @@ async def test_claude_two_bash_notifications_in_one_record_make_one_card(
 
 
 @pytest.mark.asyncio
-async def test_claude_subagent_notification_still_renders_the_status_line(
+async def test_claude_subagent_notification_renders_the_background_run_card(
     monkeypatch,
 ) -> None:
     record = _native_record("agent1", "completed", 'Agent "Review" completed')
     rows = await _render_user_records(monkeypatch, [record])
 
-    assert rows == [{"role": "system", "content": '\U0001F916 Agent "Review" completed'}]
+    assert len(rows) == 1
+    assert rows[0]["origin"] == "background_run"
+    assert rows[0]["content"].startswith("[Ciaobot] 1 background run finished.")
+    assert "— Review (agent1, ok)" in rows[0]["content"]
+    assert "(no output)" not in rows[0]["content"]
 
 
 def test_overlay_pairs_usage_per_user_segment_across_wake_turns() -> None:
