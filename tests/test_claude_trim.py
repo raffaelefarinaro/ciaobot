@@ -29,6 +29,7 @@ _OLD_HIDDEN_SKILLS = (
 def test_catalog_keys_unique_and_well_formed() -> None:
     keys = [option.key for option in TRIM_OPTIONS]
     assert len(keys) == len(set(keys))
+    assert len({option.label for option in TRIM_OPTIONS}) == len(TRIM_OPTIONS)
     for option in TRIM_OPTIONS:
         assert option.key == f"{option.kind}:{option.name}"
         if option.locked:

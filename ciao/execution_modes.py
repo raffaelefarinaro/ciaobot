@@ -187,9 +187,9 @@ OPENCODE_CREDENTIAL_DENY_PERMISSIONS: tuple[str, ...] = (
 def credential_path_deny_rules(runtime_root: object = None) -> tuple[str, ...]:
     """``Tool(pattern)`` deny rules for Claude's ``disallowed_tools``.
 
-    Unconditional: unlike the harness denylist these are NOT part of the
-    per-workspace ``disallowed_tools`` default, so neither an operator's custom
-    "Extra disallowed tools" list nor the literal ``none`` opt-out clears them.
+    Unconditional: these are not part of the trim catalog or the workspace
+    extras, so neither an operator's custom "Extra disallowed tools" list nor
+    the literal ``none`` opt-out clears them.
     A denylist escape hatch that also unlocks ``PWA_AUTH_TOKEN`` is not an
     escape hatch anyone asked for.
 

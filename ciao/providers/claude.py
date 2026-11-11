@@ -1156,8 +1156,8 @@ class ClaudeProvider(BaseSDKProvider):
             # stream. See _SDK_MAX_BUFFER_BYTES and issue #137.
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             env=cli_env,
-            # Per-workspace tool denylist (e.g. the default harness set, or
-            # ``Bash``). Empty list = no denylist applied.
+            # Per-workspace tool denylist: trim catalog denies plus workspace
+            # extras (e.g. ``Bash``). Empty list = no denylist applied.
             disallowed_tools=list(request.disallowed_tools or []),
             # Agents are discovered from .claude/agents/ via setting_sources
             # below. No manual frontmatter parsing needed.

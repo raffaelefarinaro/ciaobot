@@ -6197,8 +6197,9 @@ class ProjectChatManager:
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
-        Applies the default harness set plus any workspace "extra disallowed
-        tools" (the workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
+        Applies the trim catalog defaults (the workspace's `claude_trim`, see
+        `ciao/claude_trim.py`) plus any workspace "extra disallowed tools" (the
+        workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
         field). Declared MCP servers all load unless that list names them.
 
         It also always carries the unconditional credential/runtime-state file

@@ -569,8 +569,8 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
 
     Same rules as ``workspaces.workspace_from_request``. A value that fails
     them falls back to what grants the least, not to the stored value: an
-    unreadable tool deny-list becomes ``None`` (the per-workspace default
-    denies). A readable value is kept as it is, which is why the restore
+    unreadable tool deny-list becomes ``None`` (no extras; the trim catalog
+    defaults still apply). A readable value is kept as it is, which is why the restore
     confirmation shows the deny-list before anything happens. Invalid claude_trim
     entries fall back to the catalog defaults.
     """
