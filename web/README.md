@@ -362,6 +362,7 @@ file use. The tile has one occupant; the newest takes it.
   Esc in the second pane closes only that pane.
 - **File viewer:** `stores/fileViewer.ts` docks a file only into the chat that
   owns the tile. A file opened from the second pane opens the viewer.
+  Folders dock the same way (`dockFolderInstead`), pinned as `<abs>/`, the folder-pin identity (D1). Re-docking the pinned folder bumps `folderRedock`, and the tile remounts its browser. `PinnedFilePanel` renders `FolderBrowser` for a folder pin and docks only `isPinnableFilePath` files from it (mirror of `_WORKSPACE_FILE_EXTS`; keep the two in step).
 
 ### Folder browser
 
@@ -377,6 +378,7 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 - **Never pass `contextMenuItems: []`.** VueFinder's folder double-click navigates through the menu's `open` item, so the list is cut to `open` and `refresh`.
 - **Touch:** VueFinder opens items on double-click only. Under `(pointer: coarse)` a single file selection opens it.
 - **Font:** use `var(--font)`, never `var(--font-sans)`.
+- **Folder links:** `isFolderLinkPath` (`lib/filePaths.ts`) makes a relative extensionless or trailing-slash link a `a.file-link` in chat and note markdown. It never claims a dotted last segment, a known extensionless name, a domain-shaped first segment or a dot-only path. Every click goes through `fileViewer.openLink`: a folder-shaped path asks `/api/workspace-dir` once and opens the folder on a 200; anything else takes the same `open()` as before.
 
 ### Layout traps
 

@@ -5,6 +5,20 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
+import { useFileViewerStore } from '../../stores/fileViewer'
+
+vi.mock('../FolderBrowser.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    __esModule: true,
+    default: defineComponent({
+      name: 'FolderBrowserStub',
+      props: ['initialPath', 'chatId'],
+      emits: ['navigate', 'open-file'],
+      setup: () => () => h('div', { class: 'folder-browser-stub' }),
+    }),
+  }
+})
 
 const page = vi.hoisted(() => ({ loopback: true }))
 vi.mock('../../lib/loopback', () => ({ isLoopbackPage: () => page.loopback }))
@@ -460,7 +474,23 @@ describe('PinnedFilePanel', () => {
     await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
     await flushPromises()
     const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
-    expect(items).toEqual(['Refresh', 'Copy path', 'Download', 'Open in default app', 'Open in memory map'])
+    expect(items).toEqual(['Refresh', 'Copy path', 'Show in folder', 'Download', 'Open in default app', 'Open in memory map'])
+    wrapper.unmount()
+  })
+
+  it('Show in folder opens the pinned file\'s folder in the viewer', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true })
+    const openFolder = vi.spyOn(useFileViewerStore(), 'openFolder').mockResolvedValue(true)
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const item = Array.from(document.querySelectorAll<HTMLElement>('.pfp-actions-menu button'))
+      .find(b => b.textContent?.trim() === 'Show in folder')!
+    item.click()
+    await flushPromises()
+
+    expect(openFolder).toHaveBeenCalledWith('/vault', 'chat-1')
     wrapper.unmount()
   })
 
@@ -532,6 +562,142 @@ describe('PinnedFilePanel', () => {
     await flushPromises()
     expect(wrapper.get('.pfp-error').text()).toBe('File not found.')
     expect(wrapper.find('img.pfp-img').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('routes a folder link inside the pinned note through openLink without a chat', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/notes/today.md', content: '[out](../exports/x)' })
+    const openLink = vi.spyOn(useFileViewerStore(), 'openLink').mockResolvedValue(true)
+    await wrapper.get<HTMLAnchorElement>('.pfp-md a.file-link').trigger('click')
+    expect(openLink).toHaveBeenCalledWith('/ws/exports/x', null)
+    expect(openLink.mock.calls[0]?.length).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('renders a folder pin as the folder browser with folder actions', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+
+    const fb = wrapper.findComponent({ name: 'FolderBrowserStub' })
+    expect(fb.props()).toEqual({ initialPath: '/ws/exports', chatId: 'chat-1' })
+    expect(wrapper.get('.chat-title').text()).toBe('exports')
+    expect(wrapper.get('.pfp-body').classes()).toContain('pfp-body-folder')
+    expect(fileFetchCount()).toBe(0)
+    expect(wrapper.find('button[aria-label="Edit"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Unpin folder"]').exists()).toBe(true)
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
+    expect(items).toEqual(['Refresh', 'Copy path', 'Open in default app'])
+    wrapper.unmount()
+  })
+
+  it('treats a folder with a file-like name as a folder', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/notes.md/' })
+    await flushPromises()
+
+    expect(wrapper.find('.pfp-body-csv').exists()).toBe(false)
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
+    expect(items).not.toContain('Open in memory map')
+    wrapper.unmount()
+  })
+
+  it('retitles the tile as the docked browser moves, and Refresh reloads that folder', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FolderBrowserStub' }).vm.$emit('navigate', '/ws/exports/sub')
+    await flushPromises()
+    expect(wrapper.get('.chat-title').text()).toBe('sub')
+    expect(wrapper.get('.chat-title').attributes('title')).toBe('/ws/exports/sub')
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    Array.from(document.querySelectorAll<HTMLElement>('.pfp-actions-menu button'))
+      .find(b => b.textContent?.trim() === 'Refresh')!
+      .click()
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'FolderBrowserStub' }).props('initialPath')).toBe('/ws/exports/sub')
+    wrapper.unmount()
+  })
+
+  it('resets to the pinned folder when it is opened again', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'FolderBrowserStub' }).vm.$emit('navigate', '/ws/exports/sub')
+    await flushPromises()
+    expect(wrapper.get('.chat-title').text()).toBe('sub')
+
+    useFileViewerStore().folderRedock = { path: '/ws/exports/', seq: 1 }
+    await flushPromises()
+    expect(wrapper.get('.chat-title').text()).toBe('exports')
+    expect(wrapper.findComponent({ name: 'FolderBrowserStub' }).props('initialPath')).toBe('/ws/exports')
+    wrapper.unmount()
+  })
+
+  it('docks a file picked in the browser and offers Back to the folder', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+    const store = useFileViewerStore()
+    const openFromFolder = vi.spyOn(store, 'openFromFolder').mockResolvedValue(true)
+
+    wrapper.findComponent({ name: 'FolderBrowserStub' }).vm.$emit('open-file', '/ws/exports/a.md')
+    await flushPromises()
+    expect(openFromFolder).toHaveBeenCalledWith('/ws/exports/a.md', 'chat-1', '/ws/exports')
+
+    await wrapper.setProps({ filePath: '/ws/exports/a.md' })
+    await flushPromises()
+    const back = wrapper.get('.pfp-back-btn')
+    expect(back.attributes('aria-label')).toBe('Back to exports')
+
+    const openFolder = vi.spyOn(store, 'openFolder').mockResolvedValue(true)
+    await back.trigger('click')
+    expect(openFolder).toHaveBeenCalledWith('/ws/exports', 'chat-1')
+
+    await wrapper.setProps({ filePath: '/ws/exports/' })
+    await flushPromises()
+    expect(wrapper.find('.pfp-back-btn').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows no Back when a different file is pinned after an open', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+    vi.spyOn(useFileViewerStore(), 'openFromFolder').mockResolvedValue(true)
+
+    wrapper.findComponent({ name: 'FolderBrowserStub' }).vm.$emit('open-file', '/ws/exports/a.md')
+    await flushPromises()
+    await wrapper.setProps({ filePath: '/ws/other.md' })
+    await flushPromises()
+    expect(wrapper.find('.pfp-back-btn').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens files the server cannot pin in the viewer', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/exports/' })
+    await flushPromises()
+    const openFromFolder = vi.spyOn(useFileViewerStore(), 'openFromFolder').mockResolvedValue(true)
+    const fb = wrapper.findComponent({ name: 'FolderBrowserStub' })
+
+    fb.vm.$emit('open-file', '/ws/exports/p.png')
+    await flushPromises()
+    expect(openFromFolder).toHaveBeenLastCalledWith('/ws/exports/p.png', '', '/ws/exports')
+
+    fb.vm.$emit('open-file', '/ws/exports/r.docx')
+    await flushPromises()
+    expect(openFromFolder).toHaveBeenLastCalledWith('/ws/exports/r.docx', '', '/ws/exports')
+    wrapper.unmount()
+  })
+
+  it('shows no Back for a file pinned from elsewhere', async () => {
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/a.md' })
+    await flushPromises()
+    expect(wrapper.find('.pfp-back-btn').exists()).toBe(false)
     wrapper.unmount()
   })
 })
