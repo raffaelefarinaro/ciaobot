@@ -1400,13 +1400,15 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // the open automation's title rail. Gated like the chat path: never with a
   // confirm, prompt or viewer up, never while a menu or popover is open, and
   // never from a text field (a card's draft would be thrown away).
+  // With an automation open the chord is the rail's even when it cannot move
+  // (either end, a sheet or a card edit): consumed, so Alt+Left never falls
+  // through to the browser's Back.
   if (viewMode.value === 'schedules' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
-    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+    if (!viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
       || document.querySelector('[data-dismissable-layer]')) return
-    if (schedulePanelRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) {
-      e.preventDefault()
-      invalidatePull()
-    }
+    if (route.params.scheduleId) e.preventDefault()
+    if (e.repeat) return
+    if (schedulePanelRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) invalidatePull()
     return
   }
   // Previous / next project, along the open project's title rail, with the
@@ -1415,9 +1417,10 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // the context being edited). The project page renders instead of any chat
   // still selected, so this comes before the chat chord.
   if (viewMode.value === 'project' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
-    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+    if (!viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
       || document.querySelector('[data-dismissable-layer]')) return
     e.preventDefault()
+    if (e.repeat) return
     if (projectViewRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) invalidatePull()
     return
   }
@@ -1425,13 +1428,23 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // gates. The surface also refuses under its own sheets and while a write is
   // in flight, and a switch writes the open task first, keeping it on screen
   // if that write is refused.
+  // With a task open the chord is consumed even when the rail cannot move
+  // (either end, a sheet, a write in flight), so Alt+Left is never Back. On
+  // the bare board it is left to the browser.
   if (viewMode.value === 'tasks' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
-    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+    if (!viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
       || document.querySelector('[data-dismissable-layer]')) return
-    if (taskBoardRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) {
-      e.preventDefault()
-      invalidatePull()
-    }
+    if (route.params.taskId) e.preventDefault()
+    if (e.repeat) return
+    if (taskBoardRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) invalidatePull()
+    return
+  }
+  // Tasks: arrows on a focused row of the sidebar's lanes roam those rows. The
+  // board and the open task keep their own keys.
+  if (viewMode.value === 'tasks' && bare && e.key.startsWith('Arrow')) {
+    if (isTypingTarget(e.target) || e.defaultPrevented) return
+    if (e.target instanceof Element && e.target.closest('.task-sidebar-list')
+      && projectSidebarRef.value?.onArrow?.(e.key)) e.preventDefault()
     return
   }
   // Automations: same arrow contract as home, but over the sidebar's

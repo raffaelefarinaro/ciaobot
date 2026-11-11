@@ -81,6 +81,23 @@ test.describe('the task page, desktop', () => {
     await expect(page).toHaveURL(new RegExp(`/tasks/${id('2')}$`))
   })
 
+  test('Option+Left at the first task is consumed, never the browser\'s Back', async ({ page, request }, ti) => {
+    await seed(page, request, `task-page-back-${ti.workerIndex}`)
+    // Home, then Tasks from the sidebar: a history entry a fallen-through
+    // Alt+Left would go Back to.
+    await boot(page, '/')
+    await page.locator('.nav-links a[href="/tasks"]').click()
+    const opener = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-open')
+    await opener.focus()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(new RegExp(`/tasks/${id('1')}$`))
+    await page.locator('.task-detail-page .pane-header').click({ position: { x: 5, y: 5 } })
+    await page.keyboard.press('Alt+ArrowLeft')
+    await page.waitForTimeout(400)
+    await expect(page).toHaveURL(new RegExp(`/tasks/${id('1')}$`))
+    await expect(page.locator('.task-detail-page')).toBeVisible()
+  })
+
   test('Option+arrows do nothing from the title field or under a confirm; a blank title keeps the task', async ({ page, request }, ti) => {
     await seed(page, request, `task-page-gates-${ti.workerIndex}`)
     await boot(page, `/tasks/${id('1')}`, CURRENT)
@@ -143,6 +160,14 @@ test.describe('the task page, phone', () => {
       header.locator('.header-trail').boundingBox(),
     ])
     expect(Math.abs((title!.y + title!.height / 2) - (trail!.y + trail!.height / 2))).toBeLessThan(trail!.height)
+    // Delete and the save line fold into the ⋯ menu, so the title keeps the row.
+    await expect(header.locator('.task-delete')).toBeHidden()
+    await header.getByRole('button', { name: 'More task actions' }).click()
+    await expect(page.getByRole('menuitem', { name: 'Delete task…' })).toBeVisible()
+    await expect(page.locator('.task-page-menu-note')).toHaveText('Changes save as you go.')
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('menuitem', { name: 'Delete task…' })).toHaveCount(0)
+    await expect(page.locator('.task-detail-page')).toBeVisible()
 
     const strip = (await page.locator('.task-detail-page .title-rail-strip').boundingBox())!
     await touchDrag(page, { x: strip.x + strip.width * 0.95, y: strip.y + strip.height / 2 }, { x: -strip.width * 0.9, y: 0 })

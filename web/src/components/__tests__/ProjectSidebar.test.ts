@@ -737,25 +737,63 @@ describe('ProjectSidebar global new chat', () => {
     board.rows = [
       row('a', 'Plan the launch', 'backlog'),
       row('b', 'Wire the store', 'in_progress', { attempt_state: 'running' }),
+      row('c', 'Check the copy', 'in_review', { attempt_state: 'ready_for_review' }),
     ] as never
     board.loadedWorkspace = 'personal'
     const wrapper = await mountSidebar('tasks')
     const list = wrapper.get('.task-sidebar-list')
-    expect(list.findAll('.schedule-group-header').map(h => h.text())).toEqual(['To do', 'In progress'])
+    expect(list.findAll('.schedule-group-header').map(h => h.text())).toEqual(['To do', 'In progress', 'In review'])
     const rows = list.findAll('.task-sidebar-item')
-    expect(rows.map(r => r.get('.sidebar-row-title').text())).toEqual(['Plan the launch', 'Wire the store'])
+    expect(rows.map(r => r.get('.sidebar-row-title').text())).toEqual(['Plan the launch', 'Wire the store', 'Check the copy'])
     expect(rows[0].classes()).toContain('sidebar-row')
     expect(rows[0].attributes('href')).toBe('/tasks/a')
-    expect(rows[1].find('.schedule-mark').exists()).toBe(true)
+    // The rail's marks: none, working, ready to review.
+    expect(rows[0].find('.schedule-mark').exists()).toBe(false)
+    expect(rows[1].find('.schedule-mark').attributes('title')).toBe('The agent is working on this task')
+    expect(rows[2].find('.task-review-mark').exists()).toBe(true)
+
+    // Arrows roam the rows top to bottom, across lanes.
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+    ;(rows[0].element as HTMLElement).focus()
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(rows[1].element)
+    vm.onArrow('ArrowDown')
+    expect(document.activeElement).toBe(rows[2].element)
     await list.get('[aria-label="New task"]').trigger('click')
     expect(wrapper.emitted('new-task')).toHaveLength(1)
     wrapper.unmount()
   })
 
-  it('loads the task list in the sidebar row shape', async () => {
+  it('loads the task list in the sidebar row shape, and offers Retry when the first read fails', async () => {
     const wrapper = await mountSidebar('tasks')
-    const skeleton = wrapper.get('.task-sidebar-list .sidebar-skeleton')
-    expect(skeleton.attributes('aria-label')).toBe('Loading tasks')
+    expect(wrapper.get('.task-sidebar-list .sidebar-skeleton').text()).toBe('Loading tasks…')
+
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    const reload = vi.spyOn(board, 'reload').mockResolvedValue()
+    board.loadError = 'The engine did not answer.'
+    await nextTick()
+    const error = wrapper.get('.task-sidebar-error')
+    expect(error.attributes('role')).toBe('alert')
+    expect(error.text()).toContain('The engine did not answer.')
+    await error.get('button').trigger('click')
+    expect(reload).toHaveBeenCalledWith('personal')
+    wrapper.unmount()
+  })
+
+  it('agrees with the rail: a done task carries no working mark', async () => {
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    board.rows = [{
+      id: 'd', title: 'Shipped', status: 'done', project_id: '', due: '', assignee: 'agent', chat_id: '', attempt_id: '',
+      linked_chats: [], created_at: '2026-03-01T09:00:00+00:00', updated_at: new Date().toISOString(), revision: 'a'.repeat(64),
+      relative_path: 'Tasks/d.md', attempt_state: 'running', attempt_outcome: '', attempt_summary: '', attempt_detail: '',
+      live_attempt_id: '', completed_at: new Date().toISOString(), has_resolution: false,
+    }] as never
+    board.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar('tasks')
+    const done = wrapper.get('.task-sidebar-item')
+    expect(done.find('.schedule-mark').exists()).toBe(false)
     wrapper.unmount()
   })
 

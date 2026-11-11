@@ -422,6 +422,12 @@
     <template v-if="!collapsed && mode === 'tasks'">
       <div ref="tasksListEl" class="schedules-list task-sidebar-list">
         <SidebarListSkeleton v-if="!tasksLoaded && !taskBoard.loadError" label="Loading tasks" :groups="2" :rows="2" />
+        <!-- The first read failed: the server's sentence and a Retry, never an
+             empty list that reads as "no tasks". -->
+        <div v-else-if="!tasksLoaded" class="task-sidebar-error" role="alert">
+          <p class="sidebar-empty-note">{{ taskBoard.loadError }}</p>
+          <button type="button" class="sidebar-label-link" @click="retryTasks">Retry</button>
+        </div>
         <template v-else>
           <div
             v-for="lane in sidebarTaskLanes"
@@ -454,8 +460,10 @@
                 :active="routeTaskId === task.id"
                 :aria-current="routeTaskId === task.id ? 'page' : undefined"
               >
-                <span v-if="task.attempt_state === 'running'" class="schedule-mark" title="The agent is working on this task"><ActivityGlyph kind="working" /></span>
-                <span v-else-if="task.attempt_state === 'needs_you' && lane.status !== 'done'" class="schedule-mark" title="The agent needs you"><ActivityGlyph kind="alert" /></span>
+                <!-- The rail's marks (taskRailMark), so the two always agree. -->
+                <span v-if="taskRailMark(task) === 'working'" class="schedule-mark" title="The agent is working on this task"><ActivityGlyph kind="working" /></span>
+                <span v-else-if="taskRailMark(task) === 'needs'" class="schedule-mark" title="The agent needs you"><ActivityGlyph kind="alert" /></span>
+                <span v-else-if="taskRailMark(task) === 'unread'" class="schedule-mark task-review-mark" title="Ready to review"><span class="task-review-dot" aria-hidden="true" /><span class="sr-only">Ready to review</span></span>
               </SidebarRow>
             </div>
           </div>
@@ -1020,7 +1028,7 @@ import { useHistoryNav } from '../composables/useHistoryNav'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useTaskBoardStore } from '../stores/taskBoard'
-import { formatCardDue, readableTasks, taskLanes } from '../lib/taskBoard'
+import { formatCardDue, readableTasks, taskLanes, taskRailMark } from '../lib/taskBoard'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
@@ -1349,6 +1357,9 @@ const sidebarTaskLanes = computed(() => {
 })
 const routeTaskId = computed(() => (typeof route.params.taskId === 'string' ? route.params.taskId : ''))
 const tasksListEl = ref<HTMLElement | null>(null)
+function retryTasks(): void {
+  void taskBoard.reload(store.activeWorkspace)
+}
 
 // ── Keyboard navigation for the schedules list: one flat list, the same
 // roaming as Home's chats and the Automations overview (lib/listRoaming.ts). ──
@@ -1356,6 +1367,12 @@ const schedulesListEl = ref<HTMLElement | null>(null)
 
 function onArrow(key: string): boolean {
   if (props.collapsed) return false
+  if (props.mode === 'tasks') {
+    // The task lanes read top to bottom as one list, like the automation groups.
+    const tasksRows = Array.from(tasksListEl.value?.querySelectorAll<HTMLElement>('.task-sidebar-item') ?? [])
+    const open = tasksListEl.value?.querySelector<HTMLElement>('.task-sidebar-item.active')
+    return roamFocus([tasksRows], key, 'list', () => listAnchor(tasksRows, open))
+  }
   const rows = Array.from(schedulesListEl.value?.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])') ?? [])
   // Arrows start where the user is: the row for the open automation.
   const current = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
@@ -3247,6 +3264,20 @@ async function confirmDeleteChat(chatId: string) {
 }
 /* Automation rows are SidebarRows, the same row as a chat's; only their marks
    need a rule here. */
+.task-review-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.task-sidebar-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
 .schedule-mark {
   display: inline-flex;
   flex-shrink: 0;

@@ -135,11 +135,51 @@ describe('the open task as a page', () => {
     const { wrapper, router } = await mountAt('/tasks/ship')
     apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task({ title: 'Ship it' }), revision: NEXT_REVISION, body: '' } })
     await wrapper.get('#task-detail-name').setValue('Ship it')
+    const pageBefore = wrapper.get('.task-detail-page').element
     expect((wrapper.vm as unknown as Exposed).selectAdjacent(1)).toBe(true)
     await settle()
     expect(apiPatch).toHaveBeenCalledTimes(1)
     expect(router.currentRoute.value.path).toBe('/tasks/plan')
     expect((wrapper.get('#task-detail-name').element as HTMLTextAreaElement).value).toBe('Plan the launch')
+    // The step commits the open task and opens the next in place: the page is
+    // the same node, the board never came back, and the body arrives from the
+    // side the rail moved to.
+    expect(wrapper.get('.task-detail-page').element).toBe(pageBefore)
+    expect(wrapper.get('.task-view > .page-grid').attributes('style')).toContain('display: none')
+    expect(wrapper.get('.task-detail-pane').classes()).toContain('rail-arrive-next')
+    // The rail keeps its travel order and lands on the next item.
+    expect(wrapper.get('.title-rail').attributes('aria-label')).toBe('Tasks on this board, 2 of 4')
+    wrapper.unmount()
+  })
+
+  it('leaves an Escape aimed outside the page to its owner', async () => {
+    const { wrapper, router } = await mountAt('/tasks/ship')
+    // A popover field outside the page (the sidebar's rename, the bell's sheet)
+    // that answers its own Escape.
+    const outside = document.createElement('input')
+    document.body.appendChild(outside)
+    const owner = vi.fn()
+    outside.addEventListener('keydown', (e) => { if (e.key === 'Escape') owner() })
+    outside.focus()
+    outside.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await settle()
+    expect(owner).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.task-detail-page').exists()).toBe(true)
+    expect(router.currentRoute.value.path).toBe('/tasks/ship')
+
+    // Aimed at the page, it closes it.
+    wrapper.get('#task-detail-name').element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await settle()
+    expect(wrapper.find('.task-detail-page').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('folds Delete and the save line into a ⋯ menu that a phone shows instead', async () => {
+    const { wrapper } = await mountAt('/tasks/ship')
+    const actions = wrapper.get('.task-detail-page .pane-header')
+    expect(actions.find('.task-delete.task-header-wide').exists()).toBe(true)
+    expect(actions.get('.task-header-narrow').attributes('aria-label')).toBe('More task actions')
+    expect(actions.get('.task-saved').attributes('role')).toBe('status')
     wrapper.unmount()
   })
 

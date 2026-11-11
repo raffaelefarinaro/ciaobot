@@ -115,6 +115,16 @@ test.describe('automation title rail, desktop', () => {
     await expect(page).toHaveURL(/\/schedules\/alpha-weekly-review$/)
   })
 
+  test('Option+Left at the first automation is consumed, never the browser\'s Back', async ({ page }) => {
+    await boot(page, '/schedules', '.schedules-list .schedule-item')
+    await page.locator('.schedules-list .schedule-item').first().click()
+    await expect(page).toHaveURL(/\/schedules\/alpha-daily-brief$/)
+    await page.locator('body').click({ position: { x: 900, y: 600 } })
+    await page.keyboard.press('Alt+ArrowLeft')
+    await page.waitForTimeout(400)
+    await expect(page).toHaveURL(/\/schedules\/alpha-daily-brief$/)
+  })
+
   test('an arrow at the end of the rail keeps focus on the title', async ({ page }) => {
     await boot(page, '/schedules/alpha-inbox-sweep', CURRENT)
     await page.locator(CURRENT).focus()

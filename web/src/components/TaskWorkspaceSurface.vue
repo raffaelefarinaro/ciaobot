@@ -65,6 +65,9 @@ import { useTaskStore } from '../stores/tasks'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
 import { askConfirm, askConfirmReason, pendingConfirm } from '../lib/confirm'
+import { pendingPrompt } from '../lib/prompt'
+import { useFileViewerStore } from '../stores/fileViewer'
+import { useItemPeekStore } from '../stores/itemPeek'
 import { cleanReason } from '../lib/decisionReasons'
 import DecisionReason from './DecisionReason.vue'
 import { renderUserMarkdown } from '../lib/safeMarkdown'
@@ -135,6 +138,8 @@ const overlay = computed(() => props.mode === 'overlay')
 
 const projectStore = useProjectStore()
 const board = useTaskBoardStore()
+const fileViewer = useFileViewerStore()
+const itemPeek = useItemPeekStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 /**
@@ -2099,48 +2104,66 @@ const MAX_CLOSE_WRITES = 4
  * commit the editor before it touches a nested sheet's draft.
  */
 async function closeDetailNow(options: { discard?: boolean; strict?: boolean } = {}): Promise<string | null> {
-  // `strict` holds the board to the overlay's rule: close only on a verified
-  // clean draft. Switching to another task uses it, because a refused or blank
-  // edit must stay on screen rather than vanish behind the next task.
+  if (!(await commitDetail(options))) return null
+  return resetDetail()
+}
+
+/**
+ * The commit half of a close: write everything the editor holds and verify it,
+ * leaving the editor open either way. True when the draft is written (or
+ * discarded) and the editor may move on; false when it must stay on screen.
+ *
+ * `strict` holds the board to the overlay's rule: move on only from a verified
+ * clean draft. Switching to another task uses it, because a refused or blank
+ * edit must stay on screen rather than vanish behind the next task.
+ */
+async function commitDetail(options: { discard?: boolean; strict?: boolean } = {}): Promise<boolean> {
   const strict = overlay.value || Boolean(options.strict)
   if (options.discard) {
     cancelAutosave()
-  } else {
-    // The board row vanished under an open editor. A draft cannot be written to
-    // a record that is gone, and it must not be recreated; keep it and say so.
-    if (!detailTask.value && hasUnsavedEdits()) {
-      detailRecordError.value = MISSING_RECORD
-      return null
-    }
+    return true
+  }
+  // The board row vanished under an open editor. A draft cannot be written to
+  // a record that is gone, and it must not be recreated; keep it and say so.
+  if (!detailTask.value && hasUnsavedEdits()) {
+    detailRecordError.value = MISSING_RECORD
+    return false
+  }
+  {
     for (let attempt = 0; ; attempt++) {
       // The title can go blank while the previous write is in flight.
       if (strict && !detailValid.value) {
         refuseCloseForTitle()
-        return null
+        return false
       }
       if (!hasUnsavedEdits() && !autosaving.value) break
-      if (detailSaving.value) return null
+      if (detailSaving.value) return false
       if (attempt >= MAX_CLOSE_WRITES) {
-        if (strict) return refuseIncompleteClose()
+        if (strict) { refuseIncompleteClose(); return false }
         break
       }
       const snapshot = detailDraft()
       const closing = detailId.value
-      if (!(await flushDetail())) return null
-      if (detailId.value !== closing) return null
+      if (!(await flushDetail())) return false
+      if (detailId.value !== closing) return false
       if (!hasUnsavedEdits() && !autosaving.value) break
       if (!detailDraftMoved(snapshot)) {
         // A write that reports success and leaves the draft untouched did not
         // write the text this editor still holds; unmounting would lose it.
-        if (strict) return refuseIncompleteClose()
+        if (strict) { refuseIncompleteClose(); return false }
         break
       }
     }
     cancelAutosave()
     // Belt and braces: an overlay never closes over a draft it has not seen
     // written, even if every write above claimed success.
-    if (strict && hasUnsavedEdits()) return refuseIncompleteClose()
+    if (strict && hasUnsavedEdits()) { refuseIncompleteClose(); return false }
   }
+  return true
+}
+
+/** The reset half of a close: drop the editor's state. Answers the id that closed. */
+function resetDetail(): string {
   const closed = detailId.value
   detailOpen.value = false
   detailId.value = ''
@@ -2213,8 +2236,18 @@ function syncTaskAddress(taskId: string): void {
   // screen's address would navigate the host out from under itself.
   if (overlay.value) return
   if (!router || routeTaskId.value === taskId) return
+  addressInFlight = taskId
   void router.replace(taskId ? { name: 'task-detail', params: { taskId } } : { name: 'tasks' })
+    .finally(() => { if (addressInFlight === taskId) addressInFlight = null })
 }
+
+/**
+ * The address this surface has asked the router for and not yet been given.
+ * Until it lands, the old address is this surface's own past, not the user
+ * navigating: a board re-read in that window must not reopen the task the
+ * page just moved away from.
+ */
+let addressInFlight: string | null = null
 
 watch(
   [routeTaskId, () => board.loadedWorkspace, tasks, () => board.loading],
@@ -2223,6 +2256,7 @@ watch(
     // task prop and must not open or drop anything because the host navigated.
     if (overlay.value) return
     const id = routeTaskId.value
+    if (addressInFlight !== null && id !== addressInFlight) return
     if (!id || board.loadedWorkspace !== workspace.value) return
     if (detailOpen.value && detailId.value === id) return
     const task = tasks.value.find(t => t.id === id)
@@ -2245,19 +2279,21 @@ watch(
       if (routeSwitching) return
       const kept = detailId.value
       routeSwitching = true
-      let closed: string | null
+      let committed: boolean
       try {
-        closed = await closeDetailNow({ strict: true })
+        committed = await commitDetail({ strict: true })
       } finally {
         routeSwitching = false
       }
-      if (closed === null) {
+      if (!committed) {
         if (detailOpen.value && detailId.value === kept) syncTaskAddress(kept)
         return
       }
-      // The address may have moved on while the write was settling.
+      // The address may have moved on while the write was settling. The page
+      // is not torn down between the two tasks: the next one opens in place.
       const latest = tasks.value.find(t => t.id === routeTaskId.value)
       if (latest) openDetail(latest)
+      else resetDetail()
       return
     }
     openDetail(task)
@@ -2823,7 +2859,9 @@ async function deleteTask() {
   detailSaving.value = true
   const removed = await board.remove(workspace.value, task.id, revision, reason)
   detailSaving.value = false
-  if (removed) void closeDetail({ discard: true })
+  // Only the task that was deleted closes: the page may have moved on to
+  // another while the delete was in flight.
+  if (removed && detailOpen.value && detailId.value === task.id) void closeDetail({ discard: true })
   // A refused delete is a stale revision or a file already gone; re-read so the
   // row on screen matches the disk.
   else load()
@@ -2926,6 +2964,17 @@ const today = localDateKey()
 
 const detailPage = computed(() => detailOpen.value && !overlay.value)
 
+/** Where the autosave stands, said the same way in the header and its ⋯ menu. */
+const detailSaveLine = computed(() => (
+  !detailValid.value
+    ? 'Add a title to save.'
+    : autosaving.value || autosavePending.value
+      ? 'Saving…'
+      : savedAt.value
+        ? 'Saved'
+        : 'Changes save as you go.'
+))
+
 /** A sheet or confirm over the page: its keys and its draft come first. */
 const detailPageCovered = computed(
   () => pendingConfirm.value || moveOpen.value || delegateOpen.value || createOpen.value || resolutionOpen.value,
@@ -2935,10 +2984,7 @@ const detailPageCovered = computed(
 // card) on close, as the dialog did; the page traps nothing and inerts nothing,
 // so the sidebar stays usable beside it.
 let detailPageOpener: HTMLElement | null = null
-/** A rail step is replacing the open task: focus stays on the rail, not the title field. */
-let railStepping = false
 watch(detailPage, async (open, was) => {
-  if (railStepping) return
   if (open) {
     detailPageOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     await nextTick()
@@ -2955,11 +3001,19 @@ watch(detailPage, async (open, was) => {
 /**
  * Escape closes the page through the same save as ×, claimed in the capture
  * phase like the dialog's, so the global Escape (which leaves Tasks for Home)
- * never runs over an open task. A sheet, a confirm or a menu over the page owns
- * the key instead.
+ * never runs over an open task. Only a key aimed at the page (focus inside it,
+ * or on nothing): a popover or field outside it (the notification bell, the
+ * sidebar's workspace menu, a project rename) answers its own Escape. A sheet,
+ * a confirm, a prompt, the file viewer or a peek over the page owns it too.
  */
 function onDetailPageKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape' || !detailPage.value || detailPageCovered.value) return
+  const target = event.target instanceof Node ? event.target : null
+  // A key dispatched at the window has no node target: it is aimed at the page.
+  const aimedHere = !target || target === document.body || target === document.documentElement
+    || !!paneEl.value?.contains(target)
+  if (!aimedHere) return
+  if (pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
   if (event.defaultPrevented || event.isComposing || document.querySelector('[data-dismissable-layer]')) return
   event.preventDefault()
   event.stopImmediatePropagation()
@@ -2996,23 +3050,20 @@ async function switchDetail(id: string): Promise<void> {
   if (!task || !detailPage.value) throw new Error('No such task on the board')
   if (detailId.value === id) return
   if (detailPageCovered.value || detailSaving.value) throw new Error('The open task is busy')
-  railStepping = true
-  try {
-    const closed = await closeDetailNow({ strict: true })
-    if (closed === null) throw new Error('The open task kept its draft')
-    const next = tasks.value.find((entry) => entry.id === id)
-    if (!next) throw new Error('No such task on the board')
-    openDetail(next)
-    // Like a chat's rail, the keys stay on the rail: the next arrow or chord
-    // moves on again instead of typing into the new task's title.
-    await nextTick()
-    await nextTick()
-    const field = paneEl.value?.querySelector('.task-detail-form')
-    if (!field?.contains(document.activeElement)) {
-      paneEl.value?.querySelector<HTMLElement>('.task-detail-page .title-rail-item[aria-current="page"]')?.focus()
-    }
-  } finally {
-    railStepping = false
+  // Commit, not close: the page stays up and the next task opens in place, so
+  // the board never flickers back, the arrival plays and the rail keeps its
+  // travel order.
+  if (!(await commitDetail({ strict: true }))) throw new Error('The open task kept its draft')
+  const next = tasks.value.find((entry) => entry.id === id)
+  if (!next) throw new Error('No such task on the board')
+  openDetail(next)
+  // Like a chat's rail, the keys stay on the rail: the next arrow or chord
+  // moves on again instead of typing into the new task's title.
+  await nextTick()
+  await nextTick()
+  const field = paneEl.value?.querySelector('.task-detail-form')
+  if (!field?.contains(document.activeElement)) {
+    paneEl.value?.querySelector<HTMLElement>('.task-detail-page .title-rail-item[aria-current="page"]')?.focus()
   }
 }
 
@@ -3761,21 +3812,35 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
           </div>
         </template>
         <template #actions>
-          <p class="task-saved" role="status" aria-live="polite">{{
-            !detailValid
-              ? 'Add a title to save.'
-              : autosaving || autosavePending
-                ? 'Saving…'
-                : savedAt
-                  ? 'Saved'
-                  : 'Changes save as you go.'
-          }}</p>
+          <!-- Wide: the save line and Delete sit in the header. A phone folds
+               both into the ⋯ menu (CSS only), so the title keeps the row; the
+               line stays the live region either way. -->
+          <p class="task-saved" role="status" aria-live="polite">{{ detailSaveLine }}</p>
           <button
             type="button"
-            class="btn-small task-delete"
+            class="btn-small task-delete task-header-wide"
             :disabled="detailSaving"
             @click="deleteTask"
           >Delete</button>
+          <DropdownMenuRoot :modal="false">
+            <DropdownMenuTrigger as-child>
+              <button type="button" class="btn-icon task-header-narrow" aria-label="More task actions">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
+                </svg>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+                <div class="task-page-menu">
+                  <p class="task-page-menu-note" aria-hidden="true">{{ detailSaveLine }}</p>
+                  <DropdownMenuItem as-child :disabled="detailSaving">
+                    <button type="button" class="danger" @click="deleteTask">Delete task…</button>
+                  </DropdownMenuItem>
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenuPortal>
+          </DropdownMenuRoot>
         </template>
       </PaneHeader>
       <div
@@ -5434,6 +5499,39 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
   color: var(--error);
 }
+.task-detail-page .task-header-narrow { display: none; }
+.task-page-menu {
+  z-index: 100;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+}
+.task-page-menu-note {
+  margin: 0;
+  padding: 6px 12px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.task-page-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--touch);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.task-page-menu button:hover,
+.task-page-menu button[data-highlighted] { background: var(--bg3); outline: none; }
+.task-page-menu button.danger { color: var(--error); }
 .task-detail-pane {
   display: flex;
   flex-direction: column;
@@ -5450,7 +5548,9 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 @media (max-width: 768px) {
   /* A phone's header is one row: the menu and Back leave the page, and the save
      line is still announced but not drawn. */
-  .task-detail-page .close-btn { display: none; }
+  .task-detail-page .close-btn,
+  .task-detail-page .task-header-wide { display: none; }
+  .task-detail-page .task-header-narrow { display: inline-flex; }
   .task-detail-page .task-saved {
     position: absolute;
     width: 1px;
