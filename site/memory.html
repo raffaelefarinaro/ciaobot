@@ -31,6 +31,7 @@
         <a href="guide.html">Guide</a>
         <a href="features.html">Features</a>
         <a href="memory.html" aria-current="page">Memory</a>
+        <a href="trust.html">Trust</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -47,10 +48,10 @@
       <h2>The short version</h2>
       <svg class="diagram" viewBox="0 0 720 250" role="img" aria-labelledby="sum-title sum-desc">
         <title id="sum-title">Three layers of memory</title>
-        <desc id="sum-desc">Always known: a short core memory and the project description, loaded in every chat. Looked up when needed: the notes folder, searched by the assistant. Written after you archive: facts from the chat are checked and filed, or queued for you.</desc>
+        <desc id="sum-desc">Always known: core memory, two regions with character budgets, and the project description, loaded in every chat. Looked up when needed: the notes folder, searched by the assistant. Written after you archive: facts from the chat are checked and filed, or queued for you.</desc>
         <rect class="box-accent" x="10" y="20" width="220" height="210" rx="14"/>
         <text x="120" y="54" text-anchor="middle" font-weight="700" font-size="17">Always known</text>
-        <text class="muted" x="120" y="86" text-anchor="middle" font-size="14">A short core memory</text>
+        <text class="muted" x="120" y="86" text-anchor="middle" font-size="14">Two regions with budgets:</text>
         <text class="muted" x="120" y="108" text-anchor="middle" font-size="14">about you and how you work</text>
         <text class="muted" x="120" y="140" text-anchor="middle" font-size="14">+ the project's description</text>
         <text class="muted" x="120" y="190" text-anchor="middle" font-size="13">in every chat, automatically</text>
@@ -71,7 +72,25 @@
 
     <section>
       <h2>1. What it always knows</h2>
-      <p>Every workspace has a short <strong>core memory</strong> with two parts: <em>about you</em> (where you live, how you like answers) and <em>agent memory</em> (rules and facts that matter in every chat). It's small on purpose, about a page, and it lives in a plain file called <code>AGENTS.md</code> in your workspace folder.</p>
+      <p>Every workspace has a <strong>core memory</strong> with two parts: <em>about you</em> (where you live, how you like answers) and <em>agent memory</em> (rules and facts that matter in every chat). Both live in a plain file called <code>AGENTS.md</code> in your workspace folder, and both have a character budget rather than a page count. These are the shipped defaults:</p>
+      <div class="table-wrap">
+        <table id="numbers">
+          <thead><tr><th>Limit</th><th>Value</th><th>What it means</th></tr></thead>
+          <tbody>
+            <tr><td>Agent memory region</td><td>3,000 characters</td><td>What every chat loads: environment facts, conventions, lessons. A budget, not a wall.</td></tr>
+            <tr><td>About-you region (profile)</td><td>1,375 characters</td><td>Identity, preferences, how you like answers. A smaller budget, the same rule.</td></tr>
+            <tr><td>Making room</td><td>at 85%</td><td>The nightly pass merges duplicates, drops expired facts and moves project-only facts out.</td></tr>
+            <tr><td>A project note</td><td>flagged after 30 days without a check</td><td>An active project's state changes weekly, so its facts go stale fastest.</td></tr>
+            <tr><td>A person note</td><td>flagged after 90 days</td><td>An employer or an address changes more slowly than a project's status.</td></tr>
+            <tr><td>Any other note</td><td>flagged after 180 days</td><td>The default. Journals, logs and workspace files are never counted stale.</td></tr>
+            <tr><td>A fact inside a region</td><td>90 days with an <code>[as-of:]</code> date, 180 without</td><td>A dated snapshot goes stale sooner than standing state.</td></tr>
+            <tr><td>After a check</td><td>30 days before it is asked again</td><td>A note the pass re-stamped, or could not check, is left alone for a month.</td></tr>
+            <tr><td>A search</td><td>10 results by default, 32-token snippets</td><td>Snippets pick the note; the assistant reads the note itself before answering.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Both region caps are <strong>advisory</strong>. A write over the budget goes through and is reported as over budget, with the count used and the budget it passed; it is never refused. When a region reaches 85%, consolidation merges duplicates, removes expired facts and moves project-only facts into their own notes. If nothing can go, the region stays over budget and says so. The cap is never a reason to drop a durable fact.</p>
+      <p>There is also no fixed number of searches or notes per question. The assistant reads the note its search picked, reads another only when identity or a conflict is still open, and retries with two or three different wordings before it says the notes do not know. <a href="evals.html#memory-comparison">How that measures up →</a></p>
       <p>On top of that, each message carries a small, invisible header: the workspace, the project, <strong>the project's description</strong> and today's date. If you mention someone or something Ciaobot has a note about, it adds a pointer to that note too, so the assistant knows where to look.</p>
       <p>That's all that's loaded automatically. Everything else is looked up only when it's needed, which keeps chats fast and focused.</p>
       <div class="note">Facts can carry an expiry date ("Villa Rosa holds our date until 1 May"). Once the date passes, Ciaobot removes the fact before the next message, so stale facts don't linger.</div>
@@ -171,7 +190,7 @@
       <h3>Review history and undo supported changes</h3>
       <p><strong>History</strong> records memory decisions and shows before/after details for writes with receipts. <strong>Undo</strong> is available where a reversible receipt exists; older records and some batch entries are view-only. A memory or profile change that Workspace care applied itself under Memory handover reads <em>Filed by Workspace care</em> (or <em>Dismissed by Workspace care</em>), and an accepted one can be undone from the row.</p>
       <h3>Retire notes without losing them</h3>
-      <p>Old or unused notes are flagged for your decision, not automatically deleted. Review the evidence, keep a note, or move it to the retired list. Retired notes remain restorable until you explicitly choose permanent deletion; there is no timed purge.</p>
+      <p>Old or unused notes are flagged for your decision, not automatically deleted. Review the evidence, keep a note, or move it to the retired list. Retired notes remain restorable until you explicitly choose permanent deletion; there is no timed purge. Only a project can be marked <em>complete</em>; a person, a place or a reference is simply retired, and neither happens without you.</p>
       <h3>Tell it directly</h3>
       <div class="prompt">Remember that I'm allergic to penicillin.</div>
       <div class="prompt">Forget what I said about the Casa Blu venue, we dropped it.</div>
@@ -185,7 +204,7 @@
         <li>Files the suggestions tagged <em>project</em>, <em>people</em> and <em>learnings</em>, and decides the <em>review</em> ones. A judgement call comes back to you as a yes/no question.</li>
         <li>For every <em>memory</em> and <em>profile</em> suggestion it records a guess (would you accept or dismiss it?) and leaves the suggestion for you. The guess is never a decision.</li>
         <li>Leaves alone anything marked <em>decide: you</em>, and escalates what it cannot settle.</li>
-        <li>Tidies core memory only when a part reaches about 85% of its limit: it merges duplicates, drops expired facts and moves project-only facts into their project. Every line it removes is copied first to <code>Memory-Consolidations.md</code>, the undo log.</li>
+        <li>Tidies core memory only when a part reaches 85% of its budget (<a href="#numbers">the numbers</a>): it merges duplicates, drops expired facts and moves project-only facts into their project. Every line it removes is copied first to <code>Memory-Consolidations.md</code>, the undo log.</li>
         <li>Re-checks notes, and single facts inside them, that have gone too long without a check, and flags the rest.</li>
       </ul>
       <h3>Memory handover</h3>
@@ -209,6 +228,21 @@
         <li>Reviews the body of your workspace guide and files suggestions. It never edits the guide itself.</li>
         <li>Reads your recent decisions and updates <code>Memory-Review-Rules.md</code> and <code>Task-Rules.md</code> when there are at least five new ones. A rule that would change a verdict is asked as a yes/no first.</li>
       </ul>
+    </section>
+
+    <section id="cannot">
+      <h2>What this cannot establish</h2>
+      <p>Every mechanism above does one thing and stops there. These are the edges, written down rather than discovered later:</p>
+      <ul>
+        <li><strong>A keyword search cannot match a word the note does not contain.</strong> Ask for "brother-in-law" and a note that only says "Marco's wife's brother" is invisible. That is why new people and project notes get an <code>aliases:</code> line, and why the assistant retries with two or three other phrasings before it gives up. A synonym the note never uses is still a miss.</li>
+        <li><strong>Unverified is not the same as false.</strong> A note past its horizon is one nobody has checked, not one that has gone wrong. The review list is a reading list, not a verdict, and reaching it is never by itself a reason to retire a note.</li>
+        <li><strong>The nightly pass decides what to ask, not what is true.</strong> It compares a note with the chats and sources it can reach. When the evidence is not in front of it, the honest outcome is "unverified" and a cooldown — not a correction.</li>
+        <li><strong>"Written straight away" is the pass's confidence, not proof.</strong> It means the assistant judged the fact clear enough to file. History is what lets you check the judgement afterwards.</li>
+        <li><strong>The index is a copy.</strong> A search re-indexes the changed notes before it answers, so a hand edit is found on the next search; a note with <code>search: false</code>, or one of the queue and log files, is deliberately not in it at all.</li>
+        <li><strong>A note is one source with one day's view.</strong> It can faithfully record something that was already wrong when it was said. Evidence is not the same as truth.</li>
+        <li><strong>Nothing is deleted automatically, and that cuts both ways.</strong> An unused note stays until you decide, so a vault can keep things you would have thrown away. There is no timed purge to fall back on.</li>
+      </ul>
+      <p>None of this is a reason to distrust the folder. It is a reason to read a fact's date before acting on it, and to treat a suggestion as a suggestion.</p>
     </section>
 
     <section>
@@ -253,6 +287,7 @@ Logs/Chats/                  a readable copy of every archived chat</code></pre>
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
