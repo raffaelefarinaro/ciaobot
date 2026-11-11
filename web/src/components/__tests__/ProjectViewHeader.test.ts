@@ -194,14 +194,23 @@ describe('ProjectView header', () => {
     expect(wrapper.emitted('pull-end')).toEqual([[140, 0.2]])
   })
 
-  it('folds New chat and Complete into the ⋯ menu on a phone', async () => {
-    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('max-width') || q.includes('reduce'), addEventListener() {}, removeEventListener() {} }))
+  it('folds New chat and Complete into the ⋯ menu on a phone, with CSS (headerFold.css)', async () => {
     seed()
     const wrapper = await mountView()
-    expect(wrapper.find('.project-new-chat').exists()).toBe(false)
-    expect(wrapper.findAll('button').some(b => b.text() === 'Complete')).toBe(false)
+    // Both states are in the DOM; the shared fold classes pick one per width.
+    expect(wrapper.get('.project-new-chat').classes()).toContain('fold-wide')
+    expect(wrapper.findAll('button').find(b => b.text() === 'Complete')!.classes()).toContain('fold-wide')
     await wrapper.get('[aria-label="Project actions"]').trigger('click')
     await flush()
-    expect(wrapper.findAll('[role="menuitem"]').map(i => i.text())).toEqual(['New chat', 'Complete', 'Delete project'])
+    const items = wrapper.findAll('[role="menuitem"]')
+    expect(items.map(i => i.text())).toEqual(['New chat', 'Complete', 'Delete project'])
+    expect(items.map(i => i.classes().includes('fold-phone'))).toEqual([true, true, false])
+  })
+
+  it('shows the ⋯ menu of an auto project only where the header folds', async () => {
+    seed()
+    const wrapper = await mountView('general')
+    expect(wrapper.get('.project-actions').classes()).toContain('fold-phone')
+    expect(wrapper.find('.close-btn').attributes('aria-label')).toBe('Close project')
   })
 })

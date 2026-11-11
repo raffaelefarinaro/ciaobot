@@ -9,19 +9,7 @@
                the workspace's projects (swipe or arrow keys to move along it,
                pull the title down to go back Home, double-click to rename), or
                the plain title when there is nothing to move to. -->
-          <div class="item-title-row" :class="{ 'item-title-row--rail': titleRailOn && !editingName }">
-            <button
-              type="button"
-              class="btn-icon close-btn"
-              title="Close project"
-              aria-label="Close project"
-              @click="$emit('close')"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="18" y1="6" x2="6" y2="18"/>
-                <line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
+          <ItemTitleRow :rail="titleRailOn && !editingName" close-label="Close project" @close="$emit('close')">
             <input
               v-if="editingName"
               class="title-input"
@@ -51,24 +39,23 @@
             <!-- The project name is the title. Its workspace is named once, in
                  the sidebar's workspace scope, so it is not repeated here. -->
             <h2 v-else class="pane-title project-title" @dblclick="startEditName">{{ project.name }}</h2>
-          </div>
+          </ItemTitleRow>
         </div>
       </template>
       <template #actions>
         <!-- On a phone the header is one row like a chat's: New chat and
-             Complete move into the ⋯ menu, which every project then has. -->
-        <template v-if="!phone">
-          <button type="button" class="btn-small project-new-chat" aria-haspopup="dialog" @click="newChat">New chat</button>
-          <button
-            v-if="canComplete"
-            class="btn-small"
-            @click="doComplete"
-          >Complete</button>
-        </template>
+             Complete fold into the ⋯ menu (headerFold.css), which every
+             project then has. -->
+        <button type="button" class="btn-small project-new-chat fold-wide" aria-haspopup="dialog" @click="newChat">New chat</button>
+        <button
+          v-if="canComplete"
+          class="btn-small fold-wide"
+          @click="doComplete"
+        >Complete</button>
         <div
-          v-if="phone || !project.is_auto"
           ref="projectActionsEl"
           class="project-actions"
+          :class="{ 'fold-phone': project.is_auto }"
         >
           <button
             ref="projectActionsTrigger"
@@ -89,10 +76,8 @@
             aria-label="Project actions"
             @keydown="onProjectActionsKeydown"
           >
-            <template v-if="phone">
-              <button type="button" role="menuitem" aria-haspopup="dialog" @click="closeProjectActions(false); newChat()">New chat</button>
-              <button v-if="canComplete" type="button" role="menuitem" @click="closeProjectActions(false); doComplete()">Complete</button>
-            </template>
+            <button type="button" role="menuitem" class="fold-phone" aria-haspopup="dialog" @click="closeProjectActions(false); newChat()">New chat</button>
+            <button v-if="canComplete" type="button" role="menuitem" class="fold-phone" @click="closeProjectActions(false); doComplete()">Complete</button>
             <button v-if="!project.is_auto" type="button" role="menuitem" class="danger" @click="doDelete">Delete project</button>
           </div>
         </div>
@@ -504,6 +489,7 @@ import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import { takeProjectRailArrival, useProjectRail } from '../composables/useProjectRail'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
@@ -713,16 +699,6 @@ watch(() => allChats.value.filter(chat => chat.archived).map(chat => chat.chat_i
 })
 onBeforeUnmount(() => { archiveRequest++ })
 
-// A phone (768px and under, where the close button also goes): the header's
-// actions fold into the ⋯ menu so title and actions share one row.
-const PHONE_QUERY = '(max-width: 768px)'
-const phoneQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-  ? window.matchMedia(PHONE_QUERY)
-  : null
-const phone = ref(phoneQuery?.matches ?? false)
-function onPhoneChange(e: MediaQueryListEvent): void { phone.value = e.matches }
-phoneQuery?.addEventListener?.('change', onPhoneChange)
-onBeforeUnmount(() => phoneQuery?.removeEventListener?.('change', onPhoneChange))
 const canComplete = computed(() => !!project.value?.vault_folder && !project.value?.is_auto)
 
 // ── Title rail ─────────────────────────────────────────────────────────
@@ -827,19 +803,24 @@ function closeProjectActions(restoreFocus = false) {
   if (restoreFocus) void nextTick(() => projectActionsTrigger.value?.focus())
 }
 
+/** The menu's items as drawn: the phone-only ones (fold-phone) are in the DOM
+ *  at every width, but hidden on a wider pane, and focus must skip them. */
+function menuItems(): HTMLButtonElement[] {
+  return Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+    .filter(item => getComputedStyle(item).display !== 'none')
+}
+
 function toggleProjectActions() {
   if (actionsOpen.value) {
     closeProjectActions(true)
     return
   }
   actionsOpen.value = true
-  void nextTick(() => {
-    projectActionsMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
-  })
+  void nextTick(() => { menuItems()[0]?.focus() })
 }
 
 function onProjectActionsKeydown(event: KeyboardEvent) {
-  const items = Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  const items = menuItems()
   if (!items.length) return
   const current = items.indexOf(document.activeElement as HTMLButtonElement)
   if (event.key === 'Escape') {
@@ -1263,6 +1244,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 </script>
 
 <style scoped src="./railMotion.css"></style>
+<style scoped src="./headerFold.css"></style>
 
 <style scoped>
 .project-view {
@@ -1337,17 +1319,9 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   padding-bottom: var(--space-6);
 }
 
-/* The same title row as ChatPanel's and SchedulePanel's: close and the title
-   share one vertical centre; with the rail on, the row takes the header's room
-   so the rail can centre the title on the page's main column. Close sizing
-   comes from PaneHeader's shared .btn-icon rules; on a phone it is hidden like
-   the others (the menu and Back already leave the page). */
+/* The title row is ItemTitleRow (close, then the rail or the title); the left
+   cell only gives it the header's room. */
 .header-left { display: flex; align-items: center; min-width: 0; flex: 1; text-align: left; }
-.item-title-row { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
-.item-title-row--rail { flex: 1 1 auto; width: 100%; }
-.close-btn { color: var(--fg3); flex: none; }
-.close-btn:hover { color: var(--fg); }
-@media (max-width: 768px) { .close-btn { display: none; } }
 
 /* The plain title is the shared .pane-title, as on a chat or an automation. */
 .project-title {

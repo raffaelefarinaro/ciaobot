@@ -117,6 +117,10 @@ web/
     components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and
                            Memory section rows; its `placeholder` mode is the row's loading shape, which
                            SidebarListSkeleton.vue lays out in groups for the sidebar's first loads
+    components/ItemTitleRow.vue  an open item's header title row (close, then the rail or the title), shared by
+                           ChatPanel, SchedulePanel, ProjectView and TaskWorkspaceSurface; ItemHeaderMenu.vue is the
+                           shared ⋯ menu and headerFold.css the fold-wide / fold-phone classes that fold header
+                           actions into it on a phone, with no media-query listener
     components/ListRow.vue  the page lists' one hairline row: Home's chats and the Automations overview;
                            lib/listRoaming.ts is the arrow-key roaming they (and the sidebar's automation list) share
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages

@@ -21,22 +21,16 @@
       <template #title>
         <div class="header-left">
           <div class="header-breadcrumb">
-            <div class="chat-title-row" :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }">
-              <!-- Same 18px stroke icon in the same 30px box as the trailing header
-                   actions, so the close control reads as one of them. It used to be
-                   a `&times;` character at 20px, which is a different size from
-                   every icon around it and sits on the text baseline rather than in
-                   a box - visibly out of line beside the breadcrumb. It sits in the
-                   title row so it shares the title's vertical centre: with the
-                   project on a second line under the title, a close button outside
-                   the row centred itself against both lines and drifted below the
-                   title it belongs to. -->
-              <button class="btn-icon close-btn" @click="$emit('close')" :title="beside ? 'Close side chat' : 'Close chat'" :aria-label="beside ? 'Close side chat' : 'Close chat'">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
+            <!-- The shared title row of an open item: close, then the rail or
+                 the title. The close sits in the row so it shares the title's
+                 vertical centre. -->
+            <ItemTitleRow
+              class="chat-title-row"
+              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }"
+              :rail="titleRailOn && !editingTitle"
+              :close-label="beside ? 'Close side chat' : 'Close chat'"
+              @close="$emit('close')"
+            >
               <input
                 v-if="editingTitle"
                 class="title-input"
@@ -80,7 +74,7 @@
                 @click.stop
               >{{ chat.title }}</span>
               <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
-            </div>
+            </ItemTitleRow>
           </div>
         </div>
       </template>
@@ -1511,6 +1505,7 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
@@ -5727,13 +5722,6 @@ onMounted(() => {
   text-align: left;
 }
 
-/* Sizing, hover fill and touch padding all come from PaneHeader's shared
-   .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
-   as the trailing actions, since closing the chat is not the errand you came
-   here for. `flex: none` keeps the box its own size inside the title row. */
-.close-btn { color: var(--fg3); flex: none; }
-.close-btn:hover { color: var(--fg); }
-
 /* The title header names the conversation only; project context lives in
    Chat details and the sidebar rather than competing with the title. */
 .header-breadcrumb {
@@ -5747,14 +5735,6 @@ onMounted(() => {
 
 .header-breadcrumb .chat-title {
   flex: 0 1 auto;
-}
-.header-breadcrumb .chat-title-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 100%;
 }
 /* A long title wraps to at most two lines instead of pushing the code badge
    out of the header. PaneHeader's shared .pane-title rules are `nowrap` with
@@ -5780,7 +5760,8 @@ onMounted(() => {
 /* Rail mode: close and the title block share one vertical centre, and the row is
    the reading column's width (it starts where the column starts), so the rail can
    centre its title on the chat rather than on the whole header. */
-.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
+/* ItemTitleRow's rail row, capped at the chat's reading measure. */
+.header-breadcrumb .chat-title-row--rail { max-width: var(--chat-measure); }
 
 .chat-title {
   cursor: pointer;
@@ -8019,13 +8000,6 @@ details[open] > .activity-summary::before {
   .message-wrap,
   .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 8px 10px; }
-}
-
-/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
-   the menu already leave the chat, so the close control is not lost. Hidden, not
-   removed, so desktop keeps it. */
-@media (max-width: 767px) {
-  .close-btn { display: none; }
 }
 
 @media (max-width: 768px) {

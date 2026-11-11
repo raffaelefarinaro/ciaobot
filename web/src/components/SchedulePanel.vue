@@ -14,19 +14,12 @@
                the workspace's automations (swipe or arrow keys to move along it,
                pull the title down to go back to the list), or the plain title
                when there is nothing to move to. -->
-          <div class="item-title-row" :class="{ 'item-title-row--rail': titleRailOn }">
-            <button
-              type="button"
-              class="btn-icon close-btn"
-              :title="showNew ? 'Close' : 'Close automation'"
-              :aria-label="showNew ? 'Close new automation' : 'Close automation'"
-              @click="closeSchedule"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="18" y1="6" x2="6" y2="18"/>
-                <line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
+          <ItemTitleRow
+            :rail="titleRailOn"
+            :close-label="showNew ? 'Close new automation' : 'Close automation'"
+            :close-title="showNew ? 'Close' : 'Close automation'"
+            @close="closeSchedule"
+          >
             <!-- Keyed by automation, so a slide or settle still pending from the
                  last one can never switch away from an automation opened from
                  the sidebar meanwhile. -->
@@ -44,7 +37,7 @@
             />
             <span v-else-if="schedule" class="pane-title">{{ scheduleTitle(schedule) }}</span>
             <span v-else-if="showNew" class="pane-title">New automation</span>
-          </div>
+          </ItemTitleRow>
         </div>
       </template>
       <template #actions>
@@ -55,7 +48,7 @@
                phone Run now does as well, so the header is one line like a
                chat's. -->
           <button
-            class="btn-small btn-run header-run"
+            class="btn-small btn-run header-run fold-wide"
             :class="{ 'btn-running': showRunning }"
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
@@ -63,49 +56,29 @@
           <button class="btn-small desktop-only" @click="onToggleEnabled">
             {{ enabledToggleLabel(schedule) }}
           </button>
-          <DropdownMenuRoot :modal="false">
-            <DropdownMenuTrigger as-child>
+          <!-- The shared ⋯ menu. A system routine has nothing in it on a wide
+               pane (Run now and the toggle are inline, it cannot be deleted),
+               so its trigger shows only once the toggle folds into it. -->
+          <span class="item-menu-slot" :class="{ 'mobile-only-trigger': schedule.scope === 'system' }">
+          <ItemHeaderMenu label="More automation actions">
+            <DropdownMenuItem as-child>
               <button
                 type="button"
-                class="btn-icon overflow-trigger"
-                :class="{ 'mobile-only-trigger': schedule.scope === 'system' }"
-                aria-label="More automation actions"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
-                </svg>
+                class="menu-run-item fold-phone"
+                :disabled="isStarting && !runningChatId"
+                @click="onRunButtonClick"
+              >{{ showRunning ? 'Running...' : 'Run now' }}</button>
+            </DropdownMenuItem>
+            <DropdownMenuItem as-child>
+              <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
+                {{ enabledToggleLabel(schedule) }}
               </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuPortal>
-              <DropdownMenuContent
-                as-child
-                align="end"
-                :side-offset="6"
-                :collision-padding="8"
-              >
-                <!-- as-child, so the panel is this template's own element and
-                     picks up the scoped styles even though it is portalled. -->
-                <div class="schedule-actions-menu">
-                <DropdownMenuItem as-child>
-                  <button
-                    type="button"
-                    class="menu-run-item"
-                    :disabled="isStarting && !runningChatId"
-                    @click="onRunButtonClick"
-                  >{{ showRunning ? 'Running...' : 'Run now' }}</button>
-                </DropdownMenuItem>
-                <DropdownMenuItem as-child>
-                  <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
-                    {{ enabledToggleLabel(schedule) }}
-                  </button>
-                </DropdownMenuItem>
-                <DropdownMenuItem v-if="schedule.scope !== 'system'" as-child>
-                  <button type="button" class="danger" @click="onDelete">Delete automation…</button>
-                </DropdownMenuItem>
-                </div>
-              </DropdownMenuContent>
-            </DropdownMenuPortal>
-          </DropdownMenuRoot>
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="schedule.scope !== 'system'" as-child>
+              <button type="button" class="danger" @click="onDelete">Delete automation…</button>
+            </DropdownMenuItem>
+          </ItemHeaderMenu>
+          </span>
         </template>
 
       </template>
@@ -732,13 +705,7 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
-import {
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuPortal,
-  DropdownMenuRoot,
-  DropdownMenuTrigger,
-} from 'reka-ui'
+import { DropdownMenuItem } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { cadenceSummary } from '../lib/scheduleClock'
 import { useRoute, useRouter } from 'vue-router'
@@ -749,6 +716,8 @@ import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/ty
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import ItemHeaderMenu from './ItemHeaderMenu.vue'
 import ListRow from './ListRow.vue'
 import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
@@ -1600,6 +1569,7 @@ function closeSchedule() {
 
 <style scoped src="./overviewSections.css"></style>
 <style scoped src="./railMotion.css"></style>
+<style scoped src="./headerFold.css"></style>
 
 <style scoped>
 .schedule-panel {
@@ -2017,9 +1987,8 @@ function closeSchedule() {
 }
 .btn-run:hover:not(:disabled) { background: var(--accent-strong); }
 .desktop-only { display: inline-flex; }
-.overflow-trigger { color: var(--fg2); }
 .menu-toggle-item { display: none !important; }
-.menu-run-item { display: none !important; }
+.item-menu-slot { display: inline-flex; }
 
 @container chat-pane (max-width: 820px) {
   .header-actions .desktop-only { display: none; }
@@ -2032,10 +2001,7 @@ function closeSchedule() {
 }
 
 @media (max-width: 768px) {
-  .desktop-only,
-  .close-btn,
-  .header-run { display: none; }
-  .menu-run-item { display: flex !important; }
+  .desktop-only { display: none; }
   .menu-toggle-item { display: flex !important; }
   .mobile-only-trigger { display: inline-flex; }
   .prompt-heading { align-items: flex-start; }
@@ -2043,43 +2009,9 @@ function closeSchedule() {
   .prop-row dt { flex: none; }
 }
 
-.schedule-actions-menu {
-  z-index: 100;
-  min-width: 180px;
-  padding: 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
-}
-.schedule-actions-menu button {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--touch);
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-.schedule-actions-menu button:hover,
-.schedule-actions-menu button[data-highlighted] { background: var(--bg3); outline: none; }
-.schedule-actions-menu button.danger { color: var(--error); }
-
-/* The same title row as ChatPanel's: close and the title share one vertical
-   centre; with the rail on, the row takes the header's room so the rail can
-   centre the title on the page's main column. Close sizing comes from
-   PaneHeader's shared .btn-icon rules. */
+/* The title row and the ⋯ menu are ItemTitleRow and ItemHeaderMenu; the left
+   cell only has to give the row the header's room. */
 .header-left { display: flex; align-items: center; min-width: 0; flex: 1; }
-.item-title-row { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
-.item-title-row--rail { flex: 1 1 auto; width: 100%; }
-.close-btn { color: var(--fg3); flex: none; }
-.close-btn:hover { color: var(--fg); }
 
 .btn-running:not(:disabled) {
   cursor: pointer;

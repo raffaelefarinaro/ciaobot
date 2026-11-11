@@ -177,8 +177,11 @@ describe('the open task as a page', () => {
   it('folds Delete and the save line into a ⋯ menu that a phone shows instead', async () => {
     const { wrapper } = await mountAt('/tasks/ship')
     const actions = wrapper.get('.task-detail-page .pane-header')
-    expect(actions.find('.task-delete.task-header-wide').exists()).toBe(true)
-    expect(actions.get('.task-header-narrow').attributes('aria-label')).toBe('More task actions')
+    expect(actions.find('.task-delete.fold-wide').exists()).toBe(true)
+    // The shared ⋯ menu, its trigger shown only where the header folds.
+    const trigger = actions.get('.item-menu-trigger')
+    expect(trigger.attributes('aria-label')).toBe('More task actions')
+    expect(trigger.classes()).toContain('item-menu-trigger--phone')
     expect(actions.get('.task-saved').attributes('role')).toBe('status')
     wrapper.unmount()
   })

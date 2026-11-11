@@ -473,7 +473,7 @@ describe('SchedulePanel property cards', () => {
 
     await wrapper.get('button[aria-label="More automation actions"]').trigger('click')
     await flushPromises()
-    const del = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.schedule-actions-menu button'))
+    const del = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.item-header-menu button'))
       .find(button => button.textContent?.includes('Delete'))
     expect(del).toBeTruthy()
     del!.click()
