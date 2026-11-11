@@ -416,6 +416,58 @@ def test_a_new_provider_session_gets_the_full_instructions(
     assert "Run make test" in manager._build_prompt_prefix(chat)
 
 
+def test_a_repo_missing_on_turn_one_inlines_its_instructions_once_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "not available" block quotes nothing, so it must not count as inlined."""
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    state = {"missing": True}
+    monkeypatch.setattr(
+        "ciao.web.project_chats.repo_state",
+        lambda path: {"path": path, "branch": "main", "dirty": False, "missing": state["missing"]},
+    )
+    _prime(manager, chat)
+    assert chat.instructions_session_id == ""
+
+    state["missing"] = False
+    prefix = manager._build_prompt_prefix(chat)
+    assert "[Repository instructions:" in prefix
+    assert "Run make test" in prefix
+
+
+def test_a_repo_without_instructions_does_not_count_as_inlined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    (repo / "AGENTS.md").unlink()
+    _prime(manager, chat)
+    assert chat.instructions_session_id == ""
+
+    (repo / "AGENTS.md").write_text("Run make lint", encoding="utf-8")
+    assert "Run make lint" in manager._build_prompt_prefix(chat)
+
+
+def test_relinking_mid_session_inlines_the_new_repos_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    _prime(manager, chat)
+    assert chat.instructions_repo == str(repo)
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "AGENTS.md").write_text("Run cargo test", encoding="utf-8")
+    manager._projects[chat.project_id].repo_path = str(other)
+    prefix = manager._build_prompt_prefix(chat)
+    assert "[Repository instructions:" in prefix
+    assert "Run cargo test" in prefix
+
+    _prime(manager, chat)
+    assert chat.instructions_repo == str(other)
+    (other / "AGENTS.md").write_text("Run cargo nextest", encoding="utf-8")
+    assert f"read {other}/AGENTS.md" in manager._build_prompt_prefix(chat)
+
+
 def test_repo_instructions_are_capped_at_8000_characters() -> None:
     from ciao import repo_link
 

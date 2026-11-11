@@ -808,11 +808,13 @@ class ChatInfo:
     context_digest: str = ""
     context_session_id: str = ""
     # Provider session that has already received the linked repo's
-    # instructions text inline; a later repo change in it gets a pointer.
+    # instructions text inline, and the repo they came from; a later re-send
+    # for the same repo in that session gets a pointer.
     instructions_session_id: str = ""
-    # Set while a turn whose capsule inlines the instructions is in flight;
-    # committed to instructions_session_id with the context marker. Not saved.
-    instructions_inline_pending: bool = False
+    instructions_repo: str = ""
+    # The repo whose instructions a turn in flight inlines ("" when none);
+    # committed to instructions_session_id/_repo with the context marker. Not saved.
+    instructions_inline_pending: str = ""
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -1389,6 +1391,7 @@ class ProjectChatManager:
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
                 instructions_session_id=cd.get("instructions_session_id", ""),
+                instructions_repo=str(cd.get("instructions_repo", "") or ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
@@ -1511,6 +1514,7 @@ class ProjectChatManager:
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
                     "instructions_session_id": c.instructions_session_id,
+                    "instructions_repo": c.instructions_repo,
                     "pending_question": c.pending_question,
                     "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
@@ -3156,8 +3160,14 @@ class ProjectChatManager:
             # cleared or no canonical doc exists under the new folder yet.
             doc = self._project_doc_file(project)
             project.vault_doc_path = self._display_path(doc) if doc is not None else ""
-        if clean_repo is not None:
+        cleared_chats: list[str] = []
+        if clean_repo is not None and clean_repo != project.repo_path:
             project.repo_path = clean_repo
+            # Stored locations point into the old repository (or its worktrees).
+            for chat in self._chats.values():
+                if chat.project_id == project_id and chat.repo_location:
+                    chat.repo_location = {}
+                    cleared_chats.append(chat.chat_id)
         # Mirror the context into the canonical doc's frontmatter so the two
         # can't drift. Deliberately after the vault_folder branch, so a call
         # that rebinds and re-describes in one go writes to the new doc.
@@ -3168,6 +3178,13 @@ class ProjectChatManager:
             "type": "project_updated",
             "project": project.to_dict(),
         })
+        for chat_id in cleared_chats:
+            self._events.publish({
+                "type": "chat_repo_location",
+                "chat_id": chat_id,
+                "project_id": project_id,
+                "repo_location": {},
+            })
         return project
 
     def reorderable_project_ids(self, workspace: str) -> list[str]:
@@ -5883,21 +5900,22 @@ class ProjectChatManager:
         project: ProjectInfo | None,
         *,
         inline_instructions: bool = True,
-    ) -> tuple[str, str, str]:
-        """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
+    ) -> tuple[str, str, str, bool]:
+        """(stable block, digest fingerprint, per-turn line, instructions inlined).
 
-        The full block with the repository's instructions, or with a pointer to
-        the file when ``inline_instructions`` is False. A repository that is
-        gone gets the short "not available" block. A memory-pass chat gets
-        nothing (see ``linked_repo_for_chat``).
+        ("", "", "", False) when unlinked. The full block with the repository's
+        instructions, or with a pointer to the file when ``inline_instructions``
+        is False. A repository that is gone gets the short "not available"
+        block. A memory-pass chat gets nothing (see ``linked_repo_for_chat``).
+        The last item is True only when the block quotes the instructions text.
         """
         if project is None or not project.repo_path or is_memory_pass_chat(chat, project):
-            return "", "", ""
+            return "", "", "", False
         path = project.repo_path
         state = repo_state(path)
         if state["missing"]:
             block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
-            return block, f"{path}\0missing", f"linked_repo={path} missing=true"
+            return block, f"{path}\0missing", f"linked_repo={path} missing=true", False
         ins = read_repo_instructions(path)
         block = render_linked_repo_block(
             path=path,
@@ -5910,6 +5928,7 @@ class ProjectChatManager:
             block,
             f"{path}\0ok\0{ins.name}\0{ins.digest}",
             f"linked_repo={path} branch={state['branch'] or '(detached)'}",
+            bool(ins.name) and inline_instructions,
         )
 
     def _build_prompt_prefix(
@@ -5936,20 +5955,22 @@ class ProjectChatManager:
         # project linked mid-session). A later re-send in a session that
         # already took the text (AGENTS.md edited, the link changed) points at
         # the file instead. A cleared context marker
-        # (compaction, cancelled first turn) inlines it again.
+        # (compaction, cancelled first turn) inlines it again, and so does a
+        # different repository (relinked mid-session): the session never saw
+        # its instructions.
+        repo_path = project.repo_path if project else ""
         already_inlined = bool(
             chat.context_digest
             and chat.session_id
             and chat.context_session_id == chat.session_id
             and chat.instructions_session_id == chat.session_id
+            and chat.instructions_repo == repo_path
         )
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(
+        repo_block, _repo_fp, repo_line, inlined = self._linked_repo_context(
             chat, project, inline_instructions=not already_inlined
         )
         include_stable = self._needs_stable_context(chat)
-        chat.instructions_inline_pending = bool(
-            include_stable and repo_block and not already_inlined
-        )
+        chat.instructions_inline_pending = repo_path if include_stable and inlined else ""
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -5992,7 +6013,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        _b, repo_fp, _l = self._linked_repo_context(chat, project)
+        _b, repo_fp, _l, _i = self._linked_repo_context(chat, project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -6013,7 +6034,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
+        repo_block, _repo_fp, repo_line, _i = self._linked_repo_context(chat, project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -6608,7 +6629,8 @@ class ProjectChatManager:
     ) -> bool:
         if chat.instructions_inline_pending and session_id:
             chat.instructions_session_id = session_id
-        chat.instructions_inline_pending = False
+            chat.instructions_repo = chat.instructions_inline_pending
+        chat.instructions_inline_pending = ""
         if not request.context_digest or not session_id:
             return False
         if (
@@ -6909,8 +6931,8 @@ class ProjectChatManager:
         if chat is None:
             return None
         project = self._projects.get(chat.project_id)
-        repo_path = getattr(project, "repo_path", "") if project else ""
-        if not repo_path or not self.linked_repo_for_chat(chat):
+        repo_path = project.repo_path if project else ""
+        if not self.linked_repo_for_chat(chat):
             if chat.repo_location:
                 chat.repo_location = {}
                 self._save()
@@ -6943,12 +6965,7 @@ class ProjectChatManager:
             return None
         chat = self._chats.get(chat_id)
         project = self._projects.get(chat.project_id) if chat else None
-        if (
-            project is None
-            or not getattr(project, "repo_path", "")
-            or chat is None
-            or not self.linked_repo_for_chat(chat)
-        ):
+        if project is None or chat is None or not self.linked_repo_for_chat(chat):
             # Not in code mode: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None

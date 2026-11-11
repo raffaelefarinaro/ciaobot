@@ -889,8 +889,10 @@ hash is part of `context_digest` (only when non-empty, so unlinked chats keep th
 digest), so editing AGENTS.md re-sends it on the next turn. The instructions text
 (capped at 8,000 characters, with a "read <path> for the rest" tail) is inlined
 once per provider session, the first time it is attached (turn 1, or the
-project linked mid-session). `ChatInfo.instructions_session_id` records the session
-that took it, committed with the context marker. A later re-send in that session
+project linked mid-session). `ChatInfo.instructions_session_id` and `instructions_repo` record the session
+that took it and the repository it came from, committed with the context marker
+only when the text was actually quoted (not for the "not available" or no-AGENTS.md
+block); a different repository linked mid-session is inlined again. A later re-send in that session
 (AGENTS.md edited, the repository relinked) carries the block and rules with a
 pointer to read `<path>/AGENTS.md` instead. A new, rotated or compacted session,
 or a cleared context marker, gets it inline again. The branch changes too

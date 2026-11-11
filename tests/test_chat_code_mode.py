@@ -174,6 +174,42 @@ def test_moving_a_chat_clears_its_repo_location(
     assert published[1]["repo_location"] == {}
 
 
+def test_relinking_a_project_clears_its_chats_repo_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored worktree of the old repository must not outlive the link."""
+    manager = _build(tmp_path)
+    repo_a = _git_repo(tmp_path / "repo-a")
+    repo_b = _git_repo(tmp_path / "repo-b")
+    project = manager.create_project("Linked", workspace="work")
+    manager.update_project(project.project_id, repo_path=str(repo_a))
+    worked = manager.create_chat(project.project_id)
+    idle = manager.create_chat(project.project_id)
+    other = manager.create_chat(manager.create_project("Other", workspace="work").project_id)
+    loc = {"path": str(repo_a), "branch": "main", "is_worktree": False, "exists": True}
+    worked.repo_location = dict(loc)
+    other.repo_location = dict(loc)
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+
+    manager.update_project(project.project_id, repo_path=str(repo_a))  # unchanged
+    assert worked.repo_location == loc
+    assert [e["type"] for e in published] == ["project_updated"]
+
+    published.clear()
+    manager.update_project(project.project_id, repo_path=str(repo_b))
+
+    assert worked.repo_location == {} and idle.repo_location == {}
+    assert other.repo_location == loc
+    assert [e["type"] for e in published] == ["project_updated", "chat_repo_location"]
+    assert published[1] == {
+        "type": "chat_repo_location",
+        "chat_id": worked.chat_id,
+        "project_id": project.project_id,
+        "repo_location": {},
+    }
+
+
 def test_a_chat_persisted_with_the_old_code_mode_key_still_loads(tmp_path: Path) -> None:
     manager = _build(tmp_path)
     project = manager.create_project("Linked", workspace="work")
