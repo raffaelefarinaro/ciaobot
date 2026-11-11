@@ -73,3 +73,44 @@ describe('useWorkspaceAdmin saveWorkspace provider_overrides', () => {
     expect(admin.workspaceDirty(admin.workspaceForms.value[0])).toBe(false)
   })
 })
+
+describe('useWorkspaceAdmin saveWorkspace claude_trim', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('omits claude_trim when unchanged', async () => {
+    const { admin, update } = setup({ ...ws(), claude_trim: { 'tool:NotebookEdit': false } })
+    await admin.fetchWorkspacesList()
+    await admin.saveWorkspace('work')
+    expect(update.mock.calls[0][1]).not.toHaveProperty('claude_trim')
+  })
+
+  it('sends the whole sparse map when changed', async () => {
+    const { admin, update } = setup(ws())
+    await admin.fetchWorkspacesList()
+    admin.workspaceForms.value[0].claude_trim = { 'tool:ReportFindings': true }
+    await admin.saveWorkspace('work')
+    expect(update.mock.calls[0][1].claude_trim).toEqual({ 'tool:ReportFindings': true })
+  })
+
+  it('sends {} after a reset', async () => {
+    const { admin, update } = setup({ ...ws(), claude_trim: { 'tool:NotebookEdit': false } })
+    await admin.fetchWorkspacesList()
+    admin.workspaceForms.value[0].claude_trim = {}
+    await admin.saveWorkspace('work')
+    expect(update.mock.calls[0][1].claude_trim).toEqual({})
+  })
+
+  it('a stored map is normalized and the form starts clean', async () => {
+    const { admin } = setup({ ...ws(), claude_trim: { b: true, a: false } as Record<string, boolean> })
+    await admin.fetchWorkspacesList()
+    const form = admin.workspaceForms.value[0]
+    expect(Object.keys(form.claude_trim)).toEqual(['a', 'b'])
+    expect(admin.workspaceDirty(form)).toBe(false)
+  })
+
+  it('a workspace with no claude_trim gets an empty map', async () => {
+    const { admin } = setup(ws())
+    await admin.fetchWorkspacesList()
+    expect(admin.workspaceForms.value[0].claude_trim).toEqual({})
+  })
+})

@@ -43,6 +43,7 @@ import type {
   PackageStatus,
   PendingPermission,
   RuntimeProvider,
+  ClaudeTrimOption,
   WorkspaceInfo,
   WorkspaceName,
   WorkspaceProviderOption,
@@ -148,6 +149,8 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
+  // The engine's Claude context-trim catalog (Settings > Overview card). Kept from the last response that carried it.
+  const claudeTrimOptions = ref<ClaudeTrimOption[]>([])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // App-wide read of the active workspace's delegated tasks: the sidebar's
@@ -2106,6 +2109,7 @@ export const useProjectStore = defineStore('projects', () => {
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
+      claudeTrimOptions.value = workspaceResponse.claude_trim_options ?? claudeTrimOptions.value
       projects.value = p
       bumpProjectOrderEpoch()
       // Keep an archived deep link's prefetched history through reconciliation.
@@ -2733,6 +2737,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     const names = workspaces.value.map(w => w.name)
     if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
       activeWorkspace.value = res.active || names[0] || 'personal'
@@ -2746,6 +2751,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -2779,6 +2785,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (res.renamed && activeWorkspace.value === res.renamed.from) {
       followRenamedWorkspace(res.renamed.from, res.renamed.to)
     }
@@ -2816,6 +2823,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
@@ -2852,6 +2860,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -7283,7 +7292,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions,
