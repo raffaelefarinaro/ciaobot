@@ -351,15 +351,11 @@ _PROVIDER_QUOTA_RE = re.compile(
 )
 
 
-def _is_terminal_quota_error(text: str) -> bool:
-    """Recognize a weekly or monthly usage limit, retried once a day instead.
-
-    A weekly limit resets days away, so an hourly retry would only burn
-    attempts (and schedule runs) against a provider that keeps refusing. The
-    caller arms the daily "quota_terminal" retry for these, not the hourly one.
-    """
+def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
-    return any(
+    # Weekly, monthly and "upgrade for higher limits" phrasings are ordinary
+    # usage limits: retried hourly like any other.
+    if any(
         needle in low
         for needle in (
             "weekly usage limit",
@@ -367,13 +363,8 @@ def _is_terminal_quota_error(text: str) -> bool:
             "monthly limit",
             "upgrade for higher limits",
         )
-    )
-
-
-def _is_retryable_quota_error(text: str) -> bool:
-    low = (text or "").lower()
-    if _is_terminal_quota_error(text):
-        return False
+    ):
+        return True
     # Claude Code uses "You've hit your session limit" in its user-facing
     # exhaustion banner, while the API-shaped error says "reached your
     # session usage limit". Both should arm the deferred hourly retry.

@@ -29,8 +29,7 @@ export function isCreditExhaustionError(errorText: string): boolean {
     || /\bout of (?:extra )?(?:credits?|usage)\b/.test(text)
 }
 
-// A provider usage or rate limit. Same shapes as `_is_terminal_quota_error`
-// and `_is_retryable_quota_error` in ciao/web/chat_service.py. Bare "quota"
+// A provider usage or rate limit. Same shapes as `_is_retryable_quota_error` in ciao/web/chat_service.py. Bare "quota"
 // or "rate limit" is not enough: tools report those too ("disk quota
 // exceeded", "Google API quota exceeded"), so they only match with a provider
 // name or an exhaustion verb.
@@ -47,9 +46,9 @@ export function isUsageLimitError(errorText: string): boolean {
       && /\b(usage limit|rate limit|quota|session)\b/.test(text))
 }
 
-// Weekly and monthly limits get one retry a day for up to a week
-// (`quota_terminal` in ciao/web/project_chats.py), not the hourly retry, so
-// the card says the limit will not clear soon.
+// Weekly and monthly limits are retried hourly like any usage limit
+// (ciao/web/project_chats.py), but they will not clear for days, so the card
+// says the limit will not clear soon.
 function isTerminalUsageLimit(text: string): boolean {
   return /\b(weekly usage limit|weekly limit|monthly limit|upgrade for higher limits)\b/.test(text)
 }

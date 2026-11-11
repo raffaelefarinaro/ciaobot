@@ -805,17 +805,6 @@ class ChatStreaming:
                                         reason=result_text or "quota limit",
                                         unattended=run_unattended,
                                     )
-                                elif chat_service._is_terminal_quota_error(result_text):
-                                    _arm_retry(
-                                        chat_id,
-                                        stream,
-                                        kind="quota_terminal",
-                                        current_prompt=run_prompt,
-                                        current_images=run_images,
-                                        had_progress=had_provider_progress,
-                                        reason=result_text or "quota limit",
-                                        unattended=run_unattended,
-                                    )
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
                                 ):
@@ -1000,17 +989,6 @@ class ChatStreaming:
                                 chat_id,
                                 stream,
                                 kind="quota",
-                                current_prompt=current_prompt,
-                                current_images=current_images,
-                                had_progress=had_provider_progress,
-                                reason=error_msg,
-                                unattended=turn_unattended,
-                            )
-                        elif chat_service._is_terminal_quota_error(error_msg):
-                            _arm_retry(
-                                chat_id,
-                                stream,
-                                kind="quota_terminal",
                                 current_prompt=current_prompt,
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
