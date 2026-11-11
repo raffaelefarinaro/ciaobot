@@ -199,6 +199,7 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "default_provider": config.default_provider_for_workspace(workspace.name),
         "disallowed_tools": workspace.disallowed_tools,
         "claude_ai_connectors": workspace.claude_ai_connectors,
+        "claude_trim": workspace.claude_trim,
         "gws_profile": workspace.gws_profile,
         "color": workspace.color,
     }
@@ -568,11 +569,14 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
 
     Same rules as ``workspaces.workspace_from_request``. A value that fails
     them falls back to what grants the least, not to the stored value: an
-    unreadable tool deny-list becomes ``None`` (the per-workspace default
-    denies). A readable value is kept as it is, which is why the restore
-    confirmation shows the deny-list before anything happens.
+    unreadable tool deny-list becomes ``None`` (no extras; the trim catalog
+    defaults still apply). A readable value is kept as it is, which is why the restore
+    confirmation shows the deny-list before anything happens. claude_trim keeps
+    only entries that hide more than the catalog default; an archive cannot
+    un-hide a tool or skill — the operator re-enables it in Settings after restore.
     """
     from ciao import provider_registry  # noqa: PLC0415
+    from ciao.claude_trim import load_claude_trim  # noqa: PLC0415
     from ciao.config import DEFAULT_WORKSPACE_COLOR, coerce_workspace_color  # noqa: PLC0415
 
     entry = _workspace_entry(metadata)
@@ -599,6 +603,7 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         "default_provider": provider,
         "disallowed_tools": disallowed,
         "claude_ai_connectors": connectors,
+        "claude_trim": {k: v for k, v in load_claude_trim(entry.get("claude_trim")).items() if v},
         "gws_profile": profile,
         "color": color,
     }
@@ -887,6 +892,7 @@ def register_restored(
         default_provider=settings["default_provider"],
         disallowed_tools=settings["disallowed_tools"],
         claude_ai_connectors=settings["claude_ai_connectors"],
+        claude_trim=settings["claude_trim"],
         gws_profile=settings["gws_profile"],
         color=settings["color"],
     )

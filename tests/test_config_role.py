@@ -5,18 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ciao.claude_trim import claude_settings_layer, trim_tool_denies
 from ciao.config import (
     CiaoConfig,
-    _DEFAULT_HARNESS_DISALLOWED_TOOLS,
     _WORKSPACE_EVIDENCE_DIRS,
     _WORKSPACE_EVIDENCE_EXTRA_DIRS,
 )
 from ciao.entity_types import load_entity_types, stock_entity_type_registry
-from ciao.execution_modes import (
-    HARNESS_DISABLED_SKILLS,
-    credential_path_deny_rules,
-    harness_skill_overrides,
-)
+from ciao.execution_modes import credential_path_deny_rules
 
 
 def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
@@ -204,15 +200,17 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
     assert config.workspace("home").vault_root == "memory-vault/home"
     assert config.workspace("home").gws_profile == "personal"
     assert config.default_provider_for_workspace("home") == "claude"
+    # extras are additive, not a replacement
     assert _policy_denies(config, config.disallowed_tools_for_workspace("home")) == [
+        *trim_tool_denies({}),
         "Bash",
         "mcp__example",
     ]
     assert config.default_provider_for_workspace("client") == "opencode"
     # A workspace with no explicit denylist gets the same defaults whatever it
     # is named — no branch on "personal"/"work" anywhere.
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("client")) == list(
-        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    assert _policy_denies(config, config.disallowed_tools_for_workspace("client")) == (
+        trim_tool_denies({})
     )
 
 
@@ -252,8 +250,8 @@ def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
     assert config.default_model_for_workspace("missing") == "opus"
     # A stale or renamed workspace name still gets the harness denies. Returning
     # [] made it the one input that reached the model with nothing denied.
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("missing")) == list(
-        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    assert _policy_denies(config, config.disallowed_tools_for_workspace("missing")) == (
+        trim_tool_denies({})
     )
 
 
@@ -324,10 +322,41 @@ def test_harness_denylist_covers_superseded_bundled_skills() -> None:
     path open if a downstream settings file re-enables the skill; denying
     without hiding is what let the model pick `Skill(schedule)` in the first
     place."""
-    entries = set(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-    for name in HARNESS_DISABLED_SKILLS:
+    entries = set(trim_tool_denies({}))
+    for name in claude_settings_layer({})["skillOverrides"]:
         assert f"Skill({name})" in entries
-    assert harness_skill_overrides() == {name: "off" for name in HARNESS_DISABLED_SKILLS}
+
+
+def test_workspace_claude_trim_round_trips(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "home",
+                    "vault_root": "memory-vault/home",
+                    "claude_trim": {"tool:NotebookEdit": False, "tool:Nope": True},
+                },
+                {"name": "work", "vault_root": "memory-vault/work"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+
+    assert config.workspace("home").claude_trim == {"tool:NotebookEdit": False}
+    assert "NotebookEdit" not in config.disallowed_tools_for_workspace("home")
+    assert config.claude_settings_for_workspace("home") == claude_settings_layer({})
+
+    config.persist_workspace_registry()
+    stored = {row["name"]: row for row in json.loads((runtime / "workspaces.json").read_text())}
+    assert stored["home"]["claude_trim"] == {"tool:NotebookEdit": False}
+    assert "claude_trim" not in stored["work"]
+
+    reloaded = _config(CIAO_WORKSPACE=str(tmp_path))
+    assert reloaded.workspace("home").claude_trim == {"tool:NotebookEdit": False}
+    assert reloaded.workspace("work").claude_trim == {}
 
 
 def test_operator_default_model_applies_to_claude(tmp_path: Path) -> None:

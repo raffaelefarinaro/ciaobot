@@ -10,6 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao.claude_trim import trim_tool_denies
 from ciao.config import CiaoConfig
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
@@ -159,7 +160,9 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     # The workspace no longer pins a model; new chats inherit the provider
     # default (claude_default_model).
     assert config.default_model_for_workspace("client-a") == "opus"
+    # extras are added on top of the trim defaults
     assert _policy_denies(config, config.disallowed_tools_for_workspace("client-a")) == [
+        *trim_tool_denies({}),
         "mcp__claude_ai_Slack",
         "Bash",
     ]
@@ -197,7 +200,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     assert patch.status_code == 200
     assert _policy_denies(
         config, config.disallowed_tools_for_workspace("client-a")
-    ) == ["mcp__example", "Bash"]
+    ) == [*trim_tool_denies({}), "mcp__example", "Bash"]
 
     delete = client.delete("/api/workspaces/client-a")
     assert delete.status_code == 200
@@ -473,7 +476,8 @@ def test_persist_workspace_registry_normalizes_stale_provider(tmp_path):
 
 def test_connectors_always_allowed_and_extras_honored(tmp_path):
     """claude.ai connectors are always allowed; harness tools blocked by
-    default; an explicit per-workspace extras list replaces the defaults."""
+    default; an explicit per-workspace extras list is added on top of the
+    trim defaults."""
     client, config, _pcm = _client(tmp_path)
 
     # Default: connectors allowed, harness tools blocked.
@@ -481,7 +485,7 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     assert "mcp__claude_ai_Airtable" not in personal
     assert "EnterPlanMode" in personal
 
-    # Explicit extras replace the default harness set, and never include the
+    # Extras are added on top of the trim defaults, and never include the
     # connectors.
     resp = client.patch(
         "/api/workspaces/personal",
@@ -489,7 +493,7 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     )
     assert resp.status_code == 200
     effective = config.disallowed_tools_for_workspace("personal")
-    assert _policy_denies(config, effective) == ["mcp__n8n_mcp"]
+    assert _policy_denies(config, effective) == [*trim_tool_denies({}), "mcp__n8n_mcp"]
     assert "mcp__claude_ai_Airtable" not in effective
 
     # Persisted to disk without the (removed) claude_ai_mcps field.
@@ -525,6 +529,50 @@ def test_claude_ai_connectors_switch_saves_persists_and_validates(tmp_path):
     assert bad.status_code == 400
     assert "claude_ai_connectors" in bad.json()["error"]
     assert config.workspace("client-a").claude_ai_connectors is False
+
+
+def test_claude_trim_saves_persists_and_validates(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
+
+    on = client.patch(
+        "/api/workspaces/client-a",
+        json={"claude_trim": {"tool:ReportFindings": True}},
+    )
+    assert on.status_code == 200
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "client-a")["claude_trim"] == {
+        "tool:ReportFindings": True
+    }
+    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+
+    # Locked scheduling options cannot be un-trimmed.
+    locked = client.patch(
+        "/api/workspaces/client-a",
+        json={"claude_trim": {"tool:CronCreate": False}},
+    )
+    assert locked.status_code == 400
+    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+
+    # An empty object resets to the catalog defaults.
+    reset = client.patch("/api/workspaces/client-a", json={"claude_trim": {}})
+    assert reset.status_code == 200
+    assert config.workspace("client-a").claude_trim == {}
+
+    # A save that leaves claude_trim out keeps the stored map.
+    client.patch("/api/workspaces/client-a", json={"claude_trim": {"tool:ReportFindings": True}})
+    kept = client.patch("/api/workspaces/client-a", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+
+
+def test_workspaces_payload_includes_trim_catalog(tmp_path):
+    client, _config, _pcm = _client(tmp_path)
+
+    data = client.get("/api/workspaces").json()
+    options = {option["key"]: option for option in data["claude_trim_options"]}
+    assert options["tool:NotebookEdit"]["default_trimmed"] is True
+    assert options["tool:NotebookEdit"]["locked"] is False
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):

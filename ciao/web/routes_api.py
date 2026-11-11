@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.claude_trim import catalog_payload
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import host_terminal
@@ -278,6 +279,8 @@ def _workspaces_payload(config) -> dict:
         # What a workspace that never chose a File access scope runs under on
         # this engine. The PWA labels its "Default" option from this value.
         "default_agent_fs_scope": default_agent_fs_scope(),
+        # Catalog the Settings trim card renders; engine-owned so the PWA never restates defaults.
+        "claude_trim_options": catalog_payload(),
     }
 
 
