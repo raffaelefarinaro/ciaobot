@@ -419,6 +419,204 @@ model `--answer-cmd` and `--judge-cmd` point at. The script does not estimate
 prices, and this page does not restate vendor pricing; the model ids in the
 November run are the ones to price if you want to reproduce its bill.
 
+## Curated ingest
+
+Everything above is `--ingest raw`, the default and the November protocol: every
+session becomes a note, so the benchmark measures search over a full dump of the
+history. Ciaobot does not keep a dump. When a chat is archived, a memory pass
+reads the transcript and decides what becomes a note, what becomes an entry in
+the bounded `ciao:memory` / `ciao:profile` regions of `AGENTS.md`, what waits in
+the proposal queue for a person, and what is dropped. `--ingest curated` replays
+each haystack session through that step and answers over what is left, so the
+score credits a pass that kept the right facts and penalises one that dropped
+them.
+
+### What runs
+
+For one question, in a fresh temporary directory:
+
+1. A throwaway install: a `CiaoConfig` rooted in the temp directory, the
+   workspace seed every agent root gets at startup
+   (`sync_workspace_skills(..., refresh_upstream=False)`: the stock `AGENTS.md`
+   with empty memory regions, the stock skills and commands), a
+   `ProjectChatManager`, the transcript store, and the agent control plane
+   (`CiaoMcpService` + `CiaoControlPlane`) served on an ephemeral loopback port
+   with the engine's own `/agent/v1/{op}` handler. The pass's `ciao memory
+   update`, `ciao vault search` and other agent commands reach this install and
+   nothing else.
+2. Sessions in date order (repeated ids coalesced, as in raw ingest). Each one is
+   recorded as a chat in the workspace's General project, one turn per
+   user/assistant exchange; only `role` and `content` are read, so `has_answer`
+   never reaches the pass. The chat title is neutral (`Chat session s03`).
+3. The chat is archived the way the PWA's archive route does it:
+   `ProjectChatManager.archive_chat` writes the Markdown transcript, then
+   `run_archive_postprocess` decides whether a pass is due and queues it. The
+   pass chat starts with the engine's own prompt
+   (`MemoryPassCoordinator._prompt_for`: `MEMORY_PASS_PROMPT` plus its
+   observation, skill-review and rules sections) behind the engine's own context
+   capsule, and settles through `on_turn_finished` (archived when clean, left in
+   `attention` when not).
+4. `--proposals` is applied to whatever the pass queued, through the PWA's batch
+   route (`proposals_batch`), before the next session is archived.
+5. When every session is done, the workspace vault is indexed with
+   `fts_search.index_vault`. That index excludes `Logs/`, so the archived
+   transcripts are not searchable: answering reads only the notes the passes
+   wrote (plus the `Workspace/` queue and observation files, which the real
+   index includes too), and the two memory regions, which every real chat
+   loads. The regions are prepended to the answer context as
+   `### Workspace memory (loaded in every chat):`; the retrieved notes follow in
+   the same LongMemEval wrapper as raw ingest, with an empty `Session Date`
+   (a note is not a session).
+
+Two seams are not engine code:
+
+- **The provider.** The engine would start a Claude or OpenCode session for the
+  pass. Here every chat's provider is a `CommandProvider` that runs
+  `--extract-cmd` with the prompt, environment and working directory the engine
+  built for that turn — the same operator-pointed mechanism as `--answer-cmd`.
+  It is the narrowest replaceable point: `start_stream`, the request builder,
+  the capsule and the settle logic around it all run as they do in a chat.
+- **The clock.** `ciao.transcripts._now_iso` and the capsule's `datetime` are
+  frozen at the session's LongMemEval date while it is recorded and its pass
+  runs, so the transcript and the pass's `today=` line say when the
+  conversation happened. Other engine stamps keep the wall clock: a proposal
+  batch heading in `Memory-Proposals.md` and the learned-at stamp an accepted
+  `[memory]` fact gets (`[2026-11-11]` on a run made that day).
+
+Any one-shot model call the engine makes on its own (`ciao.providers.oneshot`,
+used by a `[project]` doc fold, an opt-in reconcile, or an LLM chat title) is
+refused during curated ingest and counted; a question where that happened is
+reported incomplete, because the store would then depend on a model the
+operator did not choose.
+
+### Flags
+
+- `--ingest curated` — off by default. Raw ingest output is unchanged by this
+  mode: `tests/fixtures/longmemeval_raw_golden.jsonl` pins every raw row and
+  every raw answer prompt, byte for byte, as the harness wrote them before
+  curated ingest existed.
+- `--extract-cmd` — required. A shell command with placeholders, substituted
+  literally and shell-quoted like `--answer-cmd`'s:
+  - `{prompt_file}` — the capsule and the pass prompt, exactly as the engine
+    built them;
+  - `{out_file}` — where the reply may be written (stdout also works);
+  - `{system_prompt_file}` — the Ciaobot system instructions the Claude
+    provider appends to Claude Code's own system prompt;
+  - `{disallowed_tools}` — the comma-separated tools the engine denies this turn.
+
+  It runs in the temp install's agent root (where the seeded `AGENTS.md` and
+  `.claude/skills` are), with the turn's environment: `CIAO_WORKSPACE`,
+  `CIAO_VAULT_ROOT`, `CIAO_AGENT_URL` and `CIAO_AGENT_TOKEN` point at the temp
+  install, the engine's own `ciao` leads `PATH`, every inherited `CIAO_*` is
+  removed, and so is every `*_API_KEY`, as for the answer and judge commands.
+  It has to be an agent that can run shell commands and edit files: the pass
+  reads the transcript, writes notes and calls `ciao`. A Claude Code
+  invocation along these lines should work, but **it has not been run** for
+  this page:
+
+  ```bash
+  --extract-cmd 'claude -p --model claude-haiku-5-5 --permission-mode bypassPermissions \
+    --strict-mcp-config --no-session-persistence \
+    --append-system-prompt "$(cat {system_prompt_file})" \
+    --disallowedTools {disallowed_tools} "$(cat {prompt_file})" > {out_file}'
+  ```
+
+- `--proposals accept|drop|leave` — required with `--ingest curated`; the run
+  refuses to start without it. A proposal waits for a person, so the run has to
+  say what that person does, after every pass:
+  - `accept` — accept every queued row whose accept is a deterministic write:
+    `[memory]`, `[profile]` (and legacy `[user]`), `[people]`, `[learnings]`.
+    Everything else (`[project]` folds a doc with a model call; `[review]`,
+    `[category]`, `[rehome]`, `[note_edit]`, `[repo]` and skill proposals need a
+    person's choice) stays queued and is counted as `unaccepted` by kind. Rows
+    marked `decide: you` are accepted too: this simulates an owner who says yes.
+  - `drop` — dismiss every queued row.
+  - `leave` — leave them queued. The queue is
+    `Workspace/Memory-Proposals.md` in the vault, which the real index searches,
+    so a left proposal is still findable by text; it is not in the regions.
+
+  Observations (`ciao observation-add`) are never promoted by the harness; the
+  nightly Workspace care run that would propose them after three sightings does
+  not run.
+
+### What it reports
+
+Every curated row carries `ingest`, `proposals`, `retrieved_note_paths` and a
+`curation` object:
+
+- `sessions`, `haystack_sessions`, `passes_ok`, `passes_failed`,
+  `passes_skipped` (the engine skipped the pass, e.g. an empty transcript),
+  `sessions_with_writes`, `extract_latency_ms`, and a per-session `passes` list
+  (status, latency, proposals filed, lines added; the error and stderr tail of a
+  failed pass).
+- `proposals` — filed, accepted, dropped, failed to resolve, unaccepted by kind,
+  pending at the end.
+- `store` and `baseline_store` (the fresh install before any session): notes,
+  their characters and bytes; `Workspace/` files, characters and bytes; region
+  characters and entry counts. `raw_chars` / `raw_bytes` are what raw ingest
+  would have stored for the same haystack.
+- `evidence_retained` — whether any line a gold answer session's pass wrote is
+  still in the store at the end (notes, `Workspace/` files or regions). Lines
+  are attributed by diffing the store before and after each session; blank
+  lines, separators and bookkeeping frontmatter stamps (`updated:` and the like)
+  are ignored, so re-stamping a note does not count. `evidence_sessions_retained`
+  lists which gold sessions survived. `null` for abstention questions.
+- `evidence_in_context` — whether such a line reached the answer context: in one
+  of the top five notes, or in the regions.
+- `retrieval` keeps raw ingest's shape (strict/fractional/any-hit @5), but a gold
+  session counts as retrieved when one of the top five notes holds a line its
+  pass wrote. It is not the same measurement as raw retrieval and should not
+  share a column with it.
+- `contradictions` — always `null`. Counting contradictory or superseded facts
+  left behind needs a judgement about meaning, not a text diff, and is not
+  measured.
+
+The printed summary adds a `Curated ingest` block: pass counts, mean store size,
+stored versus raw characters (with the fresh-install baseline subtracted for the
+ratio), proposal totals, the retained-evidence and evidence-in-context rates over
+answerable questions, and `knowledge-update` and abstention accuracy on their own
+lines. Per-type accuracy is the same table as raw ingest.
+
+A failed pass makes the question incomplete: the replay stops at that session
+(later passes would spend model calls on a store Ciaobot would not hold), the
+row's `error` starts with `curate:`, and nothing is answered or judged.
+
+### Cost
+
+Curated ingest runs one agent session per haystack session per question, before
+any answering. LongMemEval-S has about 50 sessions per question, so a
+60-question run is about 3,000 extraction runs, each reading a whole session
+transcript plus whatever it reads from the vault. Sessions repeat across
+questions, but every question replays its own haystack into its own install, so
+nothing is reused. No curated run has been made against the dataset yet; the
+only runs so far are the unit tests and a two-question smoke on the synthetic
+haystack, both with the deterministic fake extractor in
+`tests/fixtures/longmemeval_fake_extractor.py`.
+
+### Limits
+
+- **No sandbox.** In a workspace with workspace-only file access (the temp
+  install is one), a real pass runs inside the provider's filesystem sandbox,
+  limited to the workspace and a read-only grant on the archive. The harness
+  cannot apply that to an arbitrary command; the capsule still tells the agent
+  its file roots, but the command is trusted to stay in the temp install.
+- **One agent, not the provider.** The engine's provider adds its own
+  behaviour (the Claude SDK's preset system prompt, hooks, MCP wiring, retries).
+  `--extract-cmd` replaces all of it; how close a run is to a real pass depends
+  on how close that command is to the provider.
+- **Every session is a separate, attended chat in the General project.** Real
+  chats belong to projects with canonical docs, are often longer, and can be
+  auto-titled; none of that is simulated.
+- **No nightly curation.** The Workspace care run, which settles `decide:
+  nightly` proposals and promotes recurring observations, does not run.
+  `--proposals` stands in for its decisions and for the owner's.
+- **Attribution is lexical.** A pass that rewrote a fact into a new line is
+  credited to the session it was processing, even if the fact came from an
+  older note it consolidated; a fact the pass kept by leaving an existing line
+  untouched is credited to whoever wrote that line first.
+- **Wall-clock stamps.** See the clock seam above: queue headings and accepted
+  facts carry the run date, which a temporal question can trip over.
+
 ## What this cannot establish
 
 - **Not a confidence interval.** Every published number is a single run on one
@@ -456,7 +654,12 @@ November run are the ones to price if you want to reproduce its bill.
 
 - `scripts/memory-eval-longmemeval.py` — this harness.
 - `tests/test_longmemeval_harness.py` — synthetic three-session test: JSONL rows,
-  strict/fractional/any-hit, incomplete counting, hash refusal. No network, no
-  model, no real dataset.
+  strict/fractional/any-hit, incomplete counting, hash refusal, the raw-ingest
+  golden, and curated ingest end to end through the real memory pass with a fake
+  extractor. No network, no model, no real dataset.
+- `tests/fixtures/longmemeval_raw_golden.jsonl` — raw-ingest rows as the harness
+  wrote them before curated ingest existed.
+- `tests/fixtures/longmemeval_fake_extractor.py` — the deterministic
+  `--extract-cmd` the curated tests use.
 - [memory-comparison-2026-11.md](memory-comparison-2026-11.md) — the published run
   and the comparison with other systems.
