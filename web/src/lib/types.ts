@@ -55,6 +55,19 @@ export interface WorkspaceProviderOption {
 export type ProviderOverrideField = 'model' | 'thinking' | 'permission_mode' | 'insights_model'
 export type ProviderOverrides = Record<string, Partial<Record<ProviderOverrideField, string>>>
 
+export type ClaudeTrimKind = 'tool' | 'skill' | 'setting'
+// One entry of the engine's Claude context-trim catalog (GET /api/workspaces claude_trim_options; ciao/claude_trim.py).
+export interface ClaudeTrimOption {
+  key: string            // "<kind>:<name>", e.g. "tool:NotebookEdit"
+  kind: ClaudeTrimKind
+  name: string
+  label: string
+  reason: string
+  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" (open set)
+  default_trimmed: boolean
+  locked: boolean
+}
+
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
@@ -72,6 +85,8 @@ export interface WorkspaceInfo {
   agent_fs_scope?: 'workspace' | 'machine' | null
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
   provider_overrides?: ProviderOverrides
+  // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
+  claude_trim?: Record<string, boolean>
 }
 
 export interface WorkspacesResponse {
@@ -82,6 +97,8 @@ export interface WorkspacesResponse {
   provider_options?: WorkspaceProviderOption[]
   // The scope a workspace with no File access choice runs under on this engine.
   default_agent_fs_scope: 'workspace' | 'machine'
+  // Catalog the Settings "Claude context trimming" card renders, in engine order.
+  claude_trim_options?: ClaudeTrimOption[]
 }
 
 /** One archived workspace, from `GET /api/workspaces/archived`. */

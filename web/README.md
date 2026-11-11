@@ -96,6 +96,7 @@ web/
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
                            SettingsWorkspaceModels.vue is its Chats and models card;
+                           SettingsClaudeTrim.vue is its Claude context trimming card (catalog from the engine, pure helpers in lib/claudeTrim.ts; edits the same draft, saved by Chats and models' Save changes);
                            WorkspaceGoogleAccount.vue is its Google account row and
                            GoogleConnectDialog.vue the Connect dialog;
                            SettingsAllWorkspaces.vue is Overview's last card: boxed
@@ -560,9 +561,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   opener's own ×; Back only leaves it.
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
-  `SettingsWorkspaceOverview.vue` draws the Workspace, Chats and models and
-  Google account cards (one editor, one Save changes / Discard row, in the last
-  form card, Chats and models), then Memory handover, Update
+  `SettingsWorkspaceOverview.vue` draws the Workspace, Claude context trimming,
+  Chats and models and Google account cards (one editor, one Save changes /
+  Discard row, in the last form card, Chats and models), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
   the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
