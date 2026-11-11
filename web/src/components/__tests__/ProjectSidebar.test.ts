@@ -650,7 +650,7 @@ describe('ProjectSidebar global new chat', () => {
     vi.restoreAllMocks()
   })
 
-  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules') {
+  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules' | 'tasks') {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: { template: '<div />' } }],
@@ -722,6 +722,40 @@ describe('ProjectSidebar global new chat', () => {
     expect(skeleton.text()).toBe('Loading chats…')
     expect(skeleton.findAll('.sidebar-skeleton-rows--nested')).toHaveLength(3)
     expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(6)
+    wrapper.unmount()
+  })
+
+  it('lists the board\'s lanes as sidebar rows, with New on the To do label', async () => {
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    const row = (id: string, title: string, status: string, extra: Record<string, unknown> = {}) => ({
+      id, title, status, project_id: '', due: '', assignee: 'user', chat_id: '', attempt_id: '', linked_chats: [],
+      created_at: '2026-03-01T09:00:00+00:00', updated_at: '2026-03-01T09:00:00+00:00', revision: 'a'.repeat(64),
+      relative_path: `Tasks/${id}.md`, attempt_state: '', attempt_outcome: '', attempt_summary: '', attempt_detail: '',
+      live_attempt_id: '', completed_at: null, has_resolution: false, ...extra,
+    })
+    board.rows = [
+      row('a', 'Plan the launch', 'backlog'),
+      row('b', 'Wire the store', 'in_progress', { attempt_state: 'running' }),
+    ] as never
+    board.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar('tasks')
+    const list = wrapper.get('.task-sidebar-list')
+    expect(list.findAll('.schedule-group-header').map(h => h.text())).toEqual(['To do', 'In progress'])
+    const rows = list.findAll('.task-sidebar-item')
+    expect(rows.map(r => r.get('.sidebar-row-title').text())).toEqual(['Plan the launch', 'Wire the store'])
+    expect(rows[0].classes()).toContain('sidebar-row')
+    expect(rows[0].attributes('href')).toBe('/tasks/a')
+    expect(rows[1].find('.schedule-mark').exists()).toBe(true)
+    await list.get('[aria-label="New task"]').trigger('click')
+    expect(wrapper.emitted('new-task')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('loads the task list in the sidebar row shape', async () => {
+    const wrapper = await mountSidebar('tasks')
+    const skeleton = wrapper.get('.task-sidebar-list .sidebar-skeleton')
+    expect(skeleton.attributes('aria-label')).toBe('Loading tasks')
     wrapper.unmount()
   })
 

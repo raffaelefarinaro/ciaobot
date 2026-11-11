@@ -397,7 +397,8 @@ test.describe('placing cards with the mouse', () => {
     await page.getByRole('button', { name: 'Move', exact: true }).click()
     await expect(page.locator('.task-move-sheet')).toHaveCount(0)
 
-    const other = page.getByRole('button', { name: 'New task' })
+    // The board header's New task (the sidebar's To do label carries one too).
+    const other = page.locator('.task-view').getByRole('button', { name: 'New task' })
     await other.focus()
     await expect(other).toBeFocused()
     answerPatch()
@@ -429,7 +430,8 @@ test.describe('placing cards with the mouse', () => {
     await page.getByRole('button', { name: 'Move', exact: true }).click()
     await expect(page.locator('.task-move-sheet')).toHaveCount(0)
 
-    const other = page.getByRole('button', { name: 'New task' })
+    // The board header's New task (the sidebar's To do label carries one too).
+    const other = page.locator('.task-view').getByRole('button', { name: 'New task' })
     await other.focus()
     releasePatch()
     await expect(page.locator('.task-action-error')).toContainText('The board changed')

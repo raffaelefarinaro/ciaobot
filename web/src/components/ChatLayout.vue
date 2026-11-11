@@ -10,6 +10,7 @@
       @chat-selected="onChatSelected"
       :can-open-beside="splitFits && !!activePinKey && !subagentRoute"
       @new-schedule="showNewSchedule = true"
+      @new-task="taskBoardRef?.openCreate?.()"
       @open-beside="openBeside"
     />
     <div
@@ -45,6 +46,7 @@
         <!-- Behind an item being pulled down by its title: where letting go leads. -->
         <div v-if="pullY > 0" class="chat-pull-home" :style="{ opacity: String(Math.min(1, pullY / PULL_CLOSE_PX)) }" aria-hidden="true">
           <svg v-if="pullTarget === 'schedule'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="square" stroke-linejoin="miter"><rect x="3" y="3" width="18" height="18" /><polyline points="12 8 12 12 15 14" /></svg>
+          <svg v-else-if="pullTarget === 'task'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="square" stroke-linejoin="miter"><rect x="4" y="4" width="16" height="17" rx="1" /><line x1="4" y1="9" x2="20" y2="9" /><polyline points="8 15 11 18 16 13" /></svg>
           <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9H4z" /></svg>
           <span>{{ pullY >= PULL_CLOSE_PX ? `Release for ${pullHint}` : pullHint }}</span>
         </div>
@@ -130,6 +132,10 @@
           />
           <TaskBoardView
             v-else-if="viewMode === 'tasks'"
+            ref="taskBoardRef"
+            :style="pullStyle"
+            @pull="onItemPull"
+            @pull-end="onItemPullEnd"
             @open-sidebar="sidebarCollapsed = false"
           />
           <MemoryMapView
@@ -413,6 +419,12 @@ const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
 const schedulePanelRef = ref<any>(null)
 // ProjectView is loaded on first visit, so the ref is typed by what is called on it.
 const projectViewRef = ref<{ selectAdjacent?: (direction: -1 | 1) => boolean } | null>(null)
+// The task board is loaded on first visit too.
+const taskBoardRef = ref<{
+  selectAdjacent?: (direction: -1 | 1) => boolean
+  closeDetailPage?: () => Promise<void>
+  openCreate?: () => void
+} | null>(null)
 
 // Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
@@ -1180,9 +1192,11 @@ watch(projectIdParam, (id, was) => {
 
 // One pull-to-close for whatever open item has the title rail: a chat and a
 // project close to Home, an automation to the automation list.
-const pullTarget = computed<'chat' | 'schedule' | 'project'>(() =>
-  viewMode.value === 'schedules' ? 'schedule' : viewMode.value === 'project' ? 'project' : 'chat')
-const pullHint = computed(() => pullTarget.value === 'schedule' ? 'Automations' : 'Home')
+const pullTarget = computed<'chat' | 'schedule' | 'project' | 'task'>(() =>
+  viewMode.value === 'schedules' ? 'schedule'
+    : viewMode.value === 'project' ? 'project'
+      : viewMode.value === 'tasks' ? 'task' : 'chat')
+const pullHint = computed(() => pullTarget.value === 'schedule' ? 'Automations' : pullTarget.value === 'task' ? 'Tasks' : 'Home')
 const {
   pullY,
   pullStyle,
@@ -1193,6 +1207,8 @@ const {
   target => {
     if (target === 'schedule') void router.push('/schedules')
     else if (target === 'project') void router.push('/')
+    // The open task closes through its own save; a refused one stays open.
+    else if (target === 'task') void taskBoardRef.value?.closeDetailPage?.()
     else closeChat()
   },
   () => pullTarget.value,
@@ -1403,6 +1419,19 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       || document.querySelector('[data-dismissable-layer]')) return
     e.preventDefault()
     if (projectViewRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) invalidatePull()
+    return
+  }
+  // Previous / next task, along the open task's title rail, with the same
+  // gates. The surface also refuses under its own sheets and while a write is
+  // in flight, and a switch writes the open task first, keeping it on screen
+  // if that write is refused.
+  if (viewMode.value === 'tasks' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
+    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+      || document.querySelector('[data-dismissable-layer]')) return
+    if (taskBoardRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) {
+      e.preventDefault()
+      invalidatePull()
+    }
     return
   }
   // Automations: same arrow contract as home, but over the sidebar's

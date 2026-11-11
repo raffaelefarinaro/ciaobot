@@ -416,6 +416,53 @@
 
     </template>
 
+    <!-- Tasks lists the board's lanes the way Automations lists its groups:
+         SidebarRows under each lane's label, the create action on To do's
+         label. Rows open the task as a page, the same as its card. -->
+    <template v-if="!collapsed && mode === 'tasks'">
+      <div ref="tasksListEl" class="schedules-list task-sidebar-list">
+        <SidebarListSkeleton v-if="!tasksLoaded && !taskBoard.loadError" label="Loading tasks" :groups="2" :rows="2" />
+        <template v-else>
+          <div
+            v-for="lane in sidebarTaskLanes"
+            :key="lane.status"
+            class="schedule-group"
+            role="group"
+            :aria-labelledby="`task-lane-heading-${lane.status}`"
+          >
+            <div v-if="lane.status === 'backlog'" class="sidebar-label-row">
+              <h2 :id="`task-lane-heading-${lane.status}`" class="schedule-group-header">{{ lane.label }}</h2>
+              <button
+                type="button"
+                class="sidebar-label-link"
+                aria-label="New task"
+                title="New task"
+                @click="emit('new-task')"
+              ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
+            </div>
+            <h2 v-else :id="`task-lane-heading-${lane.status}`" class="schedule-group-header">{{ lane.label }}</h2>
+            <p v-if="!lane.tasks.length" class="sidebar-empty-note">Nothing to do yet.</p>
+            <div v-else class="schedule-group-items">
+              <SidebarRow
+                v-for="task in lane.tasks"
+                :key="task.id"
+                :to="`/tasks/${task.id}`"
+                class="task-sidebar-item"
+                :text="task.title"
+                :meta="formatCardDue(task.due)"
+                :muted="lane.status === 'done'"
+                :active="routeTaskId === task.id"
+                :aria-current="routeTaskId === task.id ? 'page' : undefined"
+              >
+                <span v-if="task.attempt_state === 'running'" class="schedule-mark" title="The agent is working on this task"><ActivityGlyph kind="working" /></span>
+                <span v-else-if="task.attempt_state === 'needs_you' && lane.status !== 'done'" class="schedule-mark" title="The agent needs you"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
+
     <template v-if="!collapsed && mode === 'settings'">
       <nav class="settings-nav-list" aria-label="Settings sections">
         <div
@@ -972,6 +1019,8 @@ import { useProjectStore } from '../stores/projects'
 import { useHistoryNav } from '../composables/useHistoryNav'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
+import { useTaskBoardStore } from '../stores/taskBoard'
+import { formatCardDue, readableTasks, taskLanes } from '../lib/taskBoard'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
@@ -1012,7 +1061,7 @@ const props = defineProps<{
   /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
   canOpenBeside?: boolean
 }>()
-const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'open-beside': [chatId: string] }>()
+const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'new-task': []; 'open-beside': [chatId: string] }>()
 
 /** "Open beside" is offered only where the layout can show it, and never for the chat already on screen. */
 function canOpenChatBeside(chat: { chat_id: string; local?: boolean }): boolean {
@@ -1287,6 +1336,19 @@ const workspaceSchedules = useWorkspaceSchedules()
 
 // The sidebar's automation groups, in the order the open automation's title rail walks.
 const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))
+
+// ── Tasks: the board's lanes, read from the board's own store ────────────
+const taskBoard = useTaskBoardStore()
+const tasksLoaded = computed(() => taskBoard.loadedWorkspace === store.activeWorkspace)
+// To do always shows (its label carries New); the other lanes only when they
+// hold something. Done keeps the board's rule: today's completions only.
+const sidebarTaskLanes = computed(() => {
+  if (!tasksLoaded.value) return []
+  return taskLanes(readableTasks(taskBoard.rows), { status: 'all', order: taskBoard.order })
+    .filter(lane => lane.status === 'backlog' || lane.tasks.length > 0)
+})
+const routeTaskId = computed(() => (typeof route.params.taskId === 'string' ? route.params.taskId : ''))
+const tasksListEl = ref<HTMLElement | null>(null)
 
 // ── Keyboard navigation for the schedules list: one flat list, the same
 // roaming as Home's chats and the Automations overview (lib/listRoaming.ts). ──
