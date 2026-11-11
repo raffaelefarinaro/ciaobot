@@ -621,10 +621,12 @@ describe('ProjectSidebar chat actions', () => {
     const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
     expect(css).toMatch(/\.title-shimmer\s*\{[^}]*flex:\s*1/)
     expect(css).toMatch(/animation:\s*title-shimmer-sweep/)
-    // The extracted stylesheet cannot declare keyframes for another block, so
-    // the mobile skeleton keeps its own sweep in the sidebar's block.
-    expect(source).toMatch(/animation:\s*mm-shimmer-sweep/)
-    expect(source).toMatch(/@keyframes\s+mm-shimmer-sweep/)
+    // The loading skeleton is the row's own placeholder (SidebarListSkeleton
+    // over SidebarRow), which keeps its sweep beside its keyframes.
+    expect(source).not.toMatch(/mm-shimmer/)
+    const row = readFileSync(join(here, 'SidebarRow.vue'), 'utf8')
+    expect(row).toMatch(/animation:\s*sidebar-row-sweep/)
+    expect(row).toMatch(/@keyframes\s+sidebar-row-sweep/)
   })
 })
 
@@ -696,6 +698,31 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
+  it('loads the automation list as sidebar rows, not a spinner and bars', async () => {
+    // The sidebar waits on the automation list itself (not the store's combined load), as the panel does.
+    useTaskStore().schedulesLoaded = false
+    const wrapper = await mountSidebar('schedules')
+    const skeleton = wrapper.get('.schedules-list .sidebar-skeleton')
+    expect(skeleton.attributes('role')).toBe('status')
+    expect(skeleton.attributes('aria-label')).toBe('Loading automations')
+    expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(3)
+    expect(skeleton.find('.sidebar-row--placeholder').attributes('aria-hidden')).toBe('true')
+    expect(wrapper.find('.history-loading-spinner').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('loads the chat list in the same row shape, rows hung under their project', async () => {
+    const store = useProjectStore()
+    store.projects = []
+    store.bootstrapped = false
+    const wrapper = await mountSidebar('chat')
+    const skeleton = wrapper.get('.chats-scroll-area .sidebar-skeleton')
+    expect(skeleton.attributes('aria-label')).toBe('Loading chats')
+    expect(skeleton.findAll('.sidebar-skeleton-rows--nested')).toHaveLength(3)
+    expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(6)
+    wrapper.unmount()
+  })
+
   it('no_notifications_destination_row', async () => {
     const wrapper = await mountSidebar('chat')
     const hrefs = wrapper.findAll('.nav-links a').map((a) => a.attributes('href'))
@@ -741,7 +768,7 @@ describe('ProjectSidebar global new chat', () => {
 
   it('puts New automation on the Routines label', async () => {
     const wrapper = await mountSidebar('schedules')
-    useTaskStore().loading = false
+    useTaskStore().schedulesLoaded = true
     await nextTick()
     const button = wrapper.get('button[aria-label="New automation"]')
     expect(button.text()).toBe('New')
@@ -778,7 +805,7 @@ describe('ProjectSidebar global new chat', () => {
         archive_policy: 'manual',
       } as never]
       const wrapper = await mountSidebar('schedules')
-      useTaskStore().loading = false
+      useTaskStore().schedulesLoaded = true
       await nextTick()
       const row = wrapper.get('.schedule-item .sidebar-row-meta')
       expect(row.text()).toBe('01:01')
@@ -803,7 +830,7 @@ describe('ProjectSidebar global new chat', () => {
       { ...base, schedule_id: 's1', title: 'System job', scope: 'system', frequency: 'interval', interval_minutes: 15 },
     ] as never
     const wrapper = await mountSidebar('schedules')
-    useTaskStore().loading = false
+    useTaskStore().schedulesLoaded = true
     await nextTick()
 
     const rows = wrapper.findAllComponents(SidebarRow)

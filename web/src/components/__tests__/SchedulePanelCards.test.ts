@@ -577,7 +577,7 @@ describe('SchedulePanel overview', () => {
           next_run: '2026-12-05T00:01:00Z',
         }),
       ])
-      const row = wrapper.get('.ov-item .ov-when').text()
+      const row = wrapper.get('.ov-item .list-row-end').text()
       expect(row).toContain('Sat 09:01')
       expect(row).not.toContain('00:01')
     } finally {
@@ -602,9 +602,9 @@ describe('SchedulePanel overview', () => {
         }),
       ])
       const row = wrapper.get('.ov-item')
-      expect(row.get('.ov-sub').text()).toContain('Every day at 01:01')
-      expect(row.get('.ov-sub').text()).not.toContain('00:01')
-      expect(row.get('.ov-when').text()).toContain('Sat 01:01')
+      expect(row.get('.list-row-sub').text()).toContain('Every day at 01:01')
+      expect(row.get('.list-row-sub').text()).not.toContain('00:01')
+      expect(row.get('.list-row-end').text()).toContain('Sat 01:01')
     } finally {
       if (previousTz === undefined) delete process.env.TZ
       else process.env.TZ = previousTz

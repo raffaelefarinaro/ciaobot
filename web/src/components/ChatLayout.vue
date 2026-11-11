@@ -1381,13 +1381,17 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       return
     }
-    if (projectSidebarRef.value?.onArrow?.(e.key)) {
-      e.preventDefault()
-      return
-    }
-    if (schedulePanelRef.value?.onArrow?.(e.key)) {
-      e.preventDefault()
-      return
+    // Focus already on the overview's rows roams the overview; anywhere else
+    // the sidebar's list comes first, as the canonical list.
+    const inOverview = e.target instanceof Element && !!e.target.closest('.overview-body')
+    const lists = inOverview
+      ? [schedulePanelRef.value?.onArrow, projectSidebarRef.value?.onArrow]
+      : [projectSidebarRef.value?.onArrow, schedulePanelRef.value?.onArrow]
+    for (const roam of lists) {
+      if (roam?.(e.key)) {
+        e.preventDefault()
+        return
+      }
     }
     return
   }

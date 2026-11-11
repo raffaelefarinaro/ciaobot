@@ -6,6 +6,9 @@
     <span v-if="meta" class="sidebar-row-meta">{{ meta }}</span>
     <slot />
   </RouterLink>
+  <div v-else-if="placeholder" class="sidebar-row sidebar-row--placeholder" aria-hidden="true">
+    <span class="sidebar-row-placeholder" :style="{ width: placeholder }" />
+  </div>
   <div v-else class="sidebar-row" :class="{ active }">
     <!-- A bare span is role=generic, which cannot be named: the bar is hidden
          from assistive tech and the name travels as text beside it. The row is
@@ -24,7 +27,8 @@
  * Title on the left, then an optional muted mono badge (an automation's time or
  * cadence) and whatever marks the default slot holds (activity glyphs, row
  * actions). The host adds its own classes, handlers and attributes; they land
- * on the root.
+ * on the root. `SidebarListSkeleton` draws a list of placeholder rows while a
+ * list's first load is in flight, so the loading shape is the row itself.
  */
 import { computed } from 'vue'
 import { RouterLink, type RouteLocationRaw } from 'vue-router'
@@ -43,6 +47,9 @@ const props = defineProps<{
   pending?: boolean
   /** Muted mono badge after the title (time, cadence). */
   meta?: string
+  /** A loading stand-in: the row's shape with a bar this wide (a CSS width)
+   *  where the title goes, hidden from assistive tech. */
+  placeholder?: string
 }>()
 
 const titleClass = computed(() => ({
@@ -88,6 +95,31 @@ const titleClass = computed(() => ({
 .sidebar-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+.sidebar-row--placeholder,
+.sidebar-row--placeholder:hover {
+  background: none;
+  cursor: default;
+  pointer-events: none;
+}
+.sidebar-row-placeholder {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
+  background-size: 200% 100%;
+  animation: sidebar-row-sweep 1.4s ease-in-out infinite;
+}
+@keyframes sidebar-row-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-row-placeholder { animation: sidebar-row-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes sidebar-row-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
 }
 .sidebar-row-title {
   flex: 1;

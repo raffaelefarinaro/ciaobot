@@ -109,7 +109,11 @@ web/
                            scoped CSS they share with it
     components/TitleRail.vue  the swipeable title rail of an open chat's or automation's header (ChatPanel's `plainHeader` prop turns it off);
                            railMotion.css is the lean/arrival motion of the body under it
-    components/SidebarRow.vue  the sidebar's one list row: chat rows and automation rows
+    components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and
+                           Memory section rows; its `placeholder` mode is the row's loading shape, which
+                           SidebarListSkeleton.vue lays out in groups for the sidebar's first loads
+    components/ListRow.vue  the page lists' one hairline row: Home's chats and the Automations overview;
+                           lib/listRoaming.ts is the arrow-key roaming they (and the sidebar's automation list) share
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open

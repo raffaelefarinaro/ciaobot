@@ -592,39 +592,35 @@
                 @click.stop="runAllMissed"
               >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
             </div>
-            <router-link
+            <ListRow
               v-for="s in missedSchedules"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }}</span>
-              </span>
-              <span class="ov-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }}</template>
+              <template #end><span class="ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
+            </ListRow>
           </section>
 
           <section class="ov-section" aria-labelledby="ov-next-title">
             <div class="ov-head">
               <h2 id="ov-next-title" title="Soonest first. Missed time-of-day runs are caught up on the next launch; interval runs just resume.">Next up</h2>
             </div>
-            <router-link
+            <ListRow
               v-for="s in upcomingRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
             >
-              <span class="ov-main">
-                <span class="ov-title">
-                  {{ s.title || promptTitle(s.prompt) }}
-                  <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
-                </span>
-                <span class="ov-sub">{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</span>
-              </span>
-              <span class="ov-when">{{ relativeWhen(s.next_run) }}</span>
-            </router-link>
+              <template #heading>
+                <span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
+              </template>
+              <template #sub>{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</template>
+              <template #end>{{ relativeWhen(s.next_run) }}</template>
+            </ListRow>
             <p v-if="!upcomingRoutines.length" class="ov-empty">
               Nothing scheduled. The rest run only when you click Run now, or are paused.
             </p>
@@ -632,35 +628,31 @@
 
           <section v-if="pausedRoutines.length" class="ov-section" aria-labelledby="ov-paused-title">
             <div class="ov-head"><h2 id="ov-paused-title">Paused</h2></div>
-            <router-link
+            <ListRow
               v-for="s in pausedRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item ov-item--paused"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }} · paused</span>
-              </span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }} · paused</template>
+            </ListRow>
           </section>
 
           <section v-if="systemRoutines.length" class="ov-section" aria-labelledby="ov-system-title">
             <div class="ov-head"><h2 id="ov-system-title">System routines</h2></div>
             <p class="ov-intro">Ciaobot's own upkeep. They run on their own and never need you.</p>
-            <router-link
+            <ListRow
               v-for="s in systemRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
               :class="{ 'ov-item--paused': !s.enabled }"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></span>
-              </span>
-              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run) }}</span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></template>
+              <template v-if="s.enabled && s.next_run" #end>{{ relativeWhen(s.next_run) }}</template>
+            </ListRow>
           </section>
 
           <!-- Webhooks live here rather than in a top-level inbox: a trigger is
@@ -757,6 +749,8 @@ import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/ty
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
+import ListRow from './ListRow.vue'
+import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import { takeScheduleRailArrival, useScheduleRail } from '../composables/useScheduleRail'
 import { scheduleTitle } from '../lib/scheduleList'
@@ -1573,52 +1567,16 @@ function onCreated() {
   emit('created')
 }
 
-// Keyboard roaming for the overview lists (Next up / Recent runs / Missed).
-// This mirrors ProjectSidebar's schedule list, but for the main pane's
-// .ov-item links when no single schedule is selected. The sidebar owns the
-// canonical list, so ChatLayout tries the sidebar first and only falls
-// through to here if the sidebar had nothing focused.
+// Keyboard roaming for the overview's automation rows when no single
+// automation is open. The sidebar owns the canonical list, so ChatLayout tries
+// the sidebar first and only falls through to here if the sidebar had nothing
+// focused. Links only: the webhook rows are plain `<div>`s that take no focus.
 const overviewEl = ref<HTMLElement | null>(null)
 
-function overviewItems(): HTMLElement[] {
-  const root = overviewEl.value
-  if (!root) return []
-  // Links only. The webhook rows reuse `.ov-item` on a plain `<div>`, which takes
-  // no focus: arrowing onto one would report that it had moved focus, move none,
-  // and swallow the key — so the press after the last schedule link would do
-  // nothing and look broken.
-  return Array.from(root.querySelectorAll<HTMLElement>('a.ov-item'))
-}
-
-function focusOverviewElement(element: HTMLElement) {
-  element.focus()
-  element.scrollIntoView({ block: 'nearest' })
-}
-
-function clampOverview(value: number, lower: number, upper: number): number {
-  return Math.min(upper, Math.max(lower, value))
-}
-
 function onArrow(key: string): boolean {
-  const items = overviewItems()
-  if (!items.length) return false
-  const active = document.activeElement as HTMLElement | null
-  let index = items.indexOf(active as HTMLElement)
-  if (index < 0) {
-    const activeLink = overviewEl.value?.querySelector<HTMLElement>('.ov-item.router-link-active')
-    if (activeLink && items.includes(activeLink)) {
-      index = items.indexOf(activeLink)
-    } else {
-      focusOverviewElement(items[0])
-      return true
-    }
-  }
-  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
-  if (!delta) return false
-  const nextIndex = clampOverview(index + delta, 0, items.length - 1)
-  if (nextIndex === index) return true
-  focusOverviewElement(items[nextIndex])
-  return true
+  const rows = Array.from(overviewEl.value?.querySelectorAll<HTMLElement>('a.ov-item') ?? [])
+  const current = overviewEl.value?.querySelector<HTMLElement>('a.ov-item.router-link-active')
+  return roamFocus([rows], key, 'list', () => listAnchor(rows, current))
 }
 
 // Previous / next automation (the previous / next chat chord): the rail slides
