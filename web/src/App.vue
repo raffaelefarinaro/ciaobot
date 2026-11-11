@@ -254,6 +254,9 @@ watch(shouldPollStartup, (shouldPoll) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  /* Prompt surface (chat composer, Home intake). Touch phones round it to sit
+     concentric with the screen's corners; see the media rule below. */
+  --radius-composer: 15px;
   /* Top edge that full-screen surfaces (drawer, sheets, file viewer) must
      clear: the safe-area inset, plus the .status-bar-tint strip where it is
      shown (installed app on phones, redefined with the strip below). */
@@ -999,6 +1002,12 @@ input:focus, textarea:focus, select:focus {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+/* On a touch phone the composer sits ~12px from rounded screen corners; a
+   15px box reads square against them. Its inner controls go pill/circle in
+   ChatPanel and HomeIntake so their corners stay concentric. */
+@media (max-width: 768px) and (pointer: coarse) {
+  :root { --radius-composer: 28px; }
 }
 /* iOS 26 status-bar tint. WebKit ignores `theme-color` and the status-bar-style
    meta for the installed app's bar colour: it hit-tests the top edge and fills

@@ -237,7 +237,7 @@ Shadows are reserved for content that genuinely floats above another interaction
 
 ## Shapes
 
-The shape language is compact and gently rounded. Standard controls and cards use a 10px radius, small nested elements use 6px, and modals use 14px. A tighter 4px radius (`--radius-xs`) is reserved for small squared tags that must not be mistaken for count badges: the needs-you state chip and the workspace key badges. Fully rounded shapes are limited to badges, status dots, avatars, and true pill selectors.
+The shape language is compact and gently rounded. Standard controls and cards use a 10px radius, small nested elements use 6px, and modals use 14px. A tighter 4px radius (`--radius-xs`) is reserved for small squared tags that must not be mistaken for count badges: the needs-you state chip and the workspace key badges. Fully rounded shapes are limited to badges, status dots, avatars, and true pill selectors. The prompt surface (chat composer, Home intake) uses `--radius-composer`: 15px, and 28px on coarse-pointer phones so it sits concentric with the screen's corners; on that phone surface only, its model chip, attach and send controls are pills and circles to match.
 
 Borders are structural, not decorative. Active navigation is marked by a slim accent edge plus a tonal background. Warning callouts use a muted warning-tinted surface with a 1px perimeter; quoted passages use a neutral 1px divider. Do not mix exaggerated rounding, glass effects, or unrelated shape styles into the same view.
 

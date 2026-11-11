@@ -592,7 +592,7 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 18px 50px rgb(0 0 0 / 14%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -892,5 +892,12 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   .home-intake-spinner {
     animation-duration: 2.4s;
   }
+}
+/* Touch phones: the form is rounder (--radius-composer), so the controls on
+   its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .home-intake-chip,
+  .home-intake-icon-btn,
+  .home-intake-new { border-radius: 999px; }
 }
 </style>
