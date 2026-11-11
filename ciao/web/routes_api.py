@@ -3677,7 +3677,7 @@ def _is_same_chat_target(requested: str, found: Path) -> bool:
     return [p.lower() for p in found.parts[-count:]] == [p.lower() for p in wanted.parts]
 
 
-def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
+def _resolve_chat_file(roots: list[Path], raw: str, *, fuzzy: bool = True) -> Path | Response:
     """Resolve a chat link against the chat's own roots only.
 
     Each root is tried on its own, exact matches before fuzzy ones, so a
@@ -3692,6 +3692,8 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
         result = _resolve_workspace_path([root], raw, allow_fuzzy=False)
         if not isinstance(result, Response) or result.status_code != 404:
             return result
+    if not fuzzy:
+        return JSONResponse({"error": "not found"}, status_code=404)
     requested = _LINE_SUFFIX_RE.sub("", raw)
     fuzzy_roots = [
         root for index, root in enumerate(roots)
@@ -3707,17 +3709,19 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
-async def chat_file_path(request: Request) -> Response:
-    """Canonical file identity for a link emitted in a chat's workspace.
+async def _resolve_in_chat(
+    request: Request, chat_id: str, *, fuzzy: bool = True
+) -> Path | Response:
+    """Resolve the request's ``path`` the way *chat_id*'s file links resolve.
 
-    Resolves against the chat's agent root and its workspace vault root, and
-    nothing else. A missing file must not match a same-named file in another
-    workspace, so fuzzy matching is confined to those two roots. Absolute
-    paths retain the viewer's existing policy.
+    A relative path anchors to the chat's agent root, then its workspace vault
+    root, and fuzzy matching (when *fuzzy*) stays inside those roots. This is
+    anchoring, not confinement: an absolute or ``..`` path follows the viewers'
+    existing no-sandbox policy (``_resolve_workspace_path``). ``fuzzy=False``
+    skips the directory walk and answers 404 when no exact match exists.
     """
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
-    chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     workspace = pcm._workspace_for_chat(chat_id)
@@ -3726,9 +3730,20 @@ async def chat_file_path(request: Request) -> Response:
         config.workspace_vault_root(workspace).resolve(),
     ]))
     # The fuzzy pass walks the directory tree, so it runs off the event loop.
-    result = await asyncio.to_thread(
-        _resolve_chat_file, roots, request.query_params.get("path", "").strip()
+    return await asyncio.to_thread(
+        _resolve_chat_file, roots, request.query_params.get("path", "").strip(), fuzzy=fuzzy
     )
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
+    """
+    result = await _resolve_in_chat(request, request.path_params["chat_id"])
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
@@ -5354,11 +5369,23 @@ async def workspace_image(request: Request) -> Response:
 
     Used by the markdown viewer to resolve relative image references (e.g.
     ``![alt](images/foo.png)`` inside a vault doc) against the doc's folder.
+
+    With ``chat_id`` a relative path anchors to that chat's agent and vault
+    roots (``_resolve_in_chat``) instead of ``workspace_root``, exactly, with
+    no fuzzy walk: a chat message's embedded image
+    (``![shot](memory-vault/x.png)``) is served this way, and a message full of
+    made-up image paths must not trigger directory walks. This anchors; it
+    does not confine: absolute and ``..`` paths follow the same no-sandbox
+    policy as without ``chat_id``.
     """
-    config = request.app.state.config
-    raw = request.query_params.get("path", "").strip()
-    roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    chat_id = request.query_params.get("chat_id", "").strip()
+    result: Path | Response
+    if chat_id:
+        result = await _resolve_in_chat(request, chat_id, fuzzy=False)
+    else:
+        roots = _allowed_roots(request.app.state.config)
+        raw = request.query_params.get("path", "").strip()
+        result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
         return result
     resolved = result

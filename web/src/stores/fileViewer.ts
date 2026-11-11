@@ -320,9 +320,13 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
    * Open a file as the chat's shared-pin surface (the narrow opener, or the
    * split panel). Marks the open so a remote unpin/replacement can reconcile it,
    * and so a user close can unpin through the server instead of staying local.
+   * An image pin takes the image path: `open()` reads through the text-only
+   * `/api/workspace-file`, which refuses an image with 415.
    */
   async function openSharedPin(filePath: string, chat: string): Promise<boolean> {
-    const ok = await open(filePath, null, chat)
+    const ok = isImageFilePath(filePath.replace(/:\d+$/, ''))
+      ? await openImage(filePath, chat)
+      : await open(filePath, null, chat)
     if (ok) sharedPinChatId.value = chat
     else sharedPinChatId.value = ''
     return ok
