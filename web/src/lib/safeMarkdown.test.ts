@@ -425,6 +425,14 @@ describe('chat markdown images', () => {
     expect(img('![a](/api/images/upload.png)', 'chat-1')?.getAttribute('src')).toBe('/api/images/upload.png')
     expect(img('![a](notes/plan.md)', 'chat-1')?.getAttribute('src')).toBe('notes/plan.md')
   })
+
+  it('never turns a javascript: or data: image into an API request', () => {
+    for (const href of ['javascript:alert(1)//x.png', 'data:image/png;base64,iVBORw0KGgo=']) {
+      const html = renderMarkdown(`![a](${href})`, [], undefined, { chatId: 'chat-1' })
+      expect(html).not.toContain('/api/workspace-image')
+      expect(html).not.toContain('javascript:')
+    }
+  })
 })
 
 describe('file markdown folder links', () => {

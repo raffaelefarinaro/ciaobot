@@ -91,7 +91,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id`) the chat's agent root, vault and linked repo. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
-| GET | `/api/workspace-image` | Read allowed image file (`?chat_id=` resolves a relative path against that chat's workspace, as `/api/chats/{chat_id}/file-path` does) |
+| GET | `/api/workspace-image` | Read allowed image file (`?chat_id=` anchors a relative path to that chat's agent and vault roots, exact match only, no fuzzy walk; absolute and `..` paths keep the unrestricted viewer policy) |
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
