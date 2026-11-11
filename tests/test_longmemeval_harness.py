@@ -13,6 +13,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
+import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -327,6 +330,11 @@ def test_stratified_sample_matches_published_sizes() -> None:
     assert [entry["question_id"] for entry in other] != ids
 
 
+#: The operator commands below are POSIX shell (`cat`, `printf`, `VAR=value cmd`).
+posix_shell = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell commands")
+
+
+@posix_shell
 def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     answer_cmd = (
         "grep -q 'Answer (step by step):' {prompt_file} && "
@@ -357,6 +365,7 @@ def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     assert row["latency_ms"]["judge"] is not None
 
 
+@posix_shell
 def test_failed_answer_is_counted_and_not_judged(tmp_path: Path) -> None:
     row = HARNESS.run_question(
         DATASET[0],
@@ -418,3 +427,458 @@ def test_cli_retrieval_only_end_to_end(
     captured = capsys.readouterr()
     assert "Retrieval @5" in captured.out
     assert "Incomplete: 0" in captured.out
+
+
+# ── raw ingest stays byte-identical ─────────────────────────────────────────
+
+GOLDEN = ROOT / "tests" / "fixtures" / "longmemeval_raw_golden.jsonl"
+
+
+def _stable(row: dict) -> dict:
+    """A row without its wall-clock fields, as the golden file stores it."""
+    row = json.loads(json.dumps(row, ensure_ascii=False, sort_keys=True))
+    row["latency_ms"] = sorted(row["latency_ms"])
+    if isinstance(row.get("judge"), dict):
+        row["judge"].pop("latency_ms", None)
+    return row
+
+
+@posix_shell
+def test_raw_rows_match_the_pre_curated_golden(tmp_path: Path) -> None:
+    """Raw ingest writes exactly what the harness wrote before curated ingest.
+
+    `tests/fixtures/longmemeval_raw_golden.jsonl` was produced by the harness
+    as committed before `--ingest` existed. The answer command echoes the whole
+    prompt back, so every byte of every context rendering is pinned too.
+    """
+    answer = "cat {prompt_file} > {out_file}"
+    judge = "printf yes > {out_file}"
+    rows = [
+        _stable(HARNESS.retrieve_for_question(entry, dataset_sha256="abc123", temp_root=tmp_path))
+        for entry in DATASET
+    ]
+    for mode in ("snippets", "notes", "agentic"):
+        rows.extend(
+            _stable(
+                HARNESS.run_question(
+                    entry,
+                    mode=mode,
+                    answer_cmd=answer,
+                    judge_cmd=judge,
+                    timeout=30,
+                    dataset_sha256="abc123",
+                    temp_root=tmp_path,
+                )
+            )
+            for entry in DATASET
+        )
+    golden = [json.loads(line) for line in GOLDEN.read_text(encoding="utf-8").splitlines()]
+    assert rows == golden
+
+
+@posix_shell
+def test_raw_cli_has_no_curated_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    code = HARNESS.main(
+        [
+            "--dataset", str(dataset), "--allow-other-dataset",
+            "--answer-cmd", "printf Miso > {out_file}",
+            "--judge-cmd", "printf yes > {out_file}",
+            "--out", str(out), "--temp-dir", str(tmp_path),
+        ]
+    )
+    assert code == 0
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert all(
+        not {"ingest", "proposals", "curation", "retrieved_note_paths"} & set(row) for row in rows
+    )
+    assert all(set(row["latency_ms"]) == {"index", "search", "answer", "judge"} for row in rows)
+    assert "curation" not in HARNESS.summarize(rows, qa=True)
+    captured = capsys.readouterr().out
+    assert "Ingest:" not in captured
+    assert "Curated ingest" not in captured
+
+
+# ── curated ingest ──────────────────────────────────────────────────────────
+
+FAKE_EXTRACTOR = ROOT / "tests" / "fixtures" / "longmemeval_fake_extractor.py"
+
+
+def _extract_cmd(prompt_log: Path | None = None) -> str:
+    """The fake extractor as an operator template; optionally keep every prompt."""
+    keep = f"cat {{prompt_file}} >> {shlex.quote(str(prompt_log))}; " if prompt_log else ""
+    return (
+        f"{keep}PYTHONPATH={shlex.quote(str(ROOT))} {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(FAKE_EXTRACTOR))} {{prompt_file}} > {{out_file}}"
+    )
+
+
+@pytest.fixture
+def live_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An operator shell pointed at a live install; curated ingest must not touch it."""
+    live = tmp_path / "live-install"
+    monkeypatch.setenv("CIAO_WORKSPACE", str(live))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(live / "memory-vault"))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(live / ".runtime"))
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(live / ".ciao"))
+    return live
+
+
+@posix_shell
+def test_curated_ingest_answers_from_what_the_memory_pass_kept(
+    tmp_path: Path, live_install: Path
+) -> None:
+    prompts = tmp_path / "extract-prompts.log"
+    (tmp_path / "runs").mkdir()
+    before ={key: value for key, value in os.environ.items() if key.startswith("CIAO_")}
+    row = HARNESS.run_question(
+        DATASET[1],
+        mode="notes",
+        answer_cmd="cat {prompt_file} > {out_file}",
+        judge_cmd="printf yes > {out_file}",
+        timeout=60,
+        dataset_sha256="abc123",
+        temp_root=tmp_path / "runs",
+        ingest="curated",
+        extract_cmd=_extract_cmd(prompts),
+        proposals="accept",
+    )
+
+    # Isolation: the operator's environment is restored and the live install
+    # it named was never created, let alone written.
+    assert {key: value for key, value in os.environ.items() if key.startswith("CIAO_")} == before
+    assert not live_install.exists()
+    assert list((tmp_path / "runs").iterdir()) == []
+
+    assert row["error"] is None, row
+    assert row["ingest"] == "curated"
+    assert row["proposals"] == "accept"
+    curation = row["curation"]
+    assert curation["haystack_sessions"] == curation["sessions"] == 3
+    assert curation["passes_ok"] == 3
+    assert curation["passes_failed"] == 0
+    assert curation["engine_model_calls_blocked"] == 0
+    # The Lisbon fact was queued by the pass and accepted into ciao:memory; the
+    # cat went straight to ciao:profile; the job became a people note.
+    assert curation["proposals"]["filed"] == 1
+    assert curation["proposals"]["accepted"] == 1
+    assert curation["proposals"]["pending_at_end"] == 0
+    store = curation["store"]
+    assert store["region_entries"] == {"memory": 1, "profile": 1}
+    assert store["notes"] == curation["baseline_store"]["notes"] + 1
+    assert curation["raw_chars"] > 0
+    assert curation["evidence_retained"] is True
+    assert curation["evidence_sessions_retained"] == ["real-1", "real-2"]
+    assert curation["evidence_in_context"] is True
+    assert curation["contradictions"] is None
+    assert [item["session"] for item in curation["passes"]] == ["s00", "s01", "s02"]
+
+    # The answer prompt (echoed back as the answer) holds the regions every chat
+    # loads, and no raw transcript.
+    assert "### Workspace memory (loaded in every chat):" in row["answer"]
+    assert "I live in Zurich now, I moved here from Lisbon." in row["answer"]
+    assert "My cat is called Miso." in row["answer"]
+    assert "Data engineer" not in row["answer"]
+    assert "### User" not in row["answer"]
+    assert row["judge"]["verdict"] is True
+    assert "curate" in row["latency_ms"]
+
+    # The real pass prompt ran, once per session, dated at the session.
+    log = prompts.read_text(encoding="utf-8")
+    assert log.count("A conversation in this workspace just ended") == 3
+    assert "today=2023-05-20" in log
+    assert "today=2023-05-22" in log
+    assert "Logs/Chats/" in log
+
+
+@posix_shell
+@pytest.mark.parametrize(
+    ("proposals", "accepted", "dropped", "pending", "memory_entries", "retained"),
+    [
+        # real-1's only output is a proposal: dropped, nothing of it survives,
+        # even though the engine's queue file (title, template, timestamped
+        # heading) stays behind; left, its queued row is still stored.
+        ("drop", 0, 1, 0, 0, ["real-2"]),
+        ("leave", 0, 0, 1, 0, ["real-1", "real-2"]),
+    ],
+)
+def test_curated_proposal_modes_are_explicit(
+    tmp_path: Path,
+    proposals: str,
+    accepted: int,
+    dropped: int,
+    pending: int,
+    memory_entries: int,
+    retained: list[str],
+) -> None:
+    row = HARNESS.retrieve_for_question(
+        DATASET[1],
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd=_extract_cmd(),
+        proposals=proposals,
+        timeout=60,
+    )
+    assert row["error"] is None, row
+    counts = row["curation"]["proposals"]
+    assert counts["mode"] == proposals
+    assert counts["filed"] == 1
+    assert (counts["accepted"], counts["dropped"], counts["pending_at_end"]) == (
+        accepted,
+        dropped,
+        pending,
+    )
+    assert row["curation"]["store"]["region_entries"]["memory"] == memory_entries
+    assert row["curation"]["evidence_sessions_retained"] == retained
+    assert "retrieved_note_paths" in row
+
+
+@posix_shell
+def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
+    """An `_abs` question is never scored for retained evidence, gold ids or not."""
+    entry = {**DATASET[2], "answer_session_ids": ["real-0"]}
+    row = HARNESS.retrieve_for_question(
+        entry,
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd=_extract_cmd(),
+        proposals="accept",
+        timeout=60,
+    )
+    assert row["error"] is None, row
+    assert row["curation"]["evidence_retained"] is None
+    assert row["curation"]["evidence_sessions_retained"] == []
+    assert row["curation"]["evidence_in_context"] is None
+
+
+@posix_shell
+def test_timed_out_extractor_is_killed_with_its_children(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    started = time.perf_counter()
+    row = HARNESS.retrieve_for_question(
+        DATASET[0],
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd=f"sleep 60 & echo $! > {shlex.quote(str(pidfile))}; wait",
+        proposals="leave",
+        timeout=1,
+    )
+    assert time.perf_counter() - started < 30
+    assert "command timed out after 1s" in row["error"]
+    child = int(pidfile.read_text().strip())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the extractor's child outlived the timeout")
+
+
+def test_curated_refuses_a_temp_dir_under_a_guide(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("# a live workspace guide\n", encoding="utf-8")
+    nested = tmp_path / "runs"
+    nested.mkdir()
+    with pytest.raises(ValueError, match="refuses a temp directory under"):
+        HARNESS.refuse_guide_above(nested)
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
+    with pytest.raises(SystemExit, match="refuses a temp directory under"):
+        HARNESS.main(
+            [
+                "--dataset", str(dataset), "--allow-other-dataset",
+                "--ingest", "curated", "--extract-cmd", "true", "--proposals", "drop",
+                "--out", str(tmp_path / "o.jsonl"), "--temp-dir", str(nested),
+            ]
+        )
+
+
+@posix_shell
+def test_failed_memory_pass_makes_the_question_incomplete(tmp_path: Path) -> None:
+    row = HARNESS.run_question(
+        DATASET[0],
+        mode="notes",
+        answer_cmd="printf never > {out_file}",
+        judge_cmd="printf yes > {out_file}",
+        timeout=60,
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd="echo boom >&2; exit 3",
+        proposals="leave",
+    )
+    assert row["error"].startswith("curate: 1 of 1 memory passes failed: command exited 3")
+    assert row["answer"] == ""
+    assert row["judge"]["error"] == "skipped: curation failed"
+    curation = row["curation"]
+    # The first failure stops the replay: later passes would cost model calls
+    # for a store that is not what Ciaobot would hold.
+    assert curation["sessions"] == 1
+    assert curation["haystack_sessions"] == 3
+    assert curation["passes"][0]["stderr"] == "boom"
+    assert "_note_sessions" not in curation
+    summary = HARNESS.summarize([row], qa=True)
+    assert summary["incomplete"][0]["reason"].startswith("curate:")
+    assert summary["curation"]["passes_failed"] == 1
+
+
+def test_cli_curated_needs_explicit_flags(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
+    base = ["--dataset", str(dataset), "--allow-other-dataset", "--out", str(tmp_path / "o.jsonl")]
+    with pytest.raises(SystemExit, match="--proposals"):
+        HARNESS.main([*base, "--ingest", "curated", "--extract-cmd", "true"])
+    with pytest.raises(SystemExit, match="--extract-cmd"):
+        HARNESS.main([*base, "--ingest", "curated", "--proposals", "drop"])
+    with pytest.raises(SystemExit, match="curated only"):
+        HARNESS.main([*base, "--proposals", "drop"])
+
+
+@posix_shell
+def test_cli_curated_retrieval_only_end_to_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
+    questions = tmp_path / "questions.json"
+    questions.write_text(json.dumps(["q-iguana_abs"]), encoding="utf-8")
+    out = tmp_path / "out.jsonl"
+    code = HARNESS.main(
+        [
+            "--dataset", str(dataset), "--allow-other-dataset",
+            "--questions", str(questions), "--retrieval-only",
+            "--ingest", "curated", "--extract-cmd", _extract_cmd(), "--proposals", "accept",
+            "--out", str(out), "--temp-dir", str(tmp_path),
+        ]
+    )
+    assert code == 0
+    (row,) = [json.loads(line) for line in out.read_text().splitlines()]
+    assert row["mode"] == "retrieval"
+    # Abstention: no gold sessions, so nothing to have retained.
+    assert row["curation"]["evidence_retained"] is None
+    assert row["curation"]["evidence_in_context"] is None
+    captured = capsys.readouterr().out
+    assert "Ingest: curated (proposals: accept)" in captured
+    assert "Curated ingest (proposals: accept)" in captured
+    assert "memory passes: 3 ok, 0 failed, 0 skipped, of 3 sessions" in captured
+    assert "contradictory or superseded facts left behind: not measured" in captured
+
+
+def test_curated_summary_splits_knowledge_update_and_abstention() -> None:
+    def row(qid: str, stratum: str, verdict: bool, retained: bool | None) -> dict:
+        base = _judged_row(qid, stratum, verdict=verdict)
+        base["proposals"] = "accept"
+        base["curation"] = {
+            "sessions": 2, "passes_ok": 2, "passes_failed": 0, "passes_skipped": 0,
+            "extract_latency_ms": 100.0,
+            "proposals": {"filed": 2, "accepted": 1, "dropped": 0, "failed": 0,
+                          "unaccepted": {"review": 1}, "pending_at_end": 1},
+            "store": {"notes": 3, "note_chars": 300, "workspace_chars": 50,
+                      "region_chars": {"memory": 40, "profile": 10}},
+            "raw_chars": 4000,
+            "evidence_retained": retained,
+            "evidence_in_context": retained,
+            "engine_model_calls_blocked": 0,
+        }
+        return base
+
+    failed = row("q-failed", "multi-session", False, True)
+    failed["error"] = "curate: 1 of 1 memory passes failed: command exited 3"
+    failed["curation"]["error"] = "1 of 1 memory passes failed: command exited 3"
+    failed["curation"]["passes_failed"] = 1
+    failed["curation"]["store"]["note_chars"] = 99_999
+    rows = [
+        row("q-ku", "knowledge-update", True, True),
+        row("q-ku2", "knowledge-update", False, False),
+        row("q-x_abs", "abstention", True, None),
+        failed,
+    ]
+    summary = HARNESS.summarize(rows, qa=True)
+    curation = summary["curation"]
+    # The failed question counts as a failed pass but not in what was stored.
+    assert (curation["n"], curation["complete"], curation["passes_failed"]) == (4, 3, 1)
+    assert curation["note_chars"] == 300
+    assert curation["knowledge_update"] == {"n": 2, "correct": 1, "judged": 2, "fraction": 0.5}
+    assert curation["abstention"]["correct"] == 1
+    assert (curation["evidence_retained"], curation["evidence_answerable"]) == (1, 2)
+    assert curation["stored_to_raw"] == pytest.approx(400 / 4000)
+    assert curation["proposals_unaccepted"] == {"review": 3}
+    text = HARNESS.format_summary(summary, mode="notes")
+    assert "knowledge-update accuracy: 50.0% (1/2, 2 judged)" in text
+    assert "abstention accuracy: 100.0% (1/1, 1 judged)" in text
+    assert "left queued, not auto-acceptable: review 3" in text
+    assert "retained evidence (an answer session's pass wrote a line still stored): 50.0% (1/2)" in text
+
+
+def test_curated_helpers() -> None:
+    import datetime as dt
+
+    assert HARNESS.parse_session_date("2023/05/20 (Sat) 02:21") == dt.datetime(
+        2023, 5, 20, 2, 21, tzinfo=dt.UTC
+    )
+    assert HARNESS.parse_session_date("not a date") is None
+
+    # Only role and content are read; has_answer never reaches the pass.
+    turns = [
+        {"role": "user", "content": "a", "has_answer": True},
+        {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "c"},
+        {"role": "assistant", "content": "d"},
+        {"role": "user", "content": " "},
+    ]
+    assert HARNESS._session_pairs(turns) == [("a", ""), ("b", "c"), ("", "d")]
+
+    lines = HARNESS._content_lines("---\nupdated: 2026-11-11\ntype: person\n---\n- Lives in Zurich\n§\n\n")
+    assert lines == {"type: person", "- Lives in Zurich"}
+    # The engine's own queue template and batch headings are not a session's.
+    queue = "# Memory Proposals\n\nAwaiting a decision.\n\n## 2026-11-11T17:55:56+00:00\n- [memory] Lives in Zurich\n"
+    assert HARNESS._content_lines(queue, entries_only=True) == {"- [memory] Lives in Zurich"}
+
+    notes = {"a.md": ["real-1"], "b.md": ["real-2", "real-3"]}
+    assert HARNESS.score_curated_retrieval(["b.md"], notes, ["real-1", "real-2"]) == {
+        "gold": 2, "hits": 1, "strict": 0.0, "fractional": 0.5, "any": 1.0,
+    }
+    assert HARNESS.score_curated_retrieval(["a.md"], notes, []) is None
+
+
+def test_session_clock_dates_turns_and_the_capsule() -> None:
+    import datetime as dt
+
+    from ciao import transcripts
+    from ciao.context import capsule
+
+    when = dt.datetime(2023, 5, 20, 9, 0, tzinfo=dt.UTC)
+    with HARNESS.session_clock(when):
+        assert transcripts._now_iso() == "2023-05-20T09:00:00Z"
+        assert capsule.datetime.now(dt.UTC).date().isoformat() == "2023-05-20"
+    assert transcripts._now_iso() != "2023-05-20T09:00:00Z"
+    assert capsule.datetime is dt.datetime
+
+
+async def test_engine_model_calls_are_refused() -> None:
+    from ciao.providers import oneshot
+
+    blocked: list[str] = []
+    original = oneshot.run_oneshot
+    with (
+        HARNESS.refuse_engine_model_calls(blocked),
+        pytest.raises(RuntimeError, match="outside --extract-cmd"),
+    ):
+        await oneshot.run_oneshot("prompt")
+    assert blocked == ["run_oneshot"]
+    assert oneshot.run_oneshot is original
+
+
+def test_extractor_env_drops_inherited_ciao_and_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "/live/vault")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
+    env = HARNESS.extractor_env({"CIAO_WORKSPACE": "/tmp/install", "CIAO_AGENT_TOKEN": "t"})
+    assert "CIAO_VAULT_ROOT" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["CIAO_WORKSPACE"] == "/tmp/install"
+    assert env["CIAO_AGENT_TOKEN"] == "t"
