@@ -373,6 +373,7 @@ def test_pass_checks_touched_notes_against_the_transcript() -> None:
     prompt = memory_pass.MEMORY_PASS_PROMPT
     assert "check every note you touch against the transcript" in prompt
     assert "downgrade a claim stated as settled" in prompt
+    assert "(a recorded decision follows the rule above instead)" in prompt
 
 
 def test_memory_is_written_as_facts_not_narrative() -> None:
