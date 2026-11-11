@@ -63,6 +63,22 @@ test.describe('project title rail, phone', () => {
     await expect(page.locator('.project-view')).toHaveCount(0)
   })
 
+  test('a pull with an unsaved context draft asks first; refused, the page and the draft stay', async ({ page }) => {
+    await boot(page, '/project/alpha-general', CURRENT)
+    await page.locator('.project-context').getByRole('button', { name: 'Edit' }).click()
+    const field = page.locator('.project-context textarea')
+    await field.fill('A draft to keep')
+    const box = (await page.locator(`${CURRENT} .title-rail-title`).boundingBox())!
+    await touchDrag(page, { x: box.x + box.width / 2, y: box.y + 5 }, { x: 0, y: 200 })
+    const confirm = page.getByRole('dialog', { name: 'Unsaved changes' })
+    await expect(confirm).toBeVisible()
+    await confirm.getByRole('button', { name: 'Cancel' }).click()
+    await expect(confirm).toHaveCount(0)
+    await expect(page).toHaveURL(/\/project\/alpha-general$/)
+    await expect(field).toHaveValue('A draft to keep')
+    await expect.poll(() => page.locator('.project-view').evaluate(el => (el as HTMLElement).style.transform)).toBe('')
+  })
+
   test('the header is one row, with close hidden and New chat in the ⋯ menu', async ({ page }) => {
     await boot(page, '/project/alpha-general', CURRENT)
     const header = page.locator('.project-view .pane-header')

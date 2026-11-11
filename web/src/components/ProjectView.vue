@@ -490,7 +490,7 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
-import { useRouter } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter, type RouteLocationNormalized } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -747,25 +747,42 @@ watch(() => props.projectId, () => {
 
 /** An edit that moving to another project would throw away. */
 function holdsDraft(): boolean {
-  return editingName.value || (editingContext.value && contextDirty.value) || contextSaving.value
+  const nameDirty = editingName.value && !!project.value && nameDraft.value.trim() !== project.value.name
+  return nameDirty || (editingContext.value && contextDirty.value)
 }
 
-// A swipe or a click on a neighbour. The context editor's draft is never
-// dropped silently: moving on asks first, and a refusal keeps this project.
-async function onRailSelect(id: string): Promise<void> {
-  if (holdsDraft()) {
-    const leave = !contextSaving.value && await askConfirm('Discard your unsaved changes to this project\'s context?', {
-      title: 'Unsaved context',
-      confirmLabel: 'Discard changes',
-      destructive: true,
-    })
-    if (!leave) {
-      railLean.value = 0
-      railRemount.value++
-      return
-    }
+/**
+ * Every way off this project goes through the router: the rail (swipe, keys,
+ * chord), pull to close, ×, Escape, a sidebar row, Back. One guard asks before
+ * any of them drops an unsaved name or context, and a refusal keeps the
+ * project, its draft and its address.
+ */
+async function confirmLeave(to: RouteLocationNormalized): Promise<boolean> {
+  if (to.params.projectId === props.projectId || !holdsDraft()) return true
+  const leave = await askConfirm('Discard your unsaved changes to this project?', {
+    title: 'Unsaved changes',
+    confirmLabel: 'Discard changes',
+    destructive: true,
+  })
+  if (!leave) {
+    railLean.value = 0
+    railRemount.value++
+    return false
   }
-  await titleRail.select(id).catch(() => { railRemount.value++ })
+  editingName.value = false
+  editingContext.value = false
+  return true
+}
+onBeforeRouteLeave(to => confirmLeave(to))
+onBeforeRouteUpdate(to => confirmLeave(to))
+
+// A swipe or a click on a neighbour: the route guard asks about a draft, and a
+// refused or failed switch remounts the rail centred on this project.
+async function onRailSelect(id: string): Promise<void> {
+  await titleRail.select(id).catch(() => {
+    railLean.value = 0
+    railRemount.value++
+  })
 }
 
 // Previous / next project (the previous / next chat chord): the rail slides the
@@ -915,6 +932,9 @@ const showRepoSection = computed(() => Boolean(project.value && (!project.value.
 watch(() => props.projectId, () => {
   repoPickerOpen.value = false
   repoError.value = ''
+  // A completion sheet belongs to the project it was opened on.
+  closureOpen.value = false
+  closureProjectId.value = ''
 })
 
 function openRepoPicker() {
@@ -975,6 +995,8 @@ function openArchive(chat: { archive_path?: string }) {
 }
 
 const closureOpen = ref(false)
+/** The project the open completion sheet is about, fixed when it opened. */
+const closureProjectId = ref('')
 const closureEl = ref<HTMLElement | null>(null)
 const closureNoteField = ref<HTMLTextAreaElement | null>(null)
 const closureOutcome = ref<'completed' | 'stopped'>('completed')
@@ -1000,9 +1022,12 @@ async function doComplete() {
   closureNote.value = ''
   closureError.value = ''
   openTaskCount.value = null
-  closureOpen.value = true
   const workspace = project.value.workspace
   const projectId = project.value.project_id
+  // The view stays mounted across projects (the rail, Back), so the sheet
+  // completes the project it was opened on, never whichever is showing now.
+  closureProjectId.value = projectId
+  closureOpen.value = true
   try {
     const data = await api.get<{ tasks?: Array<{ id?: string; project_id?: string; status?: string }> }>(
       `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
@@ -1017,14 +1042,15 @@ async function doComplete() {
 }
 
 async function submitClosure() {
-  if (!project.value || closureBusy.value) return
+  const projectId = closureProjectId.value
+  if (!projectId || closureBusy.value) return
   // The note is optional in the field itself: a blank (or whitespace-only)
   // note closes the project without a note, like the task board's completion sheet.
   const note = closureNote.value.trim()
   closureBusy.value = true
   closureError.value = ''
   try {
-    await store.completeProject(project.value.project_id, {
+    await store.completeProject(projectId, {
       outcome: closureOutcome.value,
       note,
     })

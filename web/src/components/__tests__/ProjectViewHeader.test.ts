@@ -13,8 +13,14 @@ const askConfirm = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/confirm', () => ({ askConfirm }))
 
 const push = vi.hoisted(() => vi.fn(async () => {}))
+// The in-component guards, captured: a bare mount has no <router-view> for the
+// router to call them from, so the tests call them the way a navigation would.
+type Guard = (to: { params: Record<string, string> }) => Promise<boolean> | boolean
+const guards = vi.hoisted(() => ({ leave: [] as Guard[], update: [] as Guard[] }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
+  onBeforeRouteLeave: (fn: Guard) => { guards.leave.push(fn) },
+  onBeforeRouteUpdate: (fn: Guard) => { guards.update.push(fn) },
 }))
 
 function seed(count = 3) {
@@ -61,6 +67,8 @@ describe('ProjectView header', () => {
     vi.restoreAllMocks()
     askConfirm.mockReset()
     push.mockClear()
+    guards.leave.length = 0
+    guards.update.length = 0
     // Reduced motion: a keyboard step switches at once instead of after the slide.
     vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('reduce'), addEventListener() {}, removeEventListener() {} }))
   })
@@ -124,24 +132,56 @@ describe('ProjectView header', () => {
     expect(push).not.toHaveBeenCalled()
   })
 
-  it('asks before a swipe drops an unsaved context draft, and stays when refused', async () => {
+  it('one route guard asks before any way off the project drops a context draft', async () => {
     seed()
     const wrapper = await mountView()
+    expect(guards.leave).toHaveLength(1)
+    expect(guards.update).toHaveLength(1)
+    // No draft: nothing to ask.
+    expect(await guards.leave[0]({ params: {} })).toBe(true)
+    expect(askConfirm).not.toHaveBeenCalled()
+
     await wrapper.findAll('button').find(b => b.text() === 'Edit')!.trigger('click')
     await wrapper.get('textarea').setValue('a draft to keep')
+    // Pull to close, × and Escape go Home (a leave); the rail and the sidebar
+    // go to another project (an update). Refused, both keep the draft.
     askConfirm.mockResolvedValueOnce(false)
-    const { default: TitleRail } = await import('../TitleRail.vue')
-    // The rail stays up while the context is edited, so a swipe reaches the guard.
-    wrapper.findComponent(TitleRail).vm.$emit('select', 'garden')
+    expect(await guards.leave[0]({ params: {} })).toBe(false)
+    askConfirm.mockResolvedValueOnce(false)
+    expect(await guards.update[0]({ params: { projectId: 'garden' } })).toBe(false)
     await flush()
-    expect(askConfirm).toHaveBeenCalledTimes(1)
-    expect(push).not.toHaveBeenCalled()
     expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('a draft to keep')
+    // The same project (a hash or query change) is not a way off it.
+    expect(await guards.update[0]({ params: { projectId: 'kitchen' } })).toBe(true)
+    expect(askConfirm).toHaveBeenCalledTimes(2)
 
     askConfirm.mockResolvedValueOnce(true)
-    wrapper.findComponent(TitleRail).vm.$emit('select', 'garden')
+    expect(await guards.update[0]({ params: { projectId: 'garden' } })).toBe(true)
     await flush()
-    expect(push).toHaveBeenCalledWith('/project/garden')
+    expect(wrapper.find('.project-context textarea').exists()).toBe(false)
+  })
+
+  it('completes the project the sheet was opened on, and a project switch closes the sheet', async () => {
+    const store = seed()
+    const complete = vi.spyOn(store, 'completeProject').mockResolvedValue(undefined as never)
+    const apiModule = await import('../../lib/api')
+    vi.spyOn(apiModule.api, 'get').mockResolvedValue({ tasks: [] })
+    const wrapper = await mountView('kitchen')
+    await wrapper.findAll('button').find(b => b.text() === 'Complete')!.trigger('click')
+    await flush()
+    expect(wrapper.find('.closure-form').exists()).toBe(true)
+    // Back, or a rail step, while the sheet is up.
+    await wrapper.setProps({ projectId: 'garden' })
+    await flush()
+    expect(wrapper.find('.closure-form').exists()).toBe(false)
+
+    await wrapper.setProps({ projectId: 'kitchen' })
+    await flush()
+    await wrapper.findAll('button').find(b => b.text() === 'Complete')!.trigger('click')
+    await flush()
+    await wrapper.get('.closure-form').trigger('submit')
+    await flush()
+    expect(complete).toHaveBeenCalledWith('kitchen', expect.anything())
   })
 
   it('passes a pull on the title up for pull to close', async () => {
