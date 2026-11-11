@@ -47,6 +47,7 @@ from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_predictions
 from ciao import service_backend
+from ciao import transcripts
 from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
@@ -8736,7 +8737,47 @@ def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
         "undoable": is_undoable(receipt),
         "changed": bool(receipt.get("changed", True)),
         "ts": str(receipt.get("ts", "")),
+        # The turns this write cited, when the fact was extracted from a
+        # transcript. The receipt records them verbatim under ``provenance``
+        # (see ``_provenance_row``); History uses the first one to open the
+        # archive where the fact starts. A receipt with no citation — an
+        # operator edit, an import from another agent — carries an empty list,
+        # which is how the row can say the source is not pointed at a turn
+        # rather than pointing at turn 1.
+        "source_turns": _cited_turns(receipt),
     }
+
+
+def _cited_turns(receipt: dict[str, Any]) -> list[int]:
+    """The transcript turns a receipt's evidence names, in order.
+
+    Two shapes carry one: a region write records ``provenance.source_message_ids``
+    (:class:`ciao.fact_candidates.FactCandidate`), and a learning records the
+    ``sources``/``observations`` it was filed from. Both are read so a row can
+    point at a turn whichever write produced it.
+
+    Only positive integers are kept. ``source_message_ids`` is typed as
+    ``tuple[int, ...]``, and a malformed value must not become a line number in
+    the viewer — a link to the wrong line asserts the wrong evidence.
+    """
+    turns: list[int] = []
+
+    def take(values: Any) -> None:
+        for value in values if isinstance(values, (list, tuple)) else ():
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                turns.append(value)
+
+    provenance = receipt.get("provenance")
+    if isinstance(provenance, dict):
+        take(provenance.get("source_message_ids"))
+    for key in ("sources", "observations"):
+        rows = receipt.get(key)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                take([row.get("turn")])
+    return turns
 
 
 #: A retirement is reversible, but not by an undo: the note went to the review
@@ -8994,6 +9035,49 @@ def _source_index(config: Any) -> dict[str, str]:
     return index
 
 
+def _first_cited_turn(row: dict[str, Any]) -> int:
+    """The turn this decision's write cited, or ``0`` when it cited none."""
+    change = row.get("change")
+    if not isinstance(change, dict):
+        return 0
+    turns = change.get("source_turns")
+    if not isinstance(turns, list) or not turns:
+        return 0
+    first = turns[0]
+    return first if isinstance(first, int) and first > 0 else 0
+
+
+def _attach_source_line(
+    row: dict[str, Any], path: str, turn: int, archives: dict[str, str]
+) -> None:
+    """Point the row at the line where its cited turn starts.
+
+    ``source_turn``/``source_line`` are ABSENT — not zero — when the archive
+    cannot be read or no longer parses a turn with that number, which is what
+    lets History fall back to opening the file at the top and say nothing it
+    cannot back up. A transcript an operator edited by hand is exactly the case
+    where a wrong line would be worse than no line.
+
+    Runs off the event loop (:func:`asyncio.to_thread`), and reads each archive
+    at most once per request.
+    """
+    if not path.lower().endswith(".md"):
+        return
+    text = archives.get(path)
+    if text is None:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        archives[path] = text
+    if not text:
+        return
+    line = transcripts.archive_turn_line(text, turn)
+    if line:
+        row["source_turn"] = turn
+        row["source_line"] = line
+
+
 async def proposals_history(request: Request) -> JSONResponse:
     """Every recorded proposal decision across workspaces, newest first.
 
@@ -9087,10 +9171,18 @@ async def proposals_history(request: Request) -> JSONResponse:
     # resolved, and only once per request. Off the event loop: it lists a
     # directory tree.
     index = await asyncio.to_thread(_source_index, config)
+    # One read per archive per request: two facts from the same chat are the
+    # common case, and a transcript can be a few hundred kilobytes.
+    archives: dict[str, str] = {}
     for row in served:
         path = index.get(str(row.get("source", "")))
         if path:
             row["source_path"] = path
+            turn = _first_cited_turn(row)
+            if turn:
+                await asyncio.to_thread(
+                    _attach_source_line, row, path, turn, archives
+                )
         hint = _restore_hint(row)
         if hint:
             row["reversible_by"] = hint
