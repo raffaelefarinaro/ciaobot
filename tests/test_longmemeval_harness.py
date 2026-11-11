@@ -330,6 +330,11 @@ def test_stratified_sample_matches_published_sizes() -> None:
     assert [entry["question_id"] for entry in other] != ids
 
 
+#: The operator commands below are POSIX shell (`cat`, `printf`, `VAR=value cmd`).
+posix_shell = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell commands")
+
+
+@posix_shell
 def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     answer_cmd = (
         "grep -q 'Answer (step by step):' {prompt_file} && "
@@ -360,6 +365,7 @@ def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     assert row["latency_ms"]["judge"] is not None
 
 
+@posix_shell
 def test_failed_answer_is_counted_and_not_judged(tmp_path: Path) -> None:
     row = HARNESS.run_question(
         DATASET[0],
@@ -426,8 +432,6 @@ def test_cli_retrieval_only_end_to_end(
 # ── raw ingest stays byte-identical ─────────────────────────────────────────
 
 GOLDEN = ROOT / "tests" / "fixtures" / "longmemeval_raw_golden.jsonl"
-#: The operator commands below are POSIX shell (`cat`, `printf`, `VAR=value cmd`).
-posix_shell = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell commands")
 
 
 def _stable(row: dict) -> dict:
