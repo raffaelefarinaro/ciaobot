@@ -139,8 +139,13 @@
           <UsageView v-else-if="viewMode === 'stats'" @open-sidebar="sidebarCollapsed = false" />
           <ProjectView
             v-else-if="projectIdParam"
+            ref="projectViewRef"
             :project-id="projectIdParam"
+            :class="{ 'chat-rise': projectRising }"
+            :style="pullStyle"
             @close="closeProject"
+            @pull="onItemPull"
+            @pull-end="onItemPullEnd"
             @open-sidebar="sidebarCollapsed = false"
           />
           <SubagentChatView
@@ -406,6 +411,8 @@ const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanelComponent> | n
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
 const schedulePanelRef = ref<any>(null)
+// ProjectView is loaded on first visit, so the ref is typed by what is called on it.
+const projectViewRef = ref<{ selectAdjacent?: (direction: -1 | 1) => boolean } | null>(null)
 
 // Reactive handle on the global font scale. Used by the Cmd/Ctrl+Shift+= and
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
@@ -1159,9 +1166,22 @@ watch(() => (route.path.startsWith('/schedules') ? (route.params.scheduleId as s
   scheduleRiseTimer = setTimeout(() => { scheduleRising.value = false; scheduleRiseTimer = null }, 340)
 })
 
-// One pull-to-close for whatever open item has the title rail: a chat closes to
-// Home, an automation to the automation list.
-const pullTarget = computed<'chat' | 'schedule'>(() => viewMode.value === 'schedules' ? 'schedule' : 'chat')
+// The same rise for a project opened from the sidebar or Home; the title rail
+// moves between projects sideways instead.
+const projectRising = ref(false)
+let projectRiseTimer: ReturnType<typeof setTimeout> | null = null
+watch(projectIdParam, (id, was) => {
+  if (!id || was) return
+  if (prefersReducedMotion()) return
+  projectRising.value = true
+  if (projectRiseTimer) clearTimeout(projectRiseTimer)
+  projectRiseTimer = setTimeout(() => { projectRising.value = false; projectRiseTimer = null }, 340)
+})
+
+// One pull-to-close for whatever open item has the title rail: a chat and a
+// project close to Home, an automation to the automation list.
+const pullTarget = computed<'chat' | 'schedule' | 'project'>(() =>
+  viewMode.value === 'schedules' ? 'schedule' : viewMode.value === 'project' ? 'project' : 'chat')
 const pullHint = computed(() => pullTarget.value === 'schedule' ? 'Automations' : 'Home')
 const {
   pullY,
@@ -1170,7 +1190,11 @@ const {
   onPullEnd: onItemPullEnd,
   invalidate: invalidatePull,
 } = usePullToClose(
-  target => { if (target === 'schedule') void router.push('/schedules'); else closeChat() },
+  target => {
+    if (target === 'schedule') void router.push('/schedules')
+    else if (target === 'project') void router.push('/')
+    else closeChat()
+  },
   () => pullTarget.value,
   () => pullTarget.value === 'chat' && besideInTile.value,
 )
@@ -1367,6 +1391,18 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       invalidatePull()
     }
+    return
+  }
+  // Previous / next project, along the open project's title rail, with the
+  // automation path's gates: never with a confirm, prompt or viewer up, never
+  // while a menu or popover is open, and never from a text field (the name or
+  // the context being edited). The project page renders instead of any chat
+  // still selected, so this comes before the chat chord.
+  if (viewMode.value === 'project' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
+    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+      || document.querySelector('[data-dismissable-layer]')) return
+    e.preventDefault()
+    if (projectViewRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) invalidatePull()
     return
   }
   // Automations: same arrow contract as home, but over the sidebar's
