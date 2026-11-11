@@ -7040,7 +7040,7 @@ details[open] > .activity-summary::before {
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 12px 40px rgb(0 0 0 / 12%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -8120,6 +8120,13 @@ details[open] > .activity-summary::before {
     padding: 0;
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
+}
+/* Touch phones: the surface is rounder (--radius-composer), so the controls
+   on its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .composer-surface .composer-chip,
+  .composer-surface .image-btn,
+  .composer-surface .send-btn { border-radius: 999px; }
 }
 
 /* Chat comment selection trigger + composer */

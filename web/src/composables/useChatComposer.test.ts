@@ -176,6 +176,21 @@ describe('useChatComposer textarea sizing', () => {
     expect(el.style.height).toBe('200px')
   })
 
+  it('re-fits the height when the draft changes without typing (an inserted [Image N])', async () => {
+    const { composer } = makeComposer()
+    const el = attachTextarea(composer, 'Check these questions about the code mode')
+    pinScrollHeight(el, 44)
+    composer.autoResize()
+    expect(el.style.height).toBe('44px')
+
+    // The token wraps the prompt onto a second line; no input event fires.
+    pinScrollHeight(el, 70)
+    composer.insertTextAtCursor('[Image 1]')
+    await nextTick()
+    await nextTick()
+    expect(el.style.height).toBe('70px')
+  })
+
   it('applies hysteresis to the tall input bar so the buttons cannot flicker', () => {
     const { composer } = makeComposer()
     const el = attachTextarea(composer)

@@ -253,6 +253,9 @@ watch(shouldPollStartup, (shouldPoll) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  /* Prompt surface (chat composer, Home intake). Touch phones round it to sit
+     concentric with the screen's corners; see the media rule below. */
+  --radius-composer: 15px;
   /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
   --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -994,5 +997,11 @@ input:focus, textarea:focus, select:focus {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+/* On a touch phone the composer sits ~12px from rounded screen corners; a
+   15px box reads square against them. Its inner controls go pill/circle in
+   ChatPanel and HomeIntake so their corners stay concentric. */
+@media (max-width: 768px) and (pointer: coarse) {
+  :root { --radius-composer: 28px; }
 }
 </style>
