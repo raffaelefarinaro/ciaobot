@@ -507,6 +507,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
   Structured AskUserQuestion forms keep their header and answer actions fixed
   while a named, keyboard-scrollable details region owns long question content.
+  Their 60dvh cap yields to the available flex height when a short pane and
+  enlarged composer content need more room; if they cannot fit together, the
+  chat column scrolls so the controls and composer remain independently reachable.
   The `narrow-viewport.spec.ts` browser tests measure footer visibility, hit
   targets, scroll-body room, font scaling and keyboard focus in real layout.
   The store keeps chats, projects and workspaces, message history and its
