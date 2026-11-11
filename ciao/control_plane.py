@@ -2806,12 +2806,20 @@ class CiaoControlPlane:
             # ownership check still runs against the resolved id.
             project_id = self._resolve_project_id(principal, project_id)
             self._project(principal, project_id)
-        requested_mode = mode
         if mode is not None:
-            # A normal/auto MCP caller must not upgrade its own or another
-            # chat to bypass through the auto-approved metadata tool. Keep the
-            # same ceiling used for newly-created child chats.
-            mode = self._child_mode(principal, mode)
+            # A normal/auto caller must not raise its own or another chat's
+            # permission mode: that is the user's call (`chat needs-action
+            # permission_mode`). Refuse instead of clamping, so the caller cannot
+            # mistake a clamped write for a switch. Lowering is always allowed.
+            clamped = self._child_mode(principal, mode)
+            if mode in _MODE_RANK and clamped != mode:
+                raise ControlPlaneError(
+                    "mode_escalation_refused",
+                    f"Only the user can raise this chat's permission mode (requested {mode}, "
+                    f"ceiling {clamped}). Ask for it with `ciao chat needs-action permission_mode "
+                    f"--mode {mode}`; nothing was changed.",
+                )
+            mode = clamped
         try:
             updated = self.pcm.update_chat(
                 chat_id,
@@ -2830,9 +2838,6 @@ class CiaoControlPlane:
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         result = updated.to_dict(local=self.pcm.is_session_local(updated))
-        if requested_mode and requested_mode != mode:
-            result["mode_clamped"] = True
-            result["requested_mode"] = requested_mode
         return _ok(result)
 
     def chat_send(self, principal: AgentPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
