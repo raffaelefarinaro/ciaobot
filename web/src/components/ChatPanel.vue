@@ -150,6 +150,7 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
     <div
+      ref="chatColumnEl"
       class="chat-column"
       :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
       :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
@@ -743,7 +744,7 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="questionCardVisible" class="question-card question-form-card">
+    <div v-if="questionCardVisible" ref="questionCardEl" class="question-card question-form-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
@@ -2288,6 +2289,8 @@ const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, 
 // a drawer. Measured on the panel rather than the window, because the sidebar
 // and a pinned file both take width from this pane.
 const panelEl = ref<HTMLElement | null>(null)
+const chatColumnEl = ref<HTMLElement | null>(null)
+const questionCardEl = ref<HTMLElement | null>(null)
 const railEl = ref<HTMLElement | null>(null)
 const railContextEl = ref<HTMLElement | null>(null)
 const railRepoEl = ref<HTMLElement | null>(null)
@@ -5349,6 +5352,97 @@ function archiveActiveChat() {
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
 defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut, selectAdjacentChat, focusComposer })
+
+// Keep the focused draft or question field visible after layout changes.
+let composerFrame = 0
+function keepFocusedComposerVisible() { scheduleFocusedVisibility(false) }
+function keepFocusedFieldVisible() { scheduleFocusedVisibility(true) }
+function scheduleFocusedVisibility(includeQuestionField: boolean) {
+  cancelAnimationFrame(composerFrame)
+  composerFrame = requestAnimationFrame(() => {
+    const column = chatColumnEl.value, active = document.activeElement
+    if (!column?.isConnected || !(active instanceof HTMLElement) || !active.isConnected) return
+    const isComposer = active === inputEl.value
+    const body = includeQuestionField && !isComposer && active.matches('.question-other') ? active.closest<HTMLElement>('.question-form-body') : null
+    if (!isComposer && !body) return
+    const viewport = window.visualViewport
+    const bounds = column.getBoundingClientRect()
+    const top = Math.max(bounds.top, viewport?.offsetTop ?? 0)
+    const bottom = Math.min(bounds.bottom, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight))
+    if (body) {
+      const visible = body.getBoundingClientRect(), rect = active.getBoundingClientRect()
+      const bodyTop = Math.max(visible.top, top), bodyBottom = Math.min(visible.bottom, bottom)
+      const delta = rect.bottom > bodyBottom ? rect.bottom - bodyBottom : rect.top < bodyTop ? rect.top - bodyTop : 0
+      if (Math.abs(delta) > 1) body.scrollTop += delta
+    }
+    const rect = active.getBoundingClientRect()
+    const delta = rect.bottom > bottom ? rect.bottom - bottom : rect.top < top ? rect.top - top : 0
+    if (Math.abs(delta) > 1) column.scrollTop += delta
+  })
+}
+
+onMounted(() => {
+  const inputObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(keepFocusedComposerVisible)
+  const geometryObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(keepFocusedFieldVisible)
+  if (panelEl.value) geometryObserver?.observe(panelEl.value)
+  watch(inputEl, (input, previous) => {
+    if (previous) { inputObserver?.unobserve(previous); previous.removeEventListener('focus', keepFocusedComposerVisible) }
+    if (input) { inputObserver?.observe(input); input.addEventListener('focus', keepFocusedComposerVisible) }
+  }, { immediate: true, flush: 'post' })
+  watch(() => [questionCardVisible.value, visibleApprovals.value, needsYouActions.value, activeCapabilityQuestions.value, view.currentQueued, dockExpanded.value, slash.visible.value, slash.matches.value.length, showMentionPicker.value, filteredMentions.value.length], keepFocusedComposerVisible, { flush: 'post' })
+  const viewport = window.visualViewport
+  viewport?.addEventListener('resize', keepFocusedFieldVisible)
+  viewport?.addEventListener('scroll', keepFocusedFieldVisible)
+  onBeforeUnmount(() => {
+    cancelAnimationFrame(composerFrame)
+    inputEl.value?.removeEventListener('focus', keepFocusedComposerVisible)
+    inputObserver?.disconnect()
+    geometryObserver?.disconnect()
+    viewport?.removeEventListener('resize', keepFocusedFieldVisible)
+    viewport?.removeEventListener('scroll', keepFocusedFieldVisible)
+  })
+})
+
+// Keyboard selection must remain visible without scrolling the surrounding pane.
+function revealHighlightedPickerRow(selector: string) {
+  const picker = chatColumnEl.value?.querySelector<HTMLElement>(selector)
+  const row = picker?.querySelector<HTMLElement>('[aria-selected="true"]')
+  if (!picker || !row) return
+  const bounds = picker.getBoundingClientRect(), item = row.getBoundingClientRect()
+  const top = bounds.top + picker.clientTop, bottom = top + picker.clientHeight
+  const delta = item.bottom > bottom ? item.bottom - bottom : item.top < top ? item.top - top : 0
+  if (Math.abs(delta) > 1) picker.scrollTop += delta
+}
+watch(() => [slash.visible.value, slash.highlight.value, slash.matches.value.length], () => {
+  if (slash.visible.value) revealHighlightedPickerRow('.commands-picker:not(.mention-picker)')
+}, { flush: 'post' })
+watch(() => [showMentionPicker.value, mentionHighlightIdx.value, filteredMentions.value.length], () => {
+  if (showMentionPicker.value) revealHighlightedPickerRow('.mention-picker')
+}, { flush: 'post' })
+
+onMounted(() => {
+  let observer: ResizeObserver | null = null
+  watch(questionCardEl, card => {
+    observer?.disconnect()
+    if (!card || typeof ResizeObserver === 'undefined') return
+    const header = card.querySelector<HTMLElement>('.question-card-header')!
+    const actions = card.querySelector<HTMLElement>('.question-card-actions')!
+    const measure = () => {
+      const css = getComputedStyle(card)
+      const chrome = header.getBoundingClientRect().height + actions.getBoundingClientRect().height
+      const extra = parseFloat(css.paddingTop) + parseFloat(css.paddingBottom) + parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth) + 2 * parseFloat(css.rowGap)
+      const value = `${chrome + extra + 44}px`
+      if (card.style.getPropertyValue('--question-min') !== value) card.style.setProperty('--question-min', value)
+    }
+    observer = new ResizeObserver(measure)
+    observer.observe(card, { box: 'border-box' })
+    observer.observe(header, { box: 'border-box' })
+    observer.observe(actions, { box: 'border-box' })
+    measure()
+  }, { immediate: true, flush: 'post' })
+  onBeforeUnmount(() => observer?.disconnect())
+})
+
 </script>
 
 <style scoped>
@@ -5481,7 +5575,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
+.chat-column > .commands-picker { flex-shrink: 0; max-height: min(240px, 50%); box-sizing: border-box; }
 
 .chat-rail {
   flex: 0 0 var(--chat-rail-w);
@@ -7358,6 +7454,9 @@ details[open] > .activity-summary::before {
 }
 .question-form-card {
   overflow: hidden;
+  height: max-content;
+  flex-shrink: 1;
+  min-height: var(--question-min, 0px);
   max-height: 60dvh;
 }
 .question-form-body {
@@ -7365,7 +7464,7 @@ details[open] > .activity-summary::before {
   flex: 1 1 auto;
   flex-direction: column;
   gap: 10px;
-  min-height: 0;
+  min-height: 44px;
   overflow-y: auto;
 }
 .question-form-body > * { flex-shrink: 0; }
