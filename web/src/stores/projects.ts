@@ -3073,7 +3073,6 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
-      code_mode?: boolean
     },
   ) {
     const readStart = chatReadStart()
@@ -3082,11 +3081,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
     applyChatActionsFromChatInfo(c, readStart)
-  }
-
-  /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
-  async function setChatCodeMode(chatId: string, on: boolean): Promise<void> {
-    await updateChat(chatId, { code_mode: on })
   }
 
   async function handoverChat(
@@ -5294,20 +5288,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (c) c.repo_location = msg.repo_location
         break
       }
-      case 'chat_code_mode': {
-        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
-        if (!c) break
-        c.code_mode = msg.code_mode
-        // A switch made from this client also gets the PATCH response, so this is a
-        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
-        // The event has no after_turn_index; the server's ChatInfo does. Refetch
-        // rather than guess the anchor (an optimistic user row has no turn_index yet).
-        const readStart = chatReadStart()
-        void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
-          .then((fresh) => { replaceChat(fresh, readStart) })
-          .catch(() => { /* next chats load heals it */ })
-        break
-      }
       case 'chat_pin_changed': {
         // A pin/replace/unpin happened on another device. Apply server truth and
         // nothing else: this must not select or navigate the chat, mark it read,
@@ -7328,7 +7308,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, reorderableProjects, projectOrderEpoch, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
