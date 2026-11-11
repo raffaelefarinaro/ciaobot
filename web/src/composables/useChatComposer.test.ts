@@ -191,6 +191,18 @@ describe('useChatComposer textarea sizing', () => {
     expect(el.style.height).toBe('70px')
   })
 
+  it('shrinks back and drops the tall bar when the draft is cleared after a send', async () => {
+    const { composer } = makeComposer()
+    const el = attachTextarea(composer, 'long', { tall: true })
+    const bar = el.parentElement as HTMLElement
+    composer.draft.value = 'a long prompt'
+    pinScrollHeight(el, 44)
+    composer.draft.value = ''
+    await nextTick()
+    expect(el.style.height).toBe('44px')
+    expect(bar.classList.contains('tall')).toBe(false)
+  })
+
   it('applies hysteresis to the tall input bar so the buttons cannot flicker', () => {
     const { composer } = makeComposer()
     const el = attachTextarea(composer)
