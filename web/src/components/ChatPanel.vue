@@ -156,7 +156,7 @@
       data-rail-lean
       :class="railMotionClass(railLean, railArrival)"
       :style="railLeanStyle(railLean)"
-      @animationend="railArrival = 0"
+      @animationend="e => { if (e.target === e.currentTarget) railArrival = 0 }"
     >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads

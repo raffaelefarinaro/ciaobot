@@ -1,4 +1,5 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import { prefersReducedMotion } from '../lib/motion'
 
 /** Past this many px of downward pull, letting go closes the pane. */
 export const PULL_CLOSE_PX = 120
@@ -6,10 +7,6 @@ export const PULL_CLOSE_PX = 120
 export const PULL_FLICK_VELOCITY = 0.6
 export const PULL_FLICK_MIN_PX = 40
 const SETTLE_MS = 280
-
-function reducedMotion(): boolean {
-  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-}
 
 /** Whether a pull released at `dy` px moving at `velocity` px/ms closes the pane. */
 export function pullCloses(dy: number, velocity: number): boolean {
@@ -24,10 +21,16 @@ export function pullCloses(dy: number, velocity: number): boolean {
  * away and `close` runs; otherwise it springs back. Under reduced motion the
  * close is immediate.
  *
- * `invalidate` cancels a pull whose settle animation is still running, so a
- * delayed close belongs to the item and view where the pull started.
+ * `context` is read when the finger lifts and handed to `close`, so a close
+ * acts on the view the pull belonged to, not whichever is showing once the
+ * pane has dropped away. `invalidate` cancels a pull whose settle animation is
+ * still running.
  */
-export function usePullToClose(close: () => void, disabled: () => boolean = () => false): {
+export function usePullToClose<T = void>(
+  close: (context: T) => void,
+  context: () => T = () => undefined as T,
+  disabled: () => boolean = () => false,
+): {
   pullY: Ref<number>
   pullStyle: ComputedRef<Record<string, string | number | undefined> | undefined>
   onPull: (dy: number) => void
@@ -36,10 +39,10 @@ export function usePullToClose(close: () => void, disabled: () => boolean = () =
 } {
   const pullY = ref(0)
   const settling = ref(false)
-  let context = 0
+  let generation = 0
 
   function invalidate(): void {
-    context++
+    generation++
     pullY.value = 0
     settling.value = false
   }
@@ -61,28 +64,29 @@ export function usePullToClose(close: () => void, disabled: () => boolean = () =
 
   function onPull(dy: number): void {
     if (disabled()) return
-    if (settling.value) context++
+    if (settling.value) generation++
     settling.value = false
     pullY.value = dy
   }
 
   function onPullEnd(dy: number, velocity: number): void {
     if (disabled()) return
-    const started = context
+    const started = generation
+    const target = context()
     const closes = pullCloses(dy, velocity)
-    if (closes && reducedMotion()) { pullY.value = 0; close(); return }
+    if (closes && prefersReducedMotion()) { pullY.value = 0; close(target); return }
     settling.value = true
     if (closes) {
       pullY.value = Math.max(window.innerHeight, dy + 1)
       setTimeout(() => {
-        if (started !== context) return
+        if (started !== generation) return
         settling.value = false
         pullY.value = 0
-        close()
+        close(target)
       }, SETTLE_MS)
     } else {
       pullY.value = 0
-      setTimeout(() => { if (started === context) settling.value = false }, SETTLE_MS)
+      setTimeout(() => { if (started === generation) settling.value = false }, SETTLE_MS)
     }
   }
 

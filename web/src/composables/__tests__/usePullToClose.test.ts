@@ -63,9 +63,19 @@ describe('usePullToClose', () => {
     expect(close).not.toHaveBeenCalled()
   })
 
+  it('hands close the context read when the finger lifted, not when the pane has dropped', () => {
+    const close = vi.fn()
+    let view = 'schedule'
+    const pull = usePullToClose((target: string) => close(target), () => view)
+    pull.onPullEnd(PULL_CLOSE_PX + 1, 0)
+    view = 'chat'
+    vi.advanceTimersByTime(280)
+    expect(close).toHaveBeenCalledWith('schedule')
+  })
+
   it('does nothing while disabled', () => {
     const close = vi.fn()
-    const pull = usePullToClose(close, () => true)
+    const pull = usePullToClose(close, () => undefined, () => true)
     pull.onPull(200)
     pull.onPullEnd(200, 1)
     vi.advanceTimersByTime(400)

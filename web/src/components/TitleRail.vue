@@ -72,6 +72,7 @@ import {
   settledIndex,
   type RailItem,
 } from '../lib/titleRail'
+import { prefersReducedMotion } from '../lib/motion'
 
 /**
  * The swipeable title rail of an open item's header: a chat, or an automation.
@@ -189,9 +190,7 @@ function slide(direction: -1 | 1): boolean {
   if (!target || sliding) return false
   const el = strip.value
   const to = itemEls()[neighbours.value.index + direction]
-  const reduce = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (!el || !to || reduce) {
+  if (!el || !to || prefersReducedMotion()) {
     emit('select', target)
     return true
   }

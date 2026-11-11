@@ -43,8 +43,14 @@ export function takeRailArrival(key: string): -1 | 1 | 0 {
   return a
 }
 
+/** Forget a rail's travel order and arrival. The state object is shared by every
+ *  live instance of the rail, so it is cleared in place, never replaced. */
 export function resetRailState(key: string): void {
-  states.delete(key)
+  const state = states.get(key)
+  if (!state) return
+  state.snapshot = null
+  state.arrival = 0
+  state.switching = false
 }
 
 export interface TitleRail {

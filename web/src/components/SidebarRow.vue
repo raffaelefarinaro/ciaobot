@@ -45,11 +45,8 @@ const props = defineProps<{
   meta?: string
 }>()
 
-// `chat-title` is kept for the sidebar's chat-row tests and selectors.
 const titleClass = computed(() => ({
-  'chat-title': true,
   'sidebar-row-title--unread': props.unread,
-  'chat-title--unread': props.unread,
   'sidebar-row-title--muted': props.muted && !props.unread,
 }))
 </script>

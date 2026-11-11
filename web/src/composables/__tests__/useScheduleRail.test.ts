@@ -79,6 +79,38 @@ describe('scheduleRailLabel', () => {
   it('names the title, group, time and state', () => {
     expect(scheduleRailLabel('Brief', 'Routine', '08:00', null)).toBe('Brief, Routine, 08:00')
     expect(scheduleRailLabel('Brief', 'Routine', '08:00', 'working')).toBe('Brief, Routine, 08:00, working')
-    expect(scheduleRailLabel('Brief', 'Routine', '', 'paused')).toBe('Brief, Routine, paused')
+    expect(scheduleRailLabel('Brief', 'Routine', 'paused', null)).toBe('Brief, Routine, paused')
+    expect(scheduleRailLabel('Brief', 'Routine', '', 'needs')).toBe('Brief, Routine, missed a run')
+  })
+})
+
+describe('schedule rail subtitles', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as never
+    store.chats = []
+  })
+  afterEach(() => resetRailState('schedule'))
+
+  it('gives a manual routine no time, and a paused one-off the same "paused" in subtitle and label', () => {
+    useTaskStore().schedules = [
+      schedule('once', { frequency: 'once', run_at_date: '2026-12-01', enabled: false }),
+      schedule('manual', { frequency: 'manual' }),
+    ] as never
+    const [once, manual] = useScheduleRail(() => 'manual').items.value
+    expect(manual.subtitle).toBe('Routine')
+    expect(manual.label).toBe('title manual, Routine')
+    expect(once.subtitle).toBe('One-off · paused')
+    expect(once.label).toBe('title once, One-off, paused')
+  })
+
+  it('rolls the rail back when a guard cancels the navigation', async () => {
+    useTaskStore().schedules = [schedule('a'), schedule('b')] as never
+    push.mockResolvedValueOnce({ type: 4 } as never)
+    const rail = useScheduleRail(() => 'a')
+    await expect(rail.select('b')).rejects.toEqual({ type: 4 })
+    expect(takeScheduleRailArrival()).toBe(0)
   })
 })

@@ -607,7 +607,7 @@ describe('ProjectSidebar chat actions', () => {
     await nextTick()
 
     expect(wrapper.find('.chat-item .title-shimmer').exists()).toBe(false)
-    expect(wrapper.get('.chat-item .chat-title').text()).toBe('Deploy the API')
+    expect(wrapper.get('.chat-item .sidebar-row-title').text()).toBe('Deploy the API')
 
     wrapper.unmount()
   })

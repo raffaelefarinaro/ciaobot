@@ -304,6 +304,7 @@ import type PinnedFilePanelComponent from './PinnedFilePanel.vue'
 import { loadChatPanel, loadFileViewerModal, loadPinnedFilePanel, prefetchChatPanelForRoute } from '../lib/chatComponents'
 import ChatPaneSkeleton from './ChatPaneSkeleton.vue'
 import { PULL_CLOSE_PX, usePullToClose } from '../composables/usePullToClose'
+import { prefersReducedMotion } from '../lib/motion'
 // The destinations behind the rail are loaded on first visit, not on boot.
 // Statically imported they landed in the same chunk as the chat itself — a
 // third of a megabyte of Settings, Automations, the memory canvas and the
@@ -716,8 +717,7 @@ watch(sidebarCollapsed, (collapsed, was) => {
   if (!collapsed) { drawerOpened = isMobile.value; sidebarClosing.value = false; return }
   const opened = drawerOpened
   drawerOpened = false
-  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (was || !opened || !isMobile.value || reduce) { sidebarClosing.value = false; return }
+  if (was || !opened || !isMobile.value || prefersReducedMotion()) { sidebarClosing.value = false; return }
   sidebarClosing.value = true
   sidebarClosingTimer = setTimeout(() => { sidebarClosing.value = false; sidebarClosingTimer = null }, SIDEBAR_SLIDE_MS)
 })
@@ -1129,7 +1129,7 @@ const tileArriving = ref(false)
 let tileTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => store.activeChat?.chat_id, (id, was) => {
   if (!id || !was || id === was) return
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   tileArriving.value = false
   if (tileTimer) clearTimeout(tileTimer)
   void nextTick(() => {
@@ -1142,7 +1142,7 @@ let bootSettledAt = 0
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
 watch(() => store.activeChat?.chat_id, (id, was) => {
   if (!id || was || !bootSettledAt || Date.now() - bootSettledAt < 800) return
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   chatRising.value = true
   if (riseTimer) clearTimeout(riseTimer)
   riseTimer = setTimeout(() => { chatRising.value = false; riseTimer = null }, 340)
@@ -1153,7 +1153,7 @@ const scheduleRising = ref(false)
 let scheduleRiseTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => (route.path.startsWith('/schedules') ? (route.params.scheduleId as string) || '' : null), (id, was) => {
   if (!id || was !== '') return
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   scheduleRising.value = true
   if (scheduleRiseTimer) clearTimeout(scheduleRiseTimer)
   scheduleRiseTimer = setTimeout(() => { scheduleRising.value = false; scheduleRiseTimer = null }, 340)
@@ -1170,7 +1170,8 @@ const {
   onPullEnd: onItemPullEnd,
   invalidate: invalidatePull,
 } = usePullToClose(
-  () => { if (pullTarget.value === 'schedule') void router.push('/schedules'); else closeChat() },
+  target => { if (target === 'schedule') void router.push('/schedules'); else closeChat() },
+  () => pullTarget.value,
   () => pullTarget.value === 'chat' && besideInTile.value,
 )
 // A delayed pull belongs to the item and view where it started, not whichever
@@ -1355,21 +1356,31 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Automations: same arrow contract as home, but over the sidebar's
-  // schedule lists and the overview pane. This lives outside the chat-only
-  // gate because shortcutsActive deliberately excludes schedules — the
-  // lists still want keyboard roaming.
   // Previous / next automation: the same chord as previous / next chat, along
-  // the open automation's title rail.
-  if (viewMode.value === 'schedules' && !e.repeat && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
+  // the open automation's title rail. Gated like the chat path: never with a
+  // confirm, prompt or viewer up, never while a menu or popover is open, and
+  // never from a text field (a card's draft would be thrown away).
+  if (viewMode.value === 'schedules' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
+    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+      || document.querySelector('[data-dismissable-layer]')) return
     if (schedulePanelRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) {
       e.preventDefault()
       invalidatePull()
     }
     return
   }
+  // Automations: same arrow contract as home, but over the sidebar's
+  // schedule lists and the overview pane. This lives outside the chat-only
+  // gate because shortcutsActive deliberately excludes schedules — the
+  // lists still want keyboard roaming.
   if (viewMode.value === 'schedules' && bare && e.key.startsWith('Arrow')) {
     if (isTypingTarget(e.target) || e.defaultPrevented) return
+    // The title rail owns the arrows on its focused title; at either end it has
+    // nothing to step to, and the key must not roam the sidebar instead.
+    if (e.target instanceof Element && e.target.closest('.title-rail')) {
+      e.preventDefault()
+      return
+    }
     if (projectSidebarRef.value?.onArrow?.(e.key)) {
       e.preventDefault()
       return

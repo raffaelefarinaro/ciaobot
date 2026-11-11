@@ -65,6 +65,26 @@ test.describe('automation title rail, phone', () => {
   })
 })
 
+test.describe('automation header, phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+
+  test('is one row like a chat\'s, with Run now and Pause in the ⋯ menu', async ({ page }, testInfo) => {
+    await isolate(page, `automation-header-phone-${testInfo.workerIndex}`)
+    await boot(page, '/schedules/alpha-daily-brief', CURRENT)
+    const header = page.locator('.schedule-panel .pane-header')
+    const [title, trail] = await Promise.all([
+      page.locator(`${CURRENT} .title-rail-title`).boundingBox(),
+      page.locator('.schedule-panel .header-trail').boundingBox(),
+    ])
+    // Same row: the title's centre sits within the actions' band.
+    expect(Math.abs((title!.y + title!.height / 2) - (trail!.y + trail!.height / 2))).toBeLessThan(trail!.height)
+    await expect(header.getByRole('button', { name: 'Run now' })).toBeHidden()
+    await header.getByRole('button', { name: 'More automation actions' }).click()
+    await expect(page.getByRole('menuitem', { name: 'Run now' })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Pause' })).toBeVisible()
+  })
+})
+
 test.describe('automation title rail, desktop', () => {
   test.use({ viewport: { width: 1280, height: 800 } })
 
@@ -93,5 +113,49 @@ test.describe('automation title rail, desktop', () => {
     await expect(page).toHaveURL(/\/schedules\/alpha-inbox-sweep$/)
     await page.keyboard.press('Alt+ArrowLeft')
     await expect(page).toHaveURL(/\/schedules\/alpha-weekly-review$/)
+  })
+
+  test('an arrow at the end of the rail keeps focus on the title', async ({ page }) => {
+    await boot(page, '/schedules/alpha-inbox-sweep', CURRENT)
+    await page.locator(CURRENT).focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(page).toHaveURL(/\/schedules\/alpha-inbox-sweep$/)
+    await expect(page.locator(CURRENT)).toBeFocused()
+  })
+
+  test('Option+arrows do nothing with the actions menu or a confirm open, or while a card is being edited', async ({ page }) => {
+    await boot(page, '/schedules/alpha-weekly-review', CURRENT)
+    const stays = async () => {
+      await page.waitForTimeout(400)
+      await expect(page).toHaveURL(/\/schedules\/alpha-weekly-review$/)
+    }
+
+    // The ⋯ menu.
+    await page.getByRole('button', { name: 'More automation actions' }).click()
+    await expect(page.getByRole('menuitem', { name: 'Delete automation…' })).toBeVisible()
+    await page.keyboard.press('Alt+ArrowRight')
+    await stays()
+
+    // The delete confirm: stepping away under it would delete the wrong automation.
+    await page.getByRole('menuitem', { name: 'Delete automation…' }).click()
+    const confirm = page.getByRole('dialog', { name: 'Delete automation' })
+    await expect(confirm).toBeVisible()
+    await page.keyboard.press('Alt+ArrowRight')
+    await stays()
+    await confirm.getByRole('button', { name: 'Cancel' }).click()
+    await expect(confirm).toHaveCount(0)
+
+    // A card's textarea: the draft survives and the automation stays.
+    await page.locator('.prompt-actions').getByRole('button', { name: 'Edit' }).click()
+    const prompt = page.locator('.content-form textarea').last()
+    await prompt.fill('A draft to keep')
+    await page.keyboard.press('Alt+ArrowRight')
+    await stays()
+    await expect(prompt).toHaveValue('A draft to keep')
+    // Focus outside the field, the card being edited still holds the rail.
+    await page.locator('.content-form').click({ position: { x: 2, y: 2 } })
+    await page.keyboard.press('Alt+ArrowRight')
+    await stays()
+    await expect(prompt).toHaveValue('A draft to keep')
   })
 })

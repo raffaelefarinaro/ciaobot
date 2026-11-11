@@ -354,7 +354,6 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
                 :text="scheduleTitle(s)"
                 :meta="cadenceBadge(s)"
                 :muted="!s.enabled"
@@ -385,7 +384,6 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
                 :text="scheduleTitle(s)"
                 :meta="cadenceBadge(s)"
                 :muted="!s.enabled"
@@ -409,7 +407,6 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
                 :text="scheduleTitle(s)"
                 :meta="cadenceBadge(s)"
                 :muted="!s.enabled"
@@ -1020,6 +1017,7 @@ import NotificationBell from './NotificationBell.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
+import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
 import SidebarRow from './SidebarRow.vue'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
@@ -1310,14 +1308,7 @@ function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
 }
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
-const workspaceSchedules = computed(() =>
-  taskStore.schedules.filter(s => scheduleInWorkspace(
-    s,
-    store.activeWorkspace,
-    store.chats,
-    store.projects,
-  )),
-)
+const workspaceSchedules = useWorkspaceSchedules()
 
 // The sidebar's automation groups, in the order the open automation's title rail walks.
 const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))

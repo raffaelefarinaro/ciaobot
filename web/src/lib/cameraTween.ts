@@ -45,9 +45,3 @@ export function tweenCamera(from: CameraState, to: CameraState, t: number): Came
   }
 }
 
-/** True when the OS asks for reduced motion — every tween then snaps instead. */
-export function prefersReducedMotion(): boolean {
-  return typeof window !== 'undefined'
-    && typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-}
