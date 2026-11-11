@@ -571,8 +571,9 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     them falls back to what grants the least, not to the stored value: an
     unreadable tool deny-list becomes ``None`` (no extras; the trim catalog
     defaults still apply). A readable value is kept as it is, which is why the restore
-    confirmation shows the deny-list before anything happens. Invalid claude_trim
-    entries fall back to the catalog defaults.
+    confirmation shows the deny-list before anything happens. claude_trim keeps
+    only entries that hide more than the catalog default; an archive cannot
+    un-hide a tool or skill — the operator re-enables it in Settings after restore.
     """
     from ciao import provider_registry  # noqa: PLC0415
     from ciao.claude_trim import load_claude_trim  # noqa: PLC0415
@@ -602,7 +603,7 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         "default_provider": provider,
         "disallowed_tools": disallowed,
         "claude_ai_connectors": connectors,
-        "claude_trim": load_claude_trim(entry.get("claude_trim")),
+        "claude_trim": {k: v for k, v in load_claude_trim(entry.get("claude_trim")).items() if v},
         "gws_profile": profile,
         "color": color,
     }
