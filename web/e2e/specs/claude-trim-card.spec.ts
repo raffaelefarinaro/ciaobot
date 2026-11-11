@@ -106,7 +106,6 @@ test.describe('Claude context trimming card', () => {
         docClient: document.documentElement.clientWidth,
       }
     })
-    console.log(`ZOOM: ${JSON.stringify(m)}`)
     expect(m.cardScroll).toBeLessThanOrEqual(m.cardClient)
     expect(m.maxSwitchRight).toBeLessThanOrEqual(m.cardRight + 1)
     expect(m.docScroll).toBeLessThanOrEqual(m.docClient)
