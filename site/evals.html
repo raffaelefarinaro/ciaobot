@@ -31,6 +31,7 @@
         <a href="guide.html">Guide</a>
         <a href="features.html">Features</a>
         <a href="memory.html">Memory</a>
+        <a href="trust.html">Trust</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -110,12 +111,18 @@
       <p>One run, one machine, 60 questions and a synthetic benchmark: read it as a direction, not a ranking. Every number, each system's setup and its limits are in the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/evals/memory-comparison-2026-11.md">full memory comparison on GitHub</a>.</p>
     </section>
 
-    <section>
+    <section id="care">
       <h2>Read the numbers with care</h2>
+      <p>These are measurements, not a ranking. Each one carries a limit worth knowing before you compare it with anything else:</p>
       <ul>
-        <li>Three repeats per task is enough to spot a real difference, not to rank models closely matched on a single run.</li>
-        <li>A check can be unfair. When a correct answer fails, we fix the check and say so in the results file.</li>
-        <li>These are short, single-request tasks. Long projects over many turns are not measured yet.</li>
+        <li><strong>Single runs on one machine.</strong> Every number here comes from one macOS host (Apple silicon), with no configuration repeated. A difference of one or two questions is within noise.</li>
+        <li><strong>The sample is small.</strong> The memory comparison answered 60 questions: one question is 1.7 points overall, and up to 17 points inside a six-question type. The 470-question retrieval numbers are steadier than the answering numbers.</li>
+        <li><strong>The benchmark is synthetic.</strong> LongMemEval's chats are generated, and its questions may share more words with the answer session than a real question would — which favours keyword search. The vault probe was built to check that: 120 notes and 88 questions, still one person's vault.</li>
+        <li><strong>A model judges, and a model answers.</strong> Claude Sonnet graded with the benchmark's own prompts and can be wrong in both directions; not every verdict was checked by hand. Claude Haiku answered every system, so a larger model may close some gaps — snippets especially — and open others. Swap the model and these numbers move.</li>
+        <li><strong>Three repeats per task</strong> are enough to spot a real difference, not to rank two models that are closely matched. The 63 runs per model were 21 short, single-request tasks; long projects over many turns are not measured yet.</li>
+        <li><strong>Other systems ran in one configuration each</strong>, the best we found inside the same cost rule. Their maintainers might find a better one.</li>
+        <li><strong>A check can be unfair.</strong> When a correct answer failed, we fixed the check and said so in the results file. That repair is a judgement too.</li>
+        <li><strong>None of it measures your vault.</strong> Both suites run on a made-up or copied vault. They show which way a change moves the assistant and where it fails; they cannot tell you how it will do on your notes.</li>
       </ul>
     </section>
 
@@ -128,6 +135,7 @@
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

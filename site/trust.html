@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trust and Limits · Ciaobot</title>
+  <meta name="description" content="What runs without asking, what waits for you, which files the agent can reach, what leaves the machine, and what none of it can promise.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/trust.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Trust and Limits · Ciaobot">
+  <meta property="og:description" content="What runs without asking, what waits for you, which files the agent can reach, what leaves the machine, and what none of it can promise.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/trust.html">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Trust and Limits · Ciaobot">
+  <meta name="twitter:description" content="What runs without asking, what waits for you, which files the agent can reach, what leaves the machine, and what none of it can promise.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="guide.html">Guide</a>
+        <a href="features.html">Features</a>
+        <a href="memory.html">Memory</a>
+        <a href="trust.html" aria-current="page">Trust</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Trust</p>
+      <h1>What runs on its own, and what waits for you</h1>
+      <p class="lead">Ciaobot runs on your computer, acts through an agent you already installed, and keeps what it learns in plain files. This page says where each decision is made, what leaves the machine, and what none of it can promise.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#modes">Permission modes</a></li>
+        <li><a href="#waits">What waits for you</a></li>
+        <li><a href="#files">File access</a></li>
+        <li><a href="#leaves">What leaves the machine</a></li>
+        <li><a href="#topics">Sensitive topics</a></li>
+        <li><a href="#data">Retrieved text is data</a></li>
+        <li><a href="#cannot">What this cannot establish</a></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>The short version</h2>
+      <svg class="diagram" viewBox="0 0 720 264" role="img" aria-labelledby="trust-title trust-desc">
+        <title id="trust-title">Where a decision is made</title>
+        <desc id="trust-desc">You choose a permission mode for a chat. The agent asks or acts inside that mode. Ciaobot's own server refuses a few things whatever the mode, and an unattended run defers anything that needs a person.</desc>
+        <rect class="box-accent" x="10" y="20" width="210" height="96" rx="14"/>
+        <text x="115" y="52" text-anchor="middle" font-weight="700" font-size="17">You</text>
+        <text class="muted" x="115" y="78" text-anchor="middle" font-size="14">pick the mode,</text>
+        <text class="muted" x="115" y="98" text-anchor="middle" font-size="14">accept or dismiss</text>
+        <rect class="box" x="255" y="20" width="210" height="96" rx="14"/>
+        <text x="360" y="52" text-anchor="middle" font-weight="700" font-size="17">The agent</text>
+        <text class="muted" x="360" y="78" text-anchor="middle" font-size="14">asks, or acts,</text>
+        <text class="muted" x="360" y="98" text-anchor="middle" font-size="14">inside that mode</text>
+        <rect class="box-secondary" x="500" y="20" width="210" height="96" rx="14"/>
+        <text x="605" y="52" text-anchor="middle" font-weight="700" font-size="17">The server</text>
+        <text class="muted" x="605" y="78" text-anchor="middle" font-size="14">refuses a few things</text>
+        <text class="muted" x="605" y="98" text-anchor="middle" font-size="14">whatever the mode</text>
+        <path class="line" d="M220 68 H255"/>
+        <path class="line" d="M465 68 H500"/>
+        <rect class="box" x="10" y="150" width="700" height="76" rx="12"/>
+        <text x="360" y="180" text-anchor="middle" font-weight="600" font-size="15">An unattended run has nobody to ask</text>
+        <text class="muted" x="360" y="204" text-anchor="middle" font-size="13">so it does the work that needs no approval and reports the rest for you</text>
+        <path class="line" d="M360 116 V150"/>
+        <text class="muted" x="360" y="252" text-anchor="middle" font-size="13">Read left to right: you set the ceiling, the agent works under it</text>
+      </svg>
+      <p>Three layers, and it helps to know which one you are relying on. The <strong>mode</strong> on a chat decides how often the agent stops to ask. The <strong>server</strong> has its own refusals that no mode switches off. And an <strong>unattended run</strong> — an automation, or the nightly memory tidy-up — cannot ask at all, so it is held to a shorter list and reports what it skipped.</p>
+    </section>
+
+    <section id="modes">
+      <h2>Four permission modes</h2>
+      <p>Each chat has one mode, set from the chat header. Each provider also has a default for new chats in <strong>Settings → Providers</strong>, and a workspace can override that default.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Mode</th><th>In the app</th><th>What runs without a card</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Plan</strong></td><td>read-only, propose changes</td><td>Reading notes and files, and proposing a change in words. Nothing that changes anything, including Ciaobot's own operations.</td></tr>
+            <tr><td><strong>Normal</strong></td><td>ask before every action</td><td>Reading, as far as your provider allows it. A write, a command or an app action raises a card.</td></tr>
+            <tr><td><strong>Auto</strong></td><td>safe work runs, risky actions ask</td><td>Work the provider's own classifier treats as safe. Every Ciaobot command still raises a card.</td></tr>
+            <tr><td><strong>Bypass</strong></td><td>every action runs without asking</td><td>Everything the agent can do, including Ciaobot operations.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><em>Auto</em> is not a blanket yes for Ciaobot's own operations. Every Ciaobot operation is one shell command (<code>ciao &lt;noun&gt; &lt;verb&gt;</code>), and no command prefix is pre-approved: an allow rule on a prefix can be ridden past by a shell suffix, so a <code>ciao</code> call in auto mode still shows a card. If you want no cards, choose <em>Bypass</em> and know what it means.</p>
+      <div class="note">A child chat an agent starts is held at or below its parent's mode. It cannot ask for a stronger mode than the chat that started it.</div>
+    </section>
+
+    <section id="waits">
+      <h2>What waits for you, and what does not</h2>
+      <p>These decisions always come back to you, whatever mode the chat is in:</p>
+      <ul>
+        <li>A new fact added to the two always-loaded regions of <code>AGENTS.md</code>. It waits in <strong>To decide</strong> unless you turned on <em>Dismiss and accept</em> under Memory handover, which allows at most five per nightly run.</li>
+        <li>Retiring a note, or retiring one fact inside a note. A check can re-stamp a note it read and found true, or apply a cited replacement; it cannot delete anything.</li>
+        <li>Editing a skill or the body of your workspace guide.</li>
+        <li>Writing to another workspace.</li>
+        <li>Public or destructive actions: opening an issue, a force-push, a branch deletion.</li>
+      </ul>
+      <p>And these run without asking, because you already asked for them or because they are the routine work you switched on:</p>
+      <ul>
+        <li>Reading, searching and answering from your notes. A read leaves the vault unedited.</li>
+        <li>Saving the readable copy of a chat when you press <strong>Archive</strong>.</li>
+        <li>The confident writes of the post-archive memory pass, made in the chat it opened: updating a note that already exists, folding a decision into its project note. Each is recorded in <strong>History</strong>, and reversible where a receipt exists.</li>
+        <li>The nightly pass filing project, people and learnings suggestions, consolidating a region that is full, re-stamping a note it verified, and rebuilding the search index.</li>
+      </ul>
+      <p>A model decides what is worth remembering; it does not decide what you have to approve. The deferral list lives in one place in the code and every provider is held to it, so a new provider cannot bring its own answer. <a href="memory.html#control">How memory review works →</a></p>
+    </section>
+
+    <section id="files">
+      <h2>Which files the agent can reach</h2>
+      <p><strong>Workspace only</strong> confines the agent's file tools and its shell to that workspace on macOS and Linux, plus the system folders a command needs to run. The home folder is explicitly denied, and the rest — the interpreter, Node, the <code>gh</code> configuration — is granted read-only one path at a time. <strong>Whole machine</strong> lets the agent read whatever your user account can read.</p>
+      <p>Windows has no equivalent sandbox, so Ciaobot uses <em>Whole machine</em> there. On Linux the sandbox is bubblewrap, and Ubuntu 23.10 and later need a one-time AppArmor profile; without it Ciaobot says so and asks you to switch to whole machine, instead of running unsandboxed without saying so.</p>
+      <p><strong>Where to set it:</strong> the workspace's settings, under <em>File access</em>. <a href="features.html#file-access">The feature page has the same two options →</a></p>
+    </section>
+
+    <section id="leaves">
+      <h2>What leaves the machine</h2>
+      <p>Your notes, chats and memory stay in the folder you picked. The engine has no analytics endpoint and posts no usage data. What leaves is what a chat has to send to be answered, the update check, and anything you connected on purpose:</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Where it goes</th><th>What is sent</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td>The model provider you connected, through Claude Code or opencode</td><td>The message, and the context the turn needs: core memory, the project's description, the notes and search results the agent read</td><td>Every turn</td></tr>
+            <tr><td>Google, when a workspace is linked to an account</td><td>The request a Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks or Forms action needs</td><td>Only when you ask for one</td></tr>
+            <tr><td>GitHub</td><td>A request for the latest release</td><td>On the update check</td></tr>
+            <tr><td>Your private backup repository, if you turned backup on</td><td>A Git push of the memory folder</td><td>After a change</td></tr>
+            <tr><td>A webhook trigger, if you created and enabled one</td><td>The event body you or your service posts</td><td>Only while the trigger is enabled</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A web server is the other direction. Ciaobot's interface listens on all network interfaces by default so a phone or another computer can reach it, protected by the workspace password and a login rate limit. If you only use it on the host, set <strong>Settings → Access &amp; devices → Network access</strong> to loopback-only and close that door.</p>
+      <p>Ciaobot's own counters — which tools ran, how often — are written to a JSON file inside the workspace's runtime folder. They are not uploaded anywhere.</p>
+    </section>
+
+    <section id="topics">
+      <h2>Sensitive topics</h2>
+      <p><strong>There is no topic filter.</strong> Ciaobot does not classify subjects as sensitive, and it will not refuse a conversation about health, money, law or anything else. That is a deliberate limit of a private assistant, and it has a cost: the provider you chose sees the chat, so the place to hold something back is the conversation itself.</p>
+      <p>What it does instead is narrower:</p>
+      <ul>
+        <li>Credential files are closed to the agent's file tools in every mode, including bypass: <code>.env</code>, <code>secrets/</code> and the runtime folder that holds the app's own state. That deny covers the file tools; a shell command is not path-scoped by it.</li>
+        <li>The assistant is told never to print credentials, tokens or unrelated private metadata into a reply, because search output lands in transcripts.</li>
+        <li>A search snippet carries only the lines that matched, so the rest of a note's private text does not arrive with the hit.</li>
+        <li>The memory pass does not lift facts from an automated turn, and treats an instruction inside a chat as evidence rather than a request.</li>
+        <li>When the notes do not hold the answer, the assistant is told to say so instead of guessing.</li>
+      </ul>
+    </section>
+
+    <section id="data">
+      <h2>Retrieved text is data, not a command</h2>
+      <p>Email, web pages, PDFs, connector results, vault notes, search output, another chat's transcript and command output all reach the assistant as <strong>data</strong>. A sentence inside any of them that says "run this", "send that" or "change this setting" is not a request from you, and the assistant is told to bring it to you rather than act on it.</p>
+      <p>The same rule is enforced where memory is written: a conversation is evidence, never an instruction. In the nightly run, text inside a transcript, note or queued proposal that asks to edit a skill, run a command or change a setting is reported under <em>What needs you</em> and nothing else.</p>
+      <p>This is a rule the assistant follows, not a filter that rewrites what it reads. It makes an injected instruction a failure to report, rather than a design that carries it out.</p>
+    </section>
+
+    <section id="cannot">
+      <h2>What this cannot establish</h2>
+      <p>This page describes how the code is built, read from the code. It is not a security certification, and several real limits sit outside what any of it can promise.</p>
+      <ul>
+        <li><strong>Your provider's side.</strong> What Anthropic, OpenAI or any other provider logs and keeps is theirs. Ciaobot decides what is sent in a turn; it cannot decide what happens to it afterwards.</li>
+        <li><strong>Your own account.</strong> Ciaobot runs as you, with the access you have. A bug, a malicious skill or a shell command can reach what your user account can reach, including provider credentials. Disk encryption, screen lock and OS permissions are yours to set.</li>
+        <li><strong>What you install into it.</strong> A skill, plugin, MCP server or shell command you add runs with the same access. Ciaobot confines the agent's file tools; it does not sandbox an extension you chose to install.</li>
+        <li><strong>A model's judgement.</strong> The rules decide whether an action is allowed, not whether it is a good idea. The assistant can be wrong, and the memory pass can file something you would not have.</li>
+        <li><strong>Windows.</strong> There is no workspace sandbox there, so Ciaobot runs with <em>Whole machine</em> file access.</li>
+        <li><strong>The network.</strong> File access does not limit network requests, and the terminal panel is your own shell, outside the agent's sandbox entirely.</li>
+      </ul>
+      <p>If you find something that does not match this page, it is a bug in one of the two. Suspected vulnerabilities are best reported privately; the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/SECURITY.md">security policy</a> says how.</p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="memory.html">← How memory works</a>
+      <a class="btn btn-primary" href="guide.html">Get started →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>
