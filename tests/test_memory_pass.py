@@ -343,6 +343,61 @@ def test_superseded_guidance_is_rewritten_not_annotated() -> None:
     assert "removes the superseded line" in architecture
 
 
+def _ciao_memory_skill() -> str:
+    from importlib import resources
+
+    return (
+        resources.files("ciao.stock")
+        .joinpath("skills/ciao-memory/SKILL.md")
+        .read_text(encoding="utf-8")
+    )
+
+
+def test_a_passing_remark_never_overrides_a_recorded_decision() -> None:
+    """Only a real correction may overwrite a decision a note records (#2815).
+
+    A remark in one chat, or a search that found nothing, is not a correction.
+    The prompt and the skill both say so; the architecture doc matches.
+    """
+    phrase = "is never the later correction of a decision a note records"
+    assert phrase in memory_pass.MEMORY_PASS_PROMPT
+    assert phrase in _ciao_memory_skill()
+    architecture = (
+        Path(__file__).resolve().parents[1] / "docs" / "ARCHITECTURE.md"
+    ).read_text(encoding="utf-8")
+    assert "never the later correction of a recorded decision" in architecture
+
+
+def test_pass_checks_touched_notes_against_the_transcript() -> None:
+    """The pass checks the notes it touches, not only what it extracts (#2815)."""
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    assert "check every note you touch against the transcript" in prompt
+    assert "downgrade a claim stated as settled" in prompt
+    assert "(a recorded decision follows the rule above instead)" in prompt
+
+
+def test_memory_is_written_as_facts_not_narrative() -> None:
+    """Notes hold present-tense facts, and a failed attempt stays as a fact (#2815)."""
+    skill = _ciao_memory_skill()
+    for phrase in (
+        "present-tense facts, not a story of the session",
+        "what was tried and why it failed",
+    ):
+        assert phrase in memory_pass.MEMORY_PASS_PROMPT, phrase
+        assert phrase in skill, phrase
+
+
+def test_credentials_are_named_never_stored() -> None:
+    """A secret in a transcript is named in memory, never copied (#2815)."""
+    assert "name the credential" in memory_pass.MEMORY_PASS_PROMPT
+    assert "Store a credential's name, never its value" in _ciao_memory_skill()
+
+
+def test_pass_reads_the_transcript_once() -> None:
+    """The pass batches its turns instead of re-sending context per read (#2815)."""
+    assert "read the transcript once" in memory_pass.MEMORY_PASS_PROMPT
+
+
 def test_prompt_still_formats_every_placeholder() -> None:
     """A brace in the added sentence would raise on the next chat's first turn."""
     rendered = memory_pass.MEMORY_PASS_PROMPT.format(
