@@ -21,7 +21,7 @@ import json
 import os
 import subprocess
 import sys
-import time
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,11 @@ def cli() -> str:
     return path
 
 
+@pytest.fixture(scope="module")
+def base_init(cli: str, tmp_path_factory: pytest.TempPathFactory) -> dict:
+    return _init_payload(cli, tmp_path_factory.mktemp("probe"))
+
+
 def _init_payload(cli: str, tmp_path: Path, settings: dict | None = None) -> dict:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
@@ -75,8 +80,10 @@ def _init_payload(cli: str, tmp_path: Path, settings: dict | None = None) -> dic
         stderr=subprocess.DEVNULL,
         text=True,
     )
+    # readline blocks, so the deadline must kill the process from outside: a stuck CLI then hits EOF.
+    timer = threading.Timer(60, proc.kill)
+    timer.start()
     try:
-        deadline = time.monotonic() + 60
         assert proc.stdout is not None
         for line in proc.stdout:
             try:
@@ -85,46 +92,44 @@ def _init_payload(cli: str, tmp_path: Path, settings: dict | None = None) -> dic
                 continue
             if msg.get("type") == "system" and msg.get("subtype") == "init":
                 return msg
-            if time.monotonic() > deadline:
-                break
         pytest.fail("bundled Claude CLI produced no init message")
     finally:
+        timer.cancel()
         proc.kill()
         proc.wait(timeout=10)
 
 
-def test_every_builtin_tool_is_classified(cli: str, tmp_path: Path) -> None:
-    init = _init_payload(cli, tmp_path)
+def test_every_builtin_tool_is_classified(base_init: dict) -> None:
     classified = (
         {o.name for o in TRIM_OPTIONS if o.kind == "tool"}
         | {c for o in TRIM_OPTIONS for c in o.covers}
         | KEPT_CLAUDE_TOOLS
     )
-    unknown = sorted(t for t in init["tools"] if not t.startswith("mcp__") and t not in classified)
+    unknown = sorted(
+        t for t in base_init["tools"] if not t.startswith("mcp__") and t not in classified
+    )
     assert unknown == [], (
-        f"Claude CLI {init.get('claude_code_version')} has unclassified built-in tools {unknown}: "
+        f"Claude CLI {base_init.get('claude_code_version')} has unclassified built-in tools {unknown}: "
         "add each to ciao/claude_trim.py (TRIM_OPTIONS or KEPT_CLAUDE_TOOLS)"
     )
 
 
-def test_every_bundled_skill_is_classified(cli: str, tmp_path: Path) -> None:
-    init = _init_payload(cli, tmp_path)
+def test_every_bundled_skill_is_classified(base_init: dict) -> None:
     classified = {o.name for o in TRIM_OPTIONS if o.kind == "skill"} | {
         c for o in TRIM_OPTIONS for c in o.covers
     }
-    unknown = sorted(s for s in init["skills"] if s not in classified)
+    unknown = sorted(s for s in base_init["skills"] if s not in classified)
     assert unknown == [], (
-        f"Claude CLI {init.get('claude_code_version')} has unclassified bundled skills {unknown}: "
+        f"Claude CLI {base_init.get('claude_code_version')} has unclassified bundled skills {unknown}: "
         "add each to ciao/claude_trim.py (a skill TrimOption, or a covers entry of a setting option)"
     )
 
 
-def test_setting_options_remove_what_they_cover(cli: str, tmp_path: Path) -> None:
-    base = _init_payload(cli, tmp_path)
+def test_setting_options_remove_what_they_cover(cli: str, tmp_path: Path, base_init: dict) -> None:
     trimmed = _init_payload(
         cli, tmp_path, {o.name: True for o in TRIM_OPTIONS if o.kind == "setting"}
     )
-    base_names = set(base["tools"]) | set(base["skills"])
+    base_names = set(base_init["tools"]) | set(base_init["skills"])
     trimmed_names = set(trimmed["tools"]) | set(trimmed["skills"])
     present_before: list[str] = []
     for option in TRIM_OPTIONS:
@@ -141,9 +146,12 @@ def test_setting_options_remove_what_they_cover(cli: str, tmp_path: Path) -> Non
     assert present_before, "no setting-covered tool or skill is listed by the CLI; the check proves nothing"
 
 
-def test_trim_layer_is_accepted_by_the_cli(cli: str, tmp_path: Path) -> None:
+def test_trim_layer_is_accepted_by_the_cli(cli: str, tmp_path: Path, base_init: dict) -> None:
     layer: dict[str, Any] = claude_settings_layer({})
     off_skills = set(layer["skillOverrides"])
+    assert off_skills & set(base_init["skills"]), (
+        "no skill turned off by the default trim layer is listed by the CLI; the check proves nothing"
+    )
     init = _init_payload(cli, tmp_path, layer)
     still_listed = sorted(off_skills & set(init["skills"]))
     assert still_listed == [], (
