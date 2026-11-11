@@ -1993,7 +1993,7 @@ async function confirmDeleteChat(chatId: string) {
      sidebar prevents double-scroll and keeps the footer fixed. */
   overflow: hidden;
   transition: transform 0.22s var(--ease);
-  padding-top: var(--safe-top);
+  padding-top: var(--chrome-top);
   padding-left: var(--safe-left);
   padding-bottom: var(--safe-bottom);
 }

@@ -5289,6 +5289,10 @@ async def test_a_changed_linked_repo_restarts_the_opencode_server(
 
 @pytest.mark.asyncio
 async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypatch):
+    # A suite run from inside Ciaobot's own OpenCode chat inherits the engine's
+    # OPENCODE_CONFIG_CONTENT, whose skills.paths already name this checkout; the
+    # assertion below is about the repo's folder, not the host's exports.
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     provider = _provider(tmp_path)
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills").mkdir(parents=True)

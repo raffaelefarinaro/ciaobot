@@ -47,10 +47,10 @@ Each area has a reference file next to this one. Open only the file the question
 
 | Area | What it covers | Read |
 |---|---|---|
-| Workspaces, projects, chats | hierarchy, file access, archiving a workspace, usage statistics (`ciao stats`), `ciao project`, linked repos, code mode, forks, subagents and locating running agents and their completed transcripts, background shells (the provider's own `run_in_background` / `Monitor`), plan mode, turn resilience | `references/workspaces-and-chats.md` |
+| Workspaces, projects, chats | hierarchy, file access, archiving a workspace, usage statistics (`ciao stats`) and the Usage page, `ciao project`, linked repos, code mode, forks, subagents and locating running agents and their completed transcripts, background shells (the provider's own `run_in_background` / `Monitor`), plan mode, turn resilience | `references/workspaces-and-chats.md` |
 | Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
-| Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
+| Files | viewer and pinned panel, folder browser and folder pins, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
 | Terminal | the browser terminal panel: where it runs, the grant and the session it rides on, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
