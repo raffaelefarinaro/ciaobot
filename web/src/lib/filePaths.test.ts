@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildKnownPathRules, linkifyHtml, linkifyText } from './filePaths'
+import { buildKnownPathRules, isFolderLinkPath, linkifyHtml, linkifyText, looksLikeFolderPath } from './filePaths'
 
 describe('buildKnownPathRules', () => {
   it('adds basename rules only when unique', () => {
@@ -63,5 +63,38 @@ describe('linkifyHtml', () => {
     const html = linkifyHtml('<p>Moved to <code>memory-vault/work/foo/slide.pptx</code></p>')
     expect(html).toContain('class="file-link"')
     expect(html).toContain('data-file-path="memory-vault/work/foo/slide.pptx"')
+  })
+})
+
+describe('isFolderLinkPath', () => {
+  it('claims folder-shaped relative paths', () => {
+    for (const href of ['exports/sloth-v5', 'exports/', '../exports/x', 'my folder/sub', 'v1.2/notes', 'bin/run']) {
+      expect(isFolderLinkPath(href), href).toBe(true)
+    }
+  })
+
+  it('leaves files, known names, words, web links and absolute paths alone', () => {
+    for (const href of [
+      'tasks', 'docs/Makefile', 'docs/README', 'exports/v1.2', 'config/.git',
+      'my.project/sub', 'example.com/pricing', 'docs.example.io/x/', '/etc/hosts',
+      '#results', 'https://a.b/c', 'mailto:a@b.c', 'notes/a.md', 'a//b', '', '~/x',
+      './', '../', '.',
+    ]) {
+      expect(isFolderLinkPath(href), href).toBe(false)
+    }
+  })
+})
+
+describe('looksLikeFolderPath', () => {
+  it('asks the engine about folder-shaped paths', () => {
+    for (const path of ['exports/sloth-v5', 'exports/', 'bin/run', '/ws/dir']) {
+      expect(looksLikeFolderPath(path), path).toBe(true)
+    }
+  })
+
+  it('never asks about files, known names or dot-only paths', () => {
+    for (const path of ['notes/a.md', '.gitignore', 'a.md:12', 'Makefile', 'docs/README', './', '../', '.', '']) {
+      expect(looksLikeFolderPath(path), path).toBe(false)
+    }
   })
 })

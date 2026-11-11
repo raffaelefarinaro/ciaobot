@@ -377,6 +377,7 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 - **Never pass `contextMenuItems: []`.** VueFinder's folder double-click navigates through the menu's `open` item, so the list is cut to `open` and `refresh`.
 - **Touch:** VueFinder opens items on double-click only. Under `(pointer: coarse)` a single file selection opens it.
 - **Font:** use `var(--font)`, never `var(--font-sans)`.
+- **Folder links:** `isFolderLinkPath` (`lib/filePaths.ts`) makes a relative extensionless or trailing-slash link a `a.file-link` in chat and note markdown. It never claims a dotted last segment, a known extensionless name, a domain-shaped first segment or a dot-only path. Every click goes through `fileViewer.openLink`: a folder-shaped path asks `/api/workspace-dir` once and opens the folder on a 200; anything else takes the same `open()` as before.
 
 ### Layout traps
 

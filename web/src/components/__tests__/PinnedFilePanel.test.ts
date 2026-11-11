@@ -460,7 +460,23 @@ describe('PinnedFilePanel', () => {
     await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
     await flushPromises()
     const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
-    expect(items).toEqual(['Refresh', 'Copy path', 'Download', 'Open in default app', 'Open in memory map'])
+    expect(items).toEqual(['Refresh', 'Copy path', 'Show in folder', 'Download', 'Open in default app', 'Open in memory map'])
+    wrapper.unmount()
+  })
+
+  it('Show in folder opens the pinned file\'s folder in the viewer', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true })
+    const openFolder = vi.spyOn(useFileViewerStore(), 'openFolder').mockResolvedValue(true)
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const item = Array.from(document.querySelectorAll<HTMLElement>('.pfp-actions-menu button'))
+      .find(b => b.textContent?.trim() === 'Show in folder')!
+    item.click()
+    await flushPromises()
+
+    expect(openFolder).toHaveBeenCalledWith('/vault', 'chat-1')
     wrapper.unmount()
   })
 
@@ -532,6 +548,16 @@ describe('PinnedFilePanel', () => {
     await flushPromises()
     expect(wrapper.get('.pfp-error').text()).toBe('File not found.')
     expect(wrapper.find('img.pfp-img').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('routes a folder link inside the pinned note through openLink without a chat', async () => {
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const wrapper = await mountPanel({ attach: true, filePath: '/ws/notes/today.md', content: '[out](../exports/x)' })
+    const openLink = vi.spyOn(useFileViewerStore(), 'openLink').mockResolvedValue(true)
+    await wrapper.get<HTMLAnchorElement>('.pfp-md a.file-link').trigger('click')
+    expect(openLink).toHaveBeenCalledWith('/ws/exports/x', null)
+    expect(openLink.mock.calls[0]?.length).toBe(2)
     wrapper.unmount()
   })
 })
