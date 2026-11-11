@@ -776,3 +776,58 @@ def test_parse_archive_turns_reads_effective_model_from_header_only() -> None:
     )
     turns = parse_archive_turns(legacy + current)
     assert [t["effective_model"] for t in turns] == ["", "opus"]
+
+
+def test_archive_turn_line_points_at_the_heading_the_renderer_wrote(
+    tmp_path: Path,
+) -> None:
+    """A fact's cited turn resolves to the line the file viewer should open at.
+
+    The viewer jumps by line, so a source link that carries only the file name
+    opens a transcript that may hold hundreds of turns at its first line.
+    """
+    from ciao.transcripts import archive_turn_line
+
+    archived = _archive(
+        tmp_path, [{"prompt": "one"}, {"prompt": "two"}, {"prompt": "three"}]
+    )
+    text = archived.read_text(encoding="utf-8")
+    lines = text.split("\n")
+
+    for turn in (1, 2, 3):
+        line = archive_turn_line(text, turn)
+        assert line is not None, f"turn {turn} did not resolve"
+        assert lines[line - 1] == f"## Turn {turn}"
+
+    assert archive_turn_line(text, 4) is None
+
+
+def test_archive_turn_line_ignores_a_turn_a_pasted_document_invented(
+    tmp_path: Path,
+) -> None:
+    """A pasted document is prose, not an anchor.
+
+    User text is written raw inside a ``text`` fence, so a note can paste a
+    ``## Turn 7`` heading. Pointing a reader at that line would call a paste
+    evidence, so the heading counts only when the block under it is the
+    renderer's own. (A transcript pasted byte for byte still reads as one: that
+    is the hole :func:`read_archive_skills` documents, and its backstop is
+    upstream, not here.)
+    """
+    from ciao.transcripts import archive_turn_line
+
+    pasted = "\n".join(
+        [
+            "From my notes:",
+            "",
+            "## Turn 7",
+            "",
+            "That is the turn where we agreed the schedule.",
+        ]
+    )
+    archived = _archive(tmp_path, [{"prompt": pasted}, {"prompt": "two"}])
+    text = archived.read_text(encoding="utf-8")
+
+    assert archive_turn_line(text, 7) is None
+    assert archive_turn_line(text, 1) is not None
+    assert archive_turn_line(text, 2) is not None
