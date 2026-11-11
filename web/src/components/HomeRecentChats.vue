@@ -121,7 +121,7 @@
                     :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
                     :hue="colorOf(chat)"
                   />
-                  <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+                  <span class="list-row-when home-chat-time">{{ relativeActivity(chat) }}</span>
                 </template>
               </ListRow>
             </div>
@@ -172,7 +172,7 @@
                       />
                       {{ insight.label }}
                     </span>
-                    <span class="home-chat-time">{{ formatRelative(insight.timestamp) }}</span>
+                    <span class="list-row-when home-chat-time">{{ formatRelative(insight.timestamp) }}</span>
                   </span>
                 </template>
               </ListRow>

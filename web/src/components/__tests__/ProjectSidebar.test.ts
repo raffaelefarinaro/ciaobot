@@ -704,7 +704,9 @@ describe('ProjectSidebar global new chat', () => {
     const wrapper = await mountSidebar('schedules')
     const skeleton = wrapper.get('.schedules-list .sidebar-skeleton')
     expect(skeleton.attributes('role')).toBe('status')
-    expect(skeleton.attributes('aria-label')).toBe('Loading automations')
+    // Announced once: the text, with no aria-label repeating it.
+    expect(skeleton.text()).toBe('Loading automations…')
+    expect(skeleton.attributes('aria-label')).toBeUndefined()
     expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(3)
     expect(skeleton.find('.sidebar-row--placeholder').attributes('aria-hidden')).toBe('true')
     expect(wrapper.find('.history-loading-spinner').exists()).toBe(false)
@@ -717,7 +719,7 @@ describe('ProjectSidebar global new chat', () => {
     store.bootstrapped = false
     const wrapper = await mountSidebar('chat')
     const skeleton = wrapper.get('.chats-scroll-area .sidebar-skeleton')
-    expect(skeleton.attributes('aria-label')).toBe('Loading chats')
+    expect(skeleton.text()).toBe('Loading chats…')
     expect(skeleton.findAll('.sidebar-skeleton-rows--nested')).toHaveLength(3)
     expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(6)
     wrapper.unmount()

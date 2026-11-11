@@ -600,7 +600,7 @@
             >
               <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
               <template #sub>{{ cadenceSummary(s) }}</template>
-              <template #end><span class="ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
+              <template #end><span class="list-row-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
             </ListRow>
           </section>
 
@@ -619,7 +619,7 @@
                 <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
               </template>
               <template #sub>{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</template>
-              <template #end>{{ relativeWhen(s.next_run) }}</template>
+              <template #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
             </ListRow>
             <p v-if="!upcomingRoutines.length" class="ov-empty">
               Nothing scheduled. The rest run only when you click Run now, or are paused.
@@ -651,7 +651,7 @@
             >
               <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
               <template #sub>{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></template>
-              <template v-if="s.enabled && s.next_run" #end>{{ relativeWhen(s.next_run) }}</template>
+              <template v-if="s.enabled && s.next_run" #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
             </ListRow>
           </section>
 

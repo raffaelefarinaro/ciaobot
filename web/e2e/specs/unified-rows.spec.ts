@@ -42,7 +42,7 @@ test.describe('unified rows, desktop', () => {
     await page.route('**/api/schedules**', async route => { await held; await route.continue() })
     await page.goto('/schedules')
     const skeleton = page.locator('.schedules-list .sidebar-skeleton[role="status"]')
-    await expect(skeleton).toHaveAttribute('aria-label', 'Loading automations')
+    await expect(skeleton).toHaveText('Loading automations…')
     await expect(skeleton.locator('.sidebar-row--placeholder')).toHaveCount(3)
     // The placeholder is the row's box: same height as the rows that replace it.
     expect((await skeleton.locator('.sidebar-row--placeholder').first().boundingBox())!.height).toBe(36)
@@ -63,7 +63,7 @@ test.describe('unified rows, desktop', () => {
     await expect(rows.first()).toHaveClass(/list-row/)
     // The first overview row also draws the rule above it, so compare the second.
     expect((await rows.nth(1).boundingBox())!.height).toBe(homeBox.height)
-    const end = (el: Element) => getComputedStyle(el.querySelector('.list-row-end')!).fontFamily
+    const end = (el: Element) => getComputedStyle(el.querySelector('.list-row-when')!).fontFamily
     expect(await rows.first().evaluate(end)).toBe(await page.locator('.schedules-list .sidebar-row-meta').first().evaluate(el => getComputedStyle(el).fontFamily))
 
     // Arrows from the page body roam the sidebar list first, as before; with

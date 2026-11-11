@@ -28,7 +28,8 @@
  * Slots: `heading` replaces the plain title (a naming shimmer, marks after the
  * title); give its title text the `list-row-title` class to share the title
  * style. `sub` is the sub-line, `detail` any clamped lines under it (a pending
- * question, a reply snippet), `end` the right column. Keyboard roaming over
+ * question, a reply snippet), `end` the right column; give its time or state
+ * text the `list-row-when` class for the muted mono. Keyboard roaming over
  * these rows is `roamFocus` in lib/listRoaming.ts.
  */
 import { RouterLink, type RouteLocationRaw } from 'vue-router'
@@ -121,11 +122,15 @@ defineProps<{
   justify-content: center;
   gap: 4px;
   min-width: 5ch;
+  text-align: right;
+  white-space: nowrap;
+}
+/* The end column's time or state text. The column itself sets no type, so
+   what else sits there (Home's ChatSignals) keeps its own. */
+:slotted(.list-row-when) {
   color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  text-align: right;
-  white-space: nowrap;
 }
 @media (prefers-reduced-motion: reduce) {
   .list-row,

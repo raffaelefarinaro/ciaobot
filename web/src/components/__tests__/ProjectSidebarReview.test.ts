@@ -307,7 +307,8 @@ describe('ProjectSidebar review section', () => {
     mm.loading = true
     const wrapper = await mountSidebar()
     const skeleton = wrapper.get('.mm-sidebar-scroll .sidebar-skeleton')
-    expect(skeleton.attributes('aria-label')).toBe('Loading vault graph')
+    expect(skeleton.text()).toBe('Loading vault graph…')
+    expect(skeleton.attributes('aria-label')).toBeUndefined()
     expect(skeleton.findAll('.sidebar-row--placeholder').length).toBeGreaterThan(0)
     expect(wrapper.find('.mm-sidebar-scroll input').attributes('disabled')).toBeDefined()
   })

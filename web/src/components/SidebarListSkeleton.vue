@@ -3,7 +3,8 @@
  * The sidebar's first-load placeholder: groups of `SidebarRow` placeholder rows
  * under a heading bar, so the chat list, the automation list and the Memory
  * Map's filters all load in the shape of the rows they are about to show.
- * One status for assistive tech, named by `label`; the shapes are hidden.
+ * One status for assistive tech: `label` is its only text (announced once),
+ * and the shapes are hidden.
  *
  * `nested` hangs the rows under their heading the way chats hang under their
  * project (indented, with the list's rule on the left).
@@ -27,7 +28,7 @@ const WIDTHS = ['68%', '54%', '76%', '60%', '72%']
 </script>
 
 <template>
-  <div class="sidebar-skeleton" role="status" aria-live="polite" :aria-label="label">
+  <div class="sidebar-skeleton" role="status" aria-live="polite">
     <div v-for="g in groups" :key="g" class="sidebar-skeleton-group" aria-hidden="true">
       <div class="sidebar-skeleton-heading"><span class="sidebar-skeleton-heading-bar" /></div>
       <div class="sidebar-skeleton-rows" :class="{ 'sidebar-skeleton-rows--nested': nested }">
