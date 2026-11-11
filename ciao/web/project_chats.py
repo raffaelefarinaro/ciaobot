@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import dataclasses
 import time
+import unicodedata
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
@@ -88,6 +89,19 @@ class ChatActionConflictError(Exception):
     def __init__(self, actions: list[dict[str, object]]) -> None:
         super().__init__("Chat action conflict")
         self.actions = actions
+
+
+def _unsafe_filename_char(char: str) -> bool:
+    """Control, format (bidi, zero-width) and line/paragraph separators; not Zs, so U+202F passes.
+
+    Writes refuse these because a name lands on disk and in the PWA and agent
+    prompt: a bidi override fakes an extension, U+2028 fakes a line break. Reads
+    accept them. ZWNJ and ZWJ stay allowed for emoji sequences.
+    """
+    category = unicodedata.category(char)
+    return category in ("Cc", "Zl", "Zp") or (
+        category == "Cf" and char not in "\u200c\u200d"
+    )
 
 
 def _restored_pin_paths(raw: Any) -> list[str]:
@@ -10666,8 +10680,10 @@ class ProjectChatManager:
         vault_dir = self.project_vault_dir(project_id)
         if vault_dir is None:
             raise LookupError("project has no vault folder to upload into")
-        # Filename safety: basename only, no traversal, no hidden, no NUL.
-        if not filename or "\x00" in filename or not filename.isprintable():
+        # Filename safety: basename only, no traversal, no hidden, no control,
+        # format or line-separator characters (see _unsafe_filename_char). Not
+        # `isprintable()`: macOS screenshot names carry U+202F (#2787).
+        if not filename or any(_unsafe_filename_char(c) for c in filename):
             raise ValueError("invalid filename")
         base = Path(filename).name  # strips any directory component the browser sent
         if base != filename or base.startswith(".") or base in {"", ".", ".."}:

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 from ciao.git_proc import EXACT_BYTES
@@ -218,10 +219,12 @@ def _resolve_workspace_path(
     """
     if not raw:
         return JSONResponse({"error": "missing path"}, status_code=400)
-    # Reject NUL bytes and other non-printable chars up front: Path() would
-    # raise on NUL but happily accept control chars that never belong in a
-    # filesystem path from a web request.
-    if "\x00" in raw or not raw.isprintable():
+    # Reject control characters (Unicode category Cc: NUL, C0, DEL, C1) up
+    # front: Path() would raise on NUL but happily accept the rest, and none
+    # belongs in a filesystem path from a web request. Deliberately NOT
+    # `str.isprintable()`, which also refuses U+202F, the space macOS puts in
+    # every screenshot name (#2787).
+    if any(unicodedata.category(c) == "Cc" for c in raw):
         return JSONResponse({"error": "bad path"}, status_code=400)
     raw = _LINE_SUFFIX_RE.sub("", raw)
 
