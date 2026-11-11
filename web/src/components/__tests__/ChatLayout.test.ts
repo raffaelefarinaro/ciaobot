@@ -2434,6 +2434,28 @@ describe('ChatLayout shared chat pin', () => {
     wrapper.unmount()
   })
 
+  it('opens a narrow folder pin in the folder browser', async () => {
+    const { wrapper, store } = await mountChat(390)
+    store.applyChatPinState('chat-1', { path: '/ws/exports/', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+
+    expect(wrapper.get('.narrow-pin-btn').attributes('aria-label')).toContain('folder')
+    expect(wrapper.get('.narrow-pin-btn').attributes('aria-label')).toContain('exports')
+    expect(wrapper.get('.narrow-pin-name').text()).toBe('exports')
+    expect(wrapper.get('.narrow-pin-close').attributes('aria-label')).toBe('Unpin folder')
+
+    const viewer = useFileViewerStore()
+    const openFolder = vi.spyOn(viewer, 'openFolder').mockResolvedValue(true)
+    const openSharedPin = vi.spyOn(viewer, 'openSharedPin').mockResolvedValue(true)
+
+    await wrapper.find('.narrow-pin-btn').trigger('click')
+    await flushPromises()
+
+    expect(openFolder).toHaveBeenCalledWith('/ws/exports', 'chat-1')
+    expect(openSharedPin).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('keeps a dirty pinned panel alive across a remote pin change, applying it once idle', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
     const router = createRouter({

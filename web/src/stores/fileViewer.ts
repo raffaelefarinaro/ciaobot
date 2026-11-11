@@ -27,6 +27,23 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
   return 'text'
 }
 
+/** A folder pin is stored with one trailing slash (PATCH /api/chats/{id} pin contract, D1). */
+export function isFolderPin(path: string): boolean {
+  return /[/\\]$/.test(path)
+}
+
+// Mirrors `_WORKSPACE_FILE_EXTS` in ciao/web/routes_api.py: the only files the
+// server accepts as a pin. Anything else would 415 and toast, so the tile
+// opens it in the viewer instead of trying to dock it.
+const PINNABLE_FILE_EXTS = new Set([
+  'md', 'markdown', 'txt', 'py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'css', 'html', 'htm', 'json',
+  'yaml', 'yml', 'toml', 'sh', 'rs', 'go', 'java', 'xml', 'sql', 'cfg', 'ini', 'log', 'csv',
+])
+export function isPinnableFilePath(path: string): boolean {
+  const m = /\.([^./\\]+)$/.exec(path.replace(/:\d+$/, ''))
+  return !!m && PINNABLE_FILE_EXTS.has(m[1].toLowerCase())
+}
+
 export const useFileViewerStore = defineStore('fileViewer', () => {
   const projectStore = useProjectStore()
   const isOpen = ref(false)
@@ -67,6 +84,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // wide pane on a chat route), '' everywhere else. Owned by the layout so the
   // viewer never pins to a chat that is not shown.
   const dockTarget = ref('')
+  // Bumped when a dock targets the folder already pinned: the tile resets its browser to it.
+  const folderRedock = ref({ path: '', seq: 0 })
   // Generation of the latest open: a dock whose path resolution lands after a
   // newer open must not pin over the file the user opened since.
   let dockSeq = 0
@@ -107,6 +126,33 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     if (seq !== dockSeq) return true
     if (dockTarget.value !== key) return false
     if (projectStore.pinnedFileFor(key) === target) return true
+    return projectStore.pinFile(key, target)
+  }
+
+  /**
+   * Dock a folder beside the chat that owns the tile, like dockInstead does
+   * for files: same gate, same stale-open guard. '' (Browse files) is the
+   * chat's first root, resolved to its absolute path before pinning. A folder
+   * that is already pinned may be showing a subfolder, so it is reset, not
+   * skipped.
+   */
+  async function dockFolderInstead(dirPath: string, chat: string): Promise<boolean> {
+    const seq = ++dockSeq
+    const key = dockTarget.value
+    if (!key || !chat || chat !== key || isOpen.value) return false
+    let target = dirPath
+    if (!target) {
+      const probe = await fetchWorkspaceDir('', chat)
+      if (!probe.ok) return false
+      target = probe.listing.path
+    }
+    target = `${target.replace(/[/\\]+$/, '')}/`
+    if (seq !== dockSeq) return true
+    if (dockTarget.value !== key) return false
+    if (projectStore.pinnedFileFor(key) === target) {
+      folderRedock.value = { path: target, seq: folderRedock.value.seq + 1 }
+      return true
+    }
     return projectStore.pinFile(key, target)
   }
 
@@ -391,6 +437,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   /** Show a folder in the viewer. '' lists the first browsable root. */
   async function openFolder(dirPath: string, chat: string = ''): Promise<boolean> {
     if (!await canReplaceOpenFile(dirPath)) return false
+    if (await dockFolderInstead(dirPath, chat)) return true
     _reset()
     returnFolder.value = ''
     fetchSeq++ // a file fetch still in flight must not repaint the folder
@@ -408,8 +455,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   }
 
   /** Open a file chosen in the folder browser, remembering the folder for Back. */
-  async function openFromFolder(filePath: string, chat: string = ''): Promise<boolean> {
-    const folder = kind.value === 'folder' ? path.value : ''
+  async function openFromFolder(filePath: string, chat: string = '', fromFolder: string = ''): Promise<boolean> {
+    const folder = fromFolder || (kind.value === 'folder' ? path.value : '')
     // Recorded before the load so Back pressed while the file loads still
     // returns to the folder (backOrClose ignores it while a folder is shown).
     if (folder && isOpen.value) returnFolder.value = folder
@@ -564,6 +611,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     sharedPinChatId,
     returnFolder,
     dockTarget,
+    folderRedock,
     editing,
     isDirty,
     editBuffer,
