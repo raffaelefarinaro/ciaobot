@@ -10,7 +10,7 @@
 .cd-heading {
   margin: 0;
   color: var(--fg3);
-  font-family: var(--font-sans);
+  font-family: var(--font);
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1.4;
