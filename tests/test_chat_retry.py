@@ -946,10 +946,11 @@ async def test_ollama_limit_error_arms_hourly_quota_retry(tmp_path: Path, limit_
     pcm.stop_chat_retry(chat.chat_id)
 
 
-def test_quota_retry_cap_is_hourly_for_a_week() -> None:
-    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+def test_bare_monthly_limit_without_exhaustion_is_not_a_quota_error() -> None:
+    from ciao.web.chat_service import _is_retryable_quota_error
 
-    assert _MAX_QUOTA_RETRIES == 7 * 24
+    assert not _is_retryable_quota_error("Stripe: this plan has a monthly limit of 100 invoices")
+    assert _is_retryable_quota_error("You have reached your monthly limit")
 
 
 def test_quota_reset_at_ignores_rejected_weekly_bucket(tmp_path: Path) -> None:
@@ -1835,6 +1836,9 @@ def test_legacy_quota_terminal_retry_kind_loads_as_quota(tmp_path: Path) -> None
     chat = pcm.create_chat(project.project_id, title="legacy")
     pcm.set_chat_retry(chat.chat_id, "job", reason="weekly limit")
     chat.retry_kind = "quota_terminal"
+    chat.retry_interval_seconds = 24 * 60 * 60
+    from ciao.web import chat_service
+    chat.retry_next_at = chat_service._iso_after(20 * 60 * 60)
     pcm._save()
     path = tmp_path / ".runtime" / "web_projects.json"
     assert "quota_terminal" in path.read_text(encoding="utf-8")
@@ -1844,4 +1848,8 @@ def test_legacy_quota_terminal_retry_kind_loads_as_quota(tmp_path: Path) -> None
     assert restored is not None
     assert restored.retry_status == "pending"
     assert restored.retry_kind == "quota"
+    # Resumes hourly: no "every hour" card that still waits a day.
+    assert restored.retry_interval_seconds == 3600
+    due = chat_service._parse_iso(restored.retry_next_at)
+    assert due is not None and due <= chat_service._parse_iso(chat_service._iso_after(3600 + 5))
     json.loads(path.read_text(encoding="utf-8"))

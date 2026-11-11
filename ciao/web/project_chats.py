@@ -19,7 +19,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Seque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
@@ -318,6 +318,23 @@ def _load_retry_kind(raw: object) -> str:
     """A persisted retry kind; the retired "quota_terminal" loads as "quota"."""
     kind = str(raw or "")
     return "quota" if kind == "quota_terminal" else kind
+
+
+def _load_retry_timing(cd: dict) -> tuple[str, int]:
+    """Persisted ``(retry_next_at, retry_interval_seconds)``.
+
+    A retired daily "quota_terminal" retry resumes on the hourly cadence: its
+    interval becomes the hourly one and a next try more than an hour out is
+    pulled in, so the card never says "every hour" while waiting a day.
+    """
+    next_at = str(cd.get("retry_next_at", "") or "")
+    interval = int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS)
+    if cd.get("retry_kind") != "quota_terminal":
+        return next_at, interval
+    due = chat_service._parse_iso(next_at)
+    if due is None or due > datetime.now(UTC) + timedelta(seconds=_RETRY_INTERVAL_SECONDS):
+        next_at = chat_service._iso_after(_RETRY_INTERVAL_SECONDS)
+    return next_at, _RETRY_INTERVAL_SECONDS
 
 
 def _retry_cap(kind: str) -> int | None:
@@ -1370,11 +1387,11 @@ class ProjectChatManager:
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
                 retry_image_refs=list(cd.get("retry_image_refs", [])),
-                retry_next_at=cd.get("retry_next_at", ""),
+                retry_next_at=_load_retry_timing(cd)[0],
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
                 retry_kind=_load_retry_kind(cd.get("retry_kind", "")),
-                retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
+                retry_interval_seconds=_load_retry_timing(cd)[1],
                 retry_unattended=bool(cd.get("retry_unattended", False)),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
@@ -8071,7 +8088,7 @@ class ProjectChatManager:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
         A manual or MCP retry is always hourly, even when an earlier automatic
-        retry on this chat ran on a shorter or daily interval. ``unattended``
+        retry on this chat ran on a shorter interval. ``unattended``
         replays the turn as an automation run.
         """
         chat = self._chats.get(chat_id)
@@ -8302,7 +8319,7 @@ class ProjectChatManager:
                 # retry re-arms `retry_next_at` (a bucket reset, or 30s after a
                 # dropped connection), so wait for the stream to end and re-read
                 # the chat at the top of the loop. Sleeping for the interval
-                # would ignore the re-armed time for a daily retry.
+                # would ignore the re-armed time (a five-hour bucket reset).
                 while self._broker.get(chat_id) is fired:
                     await asyncio.sleep(_RETRY_STREAM_POLL_SECONDS)
         except asyncio.CancelledError:

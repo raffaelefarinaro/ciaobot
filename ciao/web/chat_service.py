@@ -359,10 +359,15 @@ def _is_retryable_quota_error(text: str) -> bool:
         needle in low
         for needle in (
             "weekly usage limit",
-            "weekly limit",
-            "monthly limit",
             "upgrade for higher limits",
         )
+    ):
+        return True
+    # A bare "weekly/monthly limit" also appears in third-party API errors a
+    # tool can surface (a billing plan's monthly limit), so it counts only
+    # with an exhaustion verb: a week of hourly replays is not cheap.
+    if any(noun in low for noun in ("weekly limit", "monthly limit")) and any(
+        verb in low for verb in ("reached", "exceeded", "exhausted", "hit your")
     ):
         return True
     # Claude Code uses "You've hit your session limit" in its user-facing
