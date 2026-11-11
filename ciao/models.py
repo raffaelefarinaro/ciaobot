@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from ciao import provider_registry
 
@@ -124,6 +124,8 @@ class AgentRequest:
     # (e.g. the default harness set or ``Bash``) reach the subprocess
     # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)
+    # Claude CLI inline settings layer (skillOverrides + disable* keys) from the workspace's claude_trim; None = catalog defaults. Claude only.
+    claude_settings: dict[str, Any] | None = None
     # True for the end-of-conversation memory pass. Providers that have their
     # own ruleset (opencode) select a stricter one; Claude already receives the
     # extra denies through ``disallowed_tools``.

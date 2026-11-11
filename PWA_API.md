@@ -946,14 +946,20 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # ({provider: {model, thinking, permission_mode, insights_model}}, sparse,
 # {} when none): this workspace's overrides of the Settings -> Providers
 # defaults for new chats and schedule runs on that provider. Empty or missing
-# means the engine default.
+# means the engine default. Each workspace also reports claude_trim (sparse
+# map of Claude trim-option key -> true/false, {} = catalog defaults), and the
+# top level carries claude_trim_options: the catalog (key, kind, name, label,
+# reason, group, default_trimmed, locked) the Settings trim card renders.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, provider_overrides,
 # gws_profile (a profile id: lowercase letters, digits, - and _; anything
 # else is a 400, empty unlinks, a missing key keeps the stored link), color (pink|cyan|amber|emerald|violet|blue|teal|lime|fuchsia; default
-# pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
-# null = defaults), claude_ai_connectors (boolean, default true). When false,
+# pink — PWA accent only), disallowed_tools (extra tools added to the trim
+# defaults, CSV or list; null/none = no extras), claude_trim (object of trim
+# option key -> true/false; sparse, replaces the stored map, {} resets to
+# defaults; an unknown key, a non-boolean, or un-trimming a locked option is a
+# 400), claude_ai_connectors (boolean, default true). When false,
 # Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so
 # the Claude account's claude.ai connectors (Slack, Jira, ...) do not load into
 # them; a non-boolean value is a 400. Memory passes never load them. POST

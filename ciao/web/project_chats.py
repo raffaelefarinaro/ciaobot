@@ -6231,6 +6231,14 @@ class ProjectChatManager:
             ))
         return base
 
+    def claude_settings_for_chat(self, chat: ChatInfo) -> dict[str, Any] | None:
+        """The Claude CLI settings layer for a chat's spawned CLI; None off the claude provider."""
+        if chat.provider != "claude":
+            return None
+        project = self._projects.get(chat.project_id)
+        workspace = project.workspace if project else None
+        return self._config.claude_settings_for_workspace(workspace)
+
     def schedule_default_model(
         self, project_id: str | None, provider: str | None = None
     ) -> str:
@@ -6779,6 +6787,7 @@ class ProjectChatManager:
             images=images or [],
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            claude_settings=self.claude_settings_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
             agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
@@ -7302,6 +7311,7 @@ class ProjectChatManager:
                 images=images,
                 extra_env=self._build_extra_env(chat),
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
+                claude_settings=self.claude_settings_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
                 agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.execution_modes import harness_skill_overrides
+from ciao.claude_trim import claude_settings_layer
 from ciao.fs_sandbox import FsSandboxUnavailable
 from ciao.models import AgentRequest, ImageAttachment, ResultEvent
 from ciao.providers import claude
@@ -118,9 +118,9 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     # (not merely denied): a denied-but-listed skill still gets picked, which
     # is how "create a loop" ended up as a cloud-routine Skill call.
     settings = json.loads(options.settings)
-    # Derived from HARNESS_DISABLED_SKILLS, not hardcoded: the list grows as
+    # Derived from the trim catalog, not hardcoded: the list grows as
     # bundled skills are evaluated, and this assertion is about the wiring.
-    assert settings["skillOverrides"] == harness_skill_overrides()
+    assert settings == claude_settings_layer({})
     assert settings["skillOverrides"]["schedule"] == "off"
     assert settings["skillOverrides"]["loop"] == "off"
     # Native background Bash and Monitor run unchanged; the one Bash hook only
@@ -1553,7 +1553,33 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
     guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
     assert len(guard) == 1
     assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
-    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+    assert options.settings == json.dumps(claude_settings_layer({}))
+
+
+@pytest.mark.asyncio
+async def test_claude_settings_from_request_reach_options(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        claude_settings={"skillOverrides": {}, "disableWorkflows": True},
+    )
+
+    await provider._ensure_connected(request)
+
+    assert json.loads(captured["options"].settings) == {
+        "skillOverrides": {},
+        "disableWorkflows": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -1812,7 +1838,7 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     assert options.sandbox is None
     assert options.add_dirs == []
     assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash"]
-    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+    assert options.settings == json.dumps(claude_settings_layer({}))
 
 
 @pytest.mark.asyncio
@@ -3485,6 +3511,26 @@ def test_a_changed_linked_repo_changes_the_claude_spawn_key(tmp_path: Path) -> N
     req_b = AgentRequest(prompt="x", model="sonnet", mode="auto", linked_repo="/r/b")
 
     assert provider._spawn_key_for(req_a) != provider._spawn_key_for(req_b)
+
+
+def test_spawn_key_changes_with_claude_settings(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    default = AgentRequest(prompt="x", model="sonnet", mode="auto")
+    trimmed = AgentRequest(
+        prompt="x",
+        model="sonnet",
+        mode="auto",
+        claude_settings={"skillOverrides": {}, "disableWorkflows": True},
+    )
+    explicit_defaults = AgentRequest(
+        prompt="x",
+        model="sonnet",
+        mode="auto",
+        claude_settings=claude_settings_layer({}),
+    )
+
+    assert provider._spawn_key_for(default) != provider._spawn_key_for(trimmed)
+    assert provider._spawn_key_for(default) == provider._spawn_key_for(explicit_defaults)
 
 
 # ── Initialize handshake: budget, diagnostics, retry ─────────────────────
