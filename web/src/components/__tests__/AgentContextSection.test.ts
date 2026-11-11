@@ -300,13 +300,16 @@ describe('AgentContextSection', () => {
     expect(label.attributes('aria-busy')).toBe('true')
   })
 
-  const repoProject = (instructions: { name: 'AGENTS.md' | 'CLAUDE.md'; chars: number } | null) => ({
+  const repoProject = (
+    instructions: { name: 'AGENTS.md' | 'CLAUDE.md'; chars: number } | null,
+    missing = false,
+  ) => ({
     ...PROJECT,
-    repo: { path: '/r/upwordo', branch: 'main', dirty: false, missing: false, instructions },
+    repo: { path: '/r/upwordo', branch: 'main', dirty: false, missing, instructions },
   }) as unknown as ProjectInfo
 
-  it('lists the repository instructions in code mode with their size', async () => {
-    const wrapper = await mountSection({ project: repoProject({ name: 'AGENTS.md', chars: 4000 }), codeMode: true })
+  it('lists the repository instructions of a linked project with their size', async () => {
+    const wrapper = await mountSection({ project: repoProject({ name: 'AGENTS.md', chars: 4000 }) })
     const row = wrapper.get('.agent-context-repo')
     expect(row.text()).toContain('upwordo/AGENTS.md')
     expect(row.text()).toContain('1k tokens')
@@ -316,14 +319,16 @@ describe('AgentContextSection', () => {
   })
 
   it('says not found when the repository has no instructions', async () => {
-    const wrapper = await mountSection({ project: repoProject(null), codeMode: true })
+    const wrapper = await mountSection({ project: repoProject(null) })
     const row = wrapper.get('.agent-context-repo')
     expect(row.text()).toContain('Repository instructions')
     expect(row.text()).toContain('not found')
   })
 
-  it('has no repository row while code mode is off', async () => {
-    const wrapper = await mountSection({ project: repoProject({ name: 'AGENTS.md', chars: 4000 }), codeMode: false })
-    expect(wrapper.find('.agent-context-repo').exists()).toBe(false)
+  it('has no repository row outside code mode: no linked repo, or its folder is missing', async () => {
+    const unlinked = await mountSection({ project: PROJECT })
+    expect(unlinked.find('.agent-context-repo').exists()).toBe(false)
+    const missing = await mountSection({ project: repoProject(null, true) })
+    expect(missing.find('.agent-context-repo').exists()).toBe(false)
   })
 })

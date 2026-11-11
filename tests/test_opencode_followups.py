@@ -328,7 +328,7 @@ async def test_recording_a_wake_turn_does_not_build_a_full_agent_request(tmp_pat
         drain_events=provider.drain_events,
         background_work_outstanding=False,
     )
-    chat.instructions_inline_pending = True
+    chat.instructions_inline_pending = "/r/repo"
     built: list[bool] = []
     monkeypatch.setattr(
         pcm, "build_agent_request", lambda *a, **k: built.append(True)
@@ -339,7 +339,7 @@ async def test_recording_a_wake_turn_does_not_build_a_full_agent_request(tmp_pat
     )
 
     assert built == []
-    assert chat.instructions_inline_pending is True
+    assert chat.instructions_inline_pending == "/r/repo"
     ctx = ChatContext.for_web(chat.chat_id)
     assert len(pcm._transcripts._load_current(ctx, "opencode")["turns"]) == 1
 

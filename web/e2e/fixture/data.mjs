@@ -84,7 +84,6 @@ function chat(workspace, n, projectId, title, extra = {}) {
     pinned_file_path: '',
     dismissed_pin_paths: [],
     pin_revision: 0,
-    code_mode: false,
     ...extra,
   }
 }
@@ -132,7 +131,6 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
       : workspace.name === 'alpha'
         ? {
           repo_location: { path: '/synthetic/repos/alpha-app-worktrees/feature-login-a-very-long-unbreakable-worktree-directory-name', branch: 'feature/login', is_worktree: true, exists: true },
-          code_mode: true,
         }
         : {}),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),

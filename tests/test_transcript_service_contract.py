@@ -847,12 +847,12 @@ async def test_a_hidden_continuation_does_not_shift_the_numbering(
     must not consume an index for the rows after it.
     """
     store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
-    for prompt in ("initial", cli_envelopes.CODE_MODE_CONTINUE_PROMPT, "second"):
+    for prompt in ("initial", cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT, "second"):
         _record_turn(store, prompt, "answer")
     session = [
         _sdk_user("initial"),
         _sdk_assistant("a1"),
-        _sdk_user(cli_envelopes.CODE_MODE_CONTINUE_PROMPT),
+        _sdk_user(cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT),
         _sdk_assistant("a2"),
         _sdk_user("second"),
         _sdk_assistant("a3"),
@@ -883,7 +883,7 @@ async def test_a_hidden_continuation_does_not_shift_the_numbering(
         ("second", 1, "2026-10-22T10:01:00Z"),
     ]
     assert all(
-        cli_envelopes.CODE_MODE_CONTINUE_PROMPT not in str(row.get("content") or "")
+        cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT not in str(row.get("content") or "")
         for row in rows
     )
 

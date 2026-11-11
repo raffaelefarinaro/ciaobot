@@ -195,6 +195,14 @@ insets the viewport itself and the page never runs under the bar. Do not
 reintroduce either: a translucent bar draws a material over the page, and
 `cover` forces every surface to simulate the inset itself.
 
+iOS 26 ignores both that meta and `theme-color` for the bar's colour: it fills
+the bar solid only when an opaque fixed box (≥90% wide, >10px tall) touches the
+top edge, and blurs the page otherwise. `App.vue`'s `.status-bar-tint` is that
+box: a `--bg` strip as tall as the phone header's top padding, above every
+overlay, in standalone on phones. Do not remove it or give it a translucent or
+blurred background, or the bar goes back to blurring on every page and turning
+the scrim's colour when the menu opens.
+
 ### Keyboard + viewport
 
 - All of this lives in `lib/viewport.ts` (`installViewportPlumbing()`, called once from `main.ts`, idempotent) and is pinned by `lib/viewport.test.ts`. Add a test there for any change to the measurement rules. The module also exports `viewportHeight()` / `viewportWidth()` (the size a `position: fixed` element should measure against) and `onViewportChange()`, wrapped for components by `composables/useViewportHeight.ts`.

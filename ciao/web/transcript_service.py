@@ -824,7 +824,7 @@ def _render_opencode_thread(
             content = _strip_injected_context(raw_prompt).strip()
             if not content:
                 continue
-            # Hidden code-mode continuation: skipped before user_idx += 1 so
+            # Hidden continuation: skipped before user_idx += 1 so
             # markers keep their turn_index.
             if cli_envelopes.is_hidden_continuation(content):
                 if metadata:
@@ -1786,9 +1786,9 @@ async def _assemble_chat_messages(
         # this exact content to keep the parent-uuid chain valid.
         if m.type == "user" and _is_no_response_sentinel(content):
             continue
-        # Our hidden continuations (cli_envelopes.CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT):
-        # hidden outright; G3's code-mode event row already shows the switch. Skip
-        # without incrementing user_idx so markers keep their turn_index.
+        # Our hidden continuations (cli_envelopes.RELOAD_CONTINUE_PROMPT and the
+        # legacy code-mode one): hidden outright. Skip without incrementing
+        # user_idx so markers keep their turn_index.
         if m.type == "user" and cli_envelopes.is_hidden_continuation(content):
             _mark_preceding_answer(result)
             continue

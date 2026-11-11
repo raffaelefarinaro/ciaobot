@@ -130,6 +130,12 @@ class FakePcm:
     def get_project(self, project_id: str) -> Any:
         return self._projects.get(project_id)
 
+    def linked_repo_for_chat(self, chat: Any) -> str:
+        """The engine's code-mode rule: the project's linked repo, when it exists."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        return raw if raw and Path(raw).is_dir() else ""
+
 
 class RefusingManager:
     """A manager that refuses every create with one reason."""
@@ -155,10 +161,10 @@ def _pcm(root: Path) -> FakePcm:
     """Two chats in one project, and that project's folder is ``root``."""
     project = SimpleNamespace(id="p1", repo_path=str(root), workspace="")
     chat = SimpleNamespace(
-        id="c1", project_id="p1", code_mode=False, repo_location={}
+        id="c1", project_id="p1", repo_location={}
     )
     other = SimpleNamespace(
-        id="c2", project_id="p1", code_mode=False, repo_location={}
+        id="c2", project_id="p1", repo_location={}
     )
     return FakePcm({"c1": chat, "c2": other}, {"p1": project})
 
@@ -572,7 +578,7 @@ def _linked_app(tmp_path: Path) -> tuple[Starlette, Path, Path]:
     root.mkdir()
     repo.mkdir()
     project = SimpleNamespace(id="p1", repo_path=str(repo), workspace="")
-    chat = SimpleNamespace(id="c1", project_id="p1", code_mode=False, repo_location={})
+    chat = SimpleNamespace(id="c1", project_id="p1", repo_location={})
     app = _app(tmp_path, root=root, pcm=FakePcm({"c1": chat}, {"p1": project}))
     return app, root, repo
 

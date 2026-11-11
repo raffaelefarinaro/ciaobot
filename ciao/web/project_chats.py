@@ -19,7 +19,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Seque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
@@ -133,7 +133,6 @@ from ciao.config import (
 from ciao.context.capsule import (
     build_context_capsule,
     render_linked_repo_block,
-    render_linked_repo_off_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -291,23 +290,14 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on quota retries. Consecutive quota retries back off exponentially from
-# _RETRY_INTERVAL_SECONDS (1h, 2h, 4h, then every _MAX_QUOTA_RETRY_INTERVAL_SECONDS),
-# so a limit that does not clear is not hit with the identical turn every
-# hour. When Claude's saved rate-limit snapshot names the rejected five-hour
-# bucket's reset, the retry is pointed there instead (_quota_reset_at). Weekly
-# and monthly limits use the "quota_terminal" kind instead: one attempt a day,
-# capped by _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
-_MAX_QUOTA_RETRIES = 6
-_MAX_QUOTA_RETRY_INTERVAL_SECONDS = 8 * 60 * 60
+# Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
+# so a week of attempts covers a weekly limit, and a limit that never clears
+# still stops. When Claude's saved rate-limit snapshot names the rejected
+# five-hour bucket's reset, the retry is pointed there instead (_quota_reset_at).
+_MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
-# checks again, not a whole retry interval (which backs off to hours).
+# checks again, not a whole retry interval.
 _RETRY_BUSY_DEFER_SECONDS = 5 * 60
-# Weekly and monthly usage limits reset on a days-long window, so an hourly
-# retry would only burn attempts. One attempt a day for a week covers a weekly
-# limit that clears on schedule.
-_TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS = 24 * 60 * 60
-_MAX_TERMINAL_QUOTA_RETRIES = 7
 
 # Agent-armed retry after an external service or the network was unreachable
 # (`ciao chat retry --action set --kind network`, from the unattended
@@ -323,6 +313,29 @@ def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
 
 
+def _load_retry_kind(raw: object) -> str:
+    """A persisted retry kind; the retired "quota_terminal" loads as "quota"."""
+    kind = str(raw or "")
+    return "quota" if kind == "quota_terminal" else kind
+
+
+def _load_retry_timing(cd: dict) -> tuple[str, int]:
+    """Persisted ``(retry_next_at, retry_interval_seconds)``.
+
+    A retired daily "quota_terminal" retry resumes on the hourly cadence: its
+    interval becomes the hourly one and a next try more than an hour out is
+    pulled in, so the card never says "every hour" while waiting a day.
+    """
+    next_at = str(cd.get("retry_next_at", "") or "")
+    interval = int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS)
+    if cd.get("retry_kind") != "quota_terminal":
+        return next_at, interval
+    due = chat_service._parse_iso(next_at)
+    if due is None or due > datetime.now(UTC) + timedelta(seconds=_RETRY_INTERVAL_SECONDS):
+        next_at = chat_service._iso_after(_RETRY_INTERVAL_SECONDS)
+    return next_at, _RETRY_INTERVAL_SECONDS
+
+
 def _retry_cap(kind: str) -> int | None:
     """Attempts allowed for an automatic retry of *kind*; None when uncapped here.
 
@@ -331,22 +344,14 @@ def _retry_cap(kind: str) -> int | None:
     """
     if kind == "quota":
         return _MAX_QUOTA_RETRIES
-    if kind == "quota_terminal":
-        return _MAX_TERMINAL_QUOTA_RETRIES
     if kind in {"connection", "startup", "auth"}:
         return _MAX_CONNECTION_DROP_RETRIES
     return None
 
 
-def _quota_retry_interval(attempts: int) -> int:
-    """Delay before quota retry number ``attempts + 1``: 1h, 2h, 4h, then capped."""
-    return min(_RETRY_INTERVAL_SECONDS << min(attempts, 8), _MAX_QUOTA_RETRY_INTERVAL_SECONDS)
-
-
 # Claude rate-limit buckets whose rejection explains each quota retry kind.
 _QUOTA_RESET_BUCKETS = {
     "quota": ("five_hour",),
-    "quota_terminal": ("seven_day", "seven_day_opus", "seven_day_sonnet"),
 }
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
@@ -781,7 +786,7 @@ class ChatInfo:
     retry_last_error: str = ""
     retry_attempts: int = 0
     # Kind of the failure that armed the pending retry ("quota",
-    # "quota_terminal", "connection", "startup", "auth", and "network", which
+    # "connection", "startup", "auth", and "network", which
     # the agent arms itself). The attempt counter
     # belongs to one kind: arming a retry of a different kind starts that
     # kind's budget at zero.
@@ -809,11 +814,13 @@ class ChatInfo:
     context_digest: str = ""
     context_session_id: str = ""
     # Provider session that has already received the linked repo's
-    # instructions text inline; a later repo change in it gets a pointer.
+    # instructions text inline, and the repo they came from; a later re-send
+    # for the same repo in that session gets a pointer.
     instructions_session_id: str = ""
-    # Set while a turn whose capsule inlines the instructions is in flight;
-    # committed to instructions_session_id with the context marker. Not saved.
-    instructions_inline_pending: bool = False
+    instructions_repo: str = ""
+    # The repo whose instructions a turn in flight inlines ("" when none);
+    # committed to instructions_session_id/_repo with the context marker. Not saved.
+    instructions_inline_pending: str = ""
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -893,9 +900,6 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
-    # Per-chat code mode (#1450). Persisted only when set, so unlinked or off
-    # chats persist exactly as before. One-way once the chat has messages.
-    code_mode: bool = False
     # Set only by the memory-backup setup route (#1328). A workspace-scoped
     # chat with this flag may also read and write the install's data root,
     # the parent of every workspace folder, because a git repository there is
@@ -948,7 +952,6 @@ class ChatInfo:
             "dismissed_pin_paths": list(self.dismissed_pin_paths),
             "pin_revision": self.pin_revision,
             "repo_location": dict(self.repo_location),
-            "code_mode": self.code_mode,
             "user_turn_count": self.user_turn_count,
             "retry": {
                 "status": self.retry_status,
@@ -1381,11 +1384,11 @@ class ProjectChatManager:
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
                 retry_image_refs=list(cd.get("retry_image_refs", [])),
-                retry_next_at=cd.get("retry_next_at", ""),
+                retry_next_at=_load_retry_timing(cd)[0],
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
-                retry_kind=str(cd.get("retry_kind", "") or ""),
-                retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
+                retry_kind=_load_retry_kind(cd.get("retry_kind", "")),
+                retry_interval_seconds=_load_retry_timing(cd)[1],
                 retry_unattended=bool(cd.get("retry_unattended", False)),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
@@ -1394,6 +1397,7 @@ class ProjectChatManager:
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
                 instructions_session_id=cd.get("instructions_session_id", ""),
+                instructions_repo=str(cd.get("instructions_repo", "") or ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
@@ -1417,7 +1421,6 @@ class ProjectChatManager:
                     if isinstance(cd.get("repo_location"), dict)
                     else {}
                 ),
-                code_mode=bool(cd.get("code_mode", False)),
                 grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
@@ -1517,6 +1520,7 @@ class ProjectChatManager:
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
                     "instructions_session_id": c.instructions_session_id,
+                    "instructions_repo": c.instructions_repo,
                     "pending_question": c.pending_question,
                     "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
@@ -1533,7 +1537,6 @@ class ProjectChatManager:
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
-                    **({"code_mode": True} if c.code_mode else {}),
                     "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
@@ -3163,8 +3166,14 @@ class ProjectChatManager:
             # cleared or no canonical doc exists under the new folder yet.
             doc = self._project_doc_file(project)
             project.vault_doc_path = self._display_path(doc) if doc is not None else ""
-        if clean_repo is not None:
+        cleared_chats: list[str] = []
+        if clean_repo is not None and clean_repo != project.repo_path:
             project.repo_path = clean_repo
+            # Stored locations point into the old repository (or its worktrees).
+            for chat in self._chats.values():
+                if chat.project_id == project_id and chat.repo_location:
+                    chat.repo_location = {}
+                    cleared_chats.append(chat.chat_id)
         # Mirror the context into the canonical doc's frontmatter so the two
         # can't drift. Deliberately after the vault_folder branch, so a call
         # that rebinds and re-describes in one go writes to the new doc.
@@ -3175,6 +3184,13 @@ class ProjectChatManager:
             "type": "project_updated",
             "project": project.to_dict(),
         })
+        for chat_id in cleared_chats:
+            self._events.publish({
+                "type": "chat_repo_location",
+                "chat_id": chat_id,
+                "project_id": project_id,
+                "repo_location": {},
+            })
         return project
 
     def reorderable_project_ids(self, workspace: str) -> list[str]:
@@ -3971,9 +3987,13 @@ class ProjectChatManager:
             )
 
         moved_from: str | None = None
+        cleared_location = False
         if project_id is not None and project_id != chat.project_id:
             moved_from = chat.project_id
             chat.project_id = project_id
+            # The stored location points into the old project's repository.
+            cleared_location = bool(chat.repo_location)
+            chat.repo_location = {}
         if title is not None:
             chat.title = title
         if changes_model:
@@ -4011,54 +4031,6 @@ class ProjectChatManager:
                 "project_id": chat.project_id,
                 "old_project_id": moved_from,
             })
-            if chat.code_mode:
-                self.set_code_mode(chat_id, False, actor="user", force=True)
-        return chat
-
-    def set_code_mode(
-        self, chat_id: str, on: bool, *, actor: Literal["user", "agent"], force: bool = False
-    ) -> ChatInfo | None:
-        """Switch the chat's code mode. None for an unknown chat; ValueError when it cannot be on.
-
-        Code mode is one-way once the chat has messages: turning it off is
-        refused unless ``force`` (a project move, a system transition).
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        if chat.code_mode == on:
-            return chat
-        if chat.archived:
-            raise ValueError("Cannot change code mode of an archived chat")
-        if not on and chat.user_turn_count > 0 and not force:
-            raise ValueError(
-                "Code mode stays on once the chat has messages. "
-                "Start a new chat to work without it."
-            )
-        project = self._projects.get(chat.project_id)
-        if on:
-            raw = project.repo_path if project else ""
-            if not raw:
-                raise ValueError(
-                    "Code mode needs a project linked to a git repository. "
-                    "Link one in the project's settings first."
-                )
-            if not Path(raw).expanduser().is_dir():
-                raise ValueError(f"The linked repository is not available on this machine: {raw}")
-        at = chat_service._now_iso()
-        chat.code_mode = on
-        cleared_location = not on and bool(chat.repo_location)
-        if cleared_location:
-            chat.repo_location = {}
-        self._save()
-        self._events.publish({
-            "type": "chat_code_mode",
-            "chat_id": chat_id,
-            "project_id": chat.project_id,
-            "code_mode": on,
-            "actor": actor,
-            "at": at,
-        })
         if cleared_location:
             self._events.publish({
                 "type": "chat_repo_location",
@@ -5732,13 +5704,18 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
-    def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
-        """The chat's linked repository, resolved, or "" when unlinked, missing,
-        code mode is off, or a memory-pass chat (the pass must not be able to
-        write the repo)."""
+    def linked_repo_for_chat(self, chat: ChatInfo) -> str:
+        """The repository the chat works on in code mode, resolved, or "".
+
+        This is the code-mode rule: a chat is in code mode exactly when its
+        project is linked to a repository whose folder exists on this machine,
+        except a memory-pass chat (the pass must not be able to write the
+        repo). Derived on every call, so a link added, changed or removed
+        mid-chat reaches the chat's next turn.
+        """
         project = self._projects.get(chat.project_id)
         raw = project.repo_path if project else ""
-        if not raw or not chat.code_mode or is_memory_pass_chat(chat, project):
+        if not raw or is_memory_pass_chat(chat, project):
             return ""
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
@@ -5906,7 +5883,7 @@ class ProjectChatManager:
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
         roots = [str(agent_root), str(vault_root)]
-        linked_repo = self._linked_repo_for_chat(chat)
+        linked_repo = self.linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
         gws_dir = self._granted_gws_dir(chat)
@@ -5929,29 +5906,22 @@ class ProjectChatManager:
         project: ProjectInfo | None,
         *,
         inline_instructions: bool = True,
-    ) -> tuple[str, str, str]:
-        """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
+    ) -> tuple[str, str, str, bool]:
+        """(stable block, digest fingerprint, per-turn line, instructions inlined).
 
-        Code mode on: the full block with the repository's instructions, or
-        with a pointer to the file when ``inline_instructions`` is False. Linked
-        but off: a light hint naming the path and how to switch on.
+        ("", "", "", False) when unlinked. The full block with the repository's
+        instructions, or with a pointer to the file when ``inline_instructions``
+        is False. A repository that is gone gets the short "not available"
+        block. A memory-pass chat gets nothing (see ``linked_repo_for_chat``).
+        The last item is True only when the block quotes the instructions text.
         """
-        if project is None or not project.repo_path:
-            return "", "", ""
+        if project is None or not project.repo_path or is_memory_pass_chat(chat, project):
+            return "", "", "", False
         path = project.repo_path
         state = repo_state(path)
-        if not chat.code_mode:
-            block = render_linked_repo_off_block(path=path)
-            if state["missing"]:
-                return block, f"{path}\0off", f"linked_repo={path} missing=true code_mode=off"
-            return (
-                block,
-                f"{path}\0off",
-                f"linked_repo={path} branch={state['branch'] or '(detached)'} code_mode=off",
-            )
         if state["missing"]:
             block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
-            return block, f"{path}\0missing", f"linked_repo={path} missing=true"
+            return block, f"{path}\0missing", f"linked_repo={path} missing=true", False
         ins = read_repo_instructions(path)
         block = render_linked_repo_block(
             path=path,
@@ -5964,6 +5934,7 @@ class ProjectChatManager:
             block,
             f"{path}\0ok\0{ins.name}\0{ins.digest}",
             f"linked_repo={path} branch={state['branch'] or '(detached)'}",
+            bool(ins.name) and inline_instructions,
         )
 
     def _build_prompt_prefix(
@@ -5986,24 +5957,26 @@ class ProjectChatManager:
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
         # The repository instructions are inlined once per provider session:
-        # the first time they are attached, whenever that is (turn 1, or code
-        # mode switched on mid-session from the PWA). A later re-send in a
-        # session that already took the text (AGENTS.md edited, code mode
-        # toggled again) points at the file instead. A cleared context marker
-        # (compaction, cancelled first turn) inlines it again.
+        # the first time they are attached, whenever that is (turn 1, or the
+        # project linked mid-session). A later re-send in a session that
+        # already took the text (AGENTS.md edited, the link changed) points at
+        # the file instead. A cleared context marker
+        # (compaction, cancelled first turn) inlines it again, and so does a
+        # different repository (relinked mid-session): the session never saw
+        # its instructions.
+        repo_path = project.repo_path if project else ""
         already_inlined = bool(
             chat.context_digest
             and chat.session_id
             and chat.context_session_id == chat.session_id
             and chat.instructions_session_id == chat.session_id
+            and chat.instructions_repo == repo_path
         )
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(
+        repo_block, _repo_fp, repo_line, inlined = self._linked_repo_context(
             chat, project, inline_instructions=not already_inlined
         )
         include_stable = self._needs_stable_context(chat)
-        chat.instructions_inline_pending = bool(
-            include_stable and chat.code_mode and repo_block and not already_inlined
-        )
+        chat.instructions_inline_pending = repo_path if include_stable and inlined else ""
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -6046,7 +6019,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        _b, repo_fp, _l = self._linked_repo_context(chat, project)
+        _b, repo_fp, _l, _i = self._linked_repo_context(chat, project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -6067,7 +6040,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
+        repo_block, _repo_fp, repo_line, _i = self._linked_repo_context(chat, project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -6662,7 +6635,8 @@ class ProjectChatManager:
     ) -> bool:
         if chat.instructions_inline_pending and session_id:
             chat.instructions_session_id = session_id
-        chat.instructions_inline_pending = False
+            chat.instructions_repo = chat.instructions_inline_pending
+        chat.instructions_inline_pending = ""
         if not request.context_digest or not session_id:
             return False
         if (
@@ -6810,7 +6784,7 @@ class ProjectChatManager:
             agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
             agent_denied=denied,
             agent_denied_except=denied_except,
-            linked_repo=self._linked_repo_for_chat(chat),
+            linked_repo=self.linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -6963,8 +6937,8 @@ class ProjectChatManager:
         if chat is None:
             return None
         project = self._projects.get(chat.project_id)
-        repo_path = getattr(project, "repo_path", "") if project else ""
-        if not repo_path or not chat.code_mode:
+        repo_path = project.repo_path if project else ""
+        if not self.linked_repo_for_chat(chat):
             if chat.repo_location:
                 chat.repo_location = {}
                 self._save()
@@ -6997,13 +6971,8 @@ class ProjectChatManager:
             return None
         chat = self._chats.get(chat_id)
         project = self._projects.get(chat.project_id) if chat else None
-        if (
-            project is None
-            or not getattr(project, "repo_path", "")
-            or chat is None
-            or not chat.code_mode
-        ):
-            # Unlinked or code mode off: the stored location was just cleared; the done payload
+        if project is None or chat is None or not self.linked_repo_for_chat(chat):
+            # Not in code mode: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None
         try:
@@ -7136,23 +7105,11 @@ class ProjectChatManager:
         })
         return True
 
-    def arm_code_mode_continuation(self, chat_id: str) -> bool:
-        """Ask the running foreground turn for one hidden continuation turn.
-
-        False when there is no foreground turn to continue: the chat is idle, or
-        only a between-turns drain stream is live (it has no drive loop).
-        """
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background or not stream.accepting_queue:
-            return False
-        stream.code_mode_continue = True
-        return True
-
     def arm_reload_continuation(self, chat_id: str) -> bool:
         """Ask the running foreground turn to reload the provider when it ends.
 
-        False when there is no foreground turn to continue, like
-        ``arm_code_mode_continuation``.
+        False when there is no foreground turn to continue: the chat is idle, or
+        only a between-turns drain stream is live (it has no drive loop).
         """
         stream = self._broker.get(chat_id)
         if stream is None or stream.background or not stream.accepting_queue:
@@ -7350,7 +7307,7 @@ class ProjectChatManager:
                 agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
                 agent_denied=denied,
                 agent_denied_except=denied_except,
-                linked_repo=self._linked_repo_for_chat(chat),
+                linked_repo=self.linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
             # Lock the chips before the await: an edit or remove landing while
@@ -7958,9 +7915,8 @@ class ProjectChatManager:
     ) -> bool:
         """Arm a deferred retry for a quota/connection/startup/auth failure.
 
-        ``kind`` is ``"quota"``, ``"quota_terminal"`` (a weekly or monthly
-        usage limit, retried daily until the window resets), ``"connection"``,
-        ``"startup"``, or ``"auth"``.
+        ``kind`` is ``"quota"`` (any usage limit, retried hourly),
+        ``"connection"``, ``"startup"``, or ``"auth"``.
         A connection/auth failure that dropped *after* streaming output
         (``had_progress``) resumes the session with a "continue" nudge instead
         of replaying the prompt — replaying could re-run tool calls the partial
@@ -8017,10 +7973,8 @@ class ProjectChatManager:
             image_refs = self._image_refs(current_images)
         if kind in {"connection", "startup", "auth"}:
             interval = _RETRY_CONNECTION_INTERVAL_SECONDS
-        elif kind == "quota_terminal":
-            interval = _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS
         else:
-            interval = _quota_retry_interval(attempts)
+            interval = _RETRY_INTERVAL_SECONDS
         armed = self.set_chat_retry(
             chat_id,
             prompt,
@@ -8039,10 +7993,9 @@ class ProjectChatManager:
     def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
         """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
 
-        ``kind`` picks the buckets: the five-hour session window for "quota",
-        the weekly buckets for "quota_terminal"; any other kind has none. The
-        next attempt is pointed at the reset instead of the backoff interval
-        when the saved rate-limit snapshot names one. The file is user state,
+        ``kind`` picks the buckets: the five-hour session window for "quota";
+        any other kind has none. The next attempt is pointed at the reset
+        instead of the hourly interval when the saved rate-limit snapshot names one. The file is user state,
         so every field is type-checked and nothing here raises.
         """
         bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
@@ -8086,7 +8039,7 @@ class ProjectChatManager:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
         A manual or MCP retry is always hourly, even when an earlier automatic
-        retry on this chat ran on a shorter or daily interval. ``unattended``
+        retry on this chat ran on a shorter interval. ``unattended``
         replays the turn as an automation run.
         """
         chat = self._chats.get(chat_id)
@@ -8317,7 +8270,7 @@ class ProjectChatManager:
                 # retry re-arms `retry_next_at` (a bucket reset, or 30s after a
                 # dropped connection), so wait for the stream to end and re-read
                 # the chat at the top of the loop. Sleeping for the interval
-                # would ignore the re-armed time for a daily retry.
+                # would ignore the re-armed time (a five-hour bucket reset).
                 while self._broker.get(chat_id) is fired:
                     await asyncio.sleep(_RETRY_STREAM_POLL_SECONDS)
         except asyncio.CancelledError:

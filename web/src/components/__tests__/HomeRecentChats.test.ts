@@ -812,24 +812,22 @@ describe('delegated task chats on Home', () => {
   })
 
   it.each([
-    [true, true],
-    [true, false],
-    [false, true],
-  ])('tags a chat with code mode %s in a project with a repo %s as in the sidebar', async (codeMode, linked) => {
+    ['linked', { path: '/repos/app', branch: 'main', dirty: false, missing: false }, true],
+    ['linked to a missing folder', { path: '/repos/app', branch: '', dirty: false, missing: true }, false],
+    ['unlinked', undefined, false],
+  ])('tags a chat in a %s project with the code badge as in the sidebar', async (_label, repo, tagged) => {
     seedChats()
     const store = useProjectStore()
-    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
-    quiet.code_mode = codeMode
     const project = store.projectFor('quiet')!
-    project.repo = linked ? ({ repo_path: '/repos/app' } as unknown as typeof project.repo) : undefined
+    project.repo = repo
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
     const tag = rowFor(wrapper, 'A quiet chat').find('.home-chat-code')
-    expect(tag.exists()).toBe(codeMode && linked)
+    expect(tag.exists()).toBe(tagged)
     if (tag.exists()) {
       expect(tag.text()).toBe('›_')
-      expect(tag.attributes('aria-label')).toBe('Code mode is on')
+      expect(tag.attributes('aria-label')).toBe('Code mode')
     }
     wrapper.unmount()
   })

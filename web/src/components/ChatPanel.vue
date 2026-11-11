@@ -1364,15 +1364,12 @@
           </button>
         </div>
       </section>
-      <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
+      <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
           :repo="project.repo"
           :location="chat.repo_location ?? null"
           :chat-id="chat.chat_id"
-          :code-mode="codeModeOn"
-          :code-mode-locked="codeModeLocked"
-          :archived="!!chat.archived"
         />
       </div>
       <!-- What the agent is given. The project also lives here on wide panes;
@@ -1380,7 +1377,6 @@
       <div ref="railContextEl" class="chat-rail-agent-context cd-block" tabindex="-1">
         <AgentContextSection
           :project="project"
-          :code-mode="codeModeOn"
           :context-pct="contextPct"
           :compacted="contextUsage.compacted"
           :compacting="compacting"
@@ -1543,7 +1539,6 @@ import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
@@ -2113,12 +2108,6 @@ onMounted(() => {
 })
 
 const project = computed(() => view.project)
-const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
-// The chat payload's turn count only refreshes on refetch, so a user row in the
-// loaded transcript locks the switch as soon as the first message is sent.
-const codeModeLocked = computed(() =>
-  isCodeModeLocked(chat.value)
-  || (codeModeOn.value && view.activeMessages.some(m => m.role === 'user')))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -7040,7 +7029,7 @@ details[open] > .activity-summary::before {
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 12px 40px rgb(0 0 0 / 12%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -8120,6 +8109,13 @@ details[open] > .activity-summary::before {
     padding: 0;
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
+}
+/* Touch phones: the surface is rounder (--radius-composer), so the controls
+   on its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .composer-surface .composer-chip,
+  .composer-surface .image-btn,
+  .composer-surface .send-btn { border-radius: 999px; }
 }
 
 /* Chat comment selection trigger + composer */

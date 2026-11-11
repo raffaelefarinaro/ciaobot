@@ -1123,29 +1123,9 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
-  it('tags a chat only when it worked outside the main checkout', async () => {
+  it('tags every chat of a linked project with a quiet code marker', async () => {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].repo_location = { path: '/r/app', branch: 'main', is_worktree: false, exists: true }
-    store.chats.push({
-      ...store.chats[0],
-      chat_id: 'chat-wt',
-      title: 'In a worktree',
-      repo_location: { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true },
-    })
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    const tags = wrapper.findAll('.chat-repo-tag')
-    expect(tags).toHaveLength(1)
-    expect(tags[0].text()).toBe('⑂ feat-x')
-    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt (code mode off)')
-    wrapper.unmount()
-  })
-
-  it('tags a code-mode chat with a quiet code marker', async () => {
-    const store = useProjectStore()
-    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].code_mode = true
     const wrapper = await mountSidebar()
     await flushPromises()
     expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
@@ -1158,17 +1138,22 @@ describe('ProjectSidebar accessible context menus', () => {
     await flushPromises()
     expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
     unlinked.unmount()
+
+    store.projects[0].repo = { path: '/r/app', branch: '', dirty: false, missing: true }
+    const missing = await mountSidebar()
+    await flushPromises()
+    expect(missing.find('.chat-code-tag').exists()).toBe(false)
+    missing.unmount()
   })
 
-  function worktreeChat(codeMode: boolean) {
+  function worktreeChat() {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].code_mode = codeMode
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('shows only the code badge when code mode and a worktree both apply', async () => {
-    worktreeChat(true)
+  it('names the worktree branch and folder in the code badge', async () => {
+    worktreeChat()
     const wrapper = await mountSidebar()
     await flushPromises()
     const code = wrapper.get('.chat-code-tag')
@@ -1178,41 +1163,20 @@ describe('ProjectSidebar accessible context menus', () => {
     expect(code.attributes('title')).toContain('/r/app-wt')
     expect(code.attributes('aria-label')).toContain('feat-x')
     expect(code.attributes('aria-label')).toContain('/r/app-wt')
-    expect(wrapper.find('.chat-repo-tag').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('keeps the dimmed branch tag when code mode is off', async () => {
-    worktreeChat(false)
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    const chip = wrapper.get('.chat-repo-tag')
-    expect(chip.text()).toBe('⑂ feat-x')
-    expect(chip.classes()).toContain('chat-repo-tag--code-off')
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
     wrapper.unmount()
   })
 
   it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
-    worktreeChat(true)
+    worktreeChat()
     const wrapper = await mountSidebar()
     await flushPromises()
     const badge = wrapper.get('.chat-code-tag')
     // A fine pointer hides the row's marks while its actions show, so the
     // facts the badge carries live in the row's own title too.
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(true)
     expect(wrapper.get('.chat-item').attributes('title'))
       .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
     expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
     expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
-    wrapper.unmount()
-  })
-
-  it('dims the branch chip of a chat whose code mode is off', async () => {
-    worktreeChat(false)
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    expect(wrapper.get('.chat-repo-tag').classes()).toContain('chat-repo-tag--code-off')
     wrapper.unmount()
   })
 })

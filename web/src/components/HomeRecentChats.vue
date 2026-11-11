@@ -100,7 +100,7 @@
                     <!-- A plain span cannot be named, so the relation also reads
                          as text: in the row title for a pointer, and here for AT. -->
                     <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
-                    <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode is on" title="Code mode is on">›_</span>
+                    <span v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode" title="Code mode">›_</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
@@ -200,7 +200,7 @@ import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
-import { isChatCodeModeOn } from '../lib/codeMode'
+import { inCodeMode } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
 import TaskGlyph from './TaskGlyph.vue'
 

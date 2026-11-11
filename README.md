@@ -60,7 +60,7 @@ Work is organised as **workspace → project → chat**. A workspace is a big ar
   <img src="site/assets/img/home.webp" alt="The Ciaobot Home page with a box to start a task and the chats that need attention" width="100%">
 </p>
 
-A project can also be linked to a git repository on your machine. Each chat then has a **code mode**, off by default: switched on (by you, or by the agent when you ask to work on the code), the chat follows the repository's `AGENTS.md`, loads its skills and can write in it, while notes and decisions stay in Ciaobot.
+A project can also be linked to a git repository on your machine. Chats in a project with a linked repository work in **code mode** automatically: the chat follows the repository's `AGENTS.md`, loads its skills and can write in it, while notes and decisions stay in Ciaobot. Put a chat in a project without a repository to keep it out.
 
 Everything you can click, you can also ask for in a chat.
 
