@@ -133,7 +133,6 @@ from ciao.config import (
 from ciao.context.capsule import (
     build_context_capsule,
     render_linked_repo_block,
-    render_linked_repo_off_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -893,9 +892,6 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
-    # Per-chat code mode (#1450). Persisted only when set, so unlinked or off
-    # chats persist exactly as before. One-way once the chat has messages.
-    code_mode: bool = False
     # Set only by the memory-backup setup route (#1328). A workspace-scoped
     # chat with this flag may also read and write the install's data root,
     # the parent of every workspace folder, because a git repository there is
@@ -948,7 +944,6 @@ class ChatInfo:
             "dismissed_pin_paths": list(self.dismissed_pin_paths),
             "pin_revision": self.pin_revision,
             "repo_location": dict(self.repo_location),
-            "code_mode": self.code_mode,
             "user_turn_count": self.user_turn_count,
             "retry": {
                 "status": self.retry_status,
@@ -1417,7 +1412,6 @@ class ProjectChatManager:
                     if isinstance(cd.get("repo_location"), dict)
                     else {}
                 ),
-                code_mode=bool(cd.get("code_mode", False)),
                 grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
@@ -1533,7 +1527,6 @@ class ProjectChatManager:
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
-                    **({"code_mode": True} if c.code_mode else {}),
                     "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
@@ -3971,9 +3964,13 @@ class ProjectChatManager:
             )
 
         moved_from: str | None = None
+        cleared_location = False
         if project_id is not None and project_id != chat.project_id:
             moved_from = chat.project_id
             chat.project_id = project_id
+            # The stored location points into the old project's repository.
+            cleared_location = bool(chat.repo_location)
+            chat.repo_location = {}
         if title is not None:
             chat.title = title
         if changes_model:
@@ -4011,54 +4008,6 @@ class ProjectChatManager:
                 "project_id": chat.project_id,
                 "old_project_id": moved_from,
             })
-            if chat.code_mode:
-                self.set_code_mode(chat_id, False, actor="user", force=True)
-        return chat
-
-    def set_code_mode(
-        self, chat_id: str, on: bool, *, actor: Literal["user", "agent"], force: bool = False
-    ) -> ChatInfo | None:
-        """Switch the chat's code mode. None for an unknown chat; ValueError when it cannot be on.
-
-        Code mode is one-way once the chat has messages: turning it off is
-        refused unless ``force`` (a project move, a system transition).
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None
-        if chat.code_mode == on:
-            return chat
-        if chat.archived:
-            raise ValueError("Cannot change code mode of an archived chat")
-        if not on and chat.user_turn_count > 0 and not force:
-            raise ValueError(
-                "Code mode stays on once the chat has messages. "
-                "Start a new chat to work without it."
-            )
-        project = self._projects.get(chat.project_id)
-        if on:
-            raw = project.repo_path if project else ""
-            if not raw:
-                raise ValueError(
-                    "Code mode needs a project linked to a git repository. "
-                    "Link one in the project's settings first."
-                )
-            if not Path(raw).expanduser().is_dir():
-                raise ValueError(f"The linked repository is not available on this machine: {raw}")
-        at = chat_service._now_iso()
-        chat.code_mode = on
-        cleared_location = not on and bool(chat.repo_location)
-        if cleared_location:
-            chat.repo_location = {}
-        self._save()
-        self._events.publish({
-            "type": "chat_code_mode",
-            "chat_id": chat_id,
-            "project_id": chat.project_id,
-            "code_mode": on,
-            "actor": actor,
-            "at": at,
-        })
         if cleared_location:
             self._events.publish({
                 "type": "chat_repo_location",
@@ -5732,13 +5681,18 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
-    def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
-        """The chat's linked repository, resolved, or "" when unlinked, missing,
-        code mode is off, or a memory-pass chat (the pass must not be able to
-        write the repo)."""
+    def linked_repo_for_chat(self, chat: ChatInfo) -> str:
+        """The repository the chat works on in code mode, resolved, or "".
+
+        This is the code-mode rule: a chat is in code mode exactly when its
+        project is linked to a repository whose folder exists on this machine,
+        except a memory-pass chat (the pass must not be able to write the
+        repo). Derived on every call, so a link added, changed or removed
+        mid-chat reaches the chat's next turn.
+        """
         project = self._projects.get(chat.project_id)
         raw = project.repo_path if project else ""
-        if not raw or not chat.code_mode or is_memory_pass_chat(chat, project):
+        if not raw or is_memory_pass_chat(chat, project):
             return ""
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
@@ -5906,7 +5860,7 @@ class ProjectChatManager:
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
         roots = [str(agent_root), str(vault_root)]
-        linked_repo = self._linked_repo_for_chat(chat)
+        linked_repo = self.linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
         gws_dir = self._granted_gws_dir(chat)
@@ -5932,23 +5886,15 @@ class ProjectChatManager:
     ) -> tuple[str, str, str]:
         """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
 
-        Code mode on: the full block with the repository's instructions, or
-        with a pointer to the file when ``inline_instructions`` is False. Linked
-        but off: a light hint naming the path and how to switch on.
+        The full block with the repository's instructions, or with a pointer to
+        the file when ``inline_instructions`` is False. A repository that is
+        gone gets the short "not available" block. A memory-pass chat gets
+        nothing (see ``linked_repo_for_chat``).
         """
-        if project is None or not project.repo_path:
+        if project is None or not project.repo_path or is_memory_pass_chat(chat, project):
             return "", "", ""
         path = project.repo_path
         state = repo_state(path)
-        if not chat.code_mode:
-            block = render_linked_repo_off_block(path=path)
-            if state["missing"]:
-                return block, f"{path}\0off", f"linked_repo={path} missing=true code_mode=off"
-            return (
-                block,
-                f"{path}\0off",
-                f"linked_repo={path} branch={state['branch'] or '(detached)'} code_mode=off",
-            )
         if state["missing"]:
             block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
             return block, f"{path}\0missing", f"linked_repo={path} missing=true"
@@ -5986,10 +5932,10 @@ class ProjectChatManager:
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
         # The repository instructions are inlined once per provider session:
-        # the first time they are attached, whenever that is (turn 1, or code
-        # mode switched on mid-session from the PWA). A later re-send in a
-        # session that already took the text (AGENTS.md edited, code mode
-        # toggled again) points at the file instead. A cleared context marker
+        # the first time they are attached, whenever that is (turn 1, or the
+        # project linked mid-session). A later re-send in a session that
+        # already took the text (AGENTS.md edited, the link changed) points at
+        # the file instead. A cleared context marker
         # (compaction, cancelled first turn) inlines it again.
         already_inlined = bool(
             chat.context_digest
@@ -6002,7 +5948,7 @@ class ProjectChatManager:
         )
         include_stable = self._needs_stable_context(chat)
         chat.instructions_inline_pending = bool(
-            include_stable and chat.code_mode and repo_block and not already_inlined
+            include_stable and repo_block and not already_inlined
         )
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
@@ -6810,7 +6756,7 @@ class ProjectChatManager:
             agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
             agent_denied=denied,
             agent_denied_except=denied_except,
-            linked_repo=self._linked_repo_for_chat(chat),
+            linked_repo=self.linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -6964,7 +6910,7 @@ class ProjectChatManager:
             return None
         project = self._projects.get(chat.project_id)
         repo_path = getattr(project, "repo_path", "") if project else ""
-        if not repo_path or not chat.code_mode:
+        if not repo_path or not self.linked_repo_for_chat(chat):
             if chat.repo_location:
                 chat.repo_location = {}
                 self._save()
@@ -7001,9 +6947,9 @@ class ProjectChatManager:
             project is None
             or not getattr(project, "repo_path", "")
             or chat is None
-            or not chat.code_mode
+            or not self.linked_repo_for_chat(chat)
         ):
-            # Unlinked or code mode off: the stored location was just cleared; the done payload
+            # Not in code mode: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None
         try:
@@ -7136,23 +7082,11 @@ class ProjectChatManager:
         })
         return True
 
-    def arm_code_mode_continuation(self, chat_id: str) -> bool:
-        """Ask the running foreground turn for one hidden continuation turn.
-
-        False when there is no foreground turn to continue: the chat is idle, or
-        only a between-turns drain stream is live (it has no drive loop).
-        """
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background or not stream.accepting_queue:
-            return False
-        stream.code_mode_continue = True
-        return True
-
     def arm_reload_continuation(self, chat_id: str) -> bool:
         """Ask the running foreground turn to reload the provider when it ends.
 
-        False when there is no foreground turn to continue, like
-        ``arm_code_mode_continuation``.
+        False when there is no foreground turn to continue: the chat is idle, or
+        only a between-turns drain stream is live (it has no drive loop).
         """
         stream = self._broker.get(chat_id)
         if stream is None or stream.background or not stream.accepting_queue:
@@ -7350,7 +7284,7 @@ class ProjectChatManager:
                 agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
                 agent_denied=denied,
                 agent_denied_except=denied_except,
-                linked_repo=self._linked_repo_for_chat(chat),
+                linked_repo=self.linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
             # Lock the chips before the await: an edit or remove landing while

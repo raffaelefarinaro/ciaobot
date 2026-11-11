@@ -2613,9 +2613,6 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
-    code_mode = body.get("code_mode")
-    if code_mode is not None and not isinstance(code_mode, bool):
-        return JSONResponse({"error": "code_mode must be a boolean"}, status_code=400)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2626,8 +2623,6 @@ async def chat_detail(request: Request) -> Response:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
-        if chat is not None and code_mode is not None:
-            chat = pcm.set_code_mode(chat_id, code_mode, actor="user")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:

@@ -438,7 +438,7 @@ def test_prose_quoting_a_notification_advances_both_turn_counters(
 def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
     capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
     for prompt in (
-        cli_envelopes.CODE_MODE_CONTINUE_PROMPT,
+        cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT,
         cli_envelopes.RELOAD_CONTINUE_PROMPT,
     ):
         assert cli_envelopes.is_hidden_continuation(prompt)

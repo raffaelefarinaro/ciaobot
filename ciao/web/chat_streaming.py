@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT
+from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
 from ciao.config import CiaoConfig
 from ciao.models import (
     AgentRequest,
@@ -1105,41 +1105,12 @@ class ChatStreaming:
                 park_rest = stream.user_stopped
                 if stream.user_stopped:
                     stream.user_stopped = False
-                # An agent that switched this chat into code mode during the turn
-                # (`ciao chat update --code on`) gets ONE hidden continuation, so
-                # the provider restarts with the repository's skills and write
-                # roots. Consumed here whatever happens: never after a stop or an
-                # error, and a queued user message supersedes it (that turn
-                # already runs in code mode). No user-turn slot and no user_echo:
-                # the renderers skip this prompt too.
-                continue_code_mode = stream.code_mode_continue
-                stream.code_mode_continue = False
                 reload_requested = stream.reload_continue
                 stream.reload_continue = False
-                chat_cm = self._host._chats.get(chat_id)
-                if (
-                    continue_code_mode
-                    and next_pending is None
-                    and not had_error
-                    and not park_rest
-                    and chat_cm is not None
-                    and chat_cm.code_mode
-                ):
-                    current_prompt = CODE_MODE_CONTINUE_PROMPT
-                    current_images = None
-                    current_turn_index = None
-                    compact = False
-                    hidden_turn = True
-                    stream.moved_to_background = False
-                    stream.move_epoch += 1
-                    stream.move_in_flight = 0
-                    stream.move_succeeded = False
-                    continue
                 # `ciao chat reload`: drop the provider so the next turn respawns
                 # it and resumes the same session with the changed MCP servers,
                 # plugins and skills. Consumed whatever happens; a queued user
                 # message runs on the fresh provider instead of a hidden turn.
-                # (A code-mode switch above already respawned it.)
                 if reload_requested and not park_rest:
                     reloaded = await self._host.reload_provider(chat_id)
                     if not reloaded:

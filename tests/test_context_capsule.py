@@ -324,7 +324,6 @@ def _linked_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: i
         lambda path: {"path": path, "branch": "main", "dirty": False, "missing": False},
     )
     chat = manager.create_chat(project.project_id)
-    chat.code_mode = True
     return manager, chat, repo
 
 
@@ -350,20 +349,6 @@ def test_an_unlinked_project_prefix_has_no_repo_block(tmp_path: Path) -> None:
     assert "linked_repo=" not in prefix
 
 
-def test_a_linked_chat_with_code_mode_off_gets_the_light_block(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager, chat, _repo = _linked_manager(tmp_path, monkeypatch)
-    on_marker = manager._stable_context_marker(chat)[0]
-    chat.code_mode = False
-    prefix = manager._build_prompt_prefix(chat)
-    assert "Code mode is off" in prefix
-    assert "code_mode=off" in prefix
-    assert "Run make test" not in prefix
-    assert "Code-work rules" not in prefix
-    assert manager._stable_context_marker(chat)[0] != on_marker
-
-
 def test_the_linked_repo_rules_keep_notes_out_of_the_repo() -> None:
     assert "Notes, plans, reports, drafts and artifacts" in LINKED_REPO_RULES
 
@@ -378,14 +363,15 @@ def _prime(manager, chat, session_id: str = "ses_1") -> None:  # type: ignore[no
     manager._commit_context_marker(chat, SimpleNamespace(context_digest=digest), session_id)
 
 
-def test_code_mode_switched_on_mid_session_inlines_the_instructions_once(
+def test_a_repo_linked_mid_session_inlines_the_instructions_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Switched on from the PWA, the agent has never seen the text: inline it, then point."""
+    """Linked mid-session, the agent has never seen the text: inline it, then point."""
     manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
-    chat.code_mode = False
+    project = manager._projects[chat.project_id]
+    project.repo_path = ""
     _prime(manager, chat)
-    chat.code_mode = True
+    project.repo_path = str(repo)
 
     assert manager._needs_stable_context(chat)
     prefix = manager._build_prompt_prefix(chat)
@@ -393,9 +379,9 @@ def test_code_mode_switched_on_mid_session_inlines_the_instructions_once(
     assert "Run make test" in prefix
 
     _prime(manager, chat)  # that turn went out
-    chat.code_mode = False
+    project.repo_path = ""
     _prime(manager, chat)
-    chat.code_mode = True
+    project.repo_path = str(repo)
     prefix = manager._build_prompt_prefix(chat)
     assert f"read {repo}/AGENTS.md" in prefix
     assert "Run make test" not in prefix

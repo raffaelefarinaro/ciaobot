@@ -1069,9 +1069,9 @@ class MemoryPassCoordinator:
         )
 
     def _repo_section(self, helper: dict) -> str:
-        """The linked-repository section, or nothing unless the source chat was in code mode."""
+        """The linked-repository section, or nothing unless the source chat is in code mode."""
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
-        if chat is None or not chat.code_mode:
+        if chat is None or not self._host.linked_repo_for_chat(chat):
             return ""
         project = self._host._projects.get(chat.project_id)
         repo_path = str(getattr(project, "repo_path", "") or "")
