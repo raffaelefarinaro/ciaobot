@@ -298,6 +298,12 @@ class _Pcm:
     def get_project(self, project_id: str) -> Any:
         return self._projects.get(project_id)
 
+    def linked_repo_for_chat(self, chat: Any) -> str:
+        """The engine's code-mode rule: the project's linked repo, when it exists."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        return raw if raw and Path(raw).is_dir() else ""
+
 
 def _config(root: Path) -> Any:
     return SimpleNamespace(
@@ -307,7 +313,10 @@ def _config(root: Path) -> Any:
     )
 
 
-def _resolve_fixture(tmp_path: Path, *, code_mode: bool, exists: bool = True) -> tuple[Any, Any, Path, Path, Path]:
+def _resolve_fixture(
+    tmp_path: Path, *, worktree: bool = True, exists: bool = True
+) -> tuple[Any, Any, Path, Path, Path]:
+    """A chat in a project linked to ``repo``; with ``worktree`` it last worked in ``tree``."""
     root = tmp_path / "root"
     repo = tmp_path / "repo"
     tree = tmp_path / "tree"
@@ -315,24 +324,26 @@ def _resolve_fixture(tmp_path: Path, *, code_mode: bool, exists: bool = True) ->
         p.mkdir()
     project = SimpleNamespace(id="p", repo_path=str(repo), workspace="")
     chat = SimpleNamespace(
-        id="c", project_id="p", code_mode=code_mode,
-        repo_location={"path": str(tree), "exists": exists},
+        id="c", project_id="p",
+        repo_location={"path": str(tree), "exists": exists} if worktree else {},
     )
     return _config(root), _Pcm({"c": chat}, {"p": project}), root, repo, tree
 
 
 def test_resolve_folder_prefers_a_code_mode_worktree(tmp_path: Path) -> None:
-    config, pcm, _root, _repo, tree = _resolve_fixture(tmp_path, code_mode=True)
+    config, pcm, _root, _repo, tree = _resolve_fixture(tmp_path)
     assert host_terminal.resolve_folder(config, pcm, chat_id="c") == tree.resolve()
 
 
-def test_resolve_folder_ignores_the_worktree_outside_code_mode(tmp_path: Path) -> None:
-    config, pcm, _root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
-    assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
+def test_resolve_folder_ignores_the_worktree_once_the_repo_is_gone(tmp_path: Path) -> None:
+    """No linked repository on this machine means no code mode, so no worktree either."""
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path)
+    repo.rmdir()
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c") == root.resolve()
 
 
 def test_resolve_folder_skips_a_missing_worktree(tmp_path: Path) -> None:
-    config, pcm, _root, repo, tree = _resolve_fixture(tmp_path, code_mode=True, exists=False)
+    config, pcm, _root, repo, tree = _resolve_fixture(tmp_path, exists=False)
     assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
     tree.rmdir()
     assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
@@ -349,7 +360,7 @@ def test_resolve_folder_falls_back_to_the_agent_root(tmp_path: Path) -> None:
 
 
 def test_folder_choices_lists_the_repo_then_the_workspace(tmp_path: Path) -> None:
-    config, pcm, root, _repo, tree = _resolve_fixture(tmp_path, code_mode=True)
+    config, pcm, root, _repo, tree = _resolve_fixture(tmp_path)
     assert host_terminal.folder_choices(config, pcm, chat_id="c") == {
         "repo": tree.resolve(),
         "workspace": root.resolve(),
@@ -357,13 +368,13 @@ def test_folder_choices_lists_the_repo_then_the_workspace(tmp_path: Path) -> Non
 
 
 def test_resolve_folder_honours_the_location(tmp_path: Path) -> None:
-    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, worktree=False)
     assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="workspace") == root.resolve()
     assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="repo") == repo.resolve()
 
 
 def test_resolve_folder_keeps_the_repo_when_the_workspace_root_is_gone(tmp_path: Path) -> None:
-    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, worktree=False)
     root.rmdir()
     assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
     with pytest.raises(FileNotFoundError):

@@ -779,28 +779,11 @@ def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, d
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
 
 
-def test_chat_update_code_flag_maps_to_code_mode() -> None:
-    parser = agent_cli.build_parser()
-    assert agent_cli.resolve(parser.parse_args(["chat", "update", "--code", "on"])) == (
-        "chat_update",
-        {"chat_id": "", "code_mode": True},
-    )
-    assert agent_cli.resolve(parser.parse_args(["chat", "update", "--code", "off"])) == (
-        "chat_update",
-        {"chat_id": "", "code_mode": False},
-    )
+def test_chat_update_has_no_code_flag() -> None:
+    """Code mode follows the project's linked repository; there is no switch."""
     with pytest.raises(SystemExit) as excinfo:
-        agent_cli.main(["chat", "update", "--code", "maybe"])
+        agent_cli.main(["chat", "update", "--code", "on"])
     assert excinfo.value.code == 2
-
-
-def test_plan_mode_refuses_a_code_mode_switch(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path, mode="plan")
-    token = _token(service)
-    with _client(service) as client:
-        response = _post(client, token, "chat_update", {"code_mode": True})
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
 def test_cli_repo_flag_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

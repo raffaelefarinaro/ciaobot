@@ -814,18 +814,12 @@
                          pointer, a hidden line for a screen reader. -->
                     <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
                     <span
-                      v-if="isChatCodeModeOn(chat, project.repo)"
+                      v-if="inCodeMode(project.repo)"
                       class="chat-code-tag"
                       role="img"
                       :title="codeBadgeTitle(chat, project.repo)"
                       :aria-label="codeBadgeTitle(chat, project.repo)"
                     >›_</span>
-                    <span
-                      v-if="branchChip(chat, project.repo)"
-                      class="chat-repo-tag chat-repo-tag--code-off"
-                      :class="{ 'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed }"
-                      :title="branchChip(chat, project.repo)!.title"
-                    >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -1009,8 +1003,8 @@ import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
-import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
-import { isChatCodeModeOn } from '../lib/codeMode'
+import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
+import { inCodeMode } from '../lib/repo'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -1209,18 +1203,11 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
-// The branch tag for a chat row. In code mode the row carries the compact
-// `code` badge instead, so the branch tag marks a code-off row only.
-function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
-  if (isChatCodeModeOn(chat, repo)) return null
-  return sidebarBranchChip(repo, chat.repo_location)
-}
-
 // The `code` badge's facts: the repository, the branch the chat works on and
-// the folder it works in. Undefined without a linked repository, which is also
-// when the badge does not render.
+// the folder it works in. Undefined outside code mode, which is also when the
+// badge does not render.
 function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
-  if (!repo || !isChatCodeModeOn(chat, repo)) return undefined
+  if (!inCodeMode(repo)) return undefined
   return sidebarCodeBadgeTitle(repo, chat.repo_location)
 }
 
@@ -2808,32 +2795,6 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: -0.04em;
 }
 
-/* A squared tag that can truncate (branch names run long). */
-.chat-repo-tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 9em;
-  height: 16px;
-  padding: 0 4px;
-  box-sizing: border-box;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font: 600 calc(10px * var(--font-scale))/14px var(--font-mono);
-}
-.chat-repo-tag--removed {
-  text-decoration: line-through;
-  opacity: 0.6;
-}
-/* A worktree the chat is no longer coding in: still named, visibly inactive. */
-.chat-repo-tag--code-off {
-  border-style: dashed;
-  opacity: 0.55;
-}
-
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
    titles read as a second level of headings next to the projects. */
 .chat-title--unread {
@@ -3077,9 +3038,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }

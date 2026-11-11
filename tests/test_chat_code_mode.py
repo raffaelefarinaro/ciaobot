@@ -1,7 +1,11 @@
-"""Per-chat code mode (#1450): off by default, persisted, broadcast, marked."""
+"""Code mode is derived: a chat is in code mode exactly when its project's linked
+repository exists on this machine, except a memory-pass chat. Nothing is stored
+per chat and nothing switches it."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,10 +14,12 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.providers.claude import ClaudeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import chat_detail
+from tests.conftest import attach_stub_mcp
 
 
 def _build(tmp_path: Path) -> ProjectChatManager:
@@ -29,151 +35,209 @@ def _build(tmp_path: Path) -> ProjectChatManager:
             for name in ("personal", "work")
         },
     )
-    return ProjectChatManager(
+    return attach_stub_mcp(ProjectChatManager(
         config,
         state_store=StateStore(config.state_path, tmp_path, config.media_root),
         transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
         path=runtime / "web_projects.json",
-    )
+    ))
 
 
-def _make_client(manager: ProjectChatManager) -> TestClient:
-    app = Starlette(routes=[Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH"])])
-    app.state.project_chat_manager = manager
-    app.state.config = manager._config
-    return TestClient(app, raise_server_exceptions=False)
+def _git_repo(path: Path) -> Path:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    (path / "AGENTS.md").write_text("Repo rules.\n", encoding="utf-8")
+    return path
 
 
-def _linked(tmp_path: Path):  # type: ignore[no-untyped-def]
+def test_a_chat_in_a_linked_project_is_in_code_mode(tmp_path: Path) -> None:
     manager = _build(tmp_path)
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = _git_repo(tmp_path / "repo")
     project = manager.create_project("Linked", workspace="work")
     project.repo_path = str(repo)
-    return manager, project, manager.create_chat(project.project_id), repo
+    chat = manager.create_chat(project.project_id)
+
+    assert manager.linked_repo_for_chat(chat) == str(repo.resolve())
+    prefix = manager._build_prompt_prefix(chat)
+    assert "[Linked repository]" in prefix
+    assert "Repo rules." in prefix
 
 
-def test_unlinked_chat_persists_without_code_mode_keys(tmp_path: Path) -> None:
+def test_a_chat_in_an_unlinked_project_is_not_in_code_mode(tmp_path: Path) -> None:
     manager = _build(tmp_path)
     project = manager.create_project("Plain", workspace="work")
     chat = manager.create_chat(project.project_id)
-    stored = manager._state_payload()["chats"][chat.chat_id]
-    assert "code_mode" not in stored
-    assert chat.to_dict()["code_mode"] is False
+
+    assert manager.linked_repo_for_chat(chat) == ""
+    assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
+    assert manager.build_agent_request(chat, prompt="hi").linked_repo == ""
 
 
-def test_code_mode_round_trips_through_a_restart(tmp_path: Path) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    restarted = _build(tmp_path)
-    reloaded = restarted._chats[chat.chat_id]
-    assert reloaded.code_mode is True
-    restarted.set_code_mode(chat.chat_id, False, actor="user")
-    assert "code_mode" not in restarted._state_payload()["chats"][chat.chat_id]
-
-
-def test_set_code_mode_rejects_unlinked_missing_and_archived(tmp_path: Path) -> None:
-    manager, project, chat, repo = _linked(tmp_path)
-    assert manager.set_code_mode("nope", True, actor="user") is None
-    plain = manager.create_project("Plain", workspace="work")
-    plain_chat = manager.create_chat(plain.project_id)
-    with pytest.raises(ValueError):
-        manager.set_code_mode(plain_chat.chat_id, True, actor="user")
-    repo.rmdir()
-    with pytest.raises(ValueError):
-        manager.set_code_mode(chat.chat_id, True, actor="user")
-    repo.mkdir()
-    chat.archived = True
-    with pytest.raises(ValueError):
-        manager.set_code_mode(chat.chat_id, True, actor="user")
-
-
-def test_set_code_mode_publishes_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager, project, chat, _repo = _linked(tmp_path)
-    published: list[dict] = []
-    monkeypatch.setattr(manager._events, "publish", published.append)
-    manager.set_code_mode(chat.chat_id, True, actor="agent")
-    assert len(published) == 1
-    event = published[0]
-    assert set(event) == {"type", "chat_id", "project_id", "code_mode", "actor", "at"}
-    assert event["type"] == "chat_code_mode" and event["actor"] == "agent"
-    manager.set_code_mode(chat.chat_id, True, actor="agent")
-    assert len(published) == 1
-
-
-def test_switching_off_clears_repo_location_and_publishes_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    chat.repo_location = {"branch": "main"}
-    published: list[dict] = []
-    monkeypatch.setattr(manager._events, "publish", published.append)
-    manager.set_code_mode(chat.chat_id, False, actor="user")
-    assert chat.repo_location == {}
-    assert [e["type"] for e in published] == ["chat_code_mode", "chat_repo_location"]
-    assert published[1]["repo_location"] == {}
-
-
-def test_code_mode_flag_in_unlinked_project_is_not_effective(tmp_path: Path) -> None:
+def test_a_missing_repository_folder_turns_code_mode_off(tmp_path: Path) -> None:
     manager = _build(tmp_path)
-    project = manager.create_project("Plain", workspace="work")
+    project = manager.create_project("Linked", workspace="work")
+    project.repo_path = str(tmp_path / "gone")
     chat = manager.create_chat(project.project_id)
-    chat.code_mode = True
-    assert manager._linked_repo_for_chat(chat) == ""
+
+    assert manager.linked_repo_for_chat(chat) == ""
+    assert manager.build_agent_request(chat, prompt="hi").linked_repo == ""
+    # The agent is still told the link is broken rather than left guessing.
+    assert "not available on this machine" in manager._build_prompt_prefix(chat)
+
+
+def test_a_memory_pass_chat_is_never_in_code_mode(tmp_path: Path) -> None:
+    manager = _build(tmp_path)
+    repo = _git_repo(tmp_path / "repo")
+    project = manager._memory_pass.ensure_project("work")
+    project.repo_path = str(repo)
+    chat = manager.create_chat(
+        project.project_id,
+        helper={"kind": "memory_pass", "source_chat_id": "chat-1", "archive_policy": "when_clean"},
+    )
+
+    assert manager.linked_repo_for_chat(chat) == ""
     assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
 
 
-def test_patch_code_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    client = _make_client(manager)
+def test_a_link_change_mid_chat_reaches_the_next_turn(tmp_path: Path) -> None:
+    """Linking, relinking and unlinking the project re-sends the stable context
+    and changes what the provider is started with, so the next turn restarts it."""
+    manager = _build(tmp_path)
+    repo_a = _git_repo(tmp_path / "repo-a")
+    repo_b = _git_repo(tmp_path / "repo-b")
+    project = manager.create_project("Later", workspace="work")
+    chat = manager.create_chat(project.project_id, provider="claude")
+    claude = ClaudeProvider(tmp_path)
+
+    def take_turn() -> tuple[object, str]:
+        """Build the next turn's request and mark its stable context as delivered."""
+        request = manager.build_agent_request(chat, prompt="hi")
+        chat.session_id = "sess-1"
+        chat.context_digest, chat.context_session_id = manager._stable_context_marker(chat)
+        return claude._spawn_key_for(request), request.linked_repo
+
+    unlinked_key, linked = take_turn()
+    assert linked == ""
+    assert not manager._needs_stable_context(chat)
+
+    manager.update_project(project.project_id, repo_path=str(repo_a))
+    assert manager._needs_stable_context(chat)
+    assert "[Linked repository]" in manager._build_prompt_prefix(chat)
+    key_a, linked = take_turn()
+    assert linked == str(repo_a.resolve())
+    assert key_a != unlinked_key
+
+    manager.update_project(project.project_id, repo_path=str(repo_b))
+    assert manager._needs_stable_context(chat)
+    key_b, linked = take_turn()
+    assert linked == str(repo_b.resolve())
+    assert key_b != key_a
+
+    manager.update_project(project.project_id, repo_path="")
+    assert manager._needs_stable_context(chat)
+    assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
+    key_off, linked = take_turn()
+    assert linked == ""
+    assert key_off != key_b
+
+
+def test_moving_a_chat_into_a_linked_project_puts_it_in_code_mode(tmp_path: Path) -> None:
+    manager = _build(tmp_path)
+    repo = _git_repo(tmp_path / "repo")
+    plain = manager.create_project("Plain", workspace="work")
+    linked = manager.create_project("Linked", workspace="work")
+    linked.repo_path = str(repo)
+    chat = manager.create_chat(plain.project_id)
+    assert manager.linked_repo_for_chat(chat) == ""
+
+    manager.update_chat(chat.chat_id, project_id=linked.project_id)
+    assert manager.linked_repo_for_chat(chat) == str(repo.resolve())
+
+
+def test_moving_a_chat_clears_its_repo_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _build(tmp_path)
+    repo = _git_repo(tmp_path / "repo")
+    linked = manager.create_project("Linked", workspace="work")
+    linked.repo_path = str(repo)
+    plain = manager.create_project("Plain", workspace="work")
+    chat = manager.create_chat(linked.project_id)
+    chat.repo_location = {"path": str(repo), "branch": "main", "is_worktree": False, "exists": True}
     published: list[dict] = []
     monkeypatch.setattr(manager._events, "publish", published.append)
-    resp = client.patch(f"/api/chats/{chat.chat_id}", json={"code_mode": True})
+
+    manager.update_chat(chat.chat_id, project_id=plain.project_id)
+
+    assert chat.repo_location == {}
+    assert [e["type"] for e in published] == ["chat_moved", "chat_repo_location"]
+    assert published[1]["repo_location"] == {}
+
+
+def test_relinking_a_project_clears_its_chats_repo_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored worktree of the old repository must not outlive the link."""
+    manager = _build(tmp_path)
+    repo_a = _git_repo(tmp_path / "repo-a")
+    repo_b = _git_repo(tmp_path / "repo-b")
+    project = manager.create_project("Linked", workspace="work")
+    manager.update_project(project.project_id, repo_path=str(repo_a))
+    worked = manager.create_chat(project.project_id)
+    idle = manager.create_chat(project.project_id)
+    other = manager.create_chat(manager.create_project("Other", workspace="work").project_id)
+    loc = {"path": str(repo_a), "branch": "main", "is_worktree": False, "exists": True}
+    worked.repo_location = dict(loc)
+    other.repo_location = dict(loc)
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+
+    manager.update_project(project.project_id, repo_path=str(repo_a))  # unchanged
+    assert worked.repo_location == loc
+    assert [e["type"] for e in published] == ["project_updated"]
+
+    published.clear()
+    manager.update_project(project.project_id, repo_path=str(repo_b))
+
+    assert worked.repo_location == {} and idle.repo_location == {}
+    assert other.repo_location == loc
+    assert [e["type"] for e in published] == ["project_updated", "chat_repo_location"]
+    assert published[1] == {
+        "type": "chat_repo_location",
+        "chat_id": worked.chat_id,
+        "project_id": project.project_id,
+        "repo_location": {},
+    }
+
+
+def test_a_chat_persisted_with_the_old_code_mode_key_still_loads(tmp_path: Path) -> None:
+    manager = _build(tmp_path)
+    project = manager.create_project("Linked", workspace="work")
+    chat = manager.create_chat(project.project_id, title="old")
+    path = tmp_path / ".runtime" / "web_projects.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["chats"][chat.chat_id]["code_mode"] = True
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    restarted = _build(tmp_path)
+
+    reloaded = restarted.get_chat(chat.chat_id)
+    assert reloaded is not None and reloaded.title == "old"
+    assert "code_mode" not in restarted._state_payload()["chats"][chat.chat_id]
+
+
+def test_the_chat_payload_and_patch_carry_no_code_mode(tmp_path: Path) -> None:
+    manager = _build(tmp_path)
+    project = manager.create_project("Plain", workspace="work")
+    chat = manager.create_chat(project.project_id)
+    assert "code_mode" not in chat.to_dict()
+
+    app = Starlette(routes=[Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH"])])
+    app.state.project_chat_manager = manager
+    app.state.config = manager._config
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.patch(f"/api/chats/{chat.chat_id}", json={"code_mode": True, "title": "t"})
     assert resp.status_code == 200
-    assert resp.json()["code_mode"] is True
-    assert published[0]["actor"] == "user"
-    plain = manager.create_project("Plain", workspace="work")
-    plain_chat = manager.create_chat(plain.project_id)
-    assert client.patch(f"/api/chats/{plain_chat.chat_id}", json={"code_mode": True}).status_code == 400
-    assert client.patch(f"/api/chats/{chat.chat_id}", json={"code_mode": "yes"}).status_code == 400
-
-
-def test_moving_a_chat_turns_code_mode_off(tmp_path: Path) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    other = manager.create_project("Other", workspace="work")
-    manager.update_chat(chat.chat_id, project_id=other.project_id)
-    assert chat.code_mode is False
-
-
-def test_project_move_still_turns_code_mode_off(tmp_path: Path) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    chat.user_turn_count = 3
-    other = manager.create_project("Other", workspace="work")
-    manager.update_chat(chat.chat_id, project_id=other.project_id)
-    assert chat.code_mode is False
-
-
-def test_code_mode_off_refused_after_a_message(tmp_path: Path) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    chat.user_turn_count = 1
-    with pytest.raises(ValueError, match="stays on"):
-        manager.set_code_mode(chat.chat_id, False, actor="user")
-    assert chat.code_mode is True
-    assert manager.set_code_mode(chat.chat_id, True, actor="agent") is chat
-    resp = _make_client(manager).patch(f"/api/chats/{chat.chat_id}", json={"code_mode": False})
-    assert resp.status_code == 400
-    assert "stays on" in resp.text
-
-
-def test_code_mode_off_allowed_before_any_message(tmp_path: Path) -> None:
-    manager, _project, chat, _repo = _linked(tmp_path)
-    manager.set_code_mode(chat.chat_id, True, actor="user")
-    assert chat.user_turn_count == 0
-    manager.set_code_mode(chat.chat_id, False, actor="user")
-    assert chat.code_mode is False
+    assert resp.json()["title"] == "t"
+    assert "code_mode" not in resp.json()
+    assert manager.linked_repo_for_chat(chat) == ""

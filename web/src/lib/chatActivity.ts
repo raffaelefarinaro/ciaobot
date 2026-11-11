@@ -296,8 +296,8 @@ export function findFinalAnswerIndex(
  *  outputs/subagents attached).
  *
  *  Only an earlier assistant row the server explicitly marked completed
- *  (`phase: 'final_answer'`, no tool call) is a bubble: a hidden code-mode
- *  continuation separates two settled replies in one turn and the server
+ *  (`phase: 'final_answer'`, no tool call) is a bubble: a hidden continuation
+ *  (reload, or legacy code mode) separates two settled replies in one turn and the server
  *  tags the first so both stay visible. Every other step (mid-turn text,
  *  thinking, tool calls, file cards, and bookkeeping after the reply) forms
  *  ordered Activity trace segments around those bubbles, in buffer order.
