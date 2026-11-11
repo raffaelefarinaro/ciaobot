@@ -26,6 +26,7 @@
     <ArchiveTaskDialog />
     <PromptDialog />
     <NewChatPicker />
+    <div class="status-bar-tint" aria-hidden="true" />
   </div>
 </template>
 
@@ -253,6 +254,10 @@ watch(shouldPollStartup, (shouldPoll) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  /* Top edge that full-screen surfaces (drawer, sheets, file viewer) must
+     clear: the safe-area inset, plus the .status-bar-tint strip where it is
+     shown (installed app on phones, redefined with the strip below). */
+  --chrome-top: var(--safe-top);
   /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
   --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -971,7 +976,7 @@ input:focus, textarea:focus, select:focus {
     max-height: 100dvh;
     border-radius: 0;
     border: none;
-    padding-top: var(--safe-top);
+    padding-top: var(--chrome-top);
     padding-bottom: var(--safe-bottom);
   }
 }
@@ -994,5 +999,33 @@ input:focus, textarea:focus, select:focus {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+/* iOS 26 status-bar tint. WebKit ignores `theme-color` and the status-bar-style
+   meta for the installed app's bar colour: it hit-tests the top edge and fills
+   the bar solid only when an opaque fixed box at least 90% of the viewport wide
+   and over 10px tall sits there (LocalFrameView::fixedContainerEdges);
+   otherwise it draws a soft blur over the page. Pane headers are in-flow, so
+   without this strip every page got the blur and only the open sidebar (fixed
+   drawer + dimming backdrop) made it solid, in the scrim's near-black.
+   The strip is exactly the phone header's --space-3 top padding in --bg, so it
+   is invisible on pages, and it sits above every overlay so the bar keeps the
+   header colour while a menu or sheet is open; those full-screen surfaces
+   clear it through --chrome-top. Phones in standalone only: a
+   browser tab owns its own chrome, and desktop headers are shorter. */
+.status-bar-tint { display: none; }
+@media (display-mode: standalone) and (max-width: 768px),
+       (display-mode: fullscreen) and (max-width: 768px) {
+  :root { --chrome-top: calc(var(--space-3) + var(--safe-top)); }
+  .status-bar-tint {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--chrome-top);
+    background: var(--bg);
+    pointer-events: none;
+    z-index: 2000; /* above every overlay, incl. the 1100 engine-offline curtain */
+  }
 }
 </style>
