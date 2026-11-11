@@ -54,7 +54,7 @@ test.describe('phone chat header', () => {
 
     await openChatDetails(page)
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
-    await expect(page.locator('#chat-work-rail .chat-repo-section .chat-repo-code-note')).toBeVisible()
+    await expect(page.locator('#chat-work-rail .chat-repo-section .chat-repo-row').first()).toBeVisible()
   })
 
   test('the ⋯ menu holds Chat details, Notifications, Archive and Back', async ({ page }) => {

@@ -105,8 +105,6 @@ describe('ChatRepoSection', () => {
     expect(wrapper.find('.chat-repo-branch-row').exists()).toBe(false)
     expect(wrapper.findAll('.chat-repo-row')).toHaveLength(1)
     expect(wrapper.find('.chat-repo-copy').exists()).toBe(false)
-    // A missing folder takes the chat out of code mode, so the note is not shown.
-    expect(wrapper.find('.chat-repo-code-note').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -116,7 +114,7 @@ describe('ChatRepoSection', () => {
     expect(wrapper.find('input[type=checkbox]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Code mode')
     expect(wrapper.text()).not.toContain('Locked on')
-    expect(wrapper.get('.chat-repo-code-note').text()).toContain('work in code mode')
+    expect(wrapper.text()).not.toContain('work in code mode')
     // The only control left is the path copy button.
     const buttons = wrapper.findAll('button')
     expect(buttons).toHaveLength(1)

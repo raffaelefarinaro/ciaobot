@@ -76,12 +76,10 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
         </div>
       </template>
     </div>
-    <p v-if="!chip.missing" class="cd-detail cd-detail--wrap chat-repo-code-note">Chats in this project work in code mode: the repository's instructions, skills and write access are loaded.</p>
   </section>
 </template>
 
 <style scoped>
-.chat-repo-code-note { margin: var(--space-1) 0 0 26px; }
 .chat-repo-kind { color: var(--fg3); }
 .chat-repo-dirty { display: inline-flex; align-items: center; gap: 5px; }
 .chat-repo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); flex: none; }
