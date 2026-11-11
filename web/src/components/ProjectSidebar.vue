@@ -246,6 +246,27 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
+          <!-- Usage: the read-only look back at runs, tokens and time. Also
+               reached from Home's At a glance. -->
+          <router-link
+            to="/stats"
+            class="nav-item"
+            :class="{ 'nav-item--active': mode === 'stats' }"
+            title="usage"
+            aria-label="usage"
+          >
+            <!-- Three bars on a baseline, in the rail's rectilinear stroke. -->
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="3" y1="21" x2="21" y2="21" />
+                <rect x="5" y="12" width="3" height="6" />
+                <rect x="10.5" y="6" width="3" height="12" />
+                <rect x="16" y="9" width="3" height="9" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">Usage</span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -324,22 +345,21 @@
         </template>
         <template v-else>
 
-          <template v-if="oneOffSchedules.length">
+          <template v-if="scheduleGroups.oneOffs.length">
           <div class="schedule-group schedule-group--once">
             <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
             <div class="schedule-group-items">
-              <router-link
-                v-for="s in oneOffSchedules"
+              <SidebarRow
+                v-for="s in scheduleGroups.oneOffs"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                class="schedule-item"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
           </div>
         </template>
@@ -357,47 +377,47 @@
                 @click="emit('new-schedule')"
               ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
             </div>
-            <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
+            <p v-if="!scheduleGroups.routines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
             <div v-else class="schedule-group-items">
-              <router-link
-                v-for="s in userRoutines"
+              <SidebarRow
+                v-for="s in scheduleGroups.routines"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
+                  class="schedule-mark"
                   title="This automation is working"
                 ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
         </div>
 
-        <template v-if="systemAutomations.length">
+        <template v-if="scheduleGroups.system.length">
           <div class="schedule-group schedule-group--system">
             <h2 class="schedule-group-header">System</h2>
             <div class="schedule-group-items">
-              <router-link
-                v-for="s in systemAutomations"
+              <SidebarRow
+                v-for="s in scheduleGroups.system"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
+                  class="schedule-mark"
                   title="This automation is working"
                 ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
           </div>
         </template>
@@ -525,8 +545,8 @@
             <div v-for="i in 3" :key="i" class="project-group">
               <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
               <div class="chat-list">
-                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
-                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
+                <div class="sidebar-row-skeleton chat-item"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
+                <div class="sidebar-row-skeleton chat-item"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
               </div>
             </div>
           </div>
@@ -769,10 +789,13 @@
                   :modal="false"
                   @update:open="onChatMenuOpenChange(chat.chat_id, $event)"
                 >
-                  <div
+                  <SidebarRow
                     class="chat-item"
+                    :text="chat.title"
+                    :active="chat.chat_id === store.activeChatId"
+                    :unread="store.chatUnread(chat.chat_id) > 0"
+                    :pending="chat.title_status === 'pending'"
                     :class="{
-                      active: chat.chat_id === store.activeChatId,
                       remote: chat.local === false,
                       dragging: dragChatId === chat.chat_id,
                     }"
@@ -788,22 +811,6 @@
                     :aria-disabled="chat.local === false"
                     :title="chatRowTitle(chat, project.repo)"
                   >
-                    <span
-                      v-if="chat.title_status === 'pending'"
-                      class="title-shimmer"
-                      aria-hidden="true"
-                      title="Naming conversation"
-                    />
-                    <span
-                      v-else
-                      class="chat-title"
-                      :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                    >{{ chat.title }}</span>
-                    <!-- A bare span is role=generic, which cannot be named: the
-                         bar is hidden from assistive tech and the name travels
-                         as text beside it. The row is not a live region; only
-                         the chat header announces the naming. -->
-                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
                     <span
                       v-if="taskSignals.isTaskChat(chat)"
                       class="chat-task-tag"
@@ -844,7 +851,7 @@
                         @focus="useChatActionAnchor"
                       >&middot;&middot;&middot;</button>
                     </DropdownMenuTrigger>
-                  </div>
+                  </SidebarRow>
 
                   <DropdownMenuPortal>
                     <DropdownMenuContent
@@ -1010,7 +1017,9 @@ import NotificationBell from './NotificationBell.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
-import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
+import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
+import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
+import SidebarRow from './SidebarRow.vue'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV_GROUPS } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
@@ -1141,11 +1150,6 @@ const historyNav = useHistoryNav()
 function historyChordHint(key: '[' | ']'): string {
   if (isApplePlatform()) return ` (⌘${key})`
   return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
-}
-
-function promptTitle(prompt: string): string {
-  const first = prompt.split('\n')[0].trim()
-  return first.length > 36 ? first.slice(0, 33) + '...' : first
 }
 
 // With a single workspace the toggle is pure noise — hide it and let the
@@ -1304,42 +1308,10 @@ function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
 }
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
-const workspaceSchedules = computed(() =>
-  taskStore.schedules.filter(s => scheduleInWorkspace(
-    s,
-    store.activeWorkspace,
-    store.chats,
-    store.projects,
-  )),
-)
+const workspaceSchedules = useWorkspaceSchedules()
 
-/**
- * The badge in a row's time slot: paused, cadence, or fire time.
- *
- * An interval entry has no time of day, so showing `daily_time_utc` left the
- * slot blank and the row unreadable. Its cadence goes there instead.
- */
-function cadenceBadge(s: Schedule): string {
-  if (!s.enabled) return 'off'
-  if (s.frequency === 'interval') return `${s.interval_minutes}m`
-  if (s.frequency === 'manual') return '·'
-  return scheduleClock(s)
-}
-
-const oneOffSchedules = computed(() => {
-  return workspaceSchedules.value
-    .filter(s => s.frequency === 'once')
-    .slice()
-    .sort((a, b) => {
-      return oneOffSortKey(a).localeCompare(oneOffSortKey(b))
-    })
-})
-const userRoutines = computed(() =>
-  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
-)
-const systemAutomations = computed(() =>
-  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope === 'system'),
-)
+// The sidebar's automation groups, in the order the open automation's title rail walks.
+const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))
 
 // ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
 const schedulesListEl = ref<HTMLElement | null>(null)
@@ -1414,7 +1386,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
+import type { ChatInfo, ProjectInfo } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -2710,19 +2682,17 @@ async function confirmDeleteChat(chatId: string) {
 .project-actions-btn:hover { color: var(--fg); background: var(--bg3); }
 @media (hover: none) { .project-actions-btn { opacity: 0.6; } }
 
-.chat-item {
+/* A chat row is a SidebarRow (which owns the row's look) indented under its
+   project's guide line; the loading skeleton takes the same box. */
+.chat-list .chat-item {
+  padding-left: 22px;
+  margin-left: 4px;
+}
+.sidebar-row-skeleton {
   display: flex;
   align-items: center;
-  gap: 6px;
   min-height: var(--touch);
-  padding: 0 4px 0 22px;
-  margin-left: 4px;
-  border-radius: 7px;
-  cursor: pointer;
-  font-size: var(--text-base);
-  color: var(--fg2);
-  overflow: hidden;
-  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* Interval-automation marker on a chat row. Accent while the cadence is live,
@@ -2747,11 +2717,6 @@ async function confirmDeleteChat(chatId: string) {
   vertical-align: middle;
 }
 
-.chat-item:hover {
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-
 /* Chat rows can be dragged onto any project header to move them. The context
    menu remains available for keyboard and touch users. */
 .chat-item[draggable="true"] {
@@ -2760,15 +2725,6 @@ async function confirmDeleteChat(chatId: string) {
 .chat-item.dragging {
   opacity: 0.4;
   cursor: grabbing;
-}
-
-/* The selected row is the fill and the brighter label. It used to also carry a
-   2px accent bar down its left edge, which said the same thing twice: next to a
-   filled row the bar read as decoration, and it was the only place in the rail
-   where the workspace accent bled into a list it did not belong to. */
-.chat-item.active {
-  background: var(--bg3);
-  color: var(--fg);
 }
 
 .chat-title {
@@ -3279,9 +3235,8 @@ async function confirmDeleteChat(chatId: string) {
   gap: 12px;
 }
 
-/* Grouped schedule sections: a sentence-case label over plain 36px rows,
-   the same list language as the Projects tree - title on the left, the muted
-   time or cadence on the right. */
+/* Grouped schedule sections: a sentence-case label over the sidebar's chat
+   rows (SidebarRow) - title on the left, the muted time or cadence on the right. */
 .schedule-group {
   display: flex;
   flex-direction: column;
@@ -3300,55 +3255,9 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   gap: 2px;
 }
-.schedule-item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  min-height: 36px;
-  box-sizing: border-box;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-base);
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-}
-@media (pointer: coarse) {
-  .schedule-item { min-height: var(--touch); }
-}
-.schedule-item:hover { background: var(--bg-elev); color: var(--fg); }
-.schedule-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-/* Same row language as a selected chat: fill and label, no accent bar. */
-.schedule-item.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-.schedule-item .schedule-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.schedule-item .schedule-time {
-  flex-shrink: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-.schedule-item--disabled .schedule-label { color: var(--fg3); }
-.schedule-item .missed-dot {
+/* Automation rows are SidebarRows, the same row as a chat's; only their marks
+   need a rule here. */
+.schedule-mark {
   display: inline-flex;
   flex-shrink: 0;
 }

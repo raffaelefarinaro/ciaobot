@@ -106,7 +106,9 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
-    components/ChatTitleRail.vue  the chat header's swipeable title rail (ChatPanel's `plainHeader` prop turns it off)
+    components/TitleRail.vue  the swipeable title rail of an open chat's or automation's header (ChatPanel's `plainHeader` prop turns it off);
+                           railMotion.css is the lean/arrival motion of the body under it
+    components/SidebarRow.vue  the sidebar's one list row: chat rows and automation rows
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
@@ -124,7 +126,8 @@ web/
                            bumps when the project order changes outside the store's own reorder so an open sidebar
                            drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
-                          out of oversized panes (useHoverPinPopover, useChatComposer, useChatRail (sidebar-ordered, workspace-scoped rail items with an order frozen across rail switches),
+                          out of oversized panes (useHoverPinPopover, useChatComposer, useTitleRail (the generic rail model: items in sidebar order, an order frozen across rail switches, the arrival side),
+                          useChatRail and useScheduleRail (the chat and automation rails over it), usePullToClose (pull a title down to close),
                           useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
@@ -142,7 +145,7 @@ web/
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
                           (drop-slot geometry, settled order, auto-scroll step, announcement wording);
-                          `chatRail.ts` (rail order, neighbours, settle index, labels)
+                          `titleRail.ts` (rail items, order, neighbours, settle index, labels, lean style), `scheduleList.ts` (the sidebar's automation groups, titles and badges)
 ```
 
 ## iOS PWA gotchas

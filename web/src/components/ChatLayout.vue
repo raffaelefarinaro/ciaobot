@@ -42,10 +42,11 @@
         @pointerdown.capture="focusPane('main')"
         @focusin="focusPane('main')"
       >
-        <!-- Behind a chat being pulled down by its title: where letting go leads. -->
-        <div v-if="pullY > 0" class="chat-pull-home" :style="{ opacity: String(Math.min(1, pullY / 120)) }" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9H4z" /></svg>
-          <span>{{ pullY >= PULL_CLOSE_PX ? 'Release for Home' : 'Home' }}</span>
+        <!-- Behind an item being pulled down by its title: where letting go leads. -->
+        <div v-if="pullY > 0" class="chat-pull-home" :style="{ opacity: String(Math.min(1, pullY / PULL_CLOSE_PX)) }" aria-hidden="true">
+          <svg v-if="pullTarget === 'schedule'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="square" stroke-linejoin="miter"><rect x="3" y="3" width="18" height="18" /><polyline points="12 8 12 12 15 14" /></svg>
+          <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7v9H4z" /></svg>
+          <span>{{ pullY >= PULL_CLOSE_PX ? `Release for ${pullHint}` : pullHint }}</span>
         </div>
         <!-- Split view when a file is pinned and holds the slot -->
         <template v-if="fileInTile">
@@ -56,7 +57,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -117,9 +118,14 @@
           <SettingsView v-if="viewMode === 'settings'" @open-sidebar="sidebarCollapsed = false" />
           <SchedulePanel
             v-else-if="viewMode === 'schedules'"
+            ref="schedulePanelRef"
             :show-new="showNewSchedule"
             @created="showNewSchedule = false"
+            :class="{ 'chat-rise': scheduleRising }"
+            :style="pullStyle"
             @close="showNewSchedule = false"
+            @pull="onItemPull"
+            @pull-end="onItemPullEnd"
             @open-sidebar="sidebarCollapsed = false"
           />
           <TaskBoardView
@@ -145,7 +151,7 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <template v-else-if="store.activeChat">
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onChatPull" @pull-end="onChatPullEnd" @open-sidebar="sidebarCollapsed = false">
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
               <template #below-header>
                 <!-- Narrow shared pin: a compact native opener for the chat's
                      server-owned pin, not a forced split pane and never an
@@ -297,6 +303,8 @@ import type ChatPanelComponent from './ChatPanel.vue'
 import type PinnedFilePanelComponent from './PinnedFilePanel.vue'
 import { loadChatPanel, loadFileViewerModal, loadPinnedFilePanel, prefetchChatPanelForRoute } from '../lib/chatComponents'
 import ChatPaneSkeleton from './ChatPaneSkeleton.vue'
+import { PULL_CLOSE_PX, usePullToClose } from '../composables/usePullToClose'
+import { prefersReducedMotion } from '../lib/motion'
 // The destinations behind the rail are loaded on first visit, not on boot.
 // Statically imported they landed in the same chunk as the chat itself — a
 // third of a megabyte of Settings, Automations, the memory canvas and the
@@ -709,8 +717,7 @@ watch(sidebarCollapsed, (collapsed, was) => {
   if (!collapsed) { drawerOpened = isMobile.value; sidebarClosing.value = false; return }
   const opened = drawerOpened
   drawerOpened = false
-  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (was || !opened || !isMobile.value || reduce) { sidebarClosing.value = false; return }
+  if (was || !opened || !isMobile.value || prefersReducedMotion()) { sidebarClosing.value = false; return }
   sidebarClosing.value = true
   sidebarClosingTimer = setTimeout(() => { sidebarClosing.value = false; sidebarClosingTimer = null }, SIDEBAR_SLIDE_MS)
 })
@@ -1122,7 +1129,7 @@ const tileArriving = ref(false)
 let tileTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => store.activeChat?.chat_id, (id, was) => {
   if (!id || !was || id === was) return
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   tileArriving.value = false
   if (tileTimer) clearTimeout(tileTimer)
   void nextTick(() => {
@@ -1135,64 +1142,41 @@ let bootSettledAt = 0
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
 watch(() => store.activeChat?.chat_id, (id, was) => {
   if (!id || was || !bootSettledAt || Date.now() - bootSettledAt < 800) return
-  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   chatRising.value = true
   if (riseTimer) clearTimeout(riseTimer)
   riseTimer = setTimeout(() => { chatRising.value = false; riseTimer = null }, 340)
 })
-
-const PULL_CLOSE_PX = 120
-const pullY = ref(0)
-const pullSettling = ref(false)
-let pullContext = 0
-function invalidatePull() {
-  pullContext++
-  pullY.value = 0
-  pullSettling.value = false
-}
-// A delayed pull belongs to the chat and view where it started, not whichever
-// chat happens to be selected when its animation finishes.
-watch(() => [store.activeChatId, store.activeWorkspace, route.path, besideInTile.value, fileInTile.value], invalidatePull, { flush: 'sync' })
-const pullStyle = computed(() => {
-  if (pullY.value <= 0 && !pullSettling.value) return undefined
-  const p = Math.min(1, pullY.value / 400)
-  return {
-    transform: `translateY(${pullY.value}px) scale(${1 - p * 0.12})`,
-    transformOrigin: '50% 0',
-    borderRadius: `${Math.min(28, pullY.value / 4)}px`,
-    overflow: 'hidden',
-    boxShadow: pullY.value > 0 ? '0 -10px 40px -10px rgb(0 0 0 / 45%)' : undefined,
-    transition: pullSettling.value ? 'transform 280ms var(--ease), border-radius 280ms var(--ease)' : 'none',
-    position: 'relative' as const,
-    zIndex: 1,
-  }
+// The same rise for an automation opened from the automation list; the title
+// rail moves between automations sideways instead.
+const scheduleRising = ref(false)
+let scheduleRiseTimer: ReturnType<typeof setTimeout> | null = null
+watch(() => (route.path.startsWith('/schedules') ? (route.params.scheduleId as string) || '' : null), (id, was) => {
+  if (!id || was !== '') return
+  if (prefersReducedMotion()) return
+  scheduleRising.value = true
+  if (scheduleRiseTimer) clearTimeout(scheduleRiseTimer)
+  scheduleRiseTimer = setTimeout(() => { scheduleRising.value = false; scheduleRiseTimer = null }, 340)
 })
-function onChatPull(dy: number) {
-  if (besideInTile.value) return
-  if (pullSettling.value) pullContext++
-  pullSettling.value = false
-  pullY.value = dy
-}
-function onChatPullEnd(dy: number, velocity: number) {
-  if (besideInTile.value) return
-  const context = pullContext
-  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  const close = dy >= PULL_CLOSE_PX || (velocity > 0.6 && dy > 40)
-  if (close && reduce) { pullY.value = 0; closeChat(); return }
-  pullSettling.value = true
-  if (close) {
-    pullY.value = Math.max(window.innerHeight, dy + 1)
-    setTimeout(() => {
-      if (context !== pullContext) return
-      pullSettling.value = false
-      pullY.value = 0
-      closeChat()
-    }, 280)
-  } else {
-    pullY.value = 0
-    setTimeout(() => { if (context === pullContext) pullSettling.value = false }, 280)
-  }
-}
+
+// One pull-to-close for whatever open item has the title rail: a chat closes to
+// Home, an automation to the automation list.
+const pullTarget = computed<'chat' | 'schedule'>(() => viewMode.value === 'schedules' ? 'schedule' : 'chat')
+const pullHint = computed(() => pullTarget.value === 'schedule' ? 'Automations' : 'Home')
+const {
+  pullY,
+  pullStyle,
+  onPull: onItemPull,
+  onPullEnd: onItemPullEnd,
+  invalidate: invalidatePull,
+} = usePullToClose(
+  target => { if (target === 'schedule') void router.push('/schedules'); else closeChat() },
+  () => pullTarget.value,
+  () => pullTarget.value === 'chat' && besideInTile.value,
+)
+// A delayed pull belongs to the item and view where it started, not whichever
+// one happens to be selected when its animation finishes.
+watch(() => [store.activeChatId, store.activeWorkspace, route.path, besideInTile.value, fileInTile.value], invalidatePull, { flush: 'sync' })
 
 function closeChat() {
   // With a second chat beside, closing the main one promotes that chat into the main pane.
@@ -1372,12 +1356,31 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Previous / next automation: the same chord as previous / next chat, along
+  // the open automation's title rail. Gated like the chat path: never with a
+  // confirm, prompt or viewer up, never while a menu or popover is open, and
+  // never from a text field (a card's draft would be thrown away).
+  if (viewMode.value === 'schedules' && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) {
+    if (e.repeat || !viewShortcutsActive.value || e.defaultPrevented || isTypingTarget(e.target)
+      || document.querySelector('[data-dismissable-layer]')) return
+    if (schedulePanelRef.value?.selectAdjacent?.(matchesShortcut(e, 'previousChat') ? -1 : 1)) {
+      e.preventDefault()
+      invalidatePull()
+    }
+    return
+  }
   // Automations: same arrow contract as home, but over the sidebar's
   // schedule lists and the overview pane. This lives outside the chat-only
   // gate because shortcutsActive deliberately excludes schedules — the
   // lists still want keyboard roaming.
   if (viewMode.value === 'schedules' && bare && e.key.startsWith('Arrow')) {
     if (isTypingTarget(e.target) || e.defaultPrevented) return
+    // The title rail owns the arrows on its focused title; at either end it has
+    // nothing to step to, and the key must not roam the sidebar instead.
+    if (e.target instanceof Element && e.target.closest('.title-rail')) {
+      e.preventDefault()
+      return
+    }
     if (projectSidebarRef.value?.onArrow?.(e.key)) {
       e.preventDefault()
       return
@@ -1622,7 +1625,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  pullContext++
+  invalidatePull()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()
   notificationInbox.dispose()

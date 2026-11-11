@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -47,11 +47,12 @@
                 @click.stop
                 autofocus
               />
-              <ChatTitleRail
+              <TitleRail
                 v-else-if="titleRailOn"
                 ref="titleRailRef"
                 class="title-rail"
                 :items="titleRail.items.value"
+                group-label="Chats in this workspace"
                 :current-id="chat.chat_id"
                 @select="titleRail.select"
                 @rename="startEditTitle"
@@ -152,9 +153,10 @@
     <div
       ref="chatColumnEl"
       class="chat-column"
-      :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
-      :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
-      @animationend="railArrival = 0"
+      data-rail-lean
+      :class="railMotionClass(railLean, railArrival)"
+      :style="railLeanStyle(railLean)"
+      @animationend="e => { if (e.target === e.currentTarget) railArrival = 0 }"
     >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
@@ -172,7 +174,7 @@
       <!-- Selecting a message (click or Enter) outlines it and shows its
          actions, leaving the rest of the transcript readable; clicking the
          message again or pressing Esc puts it back. -->
-      <div class="messages-content">
+      <div class="messages-content" data-rail-column>
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
              right-aligned user bubble, the left-aligned assistant bubbles with
@@ -1508,9 +1510,10 @@ import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage,
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
-import ChatTitleRail from './ChatTitleRail.vue'
+import TitleRail from './TitleRail.vue'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
-import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
@@ -1808,13 +1811,13 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => chat.value.chat_id)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
 const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeRailArrival())
-const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
+const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
   if (!titleRailOn.value) return false
@@ -5268,9 +5271,9 @@ async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
   const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
-  if (next) markRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
+  if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
-    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markRailArrival(0); return }
+    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.
@@ -5777,15 +5780,6 @@ onMounted(() => {
 /* Rail mode: close and the title block share one vertical centre, and the row is
    the reading column's width (it starts where the column starts), so the rail can
    centre its title on the chat rather than on the whole header. */
-.chat-column--leaning { will-change: transform, opacity; }
-.chat-column:not(.chat-column--leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
-.chat-column--arrive-next { animation: chat-arrive 260ms var(--ease) both; --arrive-from: 12%; }
-.chat-column--arrive-prev { animation: chat-arrive 260ms var(--ease) both; --arrive-from: -12%; }
-@keyframes chat-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) {
-  .chat-column:not(.chat-column--leaning) { transition: none; }
-  .chat-column--arrive-next, .chat-column--arrive-prev { animation: none; }
-}
 .header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
 
 .chat-title {
@@ -8295,4 +8289,5 @@ details[open] > .activity-summary::before {
 <!-- The shared naming placeholder: the same bar the sidebar shows while the
      engine names a chat. -->
 <style scoped src="./titleShimmer.css"></style>
+<style scoped src="./railMotion.css"></style>
 <style scoped src="./chatDetails.css"></style>

@@ -69,7 +69,7 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    // The Usage page: a read-only look back; reached from Home's At a glance, not the sidebar.
+    // The Usage page: a read-only look back; reached from the sidebar's Usage entry and Home's At a glance.
     path: '/stats',
     name: 'stats',
     component: () => import('./components/ChatLayout.vue'),

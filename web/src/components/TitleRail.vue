@@ -5,13 +5,13 @@
     :class="{ 'title-rail--settled': !moving }"
     :style="{ paddingLeft: `${pad.left}px`, paddingRight: `${pad.right}px`, '--pad-l': `${pad.left}px`, '--pad-r': `${pad.right}px` }"
     role="group"
-    :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`"
+    :aria-label="`${groupLabel}, ${neighbours.index + 1} of ${items.length}`"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
     @pointercancel="onPointerCancel"
   >
-    <!-- One chat fills the strip; the neighbours sit off-screen and only slide in
+    <!-- One item fills the strip; the neighbours sit off-screen and only slide in
          while a swipe or a step is under way, so the title keeps its place. -->
     <div
       ref="strip"
@@ -21,14 +21,14 @@
     >
       <button
         v-for="entry in items"
-        :key="entry.chatId"
+        :key="entry.id"
         type="button"
         class="title-rail-item"
-        :aria-label="railItemLabel(entry)"
-        :aria-current="entry.chatId === currentId ? 'page' : undefined"
-        :tabindex="entry.chatId === currentId ? 0 : -1"
-        @dblclick="onItemDblclick(entry.chatId)"
-        @keydown="onItemKeydown($event, entry.chatId)"
+        :aria-label="entry.label"
+        :aria-current="entry.id === currentId ? 'page' : undefined"
+        :tabindex="entry.id === currentId ? 0 : -1"
+        @dblclick="onItemDblclick(entry.id)"
+        @keydown="onItemKeydown($event, entry.id)"
       >
         <span
           v-if="entry.titlePending"
@@ -38,14 +38,14 @@
         <span
           v-else
           class="title-rail-title"
-          :class="{ 'pane-title chat-title': entry.chatId === currentId }"
+          :class="{ 'pane-title chat-title': entry.id === currentId }"
           :title="entry.title"
         >{{ entry.title }}</span>
-        <span class="title-rail-project">{{ entry.project }}</span>
+        <span class="title-rail-project">{{ entry.subtitle }}</span>
       </button>
     </div>
 
-    <!-- One segment per chat on the header's bottom edge, under the title. The bright
+    <!-- One segment per item on the header's bottom edge, under the title. The bright
          one follows the strip's scroll, so it moves with a finger mid-swipe. -->
     <div
       class="title-rail-track"
@@ -54,9 +54,9 @@
     >
       <span
         v-for="entry in items"
-        :key="entry.chatId"
+        :key="entry.id"
         class="title-rail-seg"
-        :class="SEG_STATE[entry.tier] && `title-rail-seg--${SEG_STATE[entry.tier]}`"
+        :class="entry.mark && `title-rail-seg--${entry.mark}`"
       />
       <span class="title-rail-seg-current" />
     </div>
@@ -68,43 +68,46 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   RAIL_SETTLE_MS,
   RAIL_SLIDE_MS,
-  railItemLabel,
   railNeighbours,
   settledIndex,
-  type ChatRailItem,
-} from '../lib/chatRail'
+  type RailItem,
+} from '../lib/titleRail'
+import { prefersReducedMotion } from '../lib/motion'
 
-const props = defineProps<{ items: ChatRailItem[]; currentId: string }>()
+/**
+ * The swipeable title rail of an open item's header: a chat, or an automation.
+ * Each track segment shows its item's state with the app's marks in miniature,
+ * told apart by shape and motion (DESIGN.md "Activity glyphs"): needs you is the
+ * alert triangle, working the chase, unread the news dot; a quiet item is a plain
+ * segment.
+ *
+ * The host marks itself `data-rail-host` and its reading column
+ * `data-rail-column`, so the title centres on the column rather than the header;
+ * an element that leans or slides with the rail carries `data-rail-lean`.
+ */
+const props = defineProps<{ items: RailItem[]; currentId: string; groupLabel: string }>()
 
-// Each segment shows its chat's state with the app's marks in miniature, told apart
-// by shape and motion (DESIGN.md "Activity glyphs"): needs you is the alert
-// triangle, working the chase, unread the news dot; a quiet chat is a plain segment.
-const SEG_STATE: Partial<Record<ChatRailItem['tier'], 'needs' | 'working' | 'unread'>> = {
-  needsYou: 'needs',
-  working: 'working',
-  unread: 'unread',
-}
 const emit = defineEmits<{
-  select: [chatId: string]
+  select: [id: string]
   rename: []
-  // A downward drag on the title: how far, in px, so the chat can follow the finger.
+  // A downward drag on the title: how far, in px, so the pane can follow the finger.
   pull: [dy: number]
   // The drag ended: the distance and speed (px per ms) decide close or spring back.
   pullEnd: [dy: number, velocity: number]
-  // How far the strip sits from the current chat (-1 to 1) mid-swipe, so the
+  // How far the strip sits from the current item (-1 to 1) mid-swipe, so the
   // transcript can lean the same way.
   lean: [fraction: number]
 }>()
 
-const neighbours = computed(() => railNeighbours(props.items.map(i => i.chatId), props.currentId))
+const neighbours = computed(() => railNeighbours(props.items.map(i => i.id), props.currentId))
 
-function onItemDblclick(chatId: string): void {
-  if (chatId === props.currentId) emit('rename')
+function onItemDblclick(id: string): void {
+  if (id === props.currentId) emit('rename')
 }
 
 // The arrow keys on the focused title step to the neighbour, with the same slide as a swipe.
-function onItemKeydown(e: KeyboardEvent, chatId: string): void {
-  if (chatId !== props.currentId) return
+function onItemKeydown(e: KeyboardEvent, id: string): void {
+  if (id !== props.currentId) return
   // Browser chords (Alt+ArrowLeft is Back) are not rail gestures.
   if (e.altKey || e.ctrlKey || e.metaKey) return
   const direction = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0
@@ -126,7 +129,7 @@ const trackDrop = ref<number | null>(null)
 // column's; the rail never grows, so the title only gives up room, never overlaps.
 const pad = ref({ left: 0, right: 0 })
 function readingColumn(): HTMLElement | null {
-  return root.value?.closest('.chat-panel')?.querySelector<HTMLElement>('.messages-content') ?? null
+  return root.value?.closest('[data-rail-host]')?.querySelector<HTMLElement>('[data-rail-column]') ?? null
 }
 function measureTrack(): void {
   const rail = root.value
@@ -134,9 +137,9 @@ function measureTrack(): void {
   if (rail && column) {
     const r = rail.getBoundingClientRect()
     const c = column.getBoundingClientRect()
-    // The column may be mid-lean or mid-arrival (a translateX on .chat-column);
+    // The column may be mid-lean or mid-arrival (a translateX on the lean element);
     // measure where it rests, not where the animation has it right now.
-    const moving = column.closest<HTMLElement>('.chat-column')
+    const moving = column.closest<HTMLElement>('[data-rail-lean]')
     const shift = moving && typeof DOMMatrixReadOnly === 'function'
       ? new DOMMatrixReadOnly(getComputedStyle(moving).transform === 'none' ? undefined : getComputedStyle(moving).transform).m41
       : 0
@@ -168,7 +171,7 @@ function itemEls(): HTMLElement[] {
   return Array.from(strip.value?.querySelectorAll<HTMLElement>('.title-rail-item') ?? [])
 }
 
-// Instant, no animation: puts the current chat in view.
+// Instant, no animation: puts the current item in view.
 function centre(): void {
   const el = strip.value
   const cur = itemEls()[neighbours.value.index]
@@ -178,7 +181,7 @@ function centre(): void {
 
 /**
  * Slide the neighbour in, then switch to it: the keyboard path (arrow keys, the
- * previous/next chat shortcut) gets the same motion as a swipe. With reduced
+ * previous/next shortcut) gets the same motion as a swipe. With reduced
  * motion the switch is immediate. Returns false when there is no neighbour.
  */
 let sliding: ReturnType<typeof setTimeout> | null = null
@@ -187,9 +190,7 @@ function slide(direction: -1 | 1): boolean {
   if (!target || sliding) return false
   const el = strip.value
   const to = itemEls()[neighbours.value.index + direction]
-  const reduce = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (!el || !to || reduce) {
+  if (!el || !to || prefersReducedMotion()) {
     emit('select', target)
     return true
   }
@@ -211,8 +212,8 @@ function settle(): void {
     itemEls().map(e => e.offsetLeft + e.offsetWidth / 2),
   )
   const target = props.items[i]
-  if (target && target.chatId !== props.currentId) { emit('select', target.chatId); return }
-  // Settled on the current chat but off centre (a wheel nudge short of halfway): spring back.
+  if (target && target.id !== props.currentId) { emit('select', target.id); return }
+  // Settled on the current item but off centre (a wheel nudge short of halfway): spring back.
   // Without scroll-snap nothing else re-centres it.
   const cur = itemEls()[neighbours.value.index]
   if (cur && Math.abs(strip.value.scrollLeft - (cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2)) > 1) restoreCurrentTitle()
@@ -243,7 +244,7 @@ watch(
 
 /**
  * Pointer gestures on the title. After 8px the drag locks to an axis:
- * - down: the chat follows the finger (`pull`), and on release it closes or springs back (`pullEnd`);
+ * - down: the pane follows the finger (`pull`), and on release it closes or springs back (`pullEnd`);
  * - sideways, for every pointer type: the strip follows the pointer, then settles on the
  *   neighbour or back. The strip is not a native scroller, so touch goes through here too.
  * An upward drag does nothing, so the page keeps its own scrolling.

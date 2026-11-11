@@ -1,25 +1,61 @@
 <template>
-  <div class="schedule-panel">
+  <div class="schedule-panel" data-rail-host>
     <PaneHeader
       v-if="!schedule && !showNew"
       page-tag="Automations"
       @open-sidebar="emit('open-sidebar')"
     />
-    <PaneHeader v-else page-tag="Automations" @open-sidebar="emit('open-sidebar')">
+    <!-- Like an open chat: no brand or page tag, so on a phone the close,
+         title and actions share one row. -->
+    <PaneHeader v-else :brand="false" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="btn-icon close-btn desktop-only" @click="closeSchedule" title="Close" aria-label="Close automation">&times;</button>
-          <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
-          <span v-else-if="showNew" class="pane-title">New automation</span>
+          <!-- The same title row as an open chat: close, then the title rail of
+               the workspace's automations (swipe or arrow keys to move along it,
+               pull the title down to go back to the list), or the plain title
+               when there is nothing to move to. -->
+          <div class="item-title-row" :class="{ 'item-title-row--rail': titleRailOn }">
+            <button
+              type="button"
+              class="btn-icon close-btn"
+              :title="showNew ? 'Close' : 'Close automation'"
+              :aria-label="showNew ? 'Close new automation' : 'Close automation'"
+              @click="closeSchedule"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+            <!-- Keyed by automation, so a slide or settle still pending from the
+                 last one can never switch away from an automation opened from
+                 the sidebar meanwhile. -->
+            <TitleRail
+              v-if="titleRailOn && schedule"
+              :key="schedule.schedule_id"
+              ref="titleRailRef"
+              :items="titleRail.items.value"
+              :current-id="schedule.schedule_id"
+              group-label="Automations in this workspace"
+              @select="titleRail.select"
+              @lean="railLean = $event"
+              @pull="emit('pull', $event)"
+              @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
+            />
+            <span v-else-if="schedule" class="pane-title">{{ scheduleTitle(schedule) }}</span>
+            <span v-else-if="showNew" class="pane-title">New automation</span>
+          </div>
         </div>
       </template>
       <template #actions>
         <template v-if="schedule">
           <!-- One primary (Run now), the pause toggle beside it, and the rare
                destructive action behind the menu instead of a red button in
-               the header. On narrow panes the toggle joins the menu too. -->
+               the header. On narrow panes the toggle joins the menu too; on a
+               phone Run now does as well, so the header is one line like a
+               chat's. -->
           <button
-            class="btn-small btn-run"
+            class="btn-small btn-run header-run"
             :class="{ 'btn-running': showRunning }"
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
@@ -50,6 +86,14 @@
                 <!-- as-child, so the panel is this template's own element and
                      picks up the scoped styles even though it is portalled. -->
                 <div class="schedule-actions-menu">
+                <DropdownMenuItem as-child>
+                  <button
+                    type="button"
+                    class="menu-run-item"
+                    :disabled="isStarting && !runningChatId"
+                    @click="onRunButtonClick"
+                  >{{ showRunning ? 'Running...' : 'Run now' }}</button>
+                </DropdownMenuItem>
                 <DropdownMenuItem as-child>
                   <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
                     {{ enabledToggleLabel(schedule) }}
@@ -134,8 +178,17 @@
 
     <!-- Detail -->
     <div v-else-if="schedule" class="scroll-body">
-      <div class="page-grid schedule-grid">
-      <div class="page-main">
+      <!-- Keyed by automation: a step from the rail mounts the page fresh,
+           so its arrival animation plays on every step, even two the same way. -->
+      <div
+        :key="schedule.schedule_id"
+        class="page-grid schedule-grid"
+        data-rail-lean
+        :class="railMotionClass(railLean, railArrival)"
+        :style="railLeanStyle(railLean)"
+        @animationend="onArrivalEnd"
+      >
+      <div class="page-main" data-rail-column>
       <p v-if="!schedule.enabled" class="disabled-banner">
         {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Paused' }} — it won't run
         on its own. "Run now" still works.
@@ -703,17 +756,29 @@ import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
+import TitleRail from './TitleRail.vue'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
+import { takeScheduleRailArrival, useScheduleRail } from '../composables/useScheduleRail'
+import { scheduleTitle } from '../lib/scheduleList'
 import ModelSelector from './ModelSelector.vue'
 import WebhookTriggers from './WebhookTriggers.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
-import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
+import { isPerWorkspaceRoutine, workspaceForSchedule } from '../lib/automationWorkspace'
+import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { isMemoryProject } from '../lib/memoryPass'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
 import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 
 const props = defineProps<{ showNew?: boolean }>()
-const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'created'): void
+  (e: 'open-sidebar'): void
+  (e: 'close'): void
+  // A downward drag on the title rail, and its release: ChatLayout's pull-to-close.
+  (e: 'pull', dy: number): void
+  (e: 'pull-end', dy: number, velocity: number): void
+}>()
 
 const route = useRoute()
 const router = useRouter()
@@ -804,7 +869,21 @@ watch(schedule, (s) => {
   }
 }, { immediate: true })
 
+// The title rail: the workspace's automations in the sidebar's order. The panel
+// stays mounted across automations, so an arrival from the rail is read on each
+// change of automation rather than at setup.
+const titleRail = useScheduleRail(() => scheduleId.value)
+const titleRailOn = computed(() => !props.showNew && titleRail.items.value.length > 1)
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
+const railLean = ref(0)
+const railArrival = ref<-1 | 1 | 0>(0)
+// Only the page's own arrival ends it, not an animation bubbling up from inside it.
+function onArrivalEnd(e: AnimationEvent): void {
+  if (e.target === e.currentTarget) railArrival.value = 0
+}
 watch(scheduleId, () => {
+  railLean.value = 0
+  railArrival.value = takeScheduleRailArrival()
   editingCard.value = ''
   editBaseline.value = ''
   copiedPromptKey.value = ''
@@ -858,14 +937,7 @@ watch(
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
-const workspaceSchedules = computed(() =>
-  store.schedules.filter(s => scheduleInWorkspace(
-    s,
-    projectStore.activeWorkspace,
-    projectStore.chats,
-    projectStore.projects,
-  )),
-)
+const workspaceSchedules = useWorkspaceSchedules()
 const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
 
 // The overview splits the user's own routines from Ciaobot's system ones, and
@@ -1485,12 +1557,14 @@ async function onToggleEnabled() {
 
 async function onDelete() {
   if (!schedule.value) return
+  // Captured before the confirm: whatever is selected when it resolves, the
+  // automation deleted is the one the user asked about.
+  const id = schedule.value.schedule_id
   if (!await askConfirm('Delete this automation? It will stop running.', {
     title: 'Delete automation',
     confirmLabel: 'Delete automation',
     destructive: true,
   })) return
-  const id = schedule.value.schedule_id
   await store.deleteSchedule(id)
   router.push('/schedules')
 }
@@ -1547,7 +1621,15 @@ function onArrow(key: string): boolean {
   return true
 }
 
-defineExpose({ onArrow })
+// Previous / next automation (the previous / next chat chord): the rail slides
+// the neighbour in before switching, like a swipe.
+function selectAdjacent(direction: -1 | 1): boolean {
+  // A card being edited holds a draft that moving on would discard.
+  if (!titleRailOn.value || editingCard.value) return false
+  return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
+}
+
+defineExpose({ onArrow, selectAdjacent })
 
 function closeSchedule() {
   if (props.showNew) {
@@ -1559,6 +1641,8 @@ function closeSchedule() {
 </script>
 
 <style scoped src="./overviewSections.css"></style>
+<style scoped src="./railMotion.css"></style>
+
 <style scoped>
 .schedule-panel {
   display: flex;
@@ -1977,11 +2061,11 @@ function closeSchedule() {
 .desktop-only { display: inline-flex; }
 .overflow-trigger { color: var(--fg2); }
 .menu-toggle-item { display: none !important; }
+.menu-run-item { display: none !important; }
 
 @container chat-pane (max-width: 820px) {
   .header-actions .desktop-only { display: none; }
   .menu-toggle-item { display: flex !important; }
-  .close-btn.desktop-only { display: inline-flex; }
 }
 
 @container chat-pane (min-width: 821px) {
@@ -1991,7 +2075,9 @@ function closeSchedule() {
 
 @media (max-width: 768px) {
   .desktop-only,
-  .close-btn.desktop-only { display: none; }
+  .close-btn,
+  .header-run { display: none; }
+  .menu-run-item { display: flex !important; }
   .menu-toggle-item { display: flex !important; }
   .mobile-only-trigger { display: inline-flex; }
   .prompt-heading { align-items: flex-start; }
@@ -2027,20 +2113,14 @@ function closeSchedule() {
 .schedule-actions-menu button[data-highlighted] { background: var(--bg3); outline: none; }
 .schedule-actions-menu button.danger { color: var(--error); }
 
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
+/* The same title row as ChatPanel's: close and the title share one vertical
+   centre; with the rail on, the row takes the header's room so the rail can
+   centre the title on the page's main column. Close sizing comes from
+   PaneHeader's shared .btn-icon rules. */
+.header-left { display: flex; align-items: center; min-width: 0; flex: 1; }
+.item-title-row { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.item-title-row--rail { flex: 1 1 auto; width: 100%; }
+.close-btn { color: var(--fg3); flex: none; }
 .close-btn:hover { color: var(--fg); }
 
 .btn-running:not(:disabled) {
