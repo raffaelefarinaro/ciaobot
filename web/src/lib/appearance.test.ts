@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import appVue from '../App.vue?raw'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   APPEARANCE_CACHE_KEY,
   CUSTOM_TOKEN_NAMES,
@@ -64,7 +66,15 @@ describe('applyAppearanceToRoot body font', () => {
 })
 
 describe('font tokens', () => {
-  const sources = import.meta.glob('../**/*.{vue,css}', { query: '?raw', eager: true, import: 'default' }) as Record<string, string>
+  // Read from disk: under vitest a `?raw` glob returns '' for every .css file
+  // (vitest's CSS handling), which silently turned off the .css half of this
+  // guard (#2788). The glob only lists the files; nothing is imported.
+  const sources = Object.fromEntries(
+    Object.keys(import.meta.glob('../**/*.{vue,css}')).map((path) => [
+      path,
+      readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8'),
+    ]),
+  ) as Record<string, string>
 
   it('no component uses var(--font-sans) outside App.vue and the Body font picker', () => {
     // SettingsAppearance.vue is the one exception: its System button must draw
@@ -78,6 +88,7 @@ describe('font tokens', () => {
     expect(picker?.[1].split('var(--font-sans)').length).toBe(2)
     expect(Object.keys(sources).some((path) => path.endsWith('/App.vue'))).toBe(true)
     expect(Object.keys(sources).some((path) => path.endsWith('settingsPanels.css'))).toBe(true)
+    expect(sources[Object.keys(sources).find((p) => p.endsWith('settingsPanels.css'))!]).toContain('{')
   })
 })
 
