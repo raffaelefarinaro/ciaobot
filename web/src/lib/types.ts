@@ -2164,6 +2164,16 @@ export interface ProposalHistoryRow {
   reason?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
+  /** The transcript turn the write cited, when its receipt recorded one.
+   * ABSENT — not zero — for a decision with no citation (an operator edit, an
+   * import from another agent) and for every row written before the receipt
+   * carried provenance. */
+  source_turn?: number
+  /** The 1-based line of that turn's `## Turn N` heading in `source_path`, so
+   * the viewer opens where the fact starts instead of at the top of a file
+   * that can hold hundreds of turns. ABSENT when the archive no longer parses
+   * that turn; the link then opens the file and says nothing more. */
+  source_line?: number
   /** The receipt that performed this decision. ABSENT — not falsy — for every
    * decision the receipt protocol never recorded: History renders those as
    * "No change snapshot available" rather than offering an undo it cannot
@@ -2257,6 +2267,10 @@ export interface ProposalHistoryChange {
   undoable: boolean
   changed: boolean
   ts: string
+  /** The transcript turns the write cited, when it was extracted from one.
+   * Empty for a receipt that cited nothing. Optional because a payload written
+   * before this field existed carries none. */
+  source_turns?: number[]
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a

@@ -159,7 +159,7 @@ test.describe('workbench layout', () => {
       previousBottom = box!.y + box!.height
     }
     // Every destination shows its label at the default sidebar width.
-    for (const label of ['Home', 'Automations', 'Memory', 'Settings']) {
+    for (const label of ['Home', 'Automations', 'Memory', 'Tasks', 'Usage', 'Settings']) {
       await expect(page.locator('.nav-links .nav-item-label', { hasText: label })).toBeVisible()
     }
   })

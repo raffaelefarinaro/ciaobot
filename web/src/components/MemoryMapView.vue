@@ -425,7 +425,8 @@ import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import { useRoute, useRouter } from 'vue-router'
-import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
+import { easeOutCubic, tweenCamera, type CameraState } from '../lib/cameraTween'
+import { prefersReducedMotion } from '../lib/motion'
 import { GraphGesture } from '../lib/graphGesture'
 import {
   COOLING_DURATION_MS,
