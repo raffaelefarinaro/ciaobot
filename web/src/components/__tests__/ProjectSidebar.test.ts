@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import NotificationBell from '../NotificationBell.vue'
+import SidebarRow from '../SidebarRow.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -779,13 +780,59 @@ describe('ProjectSidebar global new chat', () => {
       const wrapper = await mountSidebar('schedules')
       useTaskStore().loading = false
       await nextTick()
-      const row = wrapper.get('.schedule-item .schedule-time')
+      const row = wrapper.get('.schedule-item .sidebar-row-meta')
       expect(row.text()).toBe('01:01')
       wrapper.unmount()
     } finally {
       if (previousTz === undefined) delete process.env.TZ
       else process.env.TZ = previousTz
     }
+  })
+
+  it('draws automation rows with the chat row component, keeping groups, badges and state', async () => {
+    const base = {
+      prompt: 'p', daily_time_utc: '09:00', timezone_name: 'UTC', frequency: 'daily', enabled: true,
+      scope: 'user', workspace: 'personal', web_project_id: 'project-1', next_run: '', last_triggered_on: '',
+      days_of_week: null, interval_minutes: 0, day_of_month: null, run_at_date: null, web_chat_id: null,
+      missed: false, model: '', archive_policy: 'manual',
+    }
+    useTaskStore().schedules = [
+      { ...base, schedule_id: 'r1', title: 'Routine one' },
+      { ...base, schedule_id: 'r2', title: 'Paused routine', enabled: false },
+      { ...base, schedule_id: 'r3', title: 'Missed routine', missed: true },
+      { ...base, schedule_id: 's1', title: 'System job', scope: 'system', frequency: 'interval', interval_minutes: 15 },
+    ] as never
+    const wrapper = await mountSidebar('schedules')
+    useTaskStore().loading = false
+    await nextTick()
+
+    const rows = wrapper.findAllComponents(SidebarRow)
+    expect(rows.map(r => r.props('text'))).toEqual(['Routine one', 'Paused routine', 'Missed routine', 'System job'])
+    // The same row element, title and badge classes as a chat row.
+    expect(rows.every(r => r.element.classList.contains('sidebar-row') && r.element.classList.contains('schedule-item'))).toBe(true)
+    expect(rows[0].get('.sidebar-row-title').text()).toBe('Routine one')
+    expect(rows[1].get('.sidebar-row-meta').text()).toBe('off')
+    expect(rows[1].get('.sidebar-row-title').classes()).toContain('sidebar-row-title--muted')
+    expect(rows[2].find('.missed-dot').exists()).toBe(true)
+    expect(rows[3].get('.sidebar-row-meta').text()).toBe('15m')
+    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Routines', 'System'])
+    wrapper.unmount()
+  })
+
+  it('lists Usage between Tasks and Settings in the main nav', async () => {
+    const wrapper = await mountSidebar('chat')
+    const labels = wrapper.findAll('.nav-links .nav-item-label').map(l => l.text())
+    expect(labels.slice(-3)).toEqual(['Tasks', 'Usage', 'Settings'])
+    const usage = wrapper.get('.nav-links a[href="/stats"]')
+    expect(usage.attributes('aria-label')).toBe('usage')
+    expect(usage.classes()).not.toContain('nav-item--active')
+    wrapper.unmount()
+  })
+
+  it('marks Usage active on the usage page', async () => {
+    const wrapper = await mountSidebar('stats' as 'chat')
+    expect(wrapper.get('.nav-links a[href="/stats"]').classes()).toContain('nav-item--active')
+    wrapper.unmount()
   })
 
   it('leaves the vault lists to the map rail', async () => {

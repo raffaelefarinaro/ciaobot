@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { railItemLabel, railNeighbours, settledIndex, stableRailOrder } from './chatRail'
+import { railItemLabel, railNeighbours, settledIndex, stableRailOrder } from './titleRail'
 
 describe('stableRailOrder', () => {
   it('returns fresh when there is no snapshot', () => {

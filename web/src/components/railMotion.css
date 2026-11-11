@@ -1,0 +1,13 @@
+/* The body under a title rail (TitleRail.vue): a chat's column, an automation's
+   page. Mid-swipe it leans toward the neighbour (a quarter of the strip's travel,
+   fading, set inline by railLeanStyle); an item opened from the rail slides its
+   body in from that side. Pulled in with `<style scoped src>` by each host. */
+.rail-leaning { will-change: transform, opacity; }
+[data-rail-lean]:not(.rail-leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
+.rail-arrive-next { animation: rail-arrive 260ms var(--ease) both; --arrive-from: 12%; }
+.rail-arrive-prev { animation: rail-arrive 260ms var(--ease) both; --arrive-from: -12%; }
+@keyframes rail-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  [data-rail-lean]:not(.rail-leaning) { transition: none; }
+  .rail-arrive-next, .rail-arrive-prev { animation: none; }
+}

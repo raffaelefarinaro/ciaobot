@@ -3,12 +3,21 @@ import type { HomeTierKey } from './homeLanes'
 export const RAIL_SETTLE_MS = 120 // debounce after the last scroll event
 export const RAIL_SLIDE_MS = 220 // a keyboard step slides the title this long before switching
 
-export interface ChatRailItem {
-  chatId: string
+/** The state mark a rail segment carries, drawn with the app's activity glyphs in miniature. */
+export type RailMark = 'needs' | 'working' | 'unread'
+
+/**
+ * One entry on a title rail: an open chat or an open automation. The rail shows
+ * `title` with `subtitle` under it, `mark` on the item's track segment, and
+ * `label` as the item's accessible name.
+ */
+export interface RailItem {
+  id: string
   title: string
-  project: string
-  tier: HomeTierKey
+  subtitle: string
+  mark: RailMark | null
   titlePending: boolean
+  label: string
 }
 
 /** Snapshot ids that still exist, in snapshot order, then new ids in fresh order. previous=null → fresh. */
@@ -48,6 +57,32 @@ export function settledIndex(viewportCentre: number, centres: readonly number[])
   return best
 }
 
+/** Inline style for the body under a rail mid-swipe: it leans a quarter of the way and fades. */
+export function railLeanStyle(lean: number): { transform: string; opacity: string } | undefined {
+  if (lean === 0) return undefined
+  return { transform: `translateX(${-lean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(lean)) * 0.5) }
+}
+
+/** Classes for the body under a rail (railMotion.css): leaning mid-swipe, or arriving from a side. */
+export function railMotionClass(lean: number, arrival: -1 | 1 | 0): Record<string, boolean> {
+  return {
+    'rail-leaning': lean !== 0,
+    'rail-arrive-next': arrival > 0,
+    'rail-arrive-prev': arrival < 0,
+  }
+}
+
+const TIER_MARKS: Partial<Record<HomeTierKey, RailMark>> = {
+  needsYou: 'needs',
+  working: 'working',
+  unread: 'unread',
+}
+
+/** A chat's Home tier as a rail mark; a quiet chat has none. */
+export function chatTierMark(tier: HomeTierKey): RailMark | null {
+  return TIER_MARKS[tier] ?? null
+}
+
 const STATE_WORDS: Partial<Record<HomeTierKey, string>> = {
   needsYou: 'needs you',
   working: 'working',
@@ -55,7 +90,7 @@ const STATE_WORDS: Partial<Record<HomeTierKey, string>> = {
 }
 
 /** Accessible name: "<title>, <project>" plus ", needs you" | ", working" | ", unread"; pending title → "Naming conversation, <project>". Empty project omitted. */
-export function railItemLabel(item: Pick<ChatRailItem, 'title' | 'project' | 'tier' | 'titlePending'>): string {
+export function railItemLabel(item: { title: string; project: string; tier: HomeTierKey; titlePending: boolean }): string {
   const parts = [item.titlePending ? 'Naming conversation' : item.title]
   if (item.project) parts.push(item.project)
   const state = STATE_WORDS[item.tier]

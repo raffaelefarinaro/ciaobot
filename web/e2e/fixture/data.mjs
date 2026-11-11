@@ -262,6 +262,34 @@ export const SCHEDULES = [
   },
 ]
 
+// Two more healthy routines in alpha, so the open automation's title rail has
+// neighbours: the sidebar (and the rail) order is Daily, Weekly, Inbox sweep.
+SCHEDULES.push(
+  {
+    ...SCHEDULES[0],
+    schedule_id: 'alpha-weekly-review',
+    title: 'Weekly review',
+    description: 'Look back over the week.',
+    prompt: 'Review what moved this week.',
+    daily_time_utc: '09:00',
+    frequency: 'weekly',
+    days_of_week: ['mon'],
+    next_run: '2026-09-28T09:00:00Z',
+    last_triggered_on: '2026-09-21',
+    last_expected_run: '2026-09-21T09:00:00Z',
+  },
+  {
+    ...SCHEDULES[0],
+    schedule_id: 'alpha-inbox-sweep',
+    title: 'Inbox sweep',
+    description: 'Triage new mail.',
+    prompt: 'Sweep the inbox.',
+    frequency: 'interval',
+    interval_minutes: 30,
+    next_run: '2026-09-24T10:30:00Z',
+  },
+)
+
 export const MEMORY_NODES = [
   {
     id: 'memory-vault/alpha/Projects/Launch.md',
