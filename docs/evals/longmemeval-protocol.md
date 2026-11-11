@@ -510,9 +510,16 @@ operator did not choose.
   install, the engine's own `ciao` leads `PATH`, every inherited `CIAO_*` is
   removed, and so is every `*_API_KEY`, as for the answer and judge commands.
   It has to be an agent that can run shell commands and edit files: the pass
-  reads the transcript, writes notes and calls `ciao`. A Claude Code
-  invocation along these lines should work, but **it has not been run** for
-  this page:
+  reads the transcript, writes notes and calls `ciao`. It runs in its own
+  process group, so a command that outlives `--timeout` is killed with
+  everything it started. `HOME` is the operator's, so an agent CLI still loads
+  its user-level configuration (for Claude Code: `~/.claude/CLAUDE.md`, user
+  hooks and, without `--strict-mcp-config`, MCP servers). It also reads every
+  `CLAUDE.md` / `AGENTS.md` above its working directory, so curated ingest
+  refuses a `--temp-dir` (or system temp) that has one in it or above it: under
+  a live workspace the pass would load the operator's own guide and memory
+  regions. A Claude Code invocation along these lines should work, but **it has
+  not been run** for this page:
 
   ```bash
   --extract-cmd 'claude -p --model claude-haiku-5-5 --permission-mode bypassPermissions \
@@ -557,10 +564,14 @@ Every curated row carries `ingest`, `proposals`, `retrieved_note_paths` and a
   would have stored for the same haystack.
 - `evidence_retained` — whether any line a gold answer session's pass wrote is
   still in the store at the end (notes, `Workspace/` files or regions). Lines
-  are attributed by diffing the store before and after each session; blank
-  lines, separators and bookkeeping frontmatter stamps (`updated:` and the like)
-  are ignored, so re-stamping a note does not count. `evidence_sessions_retained`
-  lists which gold sessions survived. `null` for abstention questions.
+  are attributed by diffing the store before and after each session (proposal
+  handling included); blank lines, separators and bookkeeping frontmatter stamps
+  (`updated:` and the like) are ignored, so re-stamping a note does not count.
+  In `Workspace/` files only list entries count: the engine writes the queue's
+  title, template text and timestamped batch headings whatever the pass said,
+  and leaves them after an accept or a dismissal. `evidence_sessions_retained`
+  lists which gold sessions survived. `null` for abstention (`_abs`) questions,
+  whatever their `answer_session_ids` hold.
 - `evidence_in_context` — whether such a line reached the answer context: in one
   of the top five notes, or in the regions.
 - `retrieval` keeps raw ingest's shape (strict/fractional/any-hit @5), but a gold
@@ -575,7 +586,9 @@ The printed summary adds a `Curated ingest` block: pass counts, mean store size,
 stored versus raw characters (with the fresh-install baseline subtracted for the
 ratio), proposal totals, the retained-evidence and evidence-in-context rates over
 answerable questions, and `knowledge-update` and abstention accuracy on their own
-lines. Per-type accuracy is the same table as raw ingest.
+lines. Per-type accuracy is the same table as raw ingest. Pass counts cover every
+question; store, proposal and evidence figures cover only questions whose
+curation completed, and the block says how many those are.
 
 A failed pass makes the question incomplete: the replay stops at that session
 (later passes would spend model calls on a store Ciaobot would not hold), the

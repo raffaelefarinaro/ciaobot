@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -592,8 +593,14 @@ def test_curated_ingest_answers_from_what_the_memory_pass_kept(
 
 @posix_shell
 @pytest.mark.parametrize(
-    ("proposals", "accepted", "dropped", "pending", "memory_entries"),
-    [("drop", 0, 1, 0, 0), ("leave", 0, 0, 1, 0)],
+    ("proposals", "accepted", "dropped", "pending", "memory_entries", "retained"),
+    [
+        # real-1's only output is a proposal: dropped, nothing of it survives,
+        # even though the engine's queue file (title, template, timestamped
+        # heading) stays behind; left, its queued row is still stored.
+        ("drop", 0, 1, 0, 0, ["real-2"]),
+        ("leave", 0, 0, 1, 0, ["real-1", "real-2"]),
+    ],
 )
 def test_curated_proposal_modes_are_explicit(
     tmp_path: Path,
@@ -602,6 +609,7 @@ def test_curated_proposal_modes_are_explicit(
     dropped: int,
     pending: int,
     memory_entries: int,
+    retained: list[str],
 ) -> None:
     row = HARNESS.retrieve_for_question(
         DATASET[1],
@@ -621,7 +629,70 @@ def test_curated_proposal_modes_are_explicit(
         pending,
     )
     assert row["curation"]["store"]["region_entries"]["memory"] == memory_entries
+    assert row["curation"]["evidence_sessions_retained"] == retained
     assert "retrieved_note_paths" in row
+
+
+@posix_shell
+def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
+    """An `_abs` question is never scored for retained evidence, gold ids or not."""
+    entry = {**DATASET[2], "answer_session_ids": ["real-0"]}
+    row = HARNESS.retrieve_for_question(
+        entry,
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd=_extract_cmd(),
+        proposals="accept",
+        timeout=60,
+    )
+    assert row["error"] is None, row
+    assert row["curation"]["evidence_retained"] is None
+    assert row["curation"]["evidence_sessions_retained"] == []
+    assert row["curation"]["evidence_in_context"] is None
+
+
+@posix_shell
+def test_timed_out_extractor_is_killed_with_its_children(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    started = time.perf_counter()
+    row = HARNESS.retrieve_for_question(
+        DATASET[0],
+        temp_root=tmp_path,
+        ingest="curated",
+        extract_cmd=f"sleep 60 & echo $! > {shlex.quote(str(pidfile))}; wait",
+        proposals="leave",
+        timeout=1,
+    )
+    assert time.perf_counter() - started < 30
+    assert "command timed out after 1s" in row["error"]
+    child = int(pidfile.read_text().strip())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the extractor's child outlived the timeout")
+
+
+def test_curated_refuses_a_temp_dir_under_a_guide(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("# a live workspace guide\n", encoding="utf-8")
+    nested = tmp_path / "runs"
+    nested.mkdir()
+    with pytest.raises(ValueError, match="refuses a temp directory under"):
+        HARNESS.refuse_guide_above(nested)
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
+    with pytest.raises(SystemExit, match="refuses a temp directory under"):
+        HARNESS.main(
+            [
+                "--dataset", str(dataset), "--allow-other-dataset",
+                "--ingest", "curated", "--extract-cmd", "true", "--proposals", "drop",
+                "--out", str(tmp_path / "o.jsonl"), "--temp-dir", str(nested),
+            ]
+        )
 
 
 @posix_shell
@@ -712,13 +783,22 @@ def test_curated_summary_splits_knowledge_update_and_abstention() -> None:
         }
         return base
 
+    failed = row("q-failed", "multi-session", False, True)
+    failed["error"] = "curate: 1 of 1 memory passes failed: command exited 3"
+    failed["curation"]["error"] = "1 of 1 memory passes failed: command exited 3"
+    failed["curation"]["passes_failed"] = 1
+    failed["curation"]["store"]["note_chars"] = 99_999
     rows = [
         row("q-ku", "knowledge-update", True, True),
         row("q-ku2", "knowledge-update", False, False),
         row("q-x_abs", "abstention", True, None),
+        failed,
     ]
     summary = HARNESS.summarize(rows, qa=True)
     curation = summary["curation"]
+    # The failed question counts as a failed pass but not in what was stored.
+    assert (curation["n"], curation["complete"], curation["passes_failed"]) == (4, 3, 1)
+    assert curation["note_chars"] == 300
     assert curation["knowledge_update"] == {"n": 2, "correct": 1, "judged": 2, "fraction": 0.5}
     assert curation["abstention"]["correct"] == 1
     assert (curation["evidence_retained"], curation["evidence_answerable"]) == (1, 2)
@@ -751,6 +831,9 @@ def test_curated_helpers() -> None:
 
     lines = HARNESS._content_lines("---\nupdated: 2026-11-11\ntype: person\n---\n- Lives in Zurich\n§\n\n")
     assert lines == {"type: person", "- Lives in Zurich"}
+    # The engine's own queue template and batch headings are not a session's.
+    queue = "# Memory Proposals\n\nAwaiting a decision.\n\n## 2026-11-11T17:55:56+00:00\n- [memory] Lives in Zurich\n"
+    assert HARNESS._content_lines(queue, entries_only=True) == {"- [memory] Lives in Zurich"}
 
     notes = {"a.md": ["real-1"], "b.md": ["real-2", "real-3"]}
     assert HARNESS.score_curated_retrieval(["b.md"], notes, ["real-1", "real-2"]) == {

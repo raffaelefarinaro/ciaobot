@@ -44,6 +44,7 @@ import os
 import random
 import re
 import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -682,6 +683,32 @@ def refuse_engine_model_calls(blocked: list[str]) -> Iterator[None]:
         oneshot.run_oneshot = previous  # type: ignore[assignment]
 
 
+def guide_above(path: Path) -> Path | None:
+    """The nearest `AGENTS.md` or `CLAUDE.md` in `path` or any parent, or None."""
+    for folder in [path.resolve(), *path.resolve().parents]:
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def refuse_guide_above(path: Path) -> None:
+    """Refuse a temp directory inside a repository or vault that has a guide.
+
+    The extractor runs in the temp install, and an agent CLI such as Claude
+    Code reads every `CLAUDE.md` / `AGENTS.md` from its working directory up.
+    Under a live workspace that would hand the pass the operator's own guide,
+    memory regions included, as if it were the temp install's.
+    """
+    found = guide_above(path)
+    if found is not None:
+        raise ValueError(
+            f"curated ingest refuses a temp directory under {found}: the extracting "
+            "agent would load that guide. Use the system temp or another --temp-dir."
+        )
+
+
 def extractor_env(extra: dict[str, str]) -> dict[str, str]:
     """`clean_env()` without any inherited `CIAO_*`, plus the turn's own environment."""
     env = {key: value for key, value in clean_env().items() if not key.startswith("CIAO_")}
@@ -695,6 +722,19 @@ def render_extract_command(template: str, files: dict[str, Path], tools: str) ->
     for name, path in files.items():
         command = command.replace("{" + name + "}", shlex.quote(str(path)))
     return command.replace("{disallowed_tools}", shlex.quote(tools))
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill an extractor and everything it started, then reap it."""
+    if proc.returncode is None:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:  # pragma: no cover - Windows has no process groups to signal
+                proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
 
 
 class CommandProvider:
@@ -741,21 +781,27 @@ class CommandProvider:
         info: dict[str, Any] = {}
         reply = ""
         try:
+            # Its own process group, so a timeout or a cancelled turn stops the
+            # agent itself and not only the `sh` that started it: an orphaned
+            # agent would keep spending model calls on a deleted install.
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(self._cwd),
                 env=extractor_env(dict(request.extra_env or {})),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=self._timeout
                 )
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await _kill_process_group(proc)
                 info["error"] = f"command timed out after {self._timeout:g}s"
+            except BaseException:
+                await _kill_process_group(proc)
+                raise
             else:
                 reply = stdout.decode("utf-8", errors="replace")
                 out_file = files["out_file"]
@@ -805,24 +851,39 @@ def _session_pairs(turns: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return pairs
 
 
-def _content_lines(text: str) -> set[str]:
+def _content_lines(text: str, *, entries_only: bool = False) -> set[str]:
     """The lines of a stored file that can carry a fact.
 
     Blank lines, rules, region separators and bookkeeping frontmatter stamps
     (`updated:` and the like) are skipped: rewriting a note re-stamps them, and
     counting that as retained evidence would credit a pass that dropped the
-    fact but touched the note.
+    fact but touched the note. `entries_only` keeps only list items, for the
+    engine-owned `Workspace/` files (the proposal queue, observations,
+    learnings): their title, template paragraphs and timestamped batch headings
+    are written by the engine whatever the pass said, and survive an accept or
+    a dismissal, so only the entries are anything a session contributed.
     """
     lines: set[str] = set()
     for raw in text.splitlines():
         line = raw.strip()
         if len(re.sub(r"[\W_]+", "", line)) < 3:
             continue
+        if entries_only and not line.startswith(("- ", "* ")):
+            continue
         key = line.split(":", 1)[0].strip().lower() if ":" in line else ""
         if key in _BOOKKEEPING_KEYS:
             continue
         lines.add(line)
     return lines
+
+
+def _is_workspace_file(key: str) -> bool:
+    return "/Workspace/" in f"/{key}"
+
+
+def _region_key(guide: Path, region: str) -> str:
+    """A snapshot key for a memory region. Never a vault key: those end in `.md`."""
+    return f"{guide.name}#{region}"
 
 
 def _vault_files(vault: Path, base: Path) -> Iterator[tuple[str, Path]]:
@@ -855,11 +916,13 @@ def store_snapshot(vault: Path, base: Path, guide: Path) -> dict[str, set[str]]:
     snapshot: dict[str, set[str]] = {}
     for key, path in _vault_files(vault, base):
         try:
-            snapshot[key] = _content_lines(path.read_text(encoding="utf-8"))
+            snapshot[key] = _content_lines(
+                path.read_text(encoding="utf-8"), entries_only=_is_workspace_file(key)
+            )
         except (OSError, UnicodeError):
             continue
     for region, entries in _region_entries(guide).items():
-        snapshot[f"{guide.name}#{region}"] = _content_lines("\n".join(entries))
+        snapshot[_region_key(guide, region)] = _content_lines("\n".join(entries))
     return snapshot
 
 
@@ -878,7 +941,7 @@ def store_size(vault: Path, base: Path, guide: Path) -> dict[str, Any]:
             data = path.read_bytes()
         except OSError:
             continue
-        bucket = "workspace" if "/Workspace/" in f"/{key}" else "note"
+        bucket = "workspace" if _is_workspace_file(key) else "note"
         if bucket == "workspace":
             size["workspace_files"] += 1
         else:
@@ -1269,14 +1332,21 @@ async def _curate(
     note_sessions: dict[str, list[str]] = {}
     region_sessions: list[str] = []
     surviving: set[str] = set()
+    region_keys = {_region_key(engine.guide, region) for region in _region_entries(engine.guide)}
     for key, lines in snapshot.items():
         owners = [attribution[(key, line)] for line in sorted(lines) if (key, line) in attribution]
         surviving.update(owners)
-        if "#" in key:
+        if key in region_keys:
             region_sessions.extend(owners)
         else:
             note_sessions[key] = list(dict.fromkeys(owners))
-    gold = [str(item) for item in dict.fromkeys(entry.get("answer_session_ids") or [])]
+    # An abstention question has no answer to retain, whatever its
+    # `answer_session_ids` hold.
+    gold = (
+        []
+        if question_stratum(entry) == ABSTENTION
+        else [str(item) for item in dict.fromkeys(entry.get("answer_session_ids") or [])]
+    )
 
     failed = [item for item in passes if item["status"] == "failed"]
     error = None
@@ -1339,6 +1409,7 @@ def curated_index(
         raise ValueError(f"--proposals must be one of {', '.join(PROPOSAL_MODES)}")
     if not extract_cmd.strip():
         raise ValueError("curated ingest needs --extract-cmd")
+    refuse_guide_above(workdir)
     install_root = workdir / "install"
     install_root.mkdir(parents=True, exist_ok=True)
     memory_dir = workdir / "fts"
@@ -1763,7 +1834,7 @@ def _record_retrieval(
         keys, note_sessions, row["gold_session_ids"]
     )
     gold = set(row["gold_session_ids"])
-    if gold:
+    if gold and row["stratum"] != ABSTENTION:
         in_context = set(row["retrieved_session_ids"]) | set(
             curation.get("_region_sessions", [])
         )
@@ -2071,11 +2142,18 @@ def summarize_curation(
     curated: list[dict[str, Any]],
     summary: dict[str, Any],
 ) -> dict[str, Any]:
-    """What curated ingest kept, across the run. Only present for curated rows."""
+    """What curated ingest kept, across the run. Only present for curated rows.
+
+    Pass counts cover every curated question. Store, proposal and evidence
+    figures cover only the questions whose curation completed: a failed one
+    stopped at the failing session, so its store is not what Ciaobot would
+    hold, and it is already counted as incomplete.
+    """
+    complete = [item for item in curated if not item.get("error")]
 
     def mean_of(path: tuple[str, ...]) -> float | None:
         values: list[float] = []
-        for item in curated:
+        for item in complete:
             value: Any = item
             for key in path:
                 value = value.get(key) if isinstance(value, dict) else None
@@ -2094,7 +2172,7 @@ def summarize_curation(
     stored: list[float] = []
     added: list[float] = []
     ratios: list[float] = []
-    for item in curated:
+    for item in complete:
         chars = store_chars(item.get("store"))
         # A fresh install already holds its General project doc; what the
         # passes added is what compares with the raw dump.
@@ -2104,12 +2182,16 @@ def summarize_curation(
         if item.get("raw_chars"):
             ratios.append(grown / float(item["raw_chars"]))
 
-    retained = [item["evidence_retained"] for item in curated if item.get("evidence_retained") is not None]
+    retained = [
+        item["evidence_retained"] for item in complete if item.get("evidence_retained") is not None
+    ]
     in_context = [
-        item["evidence_in_context"] for item in curated if item.get("evidence_in_context") is not None
+        item["evidence_in_context"]
+        for item in complete
+        if item.get("evidence_in_context") is not None
     ]
     unaccepted: dict[str, int] = {}
-    for item in curated:
+    for item in complete:
         for kind, count in ((item.get("proposals") or {}).get("unaccepted") or {}).items():
             unaccepted[kind] = unaccepted.get(kind, 0) + int(count)
 
@@ -2120,10 +2202,11 @@ def summarize_curation(
         return {key: bucket[key] for key in ("n", "correct", "judged", "fraction")}
 
     def total(key: str) -> int:
-        return sum(int((item.get("proposals") or {}).get(key) or 0) for item in curated)
+        return sum(int((item.get("proposals") or {}).get(key) or 0) for item in complete)
 
     return {
         "n": len(curated),
+        "complete": len(complete),
         "proposals_mode": sorted({str(row.get("proposals") or "") for row in rows if row.get("curation")}),
         "sessions": sum(int(item.get("sessions") or 0) for item in curated),
         "passes_ok": sum(int(item.get("passes_ok") or 0) for item in curated),
@@ -2167,6 +2250,10 @@ def _format_curation(curation: dict[str, Any]) -> list[str]:
 
     lines = [
         "Curated ingest (proposals: " + ", ".join(curation["proposals_mode"]) + ")",
+        (
+            f"  questions curated completely: {curation['complete']} of {curation['n']} "
+            "(store, proposal and evidence figures cover these only)"
+        ),
         (
             f"  memory passes: {curation['passes_ok']} ok, "
             f"{curation['passes_failed']} failed, {curation['passes_skipped']} "
@@ -2420,6 +2507,10 @@ def main(argv: list[str] | None = None) -> int:
                 "--ingest curated needs --proposals accept|drop|leave: a proposal "
                 "waits for a person, and the run must say what that person does"
             )
+        try:
+            refuse_guide_above(Path(args.temp_dir or tempfile.gettempdir()))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     elif args.extract_cmd or args.proposals is not None:
         raise SystemExit("--extract-cmd and --proposals apply to --ingest curated only")
 
