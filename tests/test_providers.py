@@ -304,12 +304,32 @@ def test_stderr_handler_flags_fork_resume_on_background_agent_conflict(
     assert claude_provider._fork_resume_next is True
 
 
-def test_summarize_task_notification_extracts_completion_line() -> None:
-    """The CLI's <task-notification> envelope must collapse to a one-line
-    system bubble so subagent completions stay visible without leaking the
-    raw XML into chat history.
+def test_summarize_task_notification_falls_back_to_a_status_line() -> None:
+    """A notification no card recognises collapses to a one-line system
+    bubble, so it stays visible without leaking the raw XML into history.
     """
     from ciao.web.transcript_service import _summarize_task_notification
+
+    failed = (
+        "<task-notification>\n"
+        "<task-id>x</task-id>\n"
+        "<status>failed</status>\n"
+        "<summary>Hit timeout after 600s\nsecond line</summary>\n"
+        "</task-notification>"
+    )
+    fail_summary = _summarize_task_notification(failed)
+    assert fail_summary == "\U0001F916 Subagent failed: Hit timeout after 600s"
+
+    # Plain user text must be left untouched.
+    assert _summarize_task_notification("hello world") is None
+
+
+def test_subagent_completion_renders_as_background_run_card() -> None:
+    """A Task subagent completion draws as the background-run card OpenCode
+    subagent wakes already get, with the report's last lines as its tail.
+    """
+    from ciao.background_notice import format_finished_runs
+    from ciao.web.transcript_service import _native_task_notice
 
     envelope = (
         "<task-notification>\n"
@@ -317,54 +337,26 @@ def test_summarize_task_notification_extracts_completion_line() -> None:
         "<tool-use-id>toolu_016N18MKh4oq2TMMmGmQJ5RD</tool-use-id>\n"
         "<output-file>/tmp/claude-501/sess/tasks/a7b9ecacf3a281869.output</output-file>\n"
         "<status>completed</status>\n"
-        '<summary>Agent "Enrich SparkScan report" completed\n'
-        "Done. Summary:\n"
-        "- Customers extracted: 32 unique names</summary>\n"
+        '<summary>Agent "Implement issue 2766" finished</summary>\n'
+        "<note>The same task-id may notify more than once.</note>\n"
+        "<result>Opened PR #2801.\n\nCI is green.</result>\n"
         "</task-notification>"
     )
-    summary = _summarize_task_notification(envelope)
-    assert summary is not None
-    assert summary.startswith("\U0001F916 ")  # 🤖
-    assert 'Agent "Enrich SparkScan report" completed' in summary
-    # Long body must NOT bleed into the one-liner.
-    assert "Customers extracted" not in summary
-
-    # Non-completion summary (failure / stop): fall back to status + first line.
-    failed = (
-        "<task-notification>\n"
-        "<task-id>x</task-id>\n"
-        "<status>failed</status>\n"
-        "<summary>Hit timeout after 600s</summary>\n"
-        "</task-notification>"
+    expected, _failed = format_finished_runs(
+        [{
+            "status": "ok",
+            "label": "Implement issue 2766",
+            "run_id": "a7b9ecacf3a281869",
+            "exit_code": None,
+            "error": "",
+            "log_path": None,
+            "last_lines": ["Opened PR #2801.", "CI is green."],
+        }],
+        tail_lines=50,
     )
-    fail_summary = _summarize_task_notification(failed)
-    assert fail_summary is not None
-    assert "failed" in fail_summary
-    assert "Hit timeout" in fail_summary
-
-    # Plain user text must be left untouched.
-    assert _summarize_task_notification("hello world") is None
-
-
-def test_summarize_task_notification_passes_through_finished_phrasing() -> None:
-    """The subagent's own sign-off text varies ("completed", "finished", ...)
-    since it's the model's own final message, not a fixed CLI string. Any of
-    them must pass through as-is instead of doubling up with the generic
-    "Subagent {status}: ..." wrapper (e.g. "Subagent completed: Agent "X"
-    finished").
-    """
-    from ciao.web.transcript_service import _summarize_task_notification
-
-    envelope = (
-        "<task-notification>\n"
-        "<task-id>a7b9ecacf3a281869</task-id>\n"
-        "<status>completed</status>\n"
-        '<summary>Agent "Curate recent chats and proposals" finished</summary>\n'
-        "</task-notification>"
-    )
-    summary = _summarize_task_notification(envelope)
-    assert summary == '\U0001F916 Agent "Curate recent chats and proposals" finished'
-    assert "Subagent completed:" not in summary
+    assert _native_task_notice(envelope) == expected
+    assert expected.startswith("[Ciaobot] 1 background run finished.")
+    assert "/tmp/claude-501" not in expected
 
 
 def test_is_cli_internal_envelope_matches_known_wrappers() -> None:

@@ -349,15 +349,6 @@ def _classify_control_ack(text: str) -> str | None:
     return None
 
 
-# The subagent's own final message often self-reports its sign-off ("Agent
-# "X" completed", "...finished", "...done", ...) rather than a fixed CLI
-# string, so the "already shaped, pass through as-is" check has to tolerate
-# whatever terminal-status verb the model picked instead of matching only
-# "completed" — otherwise it doubles up with the generic wrapper below (e.g.
-# "Subagent completed: Agent "X" finished").
-_AGENT_SELF_STATUS_RE = re.compile(
-    r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
-)
 
 _is_cli_internal_envelope = cli_envelopes.is_cli_envelope
 
@@ -389,9 +380,6 @@ def _summarize_task_notification(content: str) -> str | None:
     summary = fields.get("summary", "")
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
-    if _AGENT_SELF_STATUS_RE.match(first_line):
-        # Already shaped like 'Agent "X" completed'; pass it through.
-        return f"{icon} {first_line}"
     if first_line:
         # Trim aggressively so the bubble stays one line; full output lives in
         # the subagent transcript fetchable via /api/chats/{id}/subagents.
@@ -403,15 +391,17 @@ def _summarize_task_notification(content: str) -> str | None:
 def _native_task_notice(content: str) -> str | None:
     """Wake-format text for provider-native shell completions, else None.
 
-    The first notification decides: a subagent completion or a ``Monitor
-    event`` falls through to the one-line status bubble. A record can
-    concatenate several completions; the consecutive native ones share one
-    notice. No log path or tail: the provider's output file is outside the
-    file sandbox and the notice carries only a summary.
+    Background shells and Task subagents both draw as the background-run
+    card, the same card an OpenCode subagent wake gets. The first
+    notification decides: a ``Monitor event`` or an unrecognised summary falls
+    through to the one-line status bubble. A record can concatenate several
+    completions; the consecutive native ones share one notice. No log path:
+    the provider's output file is outside the file sandbox. A subagent's tail
+    is its inline report.
     """
     runs: list[cli_envelopes.NativeTaskRun] = []
     for fields, _task_ids in cli_envelopes.envelope_notifications(content):
-        run = cli_envelopes.native_task_run(fields)
+        run = cli_envelopes.native_task_run(fields) or cli_envelopes.subagent_task_run(fields)
         if run is None:
             break
         runs.append(run)
@@ -425,7 +415,7 @@ def _native_task_notice(content: str) -> str | None:
             "exit_code": run.exit_code,
             "error": run.error,
             "log_path": None,
-            "last_lines": None,
+            "last_lines": list(run.tail) or None,
         }
         for run in runs
     ]
