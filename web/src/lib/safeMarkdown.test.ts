@@ -402,6 +402,31 @@ describe('chat markdown file links', () => {
   })
 })
 
+describe('chat markdown images', () => {
+  function img(text: string, chatId?: string): HTMLImageElement | null {
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown(text, [], undefined, { chatId })
+    return host.querySelector('img')
+  }
+
+  it('serves a workspace-relative image through the chat-scoped image route', () => {
+    // A bare relative src resolved against the /chat/... route and loaded the
+    // app shell, so the image rendered as a broken box.
+    const el = img('![Chat details](memory-vault/projects/active/shot%20v2.png)', 'chat-1')
+
+    expect(el?.getAttribute('src')).toBe(
+      '/api/workspace-image?path=memory-vault%2Fprojects%2Factive%2Fshot%20v2.png&chat_id=chat-1',
+    )
+    expect(el?.getAttribute('alt')).toBe('Chat details')
+  })
+
+  it('leaves web images, root URLs and non-image paths as written', () => {
+    expect(img('![a](https://example.com/a.png)', 'chat-1')?.getAttribute('src')).toBe('https://example.com/a.png')
+    expect(img('![a](/api/images/upload.png)', 'chat-1')?.getAttribute('src')).toBe('/api/images/upload.png')
+    expect(img('![a](notes/plan.md)', 'chat-1')?.getAttribute('src')).toBe('notes/plan.md')
+  })
+})
+
 describe('file markdown folder links', () => {
   it("resolves a note's folder link against the note's folder", () => {
     const up = renderFileMarkdown('[out](../exports/sloth-v5)', {

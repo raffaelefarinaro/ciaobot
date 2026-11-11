@@ -3707,17 +3707,10 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
-async def chat_file_path(request: Request) -> Response:
-    """Canonical file identity for a link emitted in a chat's workspace.
-
-    Resolves against the chat's agent root and its workspace vault root, and
-    nothing else. A missing file must not match a same-named file in another
-    workspace, so fuzzy matching is confined to those two roots. Absolute
-    paths retain the viewer's existing policy.
-    """
+async def _resolve_in_chat(request: Request, chat_id: str) -> Path | Response:
+    """Resolve the request's ``path`` against *chat_id*'s agent and vault roots only."""
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
-    chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     workspace = pcm._workspace_for_chat(chat_id)
@@ -3726,9 +3719,20 @@ async def chat_file_path(request: Request) -> Response:
         config.workspace_vault_root(workspace).resolve(),
     ]))
     # The fuzzy pass walks the directory tree, so it runs off the event loop.
-    result = await asyncio.to_thread(
+    return await asyncio.to_thread(
         _resolve_chat_file, roots, request.query_params.get("path", "").strip()
     )
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
+    """
+    result = await _resolve_in_chat(request, request.path_params["chat_id"])
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
@@ -5354,11 +5358,20 @@ async def workspace_image(request: Request) -> Response:
 
     Used by the markdown viewer to resolve relative image references (e.g.
     ``![alt](images/foo.png)`` inside a vault doc) against the doc's folder.
+
+    With ``chat_id`` the path resolves the way that chat's file links do
+    (``chat_file_path``): against the chat's own agent and vault roots, never
+    a same-named file in another workspace. A chat message's embedded image
+    (``![shot](memory-vault/x.png)``) is served this way.
     """
-    config = request.app.state.config
-    raw = request.query_params.get("path", "").strip()
-    roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    chat_id = request.query_params.get("chat_id", "").strip()
+    result: Path | Response
+    if chat_id:
+        result = await _resolve_in_chat(request, chat_id)
+    else:
+        roots = _allowed_roots(request.app.state.config)
+        raw = request.query_params.get("path", "").strip()
+        result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
         return result
     resolved = result

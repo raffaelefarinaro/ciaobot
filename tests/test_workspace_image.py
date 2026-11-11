@@ -127,3 +127,80 @@ def test_directory_path_returns_404(workspace: Path) -> None:
     client = _make_client(workspace)
     resp = client.get("/api/workspace-image", params={"path": "docs/images"})
     assert resp.status_code == 404
+
+
+# ── Chat-scoped resolution (`chat_id`) ──────────────────────────────────
+#
+# A chat message embeds `![shot](memory-vault/x.png)` relative to its own
+# workspace. Unscoped, the relative path anchors to `workspace_root` (and the
+# fuzzy fallback can land on a same-named file in another workspace), so the
+# chat transcript names its chat and the image resolves the way that chat's
+# file links do (`/api/chats/{chat_id}/file-path`).
+
+
+def _chat_client(tmp_path: Path):
+    from ciao.config import CiaoConfig
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    manager = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = manager.create_project("Shots", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Shots")
+    app = Starlette(routes=[Route("/api/workspace-image", workspace_image, methods=["GET"])])
+    app.state.config = config
+    app.state.project_chat_manager = manager
+    return TestClient(app, raise_server_exceptions=False), chat.chat_id, CiaoConfig
+
+
+def test_chat_id_resolves_against_the_chat_workspace(tmp_path: Path, monkeypatch) -> None:
+    client, chat_id, config_cls = _chat_client(tmp_path)
+    root = tmp_path / "work"
+    (root / "memory-vault").mkdir(parents=True)
+    (root / "memory-vault" / "shot.png").write_bytes(_PNG_BYTES)
+    # The same relative path under the primary root is the wrong workspace.
+    (tmp_path / "memory-vault").mkdir(exist_ok=True)
+    (tmp_path / "memory-vault" / "shot.png").write_bytes(b"wrong workspace")
+    monkeypatch.setattr(config_cls, "agent_root", lambda self, workspace: root)
+
+    resp = client.get(
+        "/api/workspace-image", params={"path": "memory-vault/shot.png", "chat_id": chat_id}
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == _PNG_BYTES
+    assert resp.headers["content-type"] == "image/png"
+
+
+def test_chat_id_never_falls_back_to_another_workspace(tmp_path: Path, monkeypatch) -> None:
+    client, chat_id, config_cls = _chat_client(tmp_path)
+    root = tmp_path / "work"
+    root.mkdir()
+    (tmp_path / "elsewhere.png").write_bytes(_PNG_BYTES)
+    monkeypatch.setattr(config_cls, "agent_root", lambda self, workspace: root)
+
+    resp = client.get("/api/workspace-image", params={"path": "elsewhere.png", "chat_id": chat_id})
+
+    assert resp.status_code == 404
+
+
+def test_unknown_chat_id_is_404(tmp_path: Path) -> None:
+    client, _chat_id, _config_cls = _chat_client(tmp_path)
+    (tmp_path / "pic.png").write_bytes(_PNG_BYTES)
+
+    resp = client.get("/api/workspace-image", params={"path": "pic.png", "chat_id": "nope"})
+
+    assert resp.status_code == 404

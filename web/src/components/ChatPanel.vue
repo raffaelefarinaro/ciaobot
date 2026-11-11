@@ -4071,7 +4071,7 @@ function renderMarkdown(text: string): string {
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true, chatId: props.chatId })
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
