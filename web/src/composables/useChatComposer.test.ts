@@ -195,7 +195,10 @@ describe('useChatComposer textarea sizing', () => {
     const { composer } = makeComposer()
     const el = attachTextarea(composer, 'long', { tall: true })
     const bar = el.parentElement as HTMLElement
+    pinScrollHeight(el, 150)
     composer.draft.value = 'a long prompt'
+    await nextTick()
+    expect(bar.classList.contains('tall')).toBe(true)
     pinScrollHeight(el, 44)
     composer.draft.value = ''
     await nextTick()
