@@ -3618,9 +3618,18 @@ describe('ChatLayout chat route without a catalog entry', () => {
         },
       })
       await flushPromises()
-      await vi.waitFor(() => {
-        expect(wrapper.find('.terminal-pane').exists()).toBe(true)
-      })
+      try {
+        // The terminal pane is a lazy chunk; a cold Windows runner can take
+        // over vitest's 1 s default to load it.
+        await vi.waitFor(() => {
+          expect(wrapper.find('.terminal-pane').exists()).toBe(true)
+        }, { timeout: 10_000 })
+      } catch (error) {
+        // Never leave a mounted layout (and its window key listeners) behind
+        // for the next test.
+        wrapper.unmount()
+        throw error
+      }
       await flushPromises()
       return wrapper
     }
