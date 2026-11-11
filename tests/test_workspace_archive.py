@@ -591,13 +591,14 @@ def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
 
 def test_restore_carries_claude_trim(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].claude_trim = {"tool:NotebookEdit": False}
+    config.workspaces["work"].claude_trim = {"tool:ReportFindings": True, "tool:NotebookEdit": False}
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
 
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].claude_trim == {"tool:NotebookEdit": False}
+    # A tightening is kept; an archive cannot un-hide NotebookEdit.
+    assert config.workspaces["work"].claude_trim == {"tool:ReportFindings": True}
 
 
 def test_workspace_archive_restore_resets_memory_handover_to_off(tmp_path):

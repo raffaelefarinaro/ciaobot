@@ -1337,6 +1337,60 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
+def test_chat_update_refuses_mode_escalation_and_writes_nothing() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def update_chat(cid, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(chat_id=cid, to_dict=lambda local=True: {"chat_id": cid, **kwargs})
+
+    pcm = SimpleNamespace(
+        update_chat=update_chat,
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1", mode="auto"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.chat_update(_chat_create_principal(), "", title="X", mode="bypass")
+
+    assert excinfo.value.code == "mode_escalation_refused"
+    assert "chat needs-action permission_mode" in str(excinfo.value)
+    assert calls == []
+
+
+def test_chat_update_allows_lowering_mode() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def update_chat(cid, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(chat_id=cid, to_dict=lambda local=True: {"chat_id": cid, **kwargs})
+
+    pcm = SimpleNamespace(
+        update_chat=update_chat,
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1", mode="auto"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+    )
+
+    result = control_plane.chat_update(_chat_create_principal(), "", mode="plan")
+
+    assert calls[-1]["mode"] == "plan"
+    assert "mode_clamped" not in result["data"]
+
+
 def test_chat_update_takes_no_code_mode_argument(tmp_path: Path) -> None:
     """Code mode follows the project's linked repository; the tool has no switch."""
     import inspect
