@@ -26,12 +26,14 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+from ciao.web import routes_hooks
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.webhooks import (
     MAX_BODY_BYTES,
     RATE_LIMIT_PER_MINUTE,
     RATE_WINDOW_SECONDS,
     RECEIPTS_NAME,
+    WebhookReceiver,
     WebhookStore,
     reset_rate_limits,
 )
@@ -415,16 +417,35 @@ def test_the_receiver_answers_202_without_waiting_for_the_launch(
     launch allocation is on disk before the model turn starts, so a chat exists
     by the time ``start_stream`` is called even though the response has already
     gone out.
+
+    The dispatch is parked in a worker thread at its last awaited seam
+    (``settle_launched``, reached through ``asyncio.to_thread``), never on the
+    event loop: since starlette 1.9 the ``TestClient`` streams the response body
+    through the loop, so a fake that blocks the loop would also hold the
+    response (#2614). Parked there, a route that awaited the dispatch could not
+    answer until the park ends, and no dispatch task would be pending.
     """
     client, config, _cookies = _world(tmp_path, monkeypatch)
     trigger_id, secret = _trigger(config)
-    entered = threading.Event()
+    parked = threading.Event()
     release = threading.Event()
-    finished = threading.Event()
+    settled = threading.Event()
     calls: list[tuple[str, str, dict[str, Any]]] = []
+    settle_launched = WebhookReceiver.settle_launched
+
+    def _parked_settle(self, receipt_id: str, *, chat_id: str):
+        # Runs in `asyncio.to_thread`, so waiting here leaves the loop free.
+        parked.set()
+        release.wait(timeout=10)
+        try:
+            return settle_launched(self, receipt_id, chat_id=chat_id)
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(WebhookReceiver, "settle_launched", _parked_settle)
 
     class _Pcm:
-        """A chat manager that records its calls and blocks inside the turn."""
+        """A chat manager that records its calls; the turn starts and returns."""
 
         def list_projects(self, workspace: str | None = None) -> list[Any]:
             del workspace
@@ -440,21 +461,6 @@ def test_the_receiver_answers_202_without_waiting_for_the_launch(
 
         def start_stream(self, chat_id, prompt, **kwargs) -> None:
             calls.append(("start_stream", chat_id, kwargs))
-            entered.set()
-            # Stands in for a turn that runs for minutes. The 202 must already
-            # have been delivered while this is blocked.
-            release.wait(timeout=30)
-            finished.set()
-
-    client.app.state.project_chat_manager = _Pcm()
-    try:
-        with client:
-            resp = _post(client, trigger_id, secret=secret)
-            assert resp.status_code == 202
-            assert resp.json()["status"] == "accepted"
-            assert entered.wait(timeout=30), "the launch was never scheduled"
-            # The response is out while the turn is still inside start_stream.
-            assert not finished.is_set()
             rows = [
                 json.loads(line)
                 for line in _journal(config).read_text(encoding="utf-8").splitlines()
@@ -462,15 +468,41 @@ def test_the_receiver_answers_202_without_waiting_for_the_launch(
             ]
             # The allocation is durable before the turn, so a crash here would be
             # `interrupted` rather than a receipt that looks un-run.
-            assert [row["status"] for row in rows] == ["accepted", "launching"]
+            statuses = [row["status"] for row in rows]
+            calls.append(("journal", chat_id, {"statuses": statuses}))
+
+    client.app.state.project_chat_manager = _Pcm()
+    try:
+        with client:
+            resp = _post(client, trigger_id, secret=secret)
+            # The response is out while the dispatch is still parked: not settled,
+            # and its task still pending in the route's strong-reference set.
+            assert not settled.is_set()
+            assert resp.status_code == 202
+            assert resp.json()["status"] == "accepted"
+            pending = list(routes_hooks._DISPATCH_TASKS)
+            assert len(pending) == 1, "the launch was not scheduled as a task"
+            assert not pending[0].done()
+            assert parked.wait(timeout=30), "the launch never reached its outcome"
             release.set()
-            assert finished.wait(timeout=30)
+            assert settled.wait(timeout=30)
     finally:
         release.set()
-    assert [name for name, _target, _kwargs in calls] == ["create_chat", "start_stream"]
+    assert [name for name, _target, _kwargs in calls] == [
+        "create_chat",
+        "start_stream",
+        "journal",
+    ]
     # No `unattended`: the turn is an ordinary one, so an approval card raised in
     # it is an ordinary approval card.
     assert calls[1][2] == {"origin": "webhook"}
+    assert calls[2][2] == {"statuses": ["accepted", "launching"]}
+    rows = [
+        json.loads(line)
+        for line in _journal(config).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["status"] for row in rows] == ["accepted", "launching", "launched"]
 
 
 def test_a_retry_is_answered_with_the_same_receipt(tmp_path: Path, monkeypatch) -> None:
