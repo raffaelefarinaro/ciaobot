@@ -108,6 +108,27 @@ describe('ProjectView header', () => {
     expect(wrapper.find('.title-rail').exists()).toBe(false)
   })
 
+  it('Escape cancels the rename and claims the key, so the page stays open', async () => {
+    const store = seed(1)
+    const update = vi.spyOn(store, 'updateProject').mockResolvedValue(undefined as never)
+    const wrapper = await mountView('general')
+    await wrapper.get('.project-title').trigger('dblclick')
+    await wrapper.get('input.title-input').setValue('General edited')
+
+    const onWindowKeydown = vi.fn()
+    window.addEventListener('keydown', onWindowKeydown)
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    wrapper.get('input.title-input').element.dispatchEvent(esc)
+    window.removeEventListener('keydown', onWindowKeydown)
+    await flush()
+
+    expect(esc.defaultPrevented).toBe(true)
+    expect(onWindowKeydown).not.toHaveBeenCalled()
+    expect(wrapper.find('input.title-input').exists()).toBe(false)
+    expect(wrapper.get('.project-title').text()).toBe('General')
+    expect(update).not.toHaveBeenCalled()
+  })
+
   it('steps to the neighbour with the previous / next chord', async () => {
     seed()
     const wrapper = await mountView()
