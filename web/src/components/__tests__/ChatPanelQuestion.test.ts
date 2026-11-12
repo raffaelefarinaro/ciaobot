@@ -206,7 +206,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     const other = wrapper.find('input.question-other')
 
     expect(wrapper.find('.question-validation').exists()).toBe(false)
-    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.question-card-actions .btn-primary').attributes('disabled')).toBeDefined()
 
     await other.trigger('blur')
     expect(wrapper.find('.question-validation').text()).toContain('required')
@@ -216,7 +216,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
 
     await other.setValue('abc')
     expect(wrapper.find('.question-validation').exists()).toBe(false)
-    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('.question-card-actions .btn-primary').attributes('disabled')).toBeUndefined()
 
     wrapper.unmount()
   })
@@ -259,7 +259,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
 
     pressKey('1')
     await nextTick()
-    await wrapper.find('.question-card-actions .primary').trigger('click')
+    await wrapper.find('.question-card-actions .btn-primary').trigger('click')
 
     expect(respond).toHaveBeenCalledWith(
       CHAT_ID,

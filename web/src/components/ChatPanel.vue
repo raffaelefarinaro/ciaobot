@@ -810,8 +810,8 @@
       <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
       </div>
       <div class="question-card-actions">
-        <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
-        <button class="btn-sm primary" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
+        <button class="btn-small" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
+        <button class="btn-primary btn-small" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
           {{ questionSubmitting ? 'Sending…' : 'Send answer' }}
         </button>
       </div>
@@ -846,7 +846,7 @@
       </div>
       <div class="question-card-actions">
         <button
-          class="btn-sm"
+          class="btn-small"
           type="button"
           :disabled="capabilityExpired(activeCapabilityQuestions[0])"
           @click="cancelCapability(activeCapabilityQuestions[0])"
@@ -1063,22 +1063,24 @@
 
     <div class="input-bar">
       <template v-if="chat.archived">
+        <!-- Sits where the composer was, in the composer's shape, so the
+             footer keeps its place and the way forward reads as the next step. -->
         <div class="archived-notice">
-          <div class="archived-notice-row">
-            <span>This chat is archived.</span>
-            <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
-              {{ isContinuing ? 'Continuing...' : heldSettledTask ? 'Continue the task in a new chat' : 'Continue in new chat' }}
+          <p class="archived-notice-text">This chat is archived.</p>
+          <div class="archived-notice-actions">
+            <!-- The memory pass this chat spawned, if one did. The pass lives in
+                 a project the sidebar hides, so this is the durable way back to
+                 it. -->
+            <button
+              v-if="archiveMemoryPassChatId"
+              class="btn-small archive-memory-pass-btn"
+              type="button"
+              @click="openMemoryPass"
+            >Open memory pass</button>
+            <button class="btn-primary btn-small continue-chat-btn" type="button" @click="continueChat" :disabled="isContinuing">
+              {{ isContinuing ? 'Continuing…' : heldSettledTask ? 'Continue the task in a new chat' : 'Continue in new chat' }}
             </button>
           </div>
-          <!-- The memory pass this chat spawned, if one did. The pass lives in
-               a project the sidebar hides, so this is the durable way back to
-               it. -->
-          <button
-            v-if="archiveMemoryPassChatId"
-            class="btn-sm archive-memory-pass-btn"
-            type="button"
-            @click="openMemoryPass"
-          >Open memory pass</button>
         </div>
       </template>
       <template v-else>
@@ -7136,30 +7138,37 @@ details[open] > .activity-summary::before {
 
 .archived-notice {
   flex: 1;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  text-align: center;
-  padding: 10px 12px;
+  min-width: 0;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-}
-
-.archived-notice-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: 7px 7px 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-composer);
+  background: var(--bg2);
 }
 
-/* The link back to the memory pass this chat spawned. 44px like every control
-   in this footer. */
-.archive-memory-pass-btn {
-  min-height: 44px;
-  min-width: 44px;
+.archived-notice-text {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+
+.archived-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* On a phone the actions take their own full-width row, as even buttons. */
+@media (max-width: 767px) {
+  .archived-notice { padding: 10px; }
+  .archived-notice-text { padding: 0 6px; }
+  .archived-notice-actions { flex: 1 1 100%; }
+  .archived-notice-actions .btn-small { flex: 1 1 auto; }
 }
 
 .image-btn {
@@ -7437,8 +7446,8 @@ details[open] > .activity-summary::before {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-.question-form-card .question-card-actions .btn-sm:focus-visible,
-.question-form-card .question-card-actions .btn-sm:focus {
+.question-form-card .question-card-actions .btn-small:focus-visible,
+.question-form-card .question-card-actions .btn-small:focus {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -7633,7 +7642,7 @@ details[open] > .activity-summary::before {
   }
   .question-option,
   .question-other,
-  .question-card-actions .btn-sm {
+  .question-card-actions .btn-small {
     min-height: var(--touch);
   }
   .question-option { justify-content: center; }
@@ -8122,31 +8131,6 @@ details[open] > .activity-summary::before {
   inset: 0;
   z-index: 40;
   background: rgba(0, 0, 0, 0.32);
-}
-.btn-sm {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: var(--text-sm);
-  font-weight: 500;
-  padding: 8px 16px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg);
-  cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease);
-}
-.btn-sm:hover { background: var(--bg3); border-color: var(--fg2); }
-.btn-sm.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-  font-weight: 600;
-}
-.btn-sm.primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* Messages container takes the full pane; comment surfaces are popovers. */

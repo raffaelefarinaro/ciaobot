@@ -10,12 +10,14 @@ import {
   busiestHour,
   fetchUsageStats,
   formatCompact,
+  formatAverage,
   formatCount,
   formatDelta,
   formatDay,
   heatCellLabel,
   heatLevel,
   heatmapCells,
+  heatmapMonths,
   modelShares,
   normalizeUsageStats,
   periodLabel,
@@ -98,6 +100,15 @@ describe('fetchUsageStats', () => {
 })
 
 describe('formatters', () => {
+  it('formatAverage keeps a decimal below 10', () => {
+    expect(formatAverage(null)).toBe('—')
+    expect(formatAverage(0.4)).toBe('0.4')
+    expect(formatAverage(2)).toBe('2')
+    expect(formatAverage(9.94)).toBe('9.9')
+    expect(formatAverage(10.4)).toBe('10')
+    expect(formatAverage(1234.6)).toBe('1,235')
+  })
+
   it('formatCount', () => {
     expect(formatCount(null)).toBe('—')
     expect(formatCount(0)).toBe('0')
@@ -166,12 +177,27 @@ describe('breakdown helpers', () => {
     expect(heatmapCells([])).toEqual([])
   })
 
-  it('covers 182 days in 26 or 27 columns', () => {
-    const days: UsageDay[] = Array.from({ length: 182 }, (_, i) => ({ date: isoDay('2026-11-09', 181 - i), count: 1 }))
-    expect(days[0].date).toBe('2026-05-12')
+  it('covers 364 days in 52 or 53 columns', () => {
+    const days: UsageDay[] = Array.from({ length: 364 }, (_, i) => ({ date: isoDay('2026-11-09', 363 - i), count: 1 }))
+    expect(days[0].date).toBe('2025-11-11')
     const cells = heatmapCells(days)
-    expect(cells).toHaveLength(183)
+    expect(cells).toHaveLength(365)
     expect(cells.filter(c => c.date === null)).toHaveLength(1)
+  })
+
+  it('names each month at the week column where it starts', () => {
+    const days: UsageDay[] = Array.from({ length: 364 }, (_, i) => ({ date: isoDay('2026-11-09', 363 - i), count: 1 }))
+    const months = heatmapMonths(heatmapCells(days))
+    // Nov 2025 starts the strip with only three weeks left, so it keeps its label.
+    expect(months.map(m => m.label)).toEqual(['Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov'])
+    expect(months[0]).toEqual({ column: 1, label: 'Nov' })
+    expect(months[1]).toEqual({ column: 4, label: 'Dec' })
+    expect(months.every((m, i) => i === 0 || m.column > months[i - 1]!.column)).toBe(true)
+  })
+
+  it('drops a partial first month that would collide with the next label', () => {
+    const days: UsageDay[] = Array.from({ length: 20 }, (_, i) => ({ date: isoDay('2026-11-09', 19 - i), count: 1 }))
+    expect(heatmapMonths(heatmapCells(days)).map(m => m.label)).toEqual(['Nov'])
   })
 
   it('labels heatmap cells', () => {
