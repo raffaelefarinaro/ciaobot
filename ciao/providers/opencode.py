@@ -4794,7 +4794,8 @@ class OpencodeProvider(BaseSDKProvider):
                 context_window = _context_window_for(
                     response.json(), provider_id, model_id
                 )
-        except (httpx.HTTPError, ValueError):
+        # httpx raises RuntimeError on a client a teardown already closed.
+        except (httpx.HTTPError, RuntimeError, ValueError):
             context_window = None
         if not context_window:
             return
