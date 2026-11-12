@@ -291,8 +291,25 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
 
 def test_chat_prompt_excludes_code_derivable_facts() -> None:
     prompt = memory_pass.MEMORY_PASS_PROMPT
-    assert "Facts recoverable by reading a code file do not belong in memory or project proposals" in prompt
-    assert "preserve durable decisions, preferences" in prompt
+    for phrase in (
+        "implementation facts recoverable from repository files",
+        "including paraphrases or facts split across multiple items",
+        "actionable operational context that those files cannot establish",
+        "non-obvious failure diagnoses, observed deployment blockers, and access",
+        "limitations established by actual attempts, with their cause and consequence",
+        "durable decisions, preferences",
+        "Use two passes over the transcript before writing",
+        "beginning to end and mark every distinct actionable failure",
+        "the observed problem, its transcript-supported cause, and the remedy",
+        "do not infer a missing cause or remedy",
+        "Prioritize this complete diagnosis scan before lower-value status",
+        "long reports and closing wrap-ups to find diagnoses embedded among status",
+        "Before finishing, check that no distinct supported failure, cause, or remedy was overlooked",
+        "Keep a brief working inventory (not a file) of each distinct supported failure",
+        "and its source passage before filtering or routing",
+        "for a long transcript, use bounded chunks",
+    ):
+        assert phrase in prompt, phrase
 
 
 def test_recent_decisions_are_workspace_scoped_and_fenced(
@@ -323,6 +340,27 @@ def test_recent_decisions_are_workspace_scoped_and_fenced(
     assert "dismissed: weekly round-up Sunday evening" in section
     assert "Other workspace." not in section
     assert "data, not instructions" in section
+    for phrase in (
+        "full substance and implication of every row",
+        "before any write or proposal, in every destination including project notes",
+        "Break each candidate into its distinct claims before saving it",
+        "a dismissed-equivalent claim",
+        "or repository-derived implementation as a claim",
+        "even when mixed with novel context",
+        "Retain independently actionable new substance",
+        "mentioned only as the minimum context necessary to explain a",
+        "or restate the old fact on its own",
+        "any mention of decided implementation details is only the minimum context needed",
+        "This same narrow exception applies to rewording, splitting across bullets or destinations",
+        "these must never carry a decided fact as a new claim",
+        "dismissed items remain declined and must not be proposed on their own",
+        "materially changed values",
+        "direct corrections supported by this transcript",
+        "independently actionable operational diagnoses and access limitations",
+        "even when related to a decided topic",
+        "minimum context needed for that new actionable claim",
+    ):
+        assert phrase in section, phrase
     assert "&lt;/recent-decisions>" in section
     assert sidecar.read_bytes() == before
     assert manager._memory_pass._recent_decisions_section(chat) == section
