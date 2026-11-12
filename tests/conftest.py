@@ -12,6 +12,8 @@ INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_")
 for _name in [name for name in os.environ if name.startswith(INHERITED_ENV_PREFIXES)]:
     del os.environ[_name]
 
+import gc
+import logging
 import sys
 import pytest
 from pathlib import Path
@@ -353,3 +355,40 @@ def attach_stub_mcp(manager):
         )
     )
     return manager
+
+
+class _UnretrievedTaskExceptions(logging.Handler):
+    """Collects asyncio's "Task exception was never retrieved" reports."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith("Task exception was never retrieved"):
+            self.messages.append(message)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _fail_on_unretrieved_task_exceptions() -> Any:
+    """Fail the run when a test leaked a task that died with an unretrieved exception.
+
+    asyncio reports such a task only when it is garbage-collected, usually under
+    a later test, so the reports are collected for the whole session (one per
+    xdist worker) and fail it at the end (#2842).
+    """
+    handler = _UnretrievedTaskExceptions()
+    asyncio_logger = logging.getLogger("asyncio")
+    asyncio_logger.addHandler(handler)
+    try:
+        yield
+        gc.collect()
+    finally:
+        asyncio_logger.removeHandler(handler)
+    if handler.messages:
+        pytest.fail(
+            "a test leaked a background task that died unobserved:\n"
+            + "\n".join(handler.messages),
+            pytrace=False,
+        )
