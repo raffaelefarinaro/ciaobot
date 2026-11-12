@@ -18,7 +18,8 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -61,11 +62,9 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao import repo_location
+from ciao import repo_location, vault_verification
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from pathlib import Path
-
     from ciao.web.project_chats import ChatInfo
 
 logger = logging.getLogger(__name__)
@@ -147,6 +146,7 @@ class ChatStreamingHost(Protocol):
     _events: EventsHub
     _snapshots: SnapshotStore
     _shutting_down: bool
+    verify_vault_answers_enabled: Callable[[], bool]
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -157,6 +157,8 @@ class ChatStreamingHost(Protocol):
     def _get_provider(self, chat_id: str) -> ProviderService: ...
 
     def _agent_root_for_chat(self, chat_id: str) -> Path: ...
+
+    def _vault_root_for_chat(self, chat_id: str) -> Path | None: ...
 
     async def reload_provider(self, chat_id: str) -> bool: ...
 
@@ -256,6 +258,10 @@ class ChatStreamingHost(Protocol):
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
+    ) -> None: ...
+
+    async def _verify_turn_and_publish(
+        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
     ) -> None: ...
 
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
@@ -506,6 +512,12 @@ class ChatStreaming:
         last_error_text = ""
         had_provider_progress = False
         repo_hints: list[str] = []
+        # Vault notes this drive's turns read, checked after a successful turn.
+        # Resolved on the first Read tool event, so a drive that reads nothing
+        # never touches the vault layout.
+        vault_root: Path | None = None
+        agent_root: Path | None = None
+        vault_root_resolved = False
         await self._host._await_between_turns_drain(chat_id)
 
         hidden_turn = False
@@ -529,6 +541,8 @@ class ChatStreaming:
                 # force-closed partial): the selected answer then replaces the
                 # carry-over even when it is empty (#2139 review).
                 turn_answer_ready = False
+                turn_vault_reads: list[Path] = []
+                turn_succeeded = False
                 stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
@@ -544,6 +558,7 @@ class ChatStreaming:
                     run_compact: bool = compact,
                 ) -> None:
                     nonlocal turn_assistant_text, turn_answer_text, turn_answer_ready
+                    nonlocal turn_succeeded, vault_root, agent_root, vault_root_resolved
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text, last_answer_text
@@ -757,6 +772,20 @@ class ChatStreaming:
                             return
                         if isinstance(event, ToolUseEvent):
                             repo_hints.extend(repo_location.tool_event_hints(event))
+                            if event.type != "tool_result" and event.tool_name in ("Read", "read"):
+                                if not vault_root_resolved:
+                                    vault_root = self._host._vault_root_for_chat(chat_id)
+                                    agent_root = self._host._agent_root_for_chat(chat_id)
+                                    vault_root_resolved = True
+                                if vault_root is not None and agent_root is not None:
+                                    read = vault_verification.vault_read_path(
+                                        event.tool_name,
+                                        event.tool_input,
+                                        vault_root=vault_root,
+                                        agent_root=agent_root,
+                                    )
+                                    if read is not None:
+                                        turn_vault_reads.append(read)
                             touches: list[dict] = []
                             if payload:
                                 multi = payload.get("file_touches")
@@ -835,6 +864,7 @@ class ChatStreaming:
                                     event.result or "", event.final_text, turn_segment
                                 )
                                 turn_answer_ready = True
+                                turn_succeeded = True
 
                 turn_task: asyncio.Task | None = None
                 if stream.user_stopped:
@@ -1036,6 +1066,21 @@ class ChatStreaming:
                     # including an explicitly empty one: keeping the previous
                     # turn's text here would re-announce it (#2139 review).
                     last_answer_text = turn_answer_text
+                if (
+                    turn_succeeded
+                    and turn_vault_reads
+                    and current_turn_index is not None
+                    and turn_answer_text.strip()
+                    and self._host.verify_vault_answers_enabled()
+                ):
+                    asyncio.create_task(
+                        self._host._verify_turn_and_publish(
+                            chat_id,
+                            current_turn_index,
+                            turn_answer_text,
+                            list(turn_vault_reads),
+                        )
+                    )
 
                 if question_paused:
                     self._host._fallback_steers(chat_id, stream, "finished")
