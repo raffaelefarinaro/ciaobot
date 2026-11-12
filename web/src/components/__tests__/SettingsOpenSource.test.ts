@@ -62,8 +62,8 @@ describe('the open-source card star nudge', () => {
 
     const wrapper = await mountSettings()
     const card = wrapper.find('.open-source-card')
-    expect(card.classes()).toContain('open-source-card--with-face')
-    expect(wrapper.find('.open-source-face').attributes('src')).toBe('/face.png')
+    expect(card.classes()).toContain('open-source-card--with-mark')
+    expect(wrapper.find('.open-source-mark svg.ciao-mark').exists()).toBe(true)
     expect(wrapper.findAll('button').map(b => b.text())).toContain('★ Star on GitHub')
     wrapper.unmount()
   })
@@ -74,8 +74,8 @@ describe('the open-source card star nudge', () => {
     housekeeping.actions = []
 
     const wrapper = await mountSettings()
-    expect(wrapper.find('.open-source-card').classes()).not.toContain('open-source-card--with-face')
-    expect(wrapper.find('.open-source-face').exists()).toBe(false)
+    expect(wrapper.find('.open-source-card').classes()).not.toContain('open-source-card--with-mark')
+    expect(wrapper.find('.open-source-mark').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('★ Star on GitHub')
     wrapper.unmount()
   })

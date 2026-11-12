@@ -2019,12 +2019,12 @@ async function confirmDeleteChat(chatId: string) {
   .sidebar-header--expanded .sidebar-brand-row { gap: 6px; }
 }
 
-/* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
+/* The Ciaobot mark: the C in the text colour, its dots in the workspace accent. */
 .sidebar-brand-mark {
   flex: 0 0 26px;
   width: 26px;
   height: 26px;
-  color: var(--accent);
+  color: var(--fg);
 }
 
 .sidebar-brand-row :deep(.sidebar-brand) {

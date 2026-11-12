@@ -209,7 +209,7 @@ The product uses a **hybrid typography system** (the proportional face is the op
 - **Chat prose:** a request keeps 1.5 leading; a reply uses 1.55. Markdown headings inside a reply are 1.35em / 1.18em / 1.08em (h1/h2/h3) of the message font.
 - **Mobile form text:** At least 16px to prevent browser auto-zoom while keeping user zoom available.
 - **Labels & Badges:** Monospaced 11px, semibold, often uppercase with 0.5px tracking for technical precision.
-- **Wordmark:** Bold monospace `ciaobot`, led in the sidebar by the Ciaobot face as a one-colour pixel mark (`CiaoMark.vue`, traced from `face.png` in three tones of `currentColor`) drawn in the workspace accent. A blinking caret may appear only in startup or explicitly terminal-like moments.
+- **Wordmark:** Bold monospace `ciaobot`, led in the sidebar by the Ciaobot mark (`CiaoMark.vue`, the same geometry as `web/public/brand/ciaobot-mark.svg`): a C in the text colour with its two dots in the workspace accent. Brand colours: green `#1A3326`, orange `#DD7239`, cream `#F8F4EF`; the app icon is the C on a cream tile (`ciaobot-icon.svg`, rasterised by `npm run build:icons`). A blinking caret may appear only in startup or explicitly terminal-like moments.
 
 Respect the user-controlled font scale. Truncate compact navigation labels only when the full value remains available through context, title text, or an expanded view.
 
