@@ -16,7 +16,7 @@
               v-model="nameDraft"
               aria-label="Project name"
               @keyup.enter="saveName"
-              @keyup.escape="editingName = false"
+              @keydown.escape.stop.prevent="cancelEditName"
               @blur="saveName"
               autofocus
             />
@@ -780,6 +780,10 @@ function startEditName() {
   if (!project.value) return
   nameDraft.value = project.value.name
   editingName.value = true
+}
+function cancelEditName() {
+  if (project.value) nameDraft.value = project.value.name
+  editingName.value = false
 }
 async function saveName() {
   if (!project.value) return

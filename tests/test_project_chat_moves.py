@@ -19,6 +19,7 @@ from ciao.config import CiaoConfig
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.memory_pass import MemoryPassCoordinator
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
 
 
@@ -982,6 +983,8 @@ def test_synchronous_archive_indexing_is_best_effort(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(fts_search, "index_file", _explode)
+    # No event loop: the archive's queued memory pass must not start its turn.
+    monkeypatch.setattr(MemoryPassCoordinator, "pump", lambda self, workspace: None)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")

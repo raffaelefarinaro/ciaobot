@@ -231,3 +231,120 @@ describe('McpAuthBody Turn off', () => {
     expect(w.find('.needs-you-turn-off-scope').exists()).toBe(false)
   })
 })
+
+describe('McpAuthBody opens the sign-in page', () => {
+  const URL_A = 'https://auth.example/authorize?a=1'
+  const fakeTab = () => ({ closed: false, opener: {} as unknown, location: { href: '' }, close: vi.fn() })
+  const claude = (state: ChatAction['state'], extra: Record<string, string> = {}) => action({
+    state,
+    params: { server: 'plugin:scandit-sdk:scandit', provider: 'claude', session_id: 's1', ...extra },
+  })
+  const signIn = (w: VueWrapper, label = 'Sign in') => w.findAll('button').find(b => b.text() === label)!.trigger('click')
+  const steps = (w: VueWrapper) => w.findAll('.needs-you-steps li')
+
+  it('opens a tab in the Claude click and sends it to the address that arrives later', async () => {
+    const tab = fakeTab()
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({ action: claude('working') })
+    const w = mountBody(claude('open'))
+
+    const click = signIn(w)
+    expect(openSpy).toHaveBeenCalledWith('', '_blank')
+    await click
+    await flushPromises()
+    expect(tab.location.href).toBe('')
+
+    await w.setProps({ action: claude('waiting', { url: URL_A }) })
+    expect(tab.location.href).toBe(URL_A)
+    expect(tab.opener).toBeNull()
+    expect(steps(w)[0].text()).toBe('Sign-in page opened')
+    expect(steps(w)[0].classes()).toContain('is-done')
+    expect(steps(w)[0].attributes('aria-current')).toBeUndefined()
+    expect(steps(w)[1].attributes('aria-current')).toBe('step')
+    expect(tab.close).not.toHaveBeenCalled()
+  })
+
+  it('sends the tab to the OpenCode address in the start answer', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({ action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: URL_A } }) })
+    const w = mountBody(action({ state: 'open', params: { server: 'linear', provider: 'opencode' } }))
+
+    await signIn(w)
+    await flushPromises()
+
+    expect(tab.location.href).toBe(URL_A)
+    expect(tab.close).not.toHaveBeenCalled()
+  })
+
+  it('leaves step 1 to do when the pop-up was blocked, and ticks it when the link is clicked', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    apiPost.mockResolvedValueOnce({ action: claude('working') })
+    const w = mountBody(claude('open'))
+
+    await signIn(w)
+    await flushPromises()
+    await w.setProps({ action: claude('waiting', { url: URL_A }) })
+
+    expect(steps(w)[0].text()).toBe('Open the sign-in page')
+    expect(steps(w)[0].classes()).not.toContain('is-done')
+    expect(steps(w)[0].attributes('aria-current')).toBe('step')
+
+    // The click only marks the page as opened: jsdom must not navigate.
+    w.get('a.needs-you-btn').element.addEventListener('click', e => e.preventDefault())
+    await w.get('a.needs-you-btn').trigger('click')
+    expect(steps(w)[0].text()).toBe('Sign-in page opened')
+    expect(steps(w)[0].classes()).toContain('is-done')
+  })
+
+  describe('closes the waiting tab', () => {
+    it('on failure', async () => {
+      const tab = fakeTab()
+      vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+      apiPost.mockResolvedValueOnce({ action: claude('working') })
+      const w = mountBody(claude('open'))
+      await signIn(w)
+      await flushPromises()
+      await w.setProps({ action: claude('failed') })
+      expect(tab.close).toHaveBeenCalled()
+    })
+
+    it('on a refused start', async () => {
+      const tab = fakeTab()
+      vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+      apiPost.mockRejectedValueOnce(new Error('boom'))
+      const w = mountBody(claude('failed'))
+      await signIn(w, 'Try again')
+      await flushPromises()
+      expect(tab.close).toHaveBeenCalled()
+    })
+
+    it('on an unsafe address', async () => {
+      const tab = fakeTab()
+      vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+      apiPost.mockResolvedValueOnce({ action: claude('waiting', { url: 'javascript:alert(1)' }) })
+      const w = mountBody(claude('open'))
+      await signIn(w)
+      await flushPromises()
+      expect(tab.close).toHaveBeenCalled()
+      expect(tab.location.href).toBe('')
+    })
+
+    it('on unmount', async () => {
+      const tab = fakeTab()
+      vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+      apiPost.mockResolvedValueOnce({ action: claude('working') })
+      const w = mountBody(claude('open'))
+      await signIn(w)
+      await flushPromises()
+      w.unmount()
+      wrapper = null
+      expect(tab.close).toHaveBeenCalled()
+    })
+  })
+
+  it('shows the plugin server by its own name', () => {
+    const w = mountBody(claude('open'))
+    expect(w.find('button[aria-label="Turn off scandit"]').exists()).toBe(true)
+  })
+})

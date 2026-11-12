@@ -6,6 +6,7 @@ import {
   isChatAction,
   isGoogleConsentUrl,
   looksLikeLoopbackCallback,
+  mcpServerName,
   mcpTurnOffErrorText,
   mcpTurnOffScopeText,
   normalizeChatActions,
@@ -363,6 +364,24 @@ describe('gws_auth copy', () => {
     expect(isGoogleConsentUrl('https://accounts.google.com.evil.io/x')).toBe(false)
     expect(isGoogleConsentUrl('javascript:alert(1)')).toBe(false)
     expect(isGoogleConsentUrl(undefined)).toBe(false)
+  })
+})
+
+describe('mcpServerName', () => {
+  it.each([
+    ['plugin:scandit-sdk:scandit', 'scandit'],
+    ['plugin:a:b:c', 'b:c'],
+    ['linear', 'linear'],
+    ['plugin:', 'plugin:'],
+    ['', ''],
+  ])('turns %j into %j', (server, name) => {
+    expect(mcpServerName(server)).toBe(name)
+  })
+
+  it('titles a plugin server by its own name', () => {
+    const copy = actionCopy(action({ params: { server: 'plugin:scandit-sdk:scandit', provider: 'claude' } }))
+    expect(copy?.title).toBe('Sign in to scandit')
+    expect(copy?.title).not.toContain('plugin:')
   })
 })
 

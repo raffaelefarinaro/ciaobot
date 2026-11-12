@@ -146,3 +146,36 @@ test('the pane with the keyboard is the selected chat in the sidebar', async ({ 
   await expect(page).toHaveURL(new RegExp(`${CHAT_PATH}$`))
   await expect(tile.locator('.chat-title')).toHaveText(SECOND_TITLE)
 })
+
+test('renaming the side chat fills its title column and selects the title', async ({ page }) => {
+  await boot(page, CHAT_PATH, COMPOSER)
+  const row = page.locator('.chat-item', { hasText: SECOND_TITLE })
+  await row.hover()
+  await row.locator('.chat-beside-btn').click()
+
+  const tile = page.locator('.chat-split-side--chat')
+  await expect(tile.locator('.chat-title')).toHaveText(SECOND_TITLE)
+  await tile.locator('.chat-title').dblclick()
+
+  const input = tile.locator('input.title-input')
+  await expect(input).toBeFocused()
+  await expect(input).toHaveValue(SECOND_TITLE)
+  const m = await tile.evaluate(el => {
+    const field = el.querySelector('input.title-input') as HTMLInputElement
+    return {
+      column: el.querySelector('.header-title')!.getBoundingClientRect().width,
+      width: field.getBoundingClientRect().width,
+      client: field.clientWidth,
+      scroll: field.scrollWidth,
+      selection: [field.selectionStart, field.selectionEnd],
+    }
+  })
+  expect(m.client).toBeGreaterThanOrEqual(m.scroll)
+  // 64px: the close button and the gaps.
+  expect(m.width).toBeGreaterThanOrEqual(m.column - 64)
+  expect(m.selection).toEqual([0, SECOND_TITLE.length])
+
+  // Escape cancels the rename and leaves the pane open.
+  await input.press('Escape')
+  await expect(tile.locator('.chat-title')).toHaveText(SECOND_TITLE)
+})
