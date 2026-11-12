@@ -5,7 +5,7 @@ import { COMPOSER, INBOX_DIALOG, boot, isolate, openChatDetails, openInbox, seed
  * Layout claims about the phone chat header need a real engine: jsdom lays
  * nothing out. At 390px the close X and the code badge give
  * their room to the title rail (Back and the menu leave the chat; Chat details
- * carries the code mode switch), and the bell's count hangs off the bell icon
+ * carries the repository facts), and the bell's count hangs off the bell icon
  * at every button size.
  */
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
@@ -54,7 +54,7 @@ test.describe('phone chat header', () => {
 
     await openChatDetails(page)
     await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
-    await expect(page.locator('#chat-work-rail .chat-repo-section').getByText('Code mode', { exact: true })).toBeVisible()
+    await expect(page.locator('#chat-work-rail .chat-repo-section .chat-repo-row').first()).toBeVisible()
   })
 
   test('the ⋯ menu holds Chat details, Notifications, Archive and Back', async ({ page }) => {

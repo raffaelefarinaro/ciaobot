@@ -1416,6 +1416,33 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
     return {name: tuple(turns) for name, turns in used.items()}
 
 
+def archive_turn_line(text: str, turn: int) -> int | None:
+    """The 1-based line of one turn's ``## Turn N`` heading, or ``None``.
+
+    A filed fact names the turn it came from, and the file viewer jumps by
+    line. Without this, "from this archive" opens a transcript that may hold
+    hundreds of turns at its first line, which shows a reader the source
+    without showing them the source.
+
+    A ``## Turn N`` counts only when the block under it is the one the renderer
+    writes (:func:`_rendered_turn_skills`), for the reason that function gives:
+    user and assistant text is written raw inside a ``text`` fence, so a
+    document, note or pasted snippet can carry a heading that looks identical.
+    Returning a line for that would point a reader at the wrong place and call
+    it evidence, which is worse than returning nothing and opening the file at
+    the top.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        match = _ARCHIVE_TURN_RE.match(line)
+        if match is None or int(match.group(1)) != turn:
+            continue
+        if _rendered_turn_skills(lines, index + 1) is None:
+            continue
+        return index + 1
+    return None
+
+
 # ── CLI JSONL transcript extraction ──────────────────────────────────────
 
 

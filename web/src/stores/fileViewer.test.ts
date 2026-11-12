@@ -374,6 +374,31 @@ describe('shared-pin surface', () => {
     expect(store.isOpen).toBe(true)
   })
 
+  test('an image pin opens as an image, never through the text route', async () => {
+    // `/api/workspace-file` is text only and refuses an image with 415: the
+    // phone chip used to show "Unsupported file type." for a surfaced PNG.
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: 'unsupported type' }), { status: 415 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const projectStore = seedChat('chat-1')
+    const pin = '/work/shots/chat-details.png'
+    projectStore.applyChatPinState('chat-1', { path: pin, dismissed_paths: [], revision: 1 }, { source: 'event' })
+    const store = useFileViewerStore()
+
+    expect(await store.openSharedPin(pin, 'chat-1')).toBe(true)
+
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('image')
+    expect(store.path).toBe(pin)
+    expect(store.error).toBe('')
+    expect(fetchMock).not.toHaveBeenCalled()
+    // Still the shared-pin surface: a remote unpin closes it.
+    expect(store.sharedPinChatId).toBe('chat-1')
+    projectStore.applyChatPinState('chat-1', { path: '', dismissed_paths: [pin], revision: 2 }, { source: 'event' })
+    await nextTick()
+    await nextTick()
+    expect(store.isOpen).toBe(false)
+  })
+
   test('remote close while dirty preserves the buffer', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('saved content')))
     const projectStore = seedChat('chat-1')

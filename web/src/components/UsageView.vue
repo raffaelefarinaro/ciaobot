@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import UsageBreakdown from './UsageBreakdown.vue'
+import SkeletonLoader from './SkeletonLoader.vue'
 import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
 import {
@@ -22,6 +23,7 @@ const range = ref<StatsRange>(30)
 const stats = ref<UsageStats | null>(null)
 const loading = ref(false)
 const error = ref('')
+const answered = ref(false)
 // Only the latest request may write, so a slow earlier answer cannot overwrite a newer range.
 let requestId = 0
 
@@ -38,7 +40,7 @@ async function load() {
       error.value = errorMessage(e, 'The engine did not answer.')
     }
   } finally {
-    if (id === requestId) loading.value = false
+    if (id === requestId) { loading.value = false; answered.value = true }
   }
 }
 
@@ -51,6 +53,11 @@ function selectRange(r: StatsRange) {
 
 onMounted(() => { void load() })
 watch(() => projects.activeWorkspace, () => { stats.value = null; void load() })
+
+// Until the first answer the page draws its shape instead of a grid of dashes.
+// After that a new range or workspace keeps the grid and shows dashes until its
+// numbers arrive, so the tiles do not flicker between shapes.
+const firstLoad = computed(() => !answered.value)
 
 const KPIS: Array<{ key: keyof UsageCounts; label: string; compact?: boolean }> = [
   { key: 'chats_opened', label: 'Chats opened' },
@@ -96,6 +103,8 @@ const kpis = computed(() => KPIS.map(k => {
           <p>Could not load usage. {{ error }}</p>
           <button type="button" class="usage-retry" @click="load">Try again</button>
         </div>
+        <SkeletonLoader v-if="firstLoad" label="Loading usage" variant="cards" :count="3" />
+        <template v-else>
         <section class="usage-totals" aria-labelledby="usage-totals-title">
           <h3 id="usage-totals-title" class="sr-only">Totals</h3>
           <dl class="usage-kpis">
@@ -107,6 +116,7 @@ const kpis = computed(() => KPIS.map(k => {
           </dl>
         </section>
         <UsageBreakdown :stats="stats" :range-days="stats?.range_days ?? range" />
+        </template>
       </div>
     </div>
   </div>

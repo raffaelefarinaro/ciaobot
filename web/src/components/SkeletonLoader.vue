@@ -16,8 +16,11 @@ withDefaults(
   defineProps<{
     /** What is loading, as a screen reader should hear it. */
     label: string
-    /** `rows`: a list. `cards`: stacked cards. `board`: four columns of cards. */
-    variant?: 'rows' | 'cards' | 'board'
+    /**
+     * `rows`: a list. `cards`: stacked cards. `board`: four columns of cards.
+     * `graph`: nodes and links, for the Memory Map's drawing.
+     */
+    variant?: 'rows' | 'cards' | 'board' | 'graph'
     /** How many rows or cards (per column, for `board`). */
     count?: number
   }>(),
@@ -39,6 +42,33 @@ const WIDTHS = ['92%', '74%', '86%', '61%', '80%', '68%']
         </div>
       </div>
     </template>
+    <div v-else-if="variant === 'graph'" class="skeleton-graph-wrap" aria-hidden="true">
+      <svg viewBox="0 0 200 140" class="skeleton-graph">
+        <line x1="45" y1="38" x2="82" y2="52" class="skeleton-edge" />
+        <line x1="82" y1="52" x2="118" y2="42" class="skeleton-edge" />
+        <line x1="118" y1="42" x2="155" y2="58" class="skeleton-edge" />
+        <line x1="82" y1="52" x2="92" y2="92" class="skeleton-edge" />
+        <line x1="118" y1="42" x2="108" y2="92" class="skeleton-edge" />
+        <line x1="92" y1="92" x2="108" y2="92" class="skeleton-edge" />
+        <line x1="45" y1="38" x2="38" y2="86" class="skeleton-edge" />
+        <line x1="38" y1="86" x2="70" y2="118" class="skeleton-edge" />
+        <line x1="155" y1="58" x2="162" y2="92" class="skeleton-edge" />
+        <line x1="162" y1="92" x2="130" y2="118" class="skeleton-edge" />
+        <line x1="70" y1="118" x2="100" y2="128" class="skeleton-edge" />
+        <line x1="130" y1="118" x2="100" y2="128" class="skeleton-edge" />
+        <circle cx="45" cy="38" r="13" class="skeleton-node skeleton-node--1" />
+        <circle cx="82" cy="52" r="10" class="skeleton-node skeleton-node--2" />
+        <circle cx="118" cy="42" r="11" class="skeleton-node skeleton-node--3" />
+        <circle cx="155" cy="58" r="12" class="skeleton-node skeleton-node--4" />
+        <circle cx="92" cy="92" r="11" class="skeleton-node skeleton-node--2" />
+        <circle cx="108" cy="92" r="10" class="skeleton-node skeleton-node--1" />
+        <circle cx="38" cy="86" r="9" class="skeleton-node skeleton-node--3" />
+        <circle cx="162" cy="92" r="9" class="skeleton-node skeleton-node--2" />
+        <circle cx="70" cy="118" r="10" class="skeleton-node skeleton-node--4" />
+        <circle cx="130" cy="118" r="10" class="skeleton-node skeleton-node--1" />
+        <circle cx="100" cy="128" r="9" class="skeleton-node skeleton-node--3" />
+      </svg>
+    </div>
     <template v-else-if="variant === 'cards'">
       <div v-for="i in count" :key="i" class="skeleton-card" aria-hidden="true">
         <span class="skeleton-line skeleton-line--heading" :style="{ width: WIDTHS[i % WIDTHS.length] }"></span>
@@ -72,6 +102,24 @@ const WIDTHS = ['92%', '74%', '86%', '61%', '80%', '68%']
 @container chat-pane (max-width: 940px) {
   .skeleton--board { grid-template-columns: minmax(0, 1fr); }
   .skeleton--board .skeleton-column:nth-child(n + 2) { display: none; }
+}
+.skeleton--graph {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  padding: var(--space-5);
+}
+.skeleton-graph-wrap { width: min(360px, 80%); }
+.skeleton-graph { display: block; width: 100%; height: auto; }
+.skeleton-edge { stroke: var(--border); stroke-width: 2; stroke-linecap: round; opacity: 0.55; }
+.skeleton-node { fill: var(--bg3); stroke: var(--border); stroke-width: 1.6; animation: skeleton-node-pulse 1.6s ease-in-out infinite; }
+.skeleton-node--2 { animation-delay: 0.2s; }
+.skeleton-node--3 { animation-delay: 0.4s; }
+.skeleton-node--4 { animation-delay: 0.6s; }
+@keyframes skeleton-node-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 .skeleton-column {
   display: flex;
@@ -115,6 +163,7 @@ const WIDTHS = ['92%', '74%', '86%', '61%', '80%', '68%']
 }
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line { animation: skeleton-pulse 1.8s ease-in-out infinite; }
+  .skeleton-node { animation-duration: 1.8s; animation-delay: 0s; }
 }
 @keyframes skeleton-pulse {
   0%, 100% { opacity: 0.6; }

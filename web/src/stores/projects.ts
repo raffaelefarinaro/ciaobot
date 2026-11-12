@@ -43,6 +43,7 @@ import type {
   PackageStatus,
   PendingPermission,
   RuntimeProvider,
+  ClaudeTrimOption,
   WorkspaceInfo,
   WorkspaceName,
   WorkspaceProviderOption,
@@ -148,6 +149,8 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
+  // The engine's Claude context-trim catalog (Settings > Overview card). Kept from the last response that carried it.
+  const claudeTrimOptions = ref<ClaudeTrimOption[]>([])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // App-wide read of the active workspace's delegated tasks: the sidebar's
@@ -2106,6 +2109,7 @@ export const useProjectStore = defineStore('projects', () => {
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
+      claudeTrimOptions.value = workspaceResponse.claude_trim_options ?? claudeTrimOptions.value
       projects.value = p
       bumpProjectOrderEpoch()
       // Keep an archived deep link's prefetched history through reconciliation.
@@ -2733,6 +2737,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     const names = workspaces.value.map(w => w.name)
     if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
       activeWorkspace.value = res.active || names[0] || 'personal'
@@ -2746,6 +2751,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -2779,6 +2785,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (res.renamed && activeWorkspace.value === res.renamed.from) {
       followRenamedWorkspace(res.renamed.from, res.renamed.to)
     }
@@ -2816,6 +2823,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
@@ -2852,6 +2860,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -3073,7 +3082,6 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
-      code_mode?: boolean
     },
   ) {
     const readStart = chatReadStart()
@@ -3082,11 +3090,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
     applyChatActionsFromChatInfo(c, readStart)
-  }
-
-  /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
-  async function setChatCodeMode(chatId: string, on: boolean): Promise<void> {
-    await updateChat(chatId, { code_mode: on })
   }
 
   async function handoverChat(
@@ -5294,20 +5297,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (c) c.repo_location = msg.repo_location
         break
       }
-      case 'chat_code_mode': {
-        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
-        if (!c) break
-        c.code_mode = msg.code_mode
-        // A switch made from this client also gets the PATCH response, so this is a
-        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
-        // The event has no after_turn_index; the server's ChatInfo does. Refetch
-        // rather than guess the anchor (an optimistic user row has no turn_index yet).
-        const readStart = chatReadStart()
-        void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
-          .then((fresh) => { replaceChat(fresh, readStart) })
-          .catch(() => { /* next chats load heals it */ })
-        break
-      }
       case 'chat_pin_changed': {
         // A pin/replace/unpin happened on another device. Apply server truth and
         // nothing else: this must not select or navigate the chat, mark it read,
@@ -7303,7 +7292,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions,
@@ -7328,7 +7317,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, reorderableProjects, projectOrderEpoch, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,

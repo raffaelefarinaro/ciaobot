@@ -1337,131 +1337,66 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
-def _code_mode_plane(
-    tmp_path: Path,
-    *,
-    was_on: bool = False,
-    set_error: Exception | None = None,
-    arm_result: bool = True,
-):
-    """A control plane over a recording pcm for the `chat update --code` tests."""
-    repo = tmp_path / "repo"
-    repo.mkdir(exist_ok=True)
-    (repo / "AGENTS.md").write_text("Run the tests.\n", encoding="utf-8")
-    state = {"on": was_on}
-    switches: list[tuple[str, bool, str]] = []
-    armed: list[str] = []
+def test_chat_update_refuses_mode_escalation_and_writes_nothing() -> None:
+    calls: list[dict[str, Any]] = []
 
-    def set_code_mode(cid, on, *, actor):
-        if set_error is not None:
-            raise set_error
-        switches.append((cid, on, actor))
-        state["on"] = on
-        return SimpleNamespace(
-            chat_id=cid,
-            project_id="project-1",
-            to_dict=lambda local=True: {"chat_id": cid, "code_mode": on},
-        )
-
-    def arm(cid):
-        armed.append(cid)
-        return arm_result
+    def update_chat(cid, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(chat_id=cid, to_dict=lambda local=True: {"chat_id": cid, **kwargs})
 
     pcm = SimpleNamespace(
-        update_chat=lambda cid, **kwargs: SimpleNamespace(
-            chat_id=cid,
-            project_id="project-1",
-            to_dict=lambda local=True: {"chat_id": cid},
-        ),
+        update_chat=update_chat,
         is_session_local=lambda c: True,
-        get_chat=lambda cid: SimpleNamespace(
-            chat_id=cid, project_id="project-1", code_mode=state["on"]
-        ),
-        get_project=lambda pid: SimpleNamespace(
-            project_id=pid, workspace="personal", repo_path=str(repo)
-        ),
-        set_code_mode=set_code_mode,
-        arm_code_mode_continuation=arm,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1", mode="auto"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
     )
     config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
-    plane = CiaoControlPlane(
-        config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
     )
-    return plane, switches, armed
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.chat_update(_chat_create_principal(), "", title="X", mode="bypass")
+
+    assert excinfo.value.code == "mode_escalation_refused"
+    assert "chat needs-action permission_mode" in str(excinfo.value)
+    assert calls == []
 
 
-def test_chat_update_code_on_returns_instructions_and_arms_the_calling_chat(
-    tmp_path: Path,
-) -> None:
-    from ciao.control_plane import CODE_MODE_ON_NOTE
+def test_chat_update_allows_lowering_mode() -> None:
+    calls: list[dict[str, Any]] = []
 
-    plane, switches, armed = _code_mode_plane(tmp_path)
+    def update_chat(cid, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(chat_id=cid, to_dict=lambda local=True: {"chat_id": cid, **kwargs})
 
-    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
+    pcm = SimpleNamespace(
+        update_chat=update_chat,
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1", mode="auto"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+    )
 
-    assert switches == [("chat-1", True, "agent")]
-    assert data["repo_instructions"]["name"] == "AGENTS.md"
-    assert "Run the tests." in data["repo_instructions"]["text"]
-    assert data["repo_instructions"]["truncated"] is False
-    assert data["note"] == CODE_MODE_ON_NOTE
-    assert armed == ["chat-1"]
+    result = control_plane.chat_update(_chat_create_principal(), "", mode="plan")
 
-
-def test_chat_update_code_on_for_another_chat_does_not_arm(tmp_path: Path) -> None:
-    from ciao.control_plane import CODE_MODE_ON_NEXT_TURN_NOTE
-
-    plane, switches, armed = _code_mode_plane(tmp_path)
-
-    data = plane.chat_update(_chat_create_principal(), "chat-2", code_mode=True)["data"]
-
-    assert switches == [("chat-2", True, "agent")]
-    assert armed == []
-    assert data["note"] == CODE_MODE_ON_NEXT_TURN_NOTE
-    assert "repo_instructions" in data
+    assert calls[-1]["mode"] == "plan"
+    assert "mode_clamped" not in result["data"]
 
 
-def test_chat_update_code_on_own_chat_without_a_live_turn_says_your_next_turn(
-    tmp_path: Path,
-) -> None:
-    from ciao.control_plane import CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+def test_chat_update_takes_no_code_mode_argument(tmp_path: Path) -> None:
+    """Code mode follows the project's linked repository; the tool has no switch."""
+    import inspect
 
-    plane, _, armed = _code_mode_plane(tmp_path, arm_result=False)
-
-    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
-
-    assert armed == ["chat-1"]
-    assert data["note"] == CODE_MODE_ON_OWN_NEXT_TURN_NOTE
-    assert "your next turn" in data["note"]
-
-
-def test_chat_update_code_on_when_already_on_adds_nothing(tmp_path: Path) -> None:
-    plane, _, armed = _code_mode_plane(tmp_path, was_on=True)
-
-    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
-
-    assert "repo_instructions" not in data
-    assert "note" not in data
-    assert armed == []
-
-
-def test_chat_update_code_off_never_arms(tmp_path: Path) -> None:
-    plane, switches, armed = _code_mode_plane(tmp_path, was_on=True)
-
-    data = plane.chat_update(_chat_create_principal(), "", code_mode=False)["data"]
-
-    assert switches == [("chat-1", False, "agent")]
-    assert "repo_instructions" not in data
-    assert "note" not in data
-    assert armed == []
-
-
-def test_chat_update_code_mode_value_error_is_code_mode_unavailable(tmp_path: Path) -> None:
-    plane, _, _ = _code_mode_plane(tmp_path, set_error=ValueError("not linked"))
-
-    with pytest.raises(ControlPlaneError) as exc:
-        plane.chat_update(_chat_create_principal(), "", code_mode=True)
-
-    assert exc.value.code == "code_mode_unavailable"
+    assert "code_mode" not in inspect.signature(CiaoControlPlane.chat_update).parameters
+    assert "code_mode" not in inspect.signature(mcp_server._op_chat_update).parameters
 
 
 def _interval_control_plane(tmp_path: Path):

@@ -132,7 +132,7 @@ def test_an_unregistered_workspace_still_gets_them(tmp_path: Path) -> None:
 
 
 def test_a_custom_workspace_denylist_does_not_drop_them(tmp_path: Path) -> None:
-    """`disallowed_tools` replaces the harness defaults; it must not replace these."""
+    """`disallowed_tools` adds to the trim defaults; it must not replace these."""
     config = _config(tmp_path)
     workspace = config.workspace("personal")
     assert workspace is not None
@@ -144,14 +144,14 @@ def test_a_custom_workspace_denylist_does_not_drop_them(tmp_path: Path) -> None:
 
 
 def test_the_none_opt_out_does_not_unlock_the_credentials(tmp_path: Path) -> None:
-    """`none` is the documented "deny nothing" escape hatch for the harness set."""
+    """`none` means no extras; the harness trims still apply and the credential denies stay."""
     config = _config(tmp_path)
     workspace = config.workspace("personal")
     assert workspace is not None
     workspace.disallowed_tools = []
 
     tools = config.disallowed_tools_for_workspace("personal")
-    assert "EnterPlanMode" not in tools
+    assert "EnterPlanMode" in tools
     assert "Read(**/.env)" in tools
     assert "Write(**/.runtime/**)" in tools
 

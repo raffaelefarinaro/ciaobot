@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, cast
 
 from ciao import provider_registry
+from ciao.claude_trim import coerce_claude_trim
 from ciao.config import (
     CLAUDE_MODELS,
     DEFAULT_MEMORY_HANDOVER,
@@ -122,6 +123,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             else None
         ),
         "claude_ai_connectors": bool(getattr(workspace, "claude_ai_connectors", True)),
+        "claude_trim": dict(getattr(workspace, "claude_trim", None) or {}),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
         "agent_fs_scope": agent_fs_scope,
@@ -221,6 +223,12 @@ def workspace_from_request(
         claude_ai_connectors = existing.claude_ai_connectors
     else:
         claude_ai_connectors = True
+    if "claude_trim" in data:
+        claude_trim = coerce_claude_trim(data.get("claude_trim"))
+    elif existing is not None:
+        claude_trim = dict(existing.claude_trim)
+    else:
+        claude_trim = {}
     if "color" in data:
         color = coerce_workspace_color(data.get("color"))
     elif existing is not None:
@@ -276,6 +284,7 @@ def workspace_from_request(
         default_provider=provider,
         disallowed_tools=disallowed_tools,
         claude_ai_connectors=claude_ai_connectors,
+        claude_trim=claude_trim,
         gws_profile=gws_profile,
         color=color,
         agent_fs_scope=agent_fs_scope,

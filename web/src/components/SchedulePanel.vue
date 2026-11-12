@@ -1,25 +1,54 @@
 <template>
-  <div class="schedule-panel">
+  <div class="schedule-panel" data-rail-host>
     <PaneHeader
       v-if="!schedule && !showNew"
       page-tag="Automations"
       @open-sidebar="emit('open-sidebar')"
     />
-    <PaneHeader v-else page-tag="Automations" @open-sidebar="emit('open-sidebar')">
+    <!-- Like an open chat: no brand or page tag, so on a phone the close,
+         title and actions share one row. -->
+    <PaneHeader v-else :brand="false" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="btn-icon close-btn desktop-only" @click="closeSchedule" title="Close" aria-label="Close automation">&times;</button>
-          <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
-          <span v-else-if="showNew" class="pane-title">New automation</span>
+          <!-- The same title row as an open chat: close, then the title rail of
+               the workspace's automations (swipe or arrow keys to move along it,
+               pull the title down to go back to the list), or the plain title
+               when there is nothing to move to. -->
+          <ItemTitleRow
+            :rail="titleRailOn"
+            :close-label="showNew ? 'Close new automation' : 'Close automation'"
+            :close-title="showNew ? 'Close' : 'Close automation'"
+            @close="closeSchedule"
+          >
+            <!-- Keyed by automation, so a slide or settle still pending from the
+                 last one can never switch away from an automation opened from
+                 the sidebar meanwhile. -->
+            <TitleRail
+              v-if="titleRailOn && schedule"
+              :key="schedule.schedule_id"
+              ref="titleRailRef"
+              :items="titleRail.items.value"
+              :current-id="schedule.schedule_id"
+              group-label="Automations in this workspace"
+              @select="titleRail.select"
+              @lean="railLean = $event"
+              @pull="emit('pull', $event)"
+              @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
+            />
+            <span v-else-if="schedule" class="pane-title">{{ scheduleTitle(schedule) }}</span>
+            <span v-else-if="showNew" class="pane-title">New automation</span>
+          </ItemTitleRow>
         </div>
       </template>
       <template #actions>
         <template v-if="schedule">
           <!-- One primary (Run now), the pause toggle beside it, and the rare
                destructive action behind the menu instead of a red button in
-               the header. On narrow panes the toggle joins the menu too. -->
+               the header. On narrow panes the toggle joins the menu too; on a
+               phone Run now does as well, so the header is one line like a
+               chat's. -->
           <button
-            class="btn-small btn-run"
+            class="btn-small btn-run header-run fold-wide"
             :class="{ 'btn-running': showRunning }"
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
@@ -27,41 +56,29 @@
           <button class="btn-small desktop-only" @click="onToggleEnabled">
             {{ enabledToggleLabel(schedule) }}
           </button>
-          <DropdownMenuRoot :modal="false">
-            <DropdownMenuTrigger as-child>
+          <!-- The shared ⋯ menu. A system routine has nothing in it on a wide
+               pane (Run now and the toggle are inline, it cannot be deleted),
+               so its trigger shows only once the toggle folds into it. -->
+          <span class="item-menu-slot" :class="{ 'mobile-only-trigger': schedule.scope === 'system' }">
+          <ItemHeaderMenu label="More automation actions">
+            <DropdownMenuItem as-child>
               <button
                 type="button"
-                class="btn-icon overflow-trigger"
-                :class="{ 'mobile-only-trigger': schedule.scope === 'system' }"
-                aria-label="More automation actions"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
-                </svg>
+                class="menu-run-item fold-phone"
+                :disabled="isStarting && !runningChatId"
+                @click="onRunButtonClick"
+              >{{ showRunning ? 'Running...' : 'Run now' }}</button>
+            </DropdownMenuItem>
+            <DropdownMenuItem as-child>
+              <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
+                {{ enabledToggleLabel(schedule) }}
               </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuPortal>
-              <DropdownMenuContent
-                as-child
-                align="end"
-                :side-offset="6"
-                :collision-padding="8"
-              >
-                <!-- as-child, so the panel is this template's own element and
-                     picks up the scoped styles even though it is portalled. -->
-                <div class="schedule-actions-menu">
-                <DropdownMenuItem as-child>
-                  <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
-                    {{ enabledToggleLabel(schedule) }}
-                  </button>
-                </DropdownMenuItem>
-                <DropdownMenuItem v-if="schedule.scope !== 'system'" as-child>
-                  <button type="button" class="danger" @click="onDelete">Delete automation…</button>
-                </DropdownMenuItem>
-                </div>
-              </DropdownMenuContent>
-            </DropdownMenuPortal>
-          </DropdownMenuRoot>
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="schedule.scope !== 'system'" as-child>
+              <button type="button" class="danger" @click="onDelete">Delete automation…</button>
+            </DropdownMenuItem>
+          </ItemHeaderMenu>
+          </span>
         </template>
 
       </template>
@@ -134,8 +151,17 @@
 
     <!-- Detail -->
     <div v-else-if="schedule" class="scroll-body">
-      <div class="page-grid schedule-grid">
-      <div class="page-main">
+      <!-- Keyed by automation: a step from the rail mounts the page fresh,
+           so its arrival animation plays on every step, even two the same way. -->
+      <div
+        :key="schedule.schedule_id"
+        class="page-grid schedule-grid"
+        data-rail-lean
+        :class="railMotionClass(railLean, railArrival)"
+        :style="railLeanStyle(railLean)"
+        @animationend="onArrivalEnd"
+      >
+      <div class="page-main" data-rail-column>
       <p v-if="!schedule.enabled" class="disabled-banner">
         {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Paused' }} — it won't run
         on its own. "Run now" still works.
@@ -539,39 +565,35 @@
                 @click.stop="runAllMissed"
               >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
             </div>
-            <router-link
+            <ListRow
               v-for="s in missedSchedules"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }}</span>
-              </span>
-              <span class="ov-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }}</template>
+              <template #end><span class="list-row-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
+            </ListRow>
           </section>
 
           <section class="ov-section" aria-labelledby="ov-next-title">
             <div class="ov-head">
               <h2 id="ov-next-title" title="Soonest first. Missed time-of-day runs are caught up on the next launch; interval runs just resume.">Next up</h2>
             </div>
-            <router-link
+            <ListRow
               v-for="s in upcomingRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
             >
-              <span class="ov-main">
-                <span class="ov-title">
-                  {{ s.title || promptTitle(s.prompt) }}
-                  <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
-                </span>
-                <span class="ov-sub">{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</span>
-              </span>
-              <span class="ov-when">{{ relativeWhen(s.next_run) }}</span>
-            </router-link>
+              <template #heading>
+                <span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
+              </template>
+              <template #sub>{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</template>
+              <template #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
+            </ListRow>
             <p v-if="!upcomingRoutines.length" class="ov-empty">
               Nothing scheduled. The rest run only when you click Run now, or are paused.
             </p>
@@ -579,35 +601,31 @@
 
           <section v-if="pausedRoutines.length" class="ov-section" aria-labelledby="ov-paused-title">
             <div class="ov-head"><h2 id="ov-paused-title">Paused</h2></div>
-            <router-link
+            <ListRow
               v-for="s in pausedRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item ov-item--paused"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }} · paused</span>
-              </span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }} · paused</template>
+            </ListRow>
           </section>
 
           <section v-if="systemRoutines.length" class="ov-section" aria-labelledby="ov-system-title">
             <div class="ov-head"><h2 id="ov-system-title">System routines</h2></div>
             <p class="ov-intro">Ciaobot's own upkeep. They run on their own and never need you.</p>
-            <router-link
+            <ListRow
               v-for="s in systemRoutines"
               :key="s.schedule_id"
               :to="`/schedules/${s.schedule_id}`"
               class="ov-item"
               :class="{ 'ov-item--paused': !s.enabled }"
             >
-              <span class="ov-main">
-                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="ov-sub">{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></span>
-              </span>
-              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run) }}</span>
-            </router-link>
+              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
+              <template #sub>{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></template>
+              <template v-if="s.enabled && s.next_run" #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
+            </ListRow>
           </section>
 
           <!-- Webhooks live here rather than in a top-level inbox: a trigger is
@@ -687,13 +705,7 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
-import {
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuPortal,
-  DropdownMenuRoot,
-  DropdownMenuTrigger,
-} from 'reka-ui'
+import { DropdownMenuItem } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { cadenceSummary } from '../lib/scheduleClock'
 import { useRoute, useRouter } from 'vue-router'
@@ -703,17 +715,33 @@ import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
+import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import ItemHeaderMenu from './ItemHeaderMenu.vue'
+import ListRow from './ListRow.vue'
+import { listAnchor, roamFocus } from '../lib/listRoaming'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
+import { takeScheduleRailArrival, useScheduleRail } from '../composables/useScheduleRail'
+import { scheduleTitle } from '../lib/scheduleList'
 import ModelSelector from './ModelSelector.vue'
 import WebhookTriggers from './WebhookTriggers.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
-import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
+import { isPerWorkspaceRoutine, workspaceForSchedule } from '../lib/automationWorkspace'
+import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { isMemoryProject } from '../lib/memoryPass'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
 import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 
 const props = defineProps<{ showNew?: boolean }>()
-const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'created'): void
+  (e: 'open-sidebar'): void
+  (e: 'close'): void
+  // A downward drag on the title rail, and its release: ChatLayout's pull-to-close.
+  (e: 'pull', dy: number): void
+  (e: 'pull-end', dy: number, velocity: number): void
+}>()
 
 const route = useRoute()
 const router = useRouter()
@@ -804,7 +832,21 @@ watch(schedule, (s) => {
   }
 }, { immediate: true })
 
+// The title rail: the workspace's automations in the sidebar's order. The panel
+// stays mounted across automations, so an arrival from the rail is read on each
+// change of automation rather than at setup.
+const titleRail = useScheduleRail(() => scheduleId.value)
+const titleRailOn = computed(() => !props.showNew && titleRail.items.value.length > 1)
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
+const railLean = ref(0)
+const railArrival = ref<-1 | 1 | 0>(0)
+// Only the page's own arrival ends it, not an animation bubbling up from inside it.
+function onArrivalEnd(e: AnimationEvent): void {
+  if (e.target === e.currentTarget) railArrival.value = 0
+}
 watch(scheduleId, () => {
+  railLean.value = 0
+  railArrival.value = takeScheduleRailArrival()
   editingCard.value = ''
   editBaseline.value = ''
   copiedPromptKey.value = ''
@@ -858,14 +900,7 @@ watch(
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
-const workspaceSchedules = computed(() =>
-  store.schedules.filter(s => scheduleInWorkspace(
-    s,
-    projectStore.activeWorkspace,
-    projectStore.chats,
-    projectStore.projects,
-  )),
-)
+const workspaceSchedules = useWorkspaceSchedules()
 const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
 
 // The overview splits the user's own routines from Ciaobot's system ones, and
@@ -1485,12 +1520,14 @@ async function onToggleEnabled() {
 
 async function onDelete() {
   if (!schedule.value) return
+  // Captured before the confirm: whatever is selected when it resolves, the
+  // automation deleted is the one the user asked about.
+  const id = schedule.value.schedule_id
   if (!await askConfirm('Delete this automation? It will stop running.', {
     title: 'Delete automation',
     confirmLabel: 'Delete automation',
     destructive: true,
   })) return
-  const id = schedule.value.schedule_id
   await store.deleteSchedule(id)
   router.push('/schedules')
 }
@@ -1499,55 +1536,27 @@ function onCreated() {
   emit('created')
 }
 
-// Keyboard roaming for the overview lists (Next up / Recent runs / Missed).
-// This mirrors ProjectSidebar's schedule list, but for the main pane's
-// .ov-item links when no single schedule is selected. The sidebar owns the
-// canonical list, so ChatLayout tries the sidebar first and only falls
-// through to here if the sidebar had nothing focused.
+// Keyboard roaming for the overview's automation rows when no single
+// automation is open. The sidebar owns the canonical list, so ChatLayout tries
+// the sidebar first and only falls through to here if the sidebar had nothing
+// focused. Links only: the webhook rows are plain `<div>`s that take no focus.
 const overviewEl = ref<HTMLElement | null>(null)
 
-function overviewItems(): HTMLElement[] {
-  const root = overviewEl.value
-  if (!root) return []
-  // Links only. The webhook rows reuse `.ov-item` on a plain `<div>`, which takes
-  // no focus: arrowing onto one would report that it had moved focus, move none,
-  // and swallow the key — so the press after the last schedule link would do
-  // nothing and look broken.
-  return Array.from(root.querySelectorAll<HTMLElement>('a.ov-item'))
-}
-
-function focusOverviewElement(element: HTMLElement) {
-  element.focus()
-  element.scrollIntoView({ block: 'nearest' })
-}
-
-function clampOverview(value: number, lower: number, upper: number): number {
-  return Math.min(upper, Math.max(lower, value))
-}
-
 function onArrow(key: string): boolean {
-  const items = overviewItems()
-  if (!items.length) return false
-  const active = document.activeElement as HTMLElement | null
-  let index = items.indexOf(active as HTMLElement)
-  if (index < 0) {
-    const activeLink = overviewEl.value?.querySelector<HTMLElement>('.ov-item.router-link-active')
-    if (activeLink && items.includes(activeLink)) {
-      index = items.indexOf(activeLink)
-    } else {
-      focusOverviewElement(items[0])
-      return true
-    }
-  }
-  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
-  if (!delta) return false
-  const nextIndex = clampOverview(index + delta, 0, items.length - 1)
-  if (nextIndex === index) return true
-  focusOverviewElement(items[nextIndex])
-  return true
+  const rows = Array.from(overviewEl.value?.querySelectorAll<HTMLElement>('a.ov-item') ?? [])
+  const current = overviewEl.value?.querySelector<HTMLElement>('a.ov-item.router-link-active')
+  return roamFocus([rows], key, 'list', () => listAnchor(rows, current))
 }
 
-defineExpose({ onArrow })
+// Previous / next automation (the previous / next chat chord): the rail slides
+// the neighbour in before switching, like a swipe.
+function selectAdjacent(direction: -1 | 1): boolean {
+  // A card being edited holds a draft that moving on would discard.
+  if (!titleRailOn.value || editingCard.value) return false
+  return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
+}
+
+defineExpose({ onArrow, selectAdjacent })
 
 function closeSchedule() {
   if (props.showNew) {
@@ -1559,6 +1568,9 @@ function closeSchedule() {
 </script>
 
 <style scoped src="./overviewSections.css"></style>
+<style scoped src="./railMotion.css"></style>
+<style scoped src="./headerFold.css"></style>
+
 <style scoped>
 .schedule-panel {
   display: flex;
@@ -1975,13 +1987,12 @@ function closeSchedule() {
 }
 .btn-run:hover:not(:disabled) { background: var(--accent-strong); }
 .desktop-only { display: inline-flex; }
-.overflow-trigger { color: var(--fg2); }
 .menu-toggle-item { display: none !important; }
+.item-menu-slot { display: inline-flex; }
 
 @container chat-pane (max-width: 820px) {
   .header-actions .desktop-only { display: none; }
   .menu-toggle-item { display: flex !important; }
-  .close-btn.desktop-only { display: inline-flex; }
 }
 
 @container chat-pane (min-width: 821px) {
@@ -1990,8 +2001,7 @@ function closeSchedule() {
 }
 
 @media (max-width: 768px) {
-  .desktop-only,
-  .close-btn.desktop-only { display: none; }
+  .desktop-only { display: none; }
   .menu-toggle-item { display: flex !important; }
   .mobile-only-trigger { display: inline-flex; }
   .prompt-heading { align-items: flex-start; }
@@ -1999,49 +2009,9 @@ function closeSchedule() {
   .prop-row dt { flex: none; }
 }
 
-.schedule-actions-menu {
-  z-index: 100;
-  min-width: 180px;
-  padding: 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
-}
-.schedule-actions-menu button {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--touch);
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-.schedule-actions-menu button:hover,
-.schedule-actions-menu button[data-highlighted] { background: var(--bg3); outline: none; }
-.schedule-actions-menu button.danger { color: var(--error); }
-
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.close-btn:hover { color: var(--fg); }
+/* The title row and the ⋯ menu are ItemTitleRow and ItemHeaderMenu; the left
+   cell only has to give the row the header's room. */
+.header-left { display: flex; align-items: center; min-width: 0; flex: 1; }
 
 .btn-running:not(:disabled) {
   cursor: pointer;

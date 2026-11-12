@@ -237,7 +237,7 @@ onBeforeUnmount(() => {
 })
 
 function renderMarkdown(text: string): string {
-  return renderSafeMarkdown(text)
+  return renderSafeMarkdown(text, [], undefined, { chatId: props.chatId })
 }
 </script>
 

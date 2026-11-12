@@ -247,7 +247,6 @@ def _linked_repo_manager(tmp_path: Path, scope: str, *, repo: Path):
     project = manager.create_project("linked", workspace="personal")
     project.repo_path = str(repo)
     chat = manager.create_chat(project.project_id, provider="claude")
-    chat.code_mode = True
     return manager, chat
 
 
@@ -302,18 +301,6 @@ def test_a_memory_pass_chat_is_not_granted_the_linked_repo(tmp_path: Path) -> No
             "archive_policy": "when_clean",
         },
     )
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert request.linked_repo == ""
-    assert str(repo.resolve()) not in request.agent_roots
-
-
-def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    manager, chat = _linked_repo_manager(tmp_path, "workspace", repo=repo)
-    chat.code_mode = False
 
     request = manager.build_agent_request(chat, prompt="hi")
 
@@ -694,7 +681,7 @@ def test_rerooted_request_has_no_denied_paths(
         reset_reroot_cache()
 
 
-def test_code_mode_linked_repo_covering_secrets_denies_it(
+def test_a_linked_repo_covering_secrets_denies_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = tmp_path / ".runtime"
@@ -706,7 +693,6 @@ def test_code_mode_linked_repo_covering_secrets_denies_it(
         creds = _linked_account(manager)
         project = manager._projects[chat.project_id]
         project.repo_path = str(tmp_path)
-        chat.code_mode = True
 
         request = manager.build_agent_request(chat, prompt="hi")
 

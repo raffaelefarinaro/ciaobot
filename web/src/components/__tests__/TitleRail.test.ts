@@ -7,18 +7,21 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import { RAIL_SETTLE_MS, RAIL_SLIDE_MS, railItemLabel, type ChatRailItem } from '../../lib/chatRail'
-import ChatTitleRail from '../ChatTitleRail.vue'
+import { RAIL_SETTLE_MS, RAIL_SLIDE_MS, chatTierMark, railItemLabel, type RailItem } from '../../lib/titleRail'
+import type { HomeTierKey } from '../../lib/homeLanes'
+import TitleRail from '../TitleRail.vue'
 
-function item(chatId: string, overrides: Partial<ChatRailItem> = {}): ChatRailItem {
-  return {
-    chatId,
-    title: `title ${chatId}`,
-    project: 'General',
-    tier: 'quiet',
-    titlePending: false,
-    ...overrides,
-  }
+interface ChatFields { title: string; project: string; tier: HomeTierKey; titlePending: boolean }
+
+// A chat's rail item, built the way useChatRail builds it.
+function item(chatId: string, overrides: Partial<ChatFields> = {}): RailItem {
+  const f: ChatFields = { title: `title ${chatId}`, project: 'General', tier: 'quiet', titlePending: false, ...overrides }
+  return { id: chatId, title: f.title, subtitle: f.project, mark: chatTierMark(f.tier), titlePending: f.titlePending, label: railItemLabel(f) }
+}
+
+type RailProps = { items: RailItem[]; currentId: string; groupLabel?: string }
+function mountRail(options: { props: RailProps; attachTo?: HTMLElement }) {
+  return mount(TitleRail, { ...options, props: { groupLabel: 'Chats in this workspace', ...options.props } })
 }
 
 function seed(ids: string[]) {
@@ -38,7 +41,7 @@ function seed(ids: string[]) {
   return store
 }
 
-describe('ChatTitleRail', () => {
+describe('TitleRail', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
@@ -49,7 +52,7 @@ describe('ChatTitleRail', () => {
 
   it('renders every item with the current one marked', () => {
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
     })
 
@@ -72,16 +75,16 @@ describe('ChatTitleRail', () => {
   it('labels items for assistive tech', () => {
     seed(['a', 'b'])
     const a = item('a', { tier: 'needsYou' })
-    const wrapper = mount(ChatTitleRail, { props: { items: [a, item('b')], currentId: 'b' } })
+    const wrapper = mountRail({ props: { items: [a, item('b')], currentId: 'b' } })
 
     const label = wrapper.findAll('.title-rail-item')[0].attributes('aria-label')
-    expect(label).toBe(railItemLabel(a))
+    expect(label).toBe(a.label)
     expect(label).toContain('needs you')
   })
 
   it('asks to rename when the current title is double-clicked', () => {
     seed(['a', 'b'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'b' } })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'b' } })
 
     void wrapper.findAll('.title-rail-item')[1].trigger('dblclick')
 
@@ -91,7 +94,7 @@ describe('ChatTitleRail', () => {
   // The neighbours are reached by swiping or stepping, never by buttons or by clicking a peeking title.
   it('has no arrow buttons', () => {
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' } })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' } })
 
     expect(wrapper.find('button[aria-label="Previous chat"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="Next chat"]').exists()).toBe(false)
@@ -99,7 +102,7 @@ describe('ChatTitleRail', () => {
 
   it('draws one track segment per chat, marking each chat\'s state by shape', () => {
     seed(['a', 'b', 'c', 'd'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: {
         items: [item('a', { tier: 'needsYou' }), item('b'), item('c', { tier: 'working' }), item('d', { tier: 'unread' })],
         currentId: 'b',
@@ -123,7 +126,7 @@ describe('ChatTitleRail', () => {
 
   it('moves the bright segment with the strip mid-swipe', () => {
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -145,7 +148,7 @@ describe('ChatTitleRail', () => {
 
   it('reports a downward drag on the title as a pull, and its end with distance and speed', () => {
     seed(['a', 'b'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     root.setPointerCapture = () => {}
     root.dispatchEvent(pointer('pointerdown', 100, 10))
@@ -163,7 +166,7 @@ describe('ChatTitleRail', () => {
 
   it('springs back instead of committing a canceled downward drag beyond the close threshold', () => {
     seed(['a', 'b'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     root.setPointerCapture = () => {}
     root.dispatchEvent(pointer('pointerdown', 100, 10))
@@ -177,7 +180,7 @@ describe('ChatTitleRail', () => {
   it('restores the current title instead of selecting after a canceled mouse drag beyond the switch threshold', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     const strip = geometry(wrapper)
     const scrollTo = vi.fn()
@@ -194,7 +197,7 @@ describe('ChatTitleRail', () => {
 
   it('ignores a second pointer until the first drag ends', () => {
     seed(['a', 'b'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     root.setPointerCapture = () => {}
     root.dispatchEvent(pointer('pointerdown', 100, 10, 'touch', 1))
@@ -212,7 +215,7 @@ describe('ChatTitleRail', () => {
   it('a sideways touch drag past a quarter of the width slides to the neighbour', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     const strip = geometry(wrapper)
     strip.scrollTo = vi.fn() as unknown as typeof strip.scrollTo
@@ -229,7 +232,7 @@ describe('ChatTitleRail', () => {
   it('a short sideways touch drag springs back without selecting', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     const strip = geometry(wrapper)
     const scrollTo = vi.fn()
@@ -247,7 +250,7 @@ describe('ChatTitleRail', () => {
   it('a canceled sideways touch drag restores the title', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     const strip = geometry(wrapper)
     const scrollTo = vi.fn()
@@ -264,7 +267,7 @@ describe('ChatTitleRail', () => {
 
   it('ignores an upward drag', () => {
     seed(['a', 'b'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' }, attachTo: document.body })
     const root = wrapper.get('.title-rail').element as HTMLElement
     root.setPointerCapture = () => {}
     root.dispatchEvent(pointer('pointerdown', 100, 100))
@@ -279,7 +282,7 @@ describe('ChatTitleRail', () => {
   it('a horizontal wheel scrolls the strip and settles on the neighbour', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -304,7 +307,7 @@ describe('ChatTitleRail', () => {
   it('a sideways nudge short of halfway springs back to the current title', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -325,7 +328,7 @@ describe('ChatTitleRail', () => {
 
   it('reports how far the strip leans from the current chat mid-swipe', () => {
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
+    const wrapper = mountRail({ props: { items: [item('a'), item('b'), item('c')], currentId: 'b' }, attachTo: document.body })
     const strip = geometry(wrapper)
     strip.scrollLeft = 130
     strip.dispatchEvent(new Event('scroll'))
@@ -338,7 +341,7 @@ describe('ChatTitleRail', () => {
   it('steps to a neighbour with the arrow keys from the current item, after the slide', async () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
     })
     const current = wrapper.get('.title-rail-item[aria-current="page"]')
@@ -358,7 +361,7 @@ describe('ChatTitleRail', () => {
   it('slides the strip to the neighbour before switching', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -382,7 +385,7 @@ describe('ChatTitleRail', () => {
     const matchMedia = vi.fn(() => ({ matches: true }))
     vi.stubGlobal('matchMedia', matchMedia)
     try {
-      const wrapper = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' } })
+      const wrapper = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' } })
       const exposed = wrapper.vm as unknown as { slide: (d: -1 | 1) => boolean }
       expect(exposed.slide(-1)).toBe(false)
       expect(exposed.slide(1)).toBe(true)
@@ -395,7 +398,7 @@ describe('ChatTitleRail', () => {
   // A browser chord such as Alt+ArrowLeft is Back: the rail must leave it alone.
   it('ignores an arrow key pressed with a modifier', () => {
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
     })
     const current = wrapper.get('.title-rail-item[aria-current="page"]').element as HTMLElement
@@ -409,11 +412,11 @@ describe('ChatTitleRail', () => {
 
   it('does nothing for an arrow key at either end of the rail', async () => {
     seed(['a', 'b'])
-    const first = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' } })
+    const first = mountRail({ props: { items: [item('a'), item('b')], currentId: 'a' } })
     await first.get('.title-rail-item[aria-current="page"]').trigger('keydown', { key: 'ArrowLeft' })
     expect(first.emitted('select')).toBeUndefined()
 
-    const last = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'b' } })
+    const last = mountRail({ props: { items: [item('a'), item('b')], currentId: 'b' } })
     await last.get('.title-rail-item[aria-current="page"]').trigger('keydown', { key: 'ArrowRight' })
     expect(last.emitted('select')).toBeUndefined()
   })
@@ -432,7 +435,7 @@ describe('ChatTitleRail', () => {
   it('settles on a neighbour after a gesture', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -450,7 +453,7 @@ describe('ChatTitleRail', () => {
   it('does not switch on a scroll it did not see a gesture for', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -467,7 +470,7 @@ describe('ChatTitleRail', () => {
   it('does not switch after a vertical wheel, which is page scrolling', () => {
     vi.useFakeTimers()
     seed(['a', 'b', 'c'])
-    const wrapper = mount(ChatTitleRail, {
+    const wrapper = mountRail({
       props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
       attachTo: document.body,
     })
@@ -484,7 +487,7 @@ describe('ChatTitleRail', () => {
 
   // iOS 26+ gives a native scroller near the top edge the soft scroll-edge blur over the title.
   it('the strip is never a native scroller', () => {
-    const source = readFileSync(join(__dirname, '..', 'ChatTitleRail.vue'), 'utf8')
+    const source = readFileSync(join(__dirname, '..', 'TitleRail.vue'), 'utf8')
     const rule = source.match(/\.title-rail-strip\s*\{([^}]*)\}/)?.[1] ?? ''
     expect(rule).toContain('overflow: hidden')
     expect(rule).not.toMatch(/overflow(-x)?:\s*(auto|scroll)/)

@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, seedInbox } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, seedInbox, settled } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -1283,6 +1283,9 @@ test('keyboard navigation keeps slash and mention highlights visible in short pa
       expect(geometry.bottom, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.visibleBottom + 1)
     }
     await check()
+    // Opening the picker pushes the composer below the fold, and the keep-visible
+    // scroll that reveals it runs one frame later. Read the column only after that.
+    await settled(composer)
     const columnBefore = await page.locator('.chat-column').evaluate(el => el.scrollTop)
     await composer.press('ArrowUp')
     await check()

@@ -101,10 +101,22 @@ async function undoChange(row: ProposalHistoryRow) {
 
 /** Open the archive this fact came from. Only linked when the server could
  * still find the transcript; otherwise the stem is printed as plain text
- * rather than as a link that goes nowhere. */
+ * rather than as a link that goes nowhere. When the receipt named the turn it
+ * cited, the viewer opens at that turn's heading instead of the first line of
+ * a transcript that can hold hundreds of them — the source a reader asked for
+ * is the turn, not the file. */
 async function openSource(row: ProposalHistoryRow) {
   if (!row.source_path) return
-  await fileViewer.open(row.source_path)
+  await fileViewer.open(row.source_path, row.source_line ?? null)
+}
+
+/** What the source link will open, said before the click. A row whose archive
+ * no longer parses its turn says only the file name, because promising a turn
+ * the server could not locate is the one thing worse than opening at the top. */
+function sourceTitle(row: ProposalHistoryRow): string {
+  const path = row.source_path ?? ''
+  if (!row.source_line) return path
+  return `${path} · turn ${row.source_turn}`
 }
 
 onMounted(() => {
@@ -338,9 +350,10 @@ const filtersHideEverything = computed(
                 v-if="row.source_path"
                 type="button"
                 class="ph-source-link"
-                :title="row.source_path"
+                :title="sourceTitle(row)"
+                :aria-label="row.source_line ? `Open ${row.source_path} at turn ${row.source_turn}` : `Open ${row.source_path}`"
                 @click="openSource(row)"
-              >{{ row.source }}</button>
+              >{{ row.source }}<span v-if="row.source_line" class="ph-source-turn"> · turn {{ row.source_turn }}</span></button>
               <span v-else class="ph-source-name">{{ row.source }}</span>
             </p>
 
@@ -845,6 +858,13 @@ const filtersHideEverything = computed(
   cursor: pointer;
   text-decoration: underline;
   overflow-wrap: anywhere;
+}
+
+/* The turn the fact was filed from, beside the archive it lives in. One link,
+   so the underline stays: the muted colour alone marks the turn as the
+   address rather than a second action. */
+.ph-source-turn {
+  color: var(--fg2);
 }
 
 .ph-change-toggle {

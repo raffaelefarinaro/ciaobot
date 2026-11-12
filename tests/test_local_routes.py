@@ -23,6 +23,7 @@ from starlette.testclient import TestClient
 
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import SETUP_CHAT_TITLE, BackupService
+from ciao.claude_trim import catalog_payload
 from ciao.config import CiaoConfig, default_agent_fs_scope
 from ciao.legacy_node_state import LegacyNodeState
 from ciao.local_session import LocalSessionManager
@@ -200,6 +201,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "personal",
                 "disallowed_tools": None,
                 "claude_ai_connectors": True,
+                "claude_trim": {},
                 "color": "amber",
                 "agent_fs_scope": None,
                 "memory_handover": "off",
@@ -212,6 +214,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "work",
                 "disallowed_tools": [],
                 "claude_ai_connectors": True,
+                "claude_trim": {},
                 "color": "amber",
                 "agent_fs_scope": None,
                 "memory_handover": "off",
@@ -225,6 +228,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
             {"value": "opencode", "label": "opencode"},
         ],
         "default_agent_fs_scope": default_agent_fs_scope(),
+        "claude_trim_options": catalog_payload(),
     }
 
 
