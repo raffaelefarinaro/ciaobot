@@ -56,7 +56,7 @@ Inline code: `[[People/Mo]]`.
 def _note(vault: Path, relative: str, body: str) -> Path:
     path = vault / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_bytes(body.encode("utf-8"))
     return path
 
 
