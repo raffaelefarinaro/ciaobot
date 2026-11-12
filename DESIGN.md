@@ -268,7 +268,8 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
   - **Side-by-side chats:** on a pane at least 940px wide, a second chat opens in the same right-hand tile (same inset window, divider and remembered ratio) from a sidebar row's *Open beside*.
     - *Open beside* is a hover action next to the row's `···` on a fine pointer and an item in the row menu everywhere.
     - Opening it hides the terminal (shells keep running) and keeps the chat's pinned file behind it. A new pin, or opening the terminal, takes the tile back.
-    - Each pane has its own header, composer and Chat details. The pane with the keyboard wears a 2px accent ring, and clicking or focusing a pane gives it the keyboard.
+    - Each pane has the same header as a chat open on its own (title rail, Archive, Chat details), its own composer and Chat details. The pane with the keyboard wears a 2px accent ring, and clicking or focusing a pane gives it the keyboard.
+    - The pane with the keyboard is the selected chat: the sidebar highlights its row, a sidebar row click loads into it, and its title rail (or ⌥← / ⌥→) steps only that pane. Picking the other pane's chat gives that pane the keyboard instead of showing the chat twice. Archiving the second chat closes the split rather than stepping on.
     - Esc in the second pane closes it. Closing the main chat moves the second chat into the main pane.
     - The choice is remembered per workspace in this browser (`ciao:beside-chat`). Under 940px the second chat is simply not shown.
     - Both panes are 360px at minimum.
