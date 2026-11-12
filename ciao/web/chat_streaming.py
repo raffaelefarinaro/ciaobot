@@ -19,8 +19,8 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
-from pathlib import Path
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
@@ -543,6 +543,9 @@ class ChatStreaming:
                 turn_answer_ready = False
                 turn_vault_reads: list[Path] = []
                 turn_succeeded = False
+                # The turn index the answer is filed under: the last steer that
+                # landed in this turn (its final answer row), else the turn itself.
+                turn_verify_index: int | None = None
                 stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
@@ -558,7 +561,8 @@ class ChatStreaming:
                     run_compact: bool = compact,
                 ) -> None:
                     nonlocal turn_assistant_text, turn_answer_text, turn_answer_ready
-                    nonlocal turn_succeeded, vault_root, agent_root, vault_root_resolved
+                    nonlocal turn_succeeded, turn_verify_index
+                    nonlocal vault_root, agent_root, vault_root_resolved
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text, last_answer_text
@@ -629,6 +633,11 @@ class ChatStreaming:
                                 rec["completed_at"] = completed_at
                                 if duration_ms is not None:
                                     rec["duration_ms"] = duration_ms
+                                turn_verify_index = (
+                                    stream.steered_turn_indexes[-1]
+                                    if stream.steered_turn_indexes
+                                    else run_turn_index
+                                )
                                 # Steers delivered into this turn finish with it.
                                 for steered_index in stream.steered_turn_indexes:
                                     steered_rec = cm.user_turn_timings.setdefault(
@@ -1069,14 +1078,14 @@ class ChatStreaming:
                 if (
                     turn_succeeded
                     and turn_vault_reads
-                    and current_turn_index is not None
+                    and turn_verify_index is not None
                     and turn_answer_text.strip()
                     and self._host.verify_vault_answers_enabled()
                 ):
                     asyncio.create_task(
                         self._host._verify_turn_and_publish(
                             chat_id,
-                            current_turn_index,
+                            turn_verify_index,
                             turn_answer_text,
                             list(turn_vault_reads),
                         )

@@ -289,3 +289,58 @@ def test_transcript_overlay_attaches_verification_to_last_assistant_row() -> Non
     transcript_service._overlay_turn_verification(entries, {"0": _VERDICT})
     assert ["verification" in e for e in entries] == [False, False, True, False, False]
     assert entries[2]["verification"] == _VERDICT
+
+
+async def test_steered_turn_keys_the_verdict_on_the_steer_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A steer that lands before the terminal frame owns the final answer row.
+
+    Harness: the fake provider appends to the live ChatStream's
+    ``steered_turn_indexes`` (the same list ``project_chats`` fills when a steer
+    is delivered) before its successful ResultEvent, so no real steer is sent.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("vault-steer", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="steer-verify")
+    note = _ann_note(pcm)
+
+    calls: list[tuple[str, list[Path]]] = []
+
+    async def fake_verify(answer, note_paths, **_kwargs):
+        calls.append((answer, list(note_paths)))
+        return _VERDICT
+
+    monkeypatch.setattr("ciao.vault_verification.verify_answer", fake_verify)
+
+    published: list[dict] = []
+    real_publish = pcm._events.publish
+
+    def spy(payload):
+        published.append(payload)
+        return real_publish(payload)
+
+    pcm._events.publish = spy  # type: ignore[method-assign]
+
+    async def fake_stream_chat(chat_id, _prompt, images=None, **_kwargs):
+        yield _read(note)
+        pcm.get_active_stream(chat_id).steered_turn_indexes.append(1)
+        yield _result("Ann lives in Rome.")
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    async def consume(stream) -> None:
+        async for _ev in stream.subscribe():
+            pass
+
+    stream = pcm.start_stream(chat.chat_id, "where does ann live?")
+    await asyncio.wait_for(asyncio.create_task(consume(stream)), timeout=5.0)
+
+    await _wait_for(lambda: "1" in pcm._chats[chat.chat_id].turn_verification)
+    turn_verification = pcm._chats[chat.chat_id].turn_verification
+    assert "0" not in turn_verification
+    assert turn_verification["1"] == _VERDICT
+    verdicts = [e for e in published if e.get("type") == "turn_verification"]
+    assert len(verdicts) == 1
+    assert verdicts[0]["turn_index"] == 1
+    assert calls == [("Ann lives in Rome.", [note.resolve()])]
