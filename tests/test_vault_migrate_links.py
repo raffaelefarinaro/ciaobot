@@ -2179,7 +2179,8 @@ def test_post_resume_failure_reports_changes_and_receipt(tmp_path: Path, monkeyp
     note.write_bytes(b"# A\n[[Missing]]\n")
     assert cli.main(args[:-1]) == 1
     output = capsys.readouterr()
-    assert "Resumed" in output.out and str(receipt_path(runtime)) in output.out
+    assert "Planned" in output.out and "Rewrote 1 of 1 planned note(s)" in output.out
+    assert str(receipt_path(runtime)) in output.out
     assert "did NOT finish" in output.out and "Failed:" in output.err
 
 
@@ -2215,3 +2216,157 @@ def test_fresh_apply_reports_actual_writes_and_retains_plans(tmp_path: Path, mon
     output = capsys.readouterr()
     assert f"Rewrote {2 - len(blocked)} of 2 planned note(s)" in output.out
     assert "Failed:" in output.err and "did NOT finish" in output.out
+
+
+def test_cli_labels_mixed_resumed_and_failed_fresh_rewrites_as_planned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import ciao.vault_migrate_links as migration
+    from ciao import cli
+
+    vault = tmp_path / "vault"
+    resumed = _note(vault, "A.md", "# A\n[[Missing]]\n")
+    runtime = tmp_path / "runtime"
+    original = migration._replace_image
+    monkeypatch.setattr(migration, "_replace_image", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        migrate_links(vault, runtime, apply=True)
+    fresh = _note(vault, "B.md", "# B\n[[Missing]]\n")
+    def refuse_fresh(root, image, *, undo):
+        if image["path"] == "B.md" and not undo:
+            raise PermissionError("denied")
+        return original(root, image, undo=undo)
+    monkeypatch.setattr(migration, "_replace_image", refuse_fresh)
+    assert cli.main(["vault-migrate-links", "--apply", "--vault-root", str(vault), "--runtime-root", str(runtime)]) == 1
+    output = capsys.readouterr()
+    assert "Planned 2 link(s) in 2 note(s):" in output.out
+    assert "of 1 note(s)" not in output.out and "Resumed 2 link(s)" not in output.out
+    assert "Rewrote 1 of 2 planned note(s)" in output.out
+    assert resumed.read_bytes() != b"# A\n[[Missing]]\n"
+    assert fresh.read_bytes() == b"# B\n[[Missing]]\n"
+    assert "Failed:" in output.err and receipt_path(runtime).exists()
+
+
+def test_cli_success_with_resumed_and_fresh_notes_omits_scanned_denominator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import ciao.vault_migrate_links as migration
+    from ciao import cli
+
+    vault = tmp_path / "vault"
+    _note(vault, "A.md", "# A\n[[Missing]]\n")
+    runtime = tmp_path / "runtime"
+    original = migration._replace_image
+    monkeypatch.setattr(migration, "_replace_image", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        migrate_links(vault, runtime, apply=True)
+    _note(vault, "B.md", "# B\n[[Missing]]\n")
+    monkeypatch.setattr(migration, "_replace_image", original)
+    assert cli.main(["vault-migrate-links", "--apply", "--vault-root", str(vault), "--runtime-root", str(runtime)]) == 0
+    output = capsys.readouterr()
+    assert "Rewrote 2 link(s) in 2 note(s):" in output.out
+    assert "of 1 note(s)" not in output.out
+
+
+def test_cli_success_without_resume_keeps_scanned_denominator(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault = tmp_path / "vault"
+    _note(vault, "A.md", "# A\n[[Missing]]\n")
+    _note(vault, "B.md", "# B\nNo links\n")
+    assert cli.main(["vault-migrate-links", "--apply", "--vault-root", str(vault), "--runtime-root", str(tmp_path / "runtime")]) == 0
+    assert "Rewrote 1 link(s) in 1 of 2 note(s):" in capsys.readouterr().out
+
+
+def test_cli_includes_failed_resume_in_mixed_planned_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import ciao.vault_migrate_links as migration
+    from ciao import cli
+
+    vault = tmp_path / "vault"
+    pending = _note(vault, "A.md", "# A\n[[Missing]]\n")
+    runtime = tmp_path / "runtime"
+    original = migration._replace_image
+    monkeypatch.setattr(migration, "_replace_image", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        migrate_links(vault, runtime, apply=True)
+    fresh = _note(vault, "B.md", "# B\n[[Missing]]\n")
+    def refuse_pending(root, image, *, undo):
+        if image["path"] == "A.md" and not undo:
+            raise PermissionError("denied")
+        return original(root, image, undo=undo)
+    monkeypatch.setattr(migration, "_replace_image", refuse_pending)
+    assert cli.main(["vault-migrate-links", "--apply", "--vault-root", str(vault), "--runtime-root", str(runtime)]) == 1
+    output = capsys.readouterr()
+    assert "Planned 2 link(s) in 2 note(s):" in output.out
+    assert "Rewrote 1 of 2 planned note(s)" in output.out
+    assert "A.md:2" in output.out and "B.md:2" in output.out
+    assert pending.read_bytes() == b"# A\n[[Missing]]\n"
+    assert fresh.read_bytes() != b"# B\n[[Missing]]\n"
+    assert "A.md: denied" in output.err and receipt_path(runtime).exists()
+
+
+def test_legacy_undo_restores_valid_file_and_retains_conflicting_evidence(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    good = _note(vault, "A.md", "# A\n[Missing](./Missing.md)\n")
+    conflict = _note(vault, "B.md", "# B\nexternal edit\n")
+    runtime = tmp_path / "runtime"
+    path = receipt_path(runtime)
+    path.parent.mkdir(parents=True)
+    entries = [{"path": name, "offset": 4, "from": "[[Missing]]", "to": "[Missing](./Missing.md)"} for name in ("A.md", "B.md")]
+    path.write_text(json.dumps({"schema_version": 1, "vault_root": str(vault), "rewrites": entries}))
+    result = unmigrate_links(vault, runtime, apply=True)
+    assert result["files_restored"] == 1 and [f["path"] for f in result["failed"]] == ["B.md"]
+    assert good.read_bytes() == b"# A\n[[Missing]]\n" and conflict.read_bytes() == b"# B\nexternal edit\n"
+    receipt = json.loads(path.read_bytes())
+    assert receipt["operation"] == "undo" and receipt["status"] == "partial"
+    assert [e["path"] for e in receipt["legacy_rewrites"]] == ["B.md"]
+    assert [image["path"] for image in receipt["files"]] == ["A.md"]
+    conflict.write_bytes(b"# B\n[Missing](./Missing.md)\n")
+    retry = unmigrate_links(vault, runtime, apply=True)
+    assert not retry["failed"] and retry["files_restored"] == 1
+    assert conflict.read_bytes() == b"# B\n[[Missing]]\n" and not path.exists()
+
+
+def test_cli_incomplete_migration_labels_diagnostics_as_planned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import ciao.vault_migrate_links as migration
+    from ciao import cli
+    vault = tmp_path / "vault"
+    good = _note(vault, "A.md", "# A\n[[Missing#Heading]]\n")
+    bad = _note(vault, "B.md", "# B\n[[Absent#Section]]\n")
+    original = migration._replace_image
+    def refuse(root, image, *, undo):
+        if image["path"] == "B.md" and not undo:
+            raise PermissionError("denied")
+        return original(root, image, undo=undo)
+    monkeypatch.setattr(migration, "_replace_image", refuse)
+    assert cli.main(["vault-migrate-links", "--apply", "--vault-root", str(vault), "--runtime-root", str(tmp_path / "runtime")]) == 1
+    output = capsys.readouterr()
+    assert "Planned unresolved links" in output.out and "Planned heading anchors" in output.out
+    assert "Converted but resolving to nothing" not in output.out and "Heading anchors dropped (" not in output.out
+    assert "A.md" in output.out and "B.md" in output.out and "B.md: denied" in output.err
+    assert good.read_bytes() != b"# A\n[[Missing#Heading]]\n" and bad.read_bytes() == b"# B\n[[Absent#Section]]\n"
+
+
+@pytest.mark.parametrize("seam", ["planning", "publication"])
+def test_resume_file_error_survives_later_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str) -> None:
+    import ciao.vault_migrate_links as migration
+    vault = tmp_path / "vault"
+    good = _note(vault, "A.md", "# A\n[[Missing]]\n")
+    bad = _note(vault, "B.md", "# B\n[[Missing]]\n")
+    runtime = tmp_path / "runtime"
+    original = migration._replace_image
+    monkeypatch.setattr(migration, "_replace_image", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        migrate_links(vault, runtime, apply=True)
+    evidence = receipt_path(runtime).read_bytes()
+    def refuse(root, image, *, undo):
+        if image["path"] == "B.md":
+            raise PermissionError("note denied")
+        return original(root, image, undo=undo)
+    monkeypatch.setattr(migration, "_replace_image", refuse)
+    def later(*args, **kwargs):
+        raise OSError("later denied")
+    monkeypatch.setattr(migration, "migrate_vault_links" if seam == "planning" else "_publish_receipt", later)
+    result = migrate_links(vault, runtime, apply=True)
+    assert result["files_rewritten"] == 1 and not result["complete"]
+    assert {entry["path"] for entry in result["rewrites"]} == {"A.md", "B.md"}
+    assert any(e["path"] == "B.md" and "note denied" in e["error"] for e in result["failed"])
+    assert any("later denied" in e["error"] for e in result["failed"])
+    assert result["receipt_path"] == str(receipt_path(runtime)) and receipt_path(runtime).read_bytes() == evidence
+    assert good.read_bytes() != b"# A\n[[Missing]]\n" and bad.read_bytes() == b"# B\n[[Missing]]\n"

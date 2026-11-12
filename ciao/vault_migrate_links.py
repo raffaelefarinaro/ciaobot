@@ -897,9 +897,11 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
     root = Path(vault_root).resolve()
     runtime = Path(runtime_root).resolve()
     resumed: set[str] = set()
+    resume_failed: list[dict[str, str]] = []
     recorded: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
     def run() -> dict[str, Any]:
-        nonlocal recorded
+        nonlocal recorded, progress
         recorded = peek_receipt(runtime, vault_root=root)
         git = vault_git_state(root)
         if apply and recorded and recorded.get("operation") == "undo":
@@ -910,7 +912,6 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
             return {"skipped": "vault has uncommitted changes", "git": git}
         resume_files = (recorded or {}).get("files", []) if apply and recorded and recorded.get("status") in ("prepared", "partial") else []
         resume_paths = frozenset(f["path"] for f in resume_files)
-        resume_failed: list[dict[str, str]] = []
         if resume_files:
             _preflight(root)
         for image in resume_files:
@@ -920,16 +921,18 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
             except (OSError, UnicodeError) as exc:
                 resume_failed.append({"path": image["path"], "error": str(exc)})
         summary = migrate_vault_links(root, exclude_paths=resume_paths)
+        progress = summary
+        if apply:
+            summary["files_rewritten"] = len(resumed)
         summary["failed"].extend(resume_failed)
-        summary["rewrites"].extend(entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in resumed)
-        summary["files_rewritten"] += len(resumed)
+        attempted_paths = resumed | {failure["path"] for failure in resume_failed}
+        summary["rewrites"].extend(entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in attempted_paths)
         if resumed:
             summary["resumed_files"] = len(resumed)
         images = summary.pop("_images", [])
         summary.update(applied=apply, git_head_before=git["head"], forced=bool(force), complete=not summary["failed"])
         if not apply or "skipped" in summary:
             return summary
-        summary["files_rewritten"] = len(resumed)
         old_files = list((recorded or {}).get("files", []))
         old_legacy = list((recorded or {}).get("legacy_rewrites", [])) if recorded and recorded.get("schema_version") == 2 else list((recorded or {}).get("rewrites", []))
         legacy_by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -992,13 +995,23 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
         return run()
     except (ReceiptUnavailable, OSError, UnicodeError, ValueError, MemoryError) as exc:
         failure = _failure(root, runtime, apply, exc)
+        if progress is not None:
+            failure.update({key: progress[key] for key in ("files_scanned", "rewrites", "unresolved", "anchors_dropped") if key in progress})
+            failure["failed"] = list(progress.get("failed", [])) + failure["failed"]
+            if apply:
+                failure["files_rewritten"] = progress.get("files_rewritten", len(resumed))
+            if progress.get("receipt_path"):
+                failure["receipt_path"] = progress["receipt_path"]
+        else:
+            failure["failed"] = list(resume_failed) + failure["failed"]
+            attempted_paths = resumed | {item["path"] for item in resume_failed}
+            failure["rewrites"] = [entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in attempted_paths]
+            failure["files_scanned"] = len(attempted_paths)
         if recorded is not None:
             failure["receipt_path"] = str(receipt_path(runtime))
         if resumed:
-            failure["files_rewritten"] = len(resumed)
-            failure["files_scanned"] = len(resumed)
-            failure["rewrites"] = [entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in resumed]
-            failure["receipt_path"] = str(receipt_path(runtime))
+            if progress is None:
+                failure["files_rewritten"] = len(resumed)
             failure["resumed_files"] = len(resumed)
         return failure
 
@@ -1023,7 +1036,7 @@ def unmigrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False
                 files.append(_legacy_image(root, path, entries))
             except (OSError, UnicodeError) as exc:
                 summary["failed"].append({"path": path, "error": str(exc)})
-        if summary["failed"]:
+        if summary["failed"] and not files:
             return summary
         upgraded_paths = {f["path"] for f in files}
         remaining = [e for e in legacy if e["path"] not in upgraded_paths]

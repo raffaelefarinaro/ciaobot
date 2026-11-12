@@ -2410,15 +2410,18 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if "skipped" in summary:
         return _print_link_migration_skip(summary)
 
-    verb = ("Resumed" if summary.get("resumed_files") else "Planned") if args.apply and summary["failed"] else ("Rewrote" if args.apply else "Would rewrite")
+    verb = "Planned" if args.apply and summary["failed"] else ("Rewrote" if args.apply else "Would rewrite")
     rewrites = summary["rewrites"]
     if rewrites:
         planned_notes = len({change["path"] for change in rewrites})
         displayed_notes = planned_notes if args.apply and summary["failed"] else summary["files_rewritten"]
-        print(
-            f"{verb} {len(rewrites)} link(s) in {displayed_notes} "
-            f"of {summary['files_scanned']} note(s):"
-        )
+        if args.apply and (summary["failed"] or summary.get("resumed_files")):
+            print(f"{verb} {len(rewrites)} link(s) in {displayed_notes} note(s):")
+        else:
+            print(
+                f"{verb} {len(rewrites)} link(s) in {displayed_notes} "
+                f"of {summary['files_scanned']} note(s):"
+            )
         if args.apply and summary["failed"]:
             print(f"Rewrote {summary['files_rewritten']} of {planned_notes} planned note(s).")
         for change in rewrites:
@@ -2443,17 +2446,25 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         # root this run was given*, which is also what a perfectly good link
         # looks like when the root is too narrow. Asserting pre-existing rot let
         # the tool label its own broken output as damage it had found.
-        print(
-            f"\nConverted but resolving to nothing — no note under `{vault_root}` "
-            "matches these refs, so they now report as broken markdown links. "
-            "A link that works in Obsidian and appears here means the root is "
-            "too narrow, not that the link was dead:"
-        )
+        if summary["failed"] or not args.apply:
+            print("\nPlanned unresolved links resolving to nothing — no note under "
+                  f"`{vault_root}` matches these refs; conversion may produce broken links. "
+                  "A working link may appear here if the root is too narrow:")
+        else:
+            print(
+                f"\nConverted but resolving to nothing — no note under `{vault_root}` "
+                "matches these refs, so they now report as broken markdown links. "
+                "A link that works in Obsidian and appears here means the root is "
+                "too narrow, not that the link was dead:"
+            )
         for item in summary["unresolved"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}]]")
 
     if summary["anchors_dropped"]:
-        print("\nHeading anchors dropped (recorded in the receipt):")
+        if summary["failed"] or not args.apply:
+            print("\nPlanned heading anchors to drop:")
+        else:
+            print("\nHeading anchors dropped (recorded in the receipt):")
         for item in summary["anchors_dropped"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}#{item['anchor']}]]")
 
