@@ -286,16 +286,21 @@
           <div class="message-row">
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
+                <!-- Sent images stay chips, as they were in the composer: a
+                     thumbnail plus the "Image N" the prompt refers to. Click
+                     opens the full image in the viewer. -->
                 <div v-if="item.msg.images?.length" class="message-images">
                   <button
-                    v-for="img in item.msg.images"
+                    v-for="(img, ii) in item.msg.images"
                     :key="img"
                     type="button"
                     class="message-image-link"
-                    :aria-label="`Open image ${img}`"
+                    :aria-label="`Open image ${ii + 1}`"
+                    title="Open image"
                     @click="openMessageImage(img)"
                   >
-                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
+                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" alt="" aria-hidden="true" class="message-image" />
+                    <span class="message-image-label">Image {{ ii + 1 }}</span>
                   </button>
                 </div>
                 <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
@@ -6718,18 +6723,35 @@ details[open] > .activity-summary::before {
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.message-image-link { display: inline-block; line-height: 0; text-decoration: none; border: 0; padding: 0; background: none; cursor: zoom-in; }
+.message-image-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 10px 0 3px;
+  border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent2) 12%, transparent);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  cursor: zoom-in;
+}
+.message-image-link:hover .message-image-label { color: var(--accent2); }
+.message-image-link:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
+.message-image-label { white-space: nowrap; }
+@media (pointer: coarse) { .message-image-link { min-height: var(--touch); } }
 .message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
 .message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
 .message-file-icon { flex: none; color: var(--accent2); }
 .message-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .message-image {
-  max-height: 160px;
-  max-width: 240px;
-  border-radius: 6px;
+  flex: none;
+  width: 24px;
+  height: 24px;
   object-fit: cover;
-  border: 1px solid var(--border);
-  cursor: zoom-in;
+  border-radius: 5px;
   background: var(--bg);
 }
 
