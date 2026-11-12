@@ -20,10 +20,10 @@ export default defineConfig(({ mode }) => {
     base: e2e ? '/__fixture__/harness/' : '/',
     plugins: [
       vue({
-        // Leave root-absolute template URLs (`src="/face.png"`, all in `public/`)
+        // Leave root-absolute template URLs (`src="/favicon.png"`, all in `public/`)
         // as plain URLs instead of compiling them into imports. The build served
         // them from `public/` either way; under vitest on Windows the import
-        // resolved to `file:///face.png`, which is not a valid path there, and
+        // resolved to `file:///favicon.png`, which is not a valid path there, and
         // every component that renders one failed to load.
         template: { transformAssetUrls: { includeAbsolute: false } },
       }),

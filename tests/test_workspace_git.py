@@ -984,3 +984,592 @@ def test_rerun_with_an_existing_registry_and_pending_receipt_does_not_seed(
     setup_workspace(workspace)
 
     assert settings.read_bytes() == before
+
+
+# -- shared setup selection ----------------------------------------------------
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under *root* keyed by POSIX relative path, for no-write checks."""
+    if not root.exists():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _two_nested_candidates(ws: Path) -> None:
+    """Two real per-root vaults, the shape that made the old selection pick ``.``."""
+    for name in ("work", "personal"):
+        vault = ws / name / "memory-vault"
+        vault.mkdir(parents=True)
+        (vault / "MEMORY.md").write_text(f"# {name}\n", encoding="utf-8")
+
+
+def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Established configuration must never reach bounded discovery (slice 3)."""
+
+    def discovery_called(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("bounded discovery must not run for established setup")
+
+    monkeypatch.setattr("ciao.cli.detect_existing_vault_root", discovery_called, raising=False)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["env_vs_explicit", "registry_vs_explicit", "legacy_only", "explicit_only"],
+)
+def test_setup_selection_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    _forbid_discovery(monkeypatch)
+    expected_source = {
+        "env_vs_explicit": "env",
+        "registry_vs_explicit": "registry",
+        "legacy_only": "legacy",
+        "explicit_only": "explicit",
+    }[case]
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _two_nested_candidates(ws)
+    (ws / ".runtime").mkdir()
+    explicit = ws / "explicit-vault"
+    env_vault = ws / "env-vault"
+    env_vault.mkdir()
+    lines: list[str] = []
+    if case == "env_vs_explicit":
+        lines.append(f"CIAO_VAULT_ROOT={env_vault}")
+    if case == "registry_vs_explicit":
+        (ws / ".runtime" / "workspaces.json").write_text(
+            json.dumps([{"name": "personal", "vault_root": "personal/memory-vault"}]),
+            encoding="utf-8",
+        )
+    if case == "legacy_only":
+        lines.append(
+            "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"memory-vault/research\"}]'"
+        )
+    if lines:
+        (ws / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    arg = str(explicit) if case in ("env_vs_explicit", "registry_vs_explicit", "explicit_only") else None
+    before = _tree_bytes(ws)
+
+    selection = select_setup_vault(ws, vault_mode="existing", vault_root=arg)
+
+    assert selection.source == expected_source
+    assert _tree_bytes(ws) == before, "selection must not write"
+    if case == "env_vs_explicit":
+        assert selection.vault_value == str(env_vault)
+        assert selection.registered_vaults is None
+    if case == "registry_vs_explicit":
+        # An explicit argument never replaces registered targets.
+        assert selection.vault_value == str(explicit)
+        assert selection.registered_vaults == [("personal", ws / "personal" / "memory-vault")]
+    if case == "legacy_only":
+        assert selection.vault_value == "memory-vault"
+        assert selection.registered_vaults == [("research", ws / "memory-vault" / "research")]
+        assert selection.import_legacy is True
+    if case == "explicit_only":
+        assert selection.vault_value == str(explicit)
+        assert selection.registered_vaults is None
+
+
+@pytest.mark.parametrize("failure", ["malformed", "no_valid_entries", "permission"])
+@pytest.mark.parametrize("selector", ["none", "env", "explicit"])
+def test_unreadable_setup_registry_refuses_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    selector: str,
+) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _two_nested_candidates(ws)
+    (ws / ".runtime").mkdir()
+    registry = ws / ".runtime" / "workspaces.json"
+    if failure == "malformed":
+        registry.write_text("{not json", encoding="utf-8")
+    elif failure == "no_valid_entries":
+        registry.write_text(json.dumps([{"vault_root": "x"}]), encoding="utf-8")
+    else:
+        registry.write_text(
+            json.dumps([{"name": "personal", "vault_root": "personal/memory-vault"}]),
+            encoding="utf-8",
+        )
+        real_read_text = Path.read_text
+
+        def deny(self, *args, **kwargs):
+            if self == registry:
+                raise PermissionError("denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", deny)
+    (ws / ".env").write_text(
+        f"CIAO_VAULT_ROOT={ws / 'env-vault'}\n" if selector == "env" else "", encoding="utf-8"
+    )
+    explicit = str(ws / "explicit-vault") if selector == "explicit" else None
+
+    def no_writer(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("a writer ran before setup validated the registry")
+
+    monkeypatch.setattr("ciao.onboarding.ensure_receipt", no_writer)
+    monkeypatch.setattr("ciao.cli._import_legacy_workspaces_for_setup", no_writer)
+    monkeypatch.setattr("ciao.cli._write_if_missing", no_writer)
+    monkeypatch.setattr("ciao.cli.ensure_workspace_git", no_writer)
+    before = _tree_bytes(ws)
+
+    with pytest.raises(ValueError):
+        setup_workspace(
+            ws,
+            vault_root=explicit,
+            vault_mode="existing",
+            launch_agents_dir=tmp_path / "LaunchAgents",
+            app_dir=tmp_path / "Applications",
+        )
+
+    assert _tree_bytes(ws) == before
+
+
+def test_legacy_configuration_is_previewed_without_import_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    _forbid_discovery(monkeypatch)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _two_nested_candidates(ws)
+    (ws / ".env").write_text(
+        "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \".\", "
+        "\"disallowed_tools\": [\"Bash\"]}]'\n",
+        encoding="utf-8",
+    )
+    before = _tree_bytes(ws)
+
+    selection = select_setup_vault(ws, vault_mode="existing")
+
+    assert selection.source == "legacy"
+    assert selection.registered_vaults == [("research", ws)]
+    assert selection.import_legacy is True
+    assert _tree_bytes(ws) == before, "the preview must write nothing"
+    assert not (ws / ".runtime" / "workspaces.json").exists()
+
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    registry = json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    research = next(entry for entry in registry if entry["name"] == "research")
+    assert research["vault_root"] == "."
+    assert research["disallowed_tools"] == ["Bash"]
+    assert (ws / ".runtime" / "workspaces-env-imported.json").is_file()
+    assert (ws / "MEMORY.md").is_file()
+
+
+def test_completed_legacy_import_does_not_resurrect_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    _forbid_discovery(monkeypatch)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _two_nested_candidates(ws)
+    runtime = ws / ".runtime"
+    runtime.mkdir()
+    # The user removed "research" in Settings; the import already ran once.
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "personal/memory-vault"}]),
+        encoding="utf-8",
+    )
+    (runtime / "workspaces-env-imported.json").write_text(
+        json.dumps({"imported_at": "2026-01-01T00:00:00+00:00", "imported": ["research"]}),
+        encoding="utf-8",
+    )
+    (ws / ".env").write_text(
+        "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"memory-vault/research\"}]'\n",
+        encoding="utf-8",
+    )
+
+    selection = select_setup_vault(ws, vault_mode="existing")
+    assert selection.source == "registry"
+    assert selection.import_legacy is False
+    assert [name for name, _ in selection.registered_vaults or []] == ["personal"]
+
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    registry = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in registry] == ["personal"]
+
+
+
+# -- bounded discovery for a fresh existing-folder setup -----------------------
+
+_VAULT_TYPES = (
+    "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n"
+    "  description: A company we sell to.\n"
+)
+
+
+def _evidence(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "entity-types.yaml").write_text(_VAULT_TYPES, encoding="utf-8")
+    return path
+
+
+def test_existing_setup_adopts_per_root_nested_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    ws = (tmp_path / "workspace").resolve()
+    vault = _evidence(ws / "work" / "memory-vault")
+    (vault / "MEMORY.md").write_text("# Work memory\n", encoding="utf-8")
+    original = _tree_bytes(vault)
+    scaffold_targets: list[Path] = []
+
+    import ciao.cli as cli
+
+    real_write_if_missing = cli._write_if_missing
+
+    def record(path: Path, text: str) -> None:
+        scaffold_targets.append(path)
+        real_write_if_missing(path, text)
+
+    monkeypatch.setattr(cli, "_write_if_missing", record)
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    env_lines = (ws / ".env").read_text(encoding="utf-8").splitlines()
+    assert "CIAO_VAULT_ROOT=work/memory-vault" in env_lines
+    registry = json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    assert registry[0]["vault_root"] == "work/memory-vault"
+    assert _tree_bytes(vault)["entity-types.yaml"] == original["entity-types.yaml"]
+    assert (vault / "MEMORY.md").read_text(encoding="utf-8") == "# Work memory\n"
+    # No root vault defaults: the adopted notes are the only vault.
+    assert not (ws / "memory-vault").exists()
+    assert not (ws / "MEMORY.md").exists()
+    assert all(not path.is_relative_to(ws / "memory-vault") for path in scaffold_targets)
+
+    reset_reroot_cache()
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(ws),
+        "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
+        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+    })
+    assert config.workspace_vault_root("personal") == vault
+    assert config.agent_vault_root("personal") == vault
+
+
+def test_existing_setup_discovers_custom_registry_vault(tmp_path: Path) -> None:
+    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.entity_types import load_entity_types
+
+    ws = (tmp_path / "workspace").resolve()
+    brain = _evidence(ws / "brain")
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert "CIAO_VAULT_ROOT=brain" in (ws / ".env").read_text(encoding="utf-8").splitlines()
+    assert not (ws / "memory-vault").exists()
+    reset_reroot_cache()
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(ws),
+        "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
+        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+    })
+    assert config.workspace_vault_root("personal") == brain
+    assert "client" in load_entity_types(brain).canonical_types()
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected"),
+    [
+        # Root evidence plus a nested vault: two candidates.
+        ("root_evidence_and_nested", "ambiguous"),
+        # A real direct memory-vault wins even with other evidence.
+        ("direct_empty_vault_wins", "memory-vault"),
+        # A child with its own evidence and its own nested vault: two candidates.
+        ("child_evidence_and_its_vault", "ambiguous"),
+        # Only the nested vault's own evidence: one candidate, no duplicate.
+        ("one_candidate_nested_evidence", "work/memory-vault"),
+        # No evidence anywhere: root adoption.
+        ("no_evidence", "."),
+    ],
+)
+def test_existing_discovery_mixed_layout_precedence(
+    tmp_path: Path, layout: str, expected: str
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    ws = (tmp_path / "workspace").resolve()
+    ws.mkdir()
+    if layout == "root_evidence_and_nested":
+        _evidence(ws)
+        _evidence(ws / "work" / "memory-vault")
+    elif layout == "direct_empty_vault_wins":
+        (ws / "memory-vault").mkdir()
+        _evidence(ws)
+        _evidence(ws / "work" / "memory-vault")
+    elif layout == "child_evidence_and_its_vault":
+        _evidence(ws / "work")
+        _evidence(ws / "work" / "memory-vault")
+    elif layout == "one_candidate_nested_evidence":
+        _evidence(ws / "work" / "memory-vault")
+    else:
+        (ws / "ideas.md").write_text("notes\n", encoding="utf-8")
+
+    if expected == "ambiguous":
+        with pytest.raises(ValueError, match="More than one existing vault"):
+            select_setup_vault(ws, vault_mode="existing")
+        return
+    selection = select_setup_vault(ws, vault_mode="existing")
+    assert selection.vault_value == expected
+    assert selection.vault_path == (ws if expected == "." else ws / expected)
+
+
+def test_existing_setup_refuses_ambiguous_vaults_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = (tmp_path / "workspace").resolve()
+    _evidence(ws / "work" / "memory-vault")
+    _evidence(ws / "personal" / "memory-vault")
+    (ws / ".env").write_text("", encoding="utf-8")
+    before = _tree_bytes(ws)
+
+    def forbidden(name: str):
+        def writer(*args, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError(f"{name} ran before setup refused the ambiguous vault")
+
+        return writer
+
+    monkeypatch.setattr("ciao.onboarding.ensure_receipt", forbidden("receipt"))
+    monkeypatch.setattr("ciao.cli._import_legacy_workspaces_for_setup", forbidden("legacy import"))
+    monkeypatch.setattr("ciao.cli._write_if_missing", forbidden("scaffold"))
+    monkeypatch.setattr("ciao.cli.ensure_workspace_git", forbidden("workspace git"))
+    monkeypatch.setattr("ciao.cli.ensure_vault_git", forbidden("vault git"))
+    monkeypatch.setattr("ciao.cli._write_launchd_plist", forbidden("service"))
+    monkeypatch.setattr("ciao.setup_marker.write_setup_marker", forbidden("setup marker"))
+    monkeypatch.setattr("ciao.setup_marker.write_welcome_pending", forbidden("welcome"))
+    monkeypatch.setattr("ciao.app_settings.AppSettingsStore.seed_new_install_backup_default", forbidden("settings"))
+
+    with pytest.raises(ValueError) as refused:
+        setup_workspace(
+            ws,
+            vault_mode="existing",
+            launch_agents_dir=tmp_path / "LaunchAgents",
+            app_dir=tmp_path / "Applications",
+        )
+
+    message = str(refused.value)
+    assert message.index("personal/memory-vault") < message.index("work/memory-vault")
+    assert "main Ciaobot folder" in message
+    assert _tree_bytes(ws) == before
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "symlinked_child",
+        "nested_symlinked_memory_vault",
+        "direct_symlinked_memory_vault",
+        "symlinked_evidence",
+    ],
+)
+@pytest.mark.parametrize("target_side", ["inside", "outside"])
+def test_existing_discovery_rejects_symlink_components(
+    tmp_path: Path, layout: str, target_side: str
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    ws = (tmp_path / "workspace").resolve()
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = ws / "store" if target_side == "inside" else outside
+    target_vault = _evidence(store / "brain")
+    (target_vault / "MEMORY.md").write_text("# Brain\n", encoding="utf-8")
+    types_target = target_vault / "entity-types.yaml"
+    before_target = types_target.read_bytes()
+
+    def link(path: Path, target: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.symlink_to(target, target_is_directory=target.is_dir())
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks are unavailable here: {exc}")
+
+    if layout == "symlinked_child":
+        link(ws / "linked", target_vault)
+    elif layout == "nested_symlinked_memory_vault":
+        (ws / "work").mkdir(parents=True)
+        link(ws / "work" / "memory-vault", target_vault)
+    elif layout == "direct_symlinked_memory_vault":
+        link(ws / "memory-vault", target_vault)
+    else:
+        link(ws / "entity-types.yaml", types_target)
+        link(ws / "work" / "entity-types.yaml", types_target)
+
+    selection = select_setup_vault(ws, vault_mode="existing")
+
+    assert selection.vault_value == ".", "a symlink must never count as discovery evidence"
+    assert types_target.read_bytes() == before_target
+    assert (target_vault / "MEMORY.md").read_text(encoding="utf-8") == "# Brain\n"
+
+
+def test_explicit_external_vault_keeps_existing_symlink_behavior(tmp_path: Path) -> None:
+    from ciao.cli import select_setup_vault
+
+    ws = (tmp_path / "workspace").resolve()
+    ws.mkdir()
+    _evidence(ws / "work" / "memory-vault")
+    real = _evidence(tmp_path / "real-brain")
+    link = tmp_path / "brain-link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks are unavailable here: {exc}")
+
+    selection = select_setup_vault(ws, vault_mode="existing", vault_root=str(link))
+
+    # An explicitly selected location is used as given, never discovered over.
+    assert selection.source == "explicit"
+    assert selection.vault_value == str(link)
+    assert selection.vault_path == link
+
+
+def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> None:
+    """The documented recovery edits, applied exactly, and nothing else.
+
+    The affected install registered its personal workspace at ``"."`` while its
+    notes live at ``work/memory-vault``. Recovery changes only the global
+    ``CIAO_VAULT_ROOT`` and that one registry entry's ``vault_root``.
+    """
+    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.entity_types import load_entity_types
+
+    install = (tmp_path / "install").resolve()
+    runtime = install / ".runtime"
+    receipt = runtime / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    notes = _evidence(install / "work" / "memory-vault")
+    (notes / "MEMORY.md").write_text("# Notes\n", encoding="utf-8")
+    research = install / "research" / "memory-vault"
+    research.mkdir(parents=True)
+    (research / "MEMORY.md").write_text("# Research\n", encoding="utf-8")
+    stray_default = install / "memory-vault" / "MEMORY.md"
+    stray_default.parent.mkdir(parents=True)
+    stray_default.write_text("# Stray default\n", encoding="utf-8")
+    env_path = install / ".env"
+    env_path.write_text(
+        "PWA_AUTH_TOKEN=test-token\n# operator comment\nCIAO_VAULT_ROOT=.\nPWA_PORT=8443\n",
+        encoding="utf-8",
+    )
+    registry_path = runtime / "workspaces.json"
+    registry_path.write_text(json.dumps([
+        {"name": "personal", "vault_root": ".", "default_provider": "claude", "gws_profile": ""},
+        {
+            "name": "research",
+            "vault_root": "research/memory-vault",
+            "default_provider": "claude",
+            "gws_profile": "research-account",
+            "disallowed_tools": ["Bash"],
+        },
+    ], indent=2), encoding="utf-8")
+    stray_before = stray_default.read_bytes()
+    research_before = _tree_bytes(research)
+
+    # The documented edits: the global assignment, then the affected entry only.
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "CIAO_VAULT_ROOT=.\n", "CIAO_VAULT_ROOT=work/memory-vault\n"
+        ),
+        encoding="utf-8",
+    )
+    entries = json.loads(registry_path.read_text(encoding="utf-8"))
+    for entry in entries:
+        if entry["name"] == "personal":
+            entry["vault_root"] = "work/memory-vault"
+    registry_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    json.loads(registry_path.read_text(encoding="utf-8"))  # valid JSON after the edit
+
+    from dotenv import dotenv_values
+
+    reset_reroot_cache()
+    # The server reads .env into its environment before building the config.
+    config = CiaoConfig.from_env({
+        **{key: value or "" for key, value in dotenv_values(env_path).items()},
+        "CIAO_WORKSPACE": str(install),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+    })
+
+    assert config.vault_root == notes
+    assert config.workspace_vault_root("personal") == notes
+    assert config.agent_vault_root("personal") == notes
+    assert (notes, "personal", Path("personal") / "memory-vault") in config.vault_scan_targets()
+    assert "client" in load_entity_types(config.agent_vault_root("personal")).canonical_types()
+
+    # The second workspace and every unrelated setting survive the edit.
+    assert config.workspace_vault_root("research") == install / "research" / "memory-vault"
+    assert config.workspace("research").gws_profile == "research-account"
+    assert config.workspace("research").disallowed_tools == ["Bash"]
+    assert "PWA_PORT=8443" in env_path.read_text(encoding="utf-8").splitlines()
+    assert "# operator comment" in env_path.read_text(encoding="utf-8").splitlines()
+    # Generated clone-root defaults and the other notes stay byte-identical.
+    assert stray_default.read_bytes() == stray_before
+    assert _tree_bytes(research) == research_before
+
+
+def test_completed_legacy_import_marker_stops_preview_but_keeps_discovery_suppressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    _forbid_discovery(monkeypatch)
+    ws = (tmp_path / "workspace").resolve()
+    _two_nested_candidates(ws)
+    (ws / ".runtime").mkdir()
+    (ws / ".runtime" / "workspaces-env-imported.json").write_text(
+        json.dumps({"imported_at": "2026-01-01T00:00:00+00:00", "imported": ["research"]}),
+        encoding="utf-8",
+    )
+    (ws / ".env").write_text(
+        "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"research-notes\"}]'\n",
+        encoding="utf-8",
+    )
+
+    def no_preview(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("a completed import must not be previewed")
+
+    monkeypatch.setattr("ciao.cli._preview_legacy_workspaces", no_preview)
+
+    selection = select_setup_vault(ws, vault_mode="existing")
+
+    # Still legacy-configured, so no discovery; but nothing is pending or listed.
+    assert selection.source == "legacy"
+    assert selection.import_legacy is False
+    assert selection.registered_vaults is None
+    assert selection.vault_value == "memory-vault"

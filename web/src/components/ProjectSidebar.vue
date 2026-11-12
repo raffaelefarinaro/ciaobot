@@ -3,7 +3,6 @@
     <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
       <div class="sidebar-brand-row">
         <template v-if="!collapsed">
-          <span class="sidebar-brand-mark" aria-hidden="true"><CiaoMark /></span>
           <BrandMark class="sidebar-brand" />
           <!-- Back / forward through in-app navigation, just before the
                collapse control; a hairline keeps the three from reading as
@@ -1044,7 +1043,6 @@ import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { inCodeMode } from '../lib/repo'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
-import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
@@ -2017,14 +2015,6 @@ async function confirmDeleteChat(chatId: string) {
    the collapse control inside the 320px phone drawer. */
 @media (pointer: coarse) {
   .sidebar-header--expanded .sidebar-brand-row { gap: 6px; }
-}
-
-/* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
-.sidebar-brand-mark {
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  color: var(--accent);
 }
 
 .sidebar-brand-row :deep(.sidebar-brand) {

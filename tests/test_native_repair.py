@@ -2410,7 +2410,9 @@ def test_plan_host_policy_refusals_with_the_real_classifier(
     monkeypatch.setattr(
         server_host_install,
         "_classify_host",
-        lambda b, r, _runner, policy: real_classify(b, r, _SignedRunner(), policy),
+        lambda b, r, _runner, policy, **kw: real_classify(
+            b, r, _SignedRunner(), policy, **kw
+        ),
     )
     artifacts = _artifacts(tmp_path)
     before = _tree(home)
@@ -2422,4 +2424,64 @@ def test_plan_host_policy_refusals_with_the_real_classifier(
         with pytest.raises(repair._Refusal) as caught:
             repair._plan_host(artifacts)
         assert caught.value.code == want
+    assert _tree(home) == before
+
+
+@requires_posix_uid
+@pytest.mark.parametrize(
+    ("installed", "want"),
+    [("signed", "unknown_state"), ("adhoc", HostPlan.replace)],
+)
+def test_plan_host_refuses_a_recordless_signed_host_with_the_real_classifier(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: str,
+    want: object,
+) -> None:
+    # #2850: the installed host's record is lost, so no record proves it. A
+    # Developer ID bundle is refused as unknown_state and touches nothing; a
+    # bundle codesign verifies as ad-hoc is still replaced. The real classifier
+    # decides, and it must be asked with repair=True, or the wrapper would fail.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+    if installed == "signed":
+        installed_archive, _bundle, installed_entry = _signed_fixture(
+            tmp_path, label="installed"
+        )
+    else:
+        installed_archive, _bundle, installed_entry = _fixture(tmp_path)
+    server_host_install.install_server_host(
+        installed_archive,
+        installed_entry,
+        bundle_path=bundle,
+        ownership_path=record,
+        runner=_SignedRunner(),
+    )
+    record.unlink()
+    (tmp_path / "release").mkdir(parents=True)
+    _archive, _bundle, entry = _fixture(tmp_path / "release")
+    monkeypatch.setattr(release_manifest, "verify_manifest", lambda *_a, **_k: {})
+    monkeypatch.setattr(release_manifest, "select_server_host_artifact", lambda _m: entry)
+    monkeypatch.setattr(server_host_install, "verify_host_archive", lambda *_a: None)
+    real_classify = server_host_install._classify_host
+    seen: list[dict[str, object]] = []
+
+    def classify(b: Path, r: Path, _runner: object, policy: object, **kw: object) -> object:
+        seen.append(dict(kw))
+        return real_classify(b, r, _SignedRunner(), policy, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(server_host_install, "_classify_host", classify)
+    artifacts = _artifacts(tmp_path)
+    before = _tree(home)
+
+    if isinstance(want, HostPlan):
+        plan, _entry, _owned = repair._plan_host(artifacts)
+        assert plan is want
+    else:
+        with pytest.raises(repair._Refusal) as caught:
+            repair._plan_host(artifacts)
+        assert caught.value.code == want
+    assert seen == [{"repair": True}]
     assert _tree(home) == before

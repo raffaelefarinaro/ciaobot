@@ -26,17 +26,18 @@
                  vertical centre. -->
             <ItemTitleRow
               class="chat-title-row"
-              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }"
+              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle, 'chat-title-row--editing': editingTitle }"
               :rail="titleRailOn && !editingTitle"
               :close-label="beside ? 'Close side chat' : 'Close chat'"
               @close="$emit('close')"
             >
               <input
                 v-if="editingTitle"
+                ref="titleInputEl"
                 class="title-input"
                 v-model="titleValue"
                 @keyup.enter="saveTitle"
-                @keyup.escape="editingTitle = false"
+                @keydown.escape.stop.prevent="cancelEditTitle"
                 @blur="saveTitle"
                 @click.stop
                 autofocus
@@ -367,6 +368,7 @@
                   :retry="chat.retry"
                   :provider="chat.provider"
                   :streaming="view.isStreaming"
+                  :chat-id="chat.chat_id"
                   @continue="openRecoveryPicker(null)"
                   @try-now="tryRetryNow"
                   @stop="stopRetry"
@@ -406,6 +408,7 @@
                 :provider="chat.provider"
                 action-label="Retry"
                 :action-disabled="view.isStreaming"
+                :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
               </template>
@@ -534,6 +537,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
               @stop="stopRetry"
@@ -1806,6 +1810,7 @@ const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
+const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
 
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
@@ -4979,7 +4984,14 @@ function openRecoveryPicker(errorIdx: number | null) {
   showModelPicker.value = true
 }
 
-function startEditTitle() { titleValue.value = chat.value.title; editingTitle.value = true }
+async function startEditTitle() {
+  titleValue.value = chat.value.title
+  editingTitle.value = true
+  await nextTick()
+  titleInputEl.value?.focus()
+  titleInputEl.value?.select()
+}
+function cancelEditTitle() { titleValue.value = chat.value.title; editingTitle.value = false }
 async function saveTitle() {
   if (titleValue.value.trim() && titleValue.value !== chat.value.title) {
     await store.renameChat(chat.value.chat_id, titleValue.value.trim())
@@ -5764,6 +5776,7 @@ onMounted(() => {
    centre its title on the chat rather than on the whole header. */
 /* ItemTitleRow's rail row, capped at the chat's reading measure. */
 .header-breadcrumb .chat-title-row--rail { max-width: var(--chat-measure); }
+.header-breadcrumb .chat-title-row--editing { flex: 1 1 auto; width: 100%; }
 
 .chat-title {
   cursor: pointer;

@@ -40,6 +40,8 @@ Not for:
 
 For a long command use the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours.
 
+A dev or preview server is one background run for the whole session. Start it with the framework's auto-reload (`uvicorn --reload`, `vite`, `next dev`, `flask run --debug`) so code changes need no restart, and give it a `timeout` that covers the session. Restart it only when the server itself has to change (port, environment, dependencies). Stopping a background run wakes the chat with a cancelled notice, so stopping and restarting after every edit floods the chat with notices that carry no information.
+
 ## Commands
 
 ### Memory
