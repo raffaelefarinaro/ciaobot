@@ -415,19 +415,50 @@ describe('ProjectView automations load state', () => {
     expect(wrapper.get('.project-automations').text()).toContain('No automations deliver prompts to this project')
   })
 
-  it('loads the project files when the project arrives after mount', async () => {
+  it('lists no files on the page; Browse files opens the project folder', async () => {
     const store = seed()
-    store.projects = [] as unknown as typeof store.projects
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+    store.projects = [{
+      project_id: 'project-1', name: 'Upwordo', workspace: 'personal', is_auto: false, vault_folder: 'upwordo',
+    }] as unknown as typeof store.projects
+    const folder = '/vault/projects/active/upwordo'
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ path: folder, root: { name: 'vault', path: '/vault' }, roots: [], parent: '/vault/projects/active', entries: [], truncated: false }),
+    })
     vi.stubGlobal('fetch', fetchMock)
-    await mountView()
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.project-files').exists()).toBe(false)
     expect(fetchMock).not.toHaveBeenCalledWith('/api/projects/project-1/files', expect.anything())
 
-    store.projects = [{
-      project_id: 'project-1', name: 'Upwordo', workspace: 'personal', is_auto: false, vault_folder: 'projects/active/upwordo',
-    }] as unknown as typeof store.projects
+    await wrapper.get('.rail-browse').trigger('click')
     await flush()
-    expect(fetchMock).toHaveBeenCalledWith('/api/projects/project-1/files', expect.anything())
+    expect(fetchMock).toHaveBeenCalledWith('/api/workspace-dir?project_id=project-1', expect.anything())
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const viewer = useFileViewerStore()
+    expect(viewer.isOpen).toBe(true)
+    expect(viewer.kind).toBe('folder')
+    expect(viewer.path).toBe(folder)
     vi.unstubAllGlobals()
+  })
+
+  it('says why when the project folder cannot be browsed', async () => {
+    const store = seed()
+    store.projects = [{
+      project_id: 'project-1', name: 'Upwordo', workspace: 'personal', is_auto: false, vault_folder: 'upwordo',
+    }] as unknown as typeof store.projects
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: 'outside_roots' }) }))
+    const wrapper = await mountView()
+
+    await wrapper.get('.rail-browse').trigger('click')
+    await flush()
+    expect(wrapper.get('.rail-browse-error').text()).toContain('outside the folders Ciaobot can browse')
+    vi.unstubAllGlobals()
+  })
+
+  it('offers no Browse files for a project without a folder', async () => {
+    seed()
+    const wrapper = await mountView()
+    expect(wrapper.find('.rail-browse').exists()).toBe(false)
   })
 })

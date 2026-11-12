@@ -52,7 +52,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats. `?archived=1&offset=0&limit=10` returns a paginated compact archive catalog. POST refuses a body carrying a `memory_pass` helper (400) and refuses the app-owned Memory project (400): that project holds the engine's own memory passes |
-| GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
+| GET | `/api/projects/{project_id}/files` | List project files (feeds the composer's @-mention picker) |
 | GET | `/api/repos/candidates` | Git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects: `{roots, candidates: [{path, name, root}]}` |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
@@ -88,7 +88,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-file` | Read allowed text file |
 | GET | `/api/system-prompt` | The text Ciaobot appends to every provider's system prompt (`ciao/system_prompt.md`): `{text, chars}`. Read-only; shown in Chat details → Always loaded |
 | GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
-| GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id`) the chat's agent root, vault and linked repo. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
+| GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id` or `project_id`) that workspace's agent root, vault and the project's linked repo. With a chat or project and no `path`, it lists the project's own vault folder (the project page's Browse files passes `project_id`); an unknown `project_id` is 404. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
 | GET | `/api/workspace-image` | Read allowed image file (`?chat_id=` anchors a relative path to that chat's agent and vault roots, exact match only, no fuzzy walk; absolute and `..` paths keep the unrestricted viewer policy) |
