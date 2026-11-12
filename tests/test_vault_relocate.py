@@ -111,6 +111,21 @@ def test_plan_classifies_shared_root_entries(tmp_path: Path) -> None:
     assert not result.refused
 
 
+def test_plan_keeps_the_link_marker_at_the_shared_root(tmp_path: Path) -> None:
+    install, config = _shared_root_install(tmp_path)
+    marker = install / "memory-vault" / ".ciao-vault-links.json"
+    marker.write_text('{"format":1,"operation_id":"' + "a" * 32 + '","state":"migrated"}\n', encoding="utf-8")
+    _commit_all(install, "marker")
+
+    result = plan(config, "scandit")
+
+    entry = next(e for e in result.entries if e.name == ".ciao-vault-links.json")
+    assert (entry.action, entry.reason) == ("skip", "shared across every workspace")
+    assert not result.refused
+    assert apply(config, "scandit", install / ".runtime")["status"] == "relocated"
+    assert marker.is_file() and not (install / "memory-vault" / "scandit" / ".ciao-vault-links.json").exists()
+
+
 def test_plan_refuses_on_an_unclassifiable_symlink(tmp_path: Path) -> None:
     install, config = _shared_root_install(tmp_path, symlink=True)
 
