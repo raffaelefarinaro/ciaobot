@@ -31,9 +31,6 @@ describe('BrandMark', () => {
       configurable: true,
       value: { href: 'http://localhost/chat/abc', replace },
     })
-    // Reduced motion, so the pixel-jitter interval never starts and the test
-    // does not depend on a timer.
-    window.matchMedia = vi.fn().mockReturnValue({ matches: true }) as unknown as typeof window.matchMedia
   })
 
   afterEach(() => {
@@ -43,7 +40,9 @@ describe('BrandMark', () => {
 
   it('renders the wordmark', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.find('.brand-label').text()).toBe('ciaobot')
+    expect(wrapper.attributes('aria-label')).toBe('Reload Ciaobot')
+    expect(wrapper.get('.brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
+    expect(wrapper.get('.brand-logo--light').attributes('src')).toBe('/brand/ciaobot-wordmark.png')
     expect(wrapper.attributes('title')).toBe('Click to reload the latest app build')
     expect(wrapper.attributes('aria-busy')).toBe('false')
     wrapper.unmount()

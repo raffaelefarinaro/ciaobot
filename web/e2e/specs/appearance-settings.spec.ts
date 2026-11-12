@@ -47,6 +47,17 @@ test.describe('Settings › Appearance', () => {
     await expect.poll(() => fg(page)).toBe('#e8e8f0')
   })
 
+  test('shows the supplied wordmark in both themes', async ({ page }) => {
+    await boot(page, '/settings/appearance', SETTINGS)
+    const brand = page.getByRole('button', { name: 'Reload Ciaobot' })
+    await page.getByRole('radio', { name: 'Light', exact: true }).click()
+    await expect(brand.locator('.brand-logo--light')).toBeVisible()
+    await expect(brand.locator('.brand-logo--dark')).toBeHidden()
+    await page.getByRole('radio', { name: 'Dark', exact: true }).click()
+    await expect(brand.locator('.brand-logo--dark')).toBeVisible()
+    await expect(brand.locator('.brand-logo--light')).toBeHidden()
+  })
+
   test('body font follows the choice and code stays monospace', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
     const family = (selector: string) =>
@@ -70,13 +81,11 @@ test.describe('Settings › Appearance', () => {
       return {
         probe: make('', 'font-family: var(--font-mono)'),
         badge: make('badge'),
-        wordmark: getComputedStyle(document.querySelector('.wordmark') as Element).fontFamily,
       }
     })
     const expectMonoSurfaces = async () => {
       const found = await monoSurfaces()
       expect(found.badge).toBe(found.probe)
-      expect(found.wordmark).toBe(found.probe)
     }
 
     await group.getByRole('radio', { name: 'Serif' }).click()
