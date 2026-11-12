@@ -5,7 +5,7 @@ test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true
 
 /**
  * The composer has to end on the screen's edge, not a dead band's: the layout
- * is the full viewport with the keyboard closed, and the surface sits 8px plus
+ * is the full viewport with the keyboard closed, and the surface sits 16px plus
  * the bottom safe inset above it. Only a real layout engine can prove this;
  * jsdom reports every box as 0x0.
  */
@@ -48,10 +48,10 @@ test('the phone chat fills the screen and the composer sits on the safe-area edg
   // Closed keyboard: the layout is the viewport itself, not a latched pixel height.
   expect(measured.appHeight).toBe('')
   expect(Math.abs(measured.layoutHeight - measured.viewportHeight)).toBeLessThanOrEqual(1)
-  // Browser mode, safe inset 0: 8px between the surface and the bottom edge.
-  expect(Math.abs(measured.bottomGap - 8)).toBeLessThanOrEqual(1)
-  // With a 34px inset the same gap carries it: 8 + 34.
-  expect(Math.abs(measured.withInset - 42)).toBeLessThanOrEqual(1)
+  // Browser mode, safe inset 0: 16px between the surface and the bottom edge, the same as the side gutter.
+  expect(Math.abs(measured.bottomGap - 16)).toBeLessThanOrEqual(1)
+  // With a 34px inset the same gap carries it: 16 + 34.
+  expect(Math.abs(measured.withInset - 50)).toBeLessThanOrEqual(1)
   // The transcript keeps 16px above the composer surface.
   expect(Math.abs(measured.rowGap - 16)).toBeLessThanOrEqual(2)
 })

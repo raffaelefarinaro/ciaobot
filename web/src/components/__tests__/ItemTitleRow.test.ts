@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ItemTitleRow from '../ItemTitleRow.vue'
@@ -43,11 +44,11 @@ describe('ItemTitleRow', () => {
 
 describe('ItemHeaderMenu', () => {
   it('names its trigger, and shows it only on a phone when asked', () => {
-    const wrapper = mount(ItemHeaderMenu, { props: { label: 'More task actions', phoneOnly: true } })
+    const wrapper = mount(ItemHeaderMenu, { props: { label: 'More task actions', phoneOnly: true }, global: { plugins: [createPinia()] } })
     const trigger = wrapper.get('button.item-menu-trigger')
     expect(trigger.attributes('aria-label')).toBe('More task actions')
     expect(trigger.classes()).toContain('item-menu-trigger--phone')
-    const plain = mount(ItemHeaderMenu, { props: { label: 'More automation actions' } })
+    const plain = mount(ItemHeaderMenu, { props: { label: 'More automation actions' }, global: { plugins: [createPinia()] } })
     expect(plain.get('button.item-menu-trigger').classes()).not.toContain('item-menu-trigger--phone')
   })
 })

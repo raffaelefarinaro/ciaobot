@@ -8058,12 +8058,13 @@ details[open] > .activity-summary::before {
      the field's size, so typing never moves the text. */
   .chat-input { padding: 12px 12px; line-height: 1.25; }
   /* Keep every composer action at the shared touch-target minimum. The footer
-     lock is the 61px minimum; the bottom padding carries the platform's safe
-     inset so the surface sits 8px above the usable edge. */
+     lock is the 61px minimum. The bottom padding matches the 16px side gutter,
+     plus the platform's safe inset where it reports one (an installed app
+     without viewport-fit=cover reports 0). */
   .input-bar {
     min-height: 61px;
     padding-top: 8px;
-    padding-bottom: calc(8px + var(--safe-bottom));
+    padding-bottom: calc(16px + var(--safe-bottom));
   }
   /* The last transcript row sits 16px above the composer surface: this 8px
      plus the bar's 8px top padding. */

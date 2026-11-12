@@ -83,6 +83,23 @@ test.describe('automation header, phone', () => {
     await expect(page.getByRole('menuitem', { name: 'Run now' })).toBeVisible()
     await expect(page.getByRole('menuitem', { name: 'Pause' })).toBeVisible()
   })
+
+  test('folds Back and the bell into the ⋯ menu, as an open chat does', async ({ page }, testInfo) => {
+    await isolate(page, `automation-header-fold-${testInfo.workerIndex}`)
+    await boot(page, '/schedules/alpha-daily-brief', CURRENT)
+    const header = page.locator('.schedule-panel .pane-header')
+    await expect(page.locator('.schedule-panel .header-back')).toBeHidden()
+    await expect(page.locator('.schedule-panel .header-trail .notif-bell')).toBeHidden()
+    await header.getByRole('button', { name: /^More automation actions/ }).click()
+    await expect(page.getByRole('menuitem', { name: 'Notifications' })).toBeVisible()
+    const menuItems = page.getByRole('menuitem')
+    const count = await menuItems.count()
+    expect(count).toBeGreaterThan(0)
+    for (let i = 0; i < count; i++) {
+      const box = await menuItems.nth(i).boundingBox()
+      expect(box!.height).toBeGreaterThanOrEqual(44)
+    }
+  })
 })
 
 test.describe('automation title rail, desktop', () => {
