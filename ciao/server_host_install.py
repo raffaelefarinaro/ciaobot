@@ -344,6 +344,16 @@ class ServerHostInstallError(ServerHostError):
     """
 
 
+class _SignedDowngradeRefused(ServerHostInstallError):
+    """:data:`POLICY_REFUSED` for a Developer ID signed host the release would
+    replace with the legacy ad-hoc one.
+
+    Install reports it as plain ``POLICY_REFUSED``; native repair, which replaces
+    every other policy-refused host, must refuse this one too (#2504): the swap
+    would discard the signed host and the privacy grants made to it.
+    """
+
+
 def _require_macos() -> None:
     """The host is a macOS bundle; nothing is downloaded or extracted elsewhere."""
     if sys.platform != "darwin":
@@ -790,7 +800,7 @@ def _classify_host(
         return _REPLACE, superseded
     if not policy.signed:
         if current.signing is not None:
-            raise ServerHostInstallError(
+            raise _SignedDowngradeRefused(
                 f"the host at {bundle} is a Developer ID signed host and this "
                 f"release selects the ad-hoc one; a signed host is never replaced "
                 f"by a legacy one",
@@ -2748,8 +2758,9 @@ def repair_server_host(
 
     Still refused, with nothing touched: a symlink at the bundle path, an unfinished
     upgrade journal, an archive that fails :func:`verify_host_archive` or
-    :func:`inspect_host_bundle`, and an existing host's symlinked or non-regular
-    ownership record.
+    :func:`inspect_host_bundle`, an existing host's symlinked or non-regular
+    ownership record, and a Developer ID signed host when ``entry`` selects the
+    legacy ad-hoc one (:data:`POLICY_REFUSED`, #2504).
 
     Replacing a host changes its code identity, so macOS privacy grants made to the
     old host, such as Full Disk Access, may have to be granted again.
@@ -2774,6 +2785,8 @@ def repair_server_host(
         _refuse_unfinished_journal(bundle, record_path)
         try:
             kind, existing = _classify_host(bundle, record_path, runner, policy)
+        except _SignedDowngradeRefused:
+            raise
         except ServerHostInstallError as exc:
             if exc.code not in (HOST_EXISTS, POLICY_REFUSED):
                 raise
