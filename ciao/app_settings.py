@@ -102,14 +102,15 @@ _BOOLEAN_FIELDS = {
     "backup_enabled",
     "backup_paused",
     "dev_mode",
+    "font_scale_migrated",
     "legacy_env_imported",
     "resume_after_restart",
 }
 # Bookkeeping the store owns; a PATCH never sets it.
-_INTERNAL_FIELDS = {"legacy_env_imported"}
+_INTERNAL_FIELDS = {"font_scale_migrated", "legacy_env_imported"}
 # Booleans whose default is False and that are only written once true, so a
 # file never grows keys that say nothing.
-_SPARSE_BOOLEANS = {"dev_mode", "legacy_env_imported"}
+_SPARSE_BOOLEANS = {"dev_mode", "font_scale_migrated", "legacy_env_imported"}
 # The automatic-update clock fields (ciao/auto_update.py). Validated on read and
 # on write, because a hand-edited or truncated value must read as "no stamp" —
 # comparing a junk string against the wall clock is how an unattended updater
@@ -269,8 +270,9 @@ class AppSettings:
     resume_after_restart: bool = True
 
     # Appearance preferences are engine-wide so every device agrees. "" and
-    # 0.0 mean "never stored": the first browser to load seeds theme and
-    # font_scale from its own local values, after which the engine wins.
+    # 0.0 mean "never stored": the first browser to load seeds theme from its
+    # own local value, after which the engine wins. An unset font_scale is the
+    # PWA's shipped default and is never seeded.
     # text_contrast: "" = normal, "soft" = dimmer body text.
     text_contrast: str = ""
     # body_font: "" = system sans, "serif" or "mono".
@@ -301,6 +303,10 @@ class AppSettings:
     # imported. Set on the first start that runs the import, whatever it found,
     # so a value later cleared in Settings is never brought back from `.env`.
     legacy_env_imported: bool = False
+    # Whether the stored font_scale was written by an engine whose default is
+    # DEFAULT_FONT_SCALE. A 1.2 without it is the pre-#2707 shipped default,
+    # moved once on load by _migrate_legacy_font_scale (#2715).
+    font_scale_migrated: bool = False
 
 
 THEMES = ("dark", "light", "system")
@@ -308,6 +314,10 @@ _BODY_FONTS = ("serif", "mono")
 MIN_FONT_SCALE = 0.8
 MAX_FONT_SCALE = 1.5
 FONT_SCALE_STEP = 0.05
+# Mirrors DEFAULT_FONT_SCALE in web/src/composables/useFontScale.ts.
+DEFAULT_FONT_SCALE = 1.15
+# The shipped default before #2707; stored by every install that loaded the PWA.
+_LEGACY_DEFAULT_FONT_SCALE = 1.2
 
 
 def _valid_font_scale(value: object) -> TypeGuard[int | float]:
@@ -466,6 +476,20 @@ def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
     return True
 
 
+def _migrate_legacy_font_scale(settings: AppSettings) -> bool:
+    """Move a stored pre-#2707 default (1.2) to DEFAULT_FONT_SCALE, once.
+
+    A user who deliberately chose 1.2 is moved too: 1.2 was every install's
+    default until then, so the two cannot be told apart. Returns whether the
+    file needs rewriting.
+    """
+    if settings.font_scale_migrated or settings.font_scale != _LEGACY_DEFAULT_FONT_SCALE:
+        return False
+    settings.font_scale = DEFAULT_FONT_SCALE
+    settings.font_scale_migrated = True
+    return True
+
+
 def needs_new_install_backup_seed(path: Path) -> bool:
     """Whether ``path`` still has no explicit backup decision.
 
@@ -530,7 +554,9 @@ class AppSettingsStore:
                 key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
             )
         settings = _parse_settings(raw)
-        if isinstance(raw, dict) and _migrate_global_insights_model(raw, settings):
+        migrated = isinstance(raw, dict) and _migrate_global_insights_model(raw, settings)
+        migrated = _migrate_legacy_font_scale(settings) or migrated
+        if migrated:
             self.settings = settings
             try:
                 self._save()
@@ -652,6 +678,7 @@ class AppSettingsStore:
                         f"between {MIN_FONT_SCALE} and {MAX_FONT_SCALE}"
                     )
                 updated.font_scale = round(float(value), 2)
+                updated.font_scale_migrated = True
                 continue
             if key in _TIMESTAMP_FIELDS:
                 if not isinstance(value, str):
@@ -702,8 +729,9 @@ class AppSettingsStore:
     def appearance_payload(self) -> dict[str, object]:
         """The engine-wide appearance preferences plus a content revision.
 
-        ``theme`` and ``font_scale`` are ``None`` until a browser first stores
-        one, which is the signal for that browser to seed them.
+        ``theme`` is ``None`` until a browser first stores one, which is the
+        signal for that browser to seed it. ``font_scale`` is ``None`` while it
+        is the PWA's shipped default; a browser never seeds it.
         """
         body: dict[str, object] = {
             "text_contrast": self.settings.text_contrast or "normal",

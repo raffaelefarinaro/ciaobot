@@ -170,6 +170,15 @@ test.describe('Settings › Appearance', () => {
     await expect(page.locator(SETTINGS)).toBeVisible()
     await expect(page.locator('html')).toHaveClass(/theme-light/)
   })
+
+  test('an upgraded browser with a stale 1.2 cache follows the default and Settings shows 100%', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('ciao-font-scale', '1.2'))
+    await boot(page, '/settings/appearance', SETTINGS)
+    await expect.poll(() => token(page, '--font-scale')).toBe('1.15')
+    await expect(page.locator('.font-scale-display')).toHaveText('100%')
+    await page.getByRole('button', { name: 'Increase', exact: true }).click()
+    await expect(page.locator('.font-scale-display')).toHaveText('104%')
+  })
 })
 
 test('on a touch device every control is at least 44px and the page does not scroll sideways', async ({ browser }, testInfo) => {

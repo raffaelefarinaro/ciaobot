@@ -1163,7 +1163,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
 # `body_font` ("system", "serif" or "mono"),
 # `theme` ("dark", "light" or "system"; `null` until a browser first stores one,
 # and "system" still resolves per device from its OS), `font_scale` (0.8 to 1.5
-# in steps of 0.05; `null` until first stored), `custom_colors` (`{}` or
+# in steps of 0.05; `null` means the PWA's shipped default, 1.15, and stays
+# `null` until someone changes the size), `custom_colors` (`{}` or
 # `{"dark": {"bg": "#rrggbb", "fg": "#rrggbb"}, "light": {...}}`, either mode
 # optional) and `revision`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appearance"

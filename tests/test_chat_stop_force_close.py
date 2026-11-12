@@ -66,6 +66,7 @@ class _HangingHandle:
 def _fake_provider_service(acked: asyncio.Event, disconnects: list[int]):
     class _FakeProviderService:
         can_drain = False
+        provider = None  # ProviderService.provider before a provider exists
 
         def active_handle(self):
             return _HangingHandle(acked)
@@ -345,6 +346,8 @@ async def test_stop_prefers_the_clean_provider_level_end(tmp_path: Path) -> None
             captured.append(ev)
 
     stream = pcm.start_stream(chat.chat_id, "initial")
+    drive = pcm._streaming.drive_task(chat.chat_id, stream)
+    assert drive is not None
     consumer = asyncio.create_task(consume(stream))
 
     await _wait_for(
@@ -368,6 +371,8 @@ async def test_stop_prefers_the_clean_provider_level_end(tmp_path: Path) -> None
     assert results[0].get("text") == "partial answer"
     assert disconnects == []
     await _wait_for(lambda: stream.done)
+    # The stream ends before drive()'s post-turn tail; await the tail too.
+    await asyncio.wait_for(drive, timeout=2.0)
     assert turn_calls == ["initial"]
 
     consumer.cancel()
