@@ -73,7 +73,6 @@
                 @dblclick.stop="startEditTitle"
                 @click.stop
               >{{ chat.title }}</span>
-              <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
             </ItemTitleRow>
           </div>
         </div>
@@ -1513,7 +1512,6 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
-import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
@@ -1663,10 +1661,11 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-// `split`: two chats are on screen.
-const props = defineProps<{ chatId: string; filePinned?: boolean; plainHeader?: boolean; beside?: boolean; inactive?: boolean; split?: boolean }>()
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean }>()
 const emit = defineEmits<{
   close: []
+  // The second pane's rail picked another chat: the layout shows it in this pane.
+  'select-chat': [chatId: string]
   'open-sidebar': []
   // The title is being pulled down (px), and the pull ended (px, px per ms):
   // the layout moves the pane and decides whether to close.
@@ -1808,12 +1807,12 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
-const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
+const titleRailOn = computed(() => titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const railArrival = ref<-1 | 1 | 0>(takeChatRailArrival(props.beside))
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
@@ -5267,7 +5266,7 @@ const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
-  const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
+  const next = titleRailOn.value && !props.beside ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
   if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
     if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
@@ -5744,7 +5743,6 @@ onMounted(() => {
    title is the one title that may take a second line, and the full title
    stays in the title attribute. `overflow-wrap: anywhere` breaks a title
    that has no spaces in it (a URL, a path). */
-.chat-title-signals { flex: none; margin-left: var(--space-1); }
 
 .chat-title-row .chat-title {
   flex: 0 1 auto;
