@@ -5,13 +5,16 @@ import { chatTierMark, railItemLabel, sidebarProjectOrder, type RailItem } from 
 import { markRailArrival, resetRailState, takeRailArrival, useTitleRail, type TitleRail } from './useTitleRail'
 
 const KEY = 'chat'
+// The second chat of a split keeps its own travel order and arrival, so the two rails never share one.
+const BESIDE_KEY = 'chat-beside'
 
 export const markChatRailArrival = (direction: -1 | 1 | 0): void => markRailArrival(KEY, direction)
-export const takeChatRailArrival = (): -1 | 1 | 0 => takeRailArrival(KEY)
+export const takeChatRailArrival = (beside = false): -1 | 1 | 0 => takeRailArrival(beside ? BESIDE_KEY : KEY)
 export const resetChatRailSnapshot = (): void => resetRailState(KEY)
 
-/** The open chat's title rail: the current workspace's chats in sidebar order. */
-export function useChatRail(currentChatId: () => string): TitleRail {
+/** A chat's title rail: the current workspace's chats in sidebar order. The open chat's rail
+ *  switches the route; the second pane of a split passes `openBeside` to change only itself. */
+export function useChatRail(currentChatId: () => string, openBeside?: (chatId: string) => void): TitleRail {
   const store = useProjectStore()
 
   // The sidebar's order, top to bottom: the pinned projects (General and the other
@@ -44,10 +47,10 @@ export function useChatRail(currentChatId: () => string): TitleRail {
       }))
   })
 
-  return useTitleRail(KEY, {
+  return useTitleRail(openBeside ? BESIDE_KEY : KEY, {
     scope: () => store.activeWorkspace,
     currentId: currentChatId,
     entries,
-    navigate: id => store.switchChat(id),
+    navigate: async id => openBeside ? openBeside(id) : store.switchChat(id),
   })
 }
