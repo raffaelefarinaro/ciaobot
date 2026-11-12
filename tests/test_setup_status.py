@@ -2677,3 +2677,256 @@ def test_setup_status_has_no_suggestion_on_a_configured_install(tmp_path) -> Non
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
 
     assert setup_status(config, env={})["suggested_workspace"] is None
+
+
+def _setup_api_client(tmp_path) -> TestClient:
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[
+            Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
+            Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
+    app.state.serializer = serializer
+    app.state.request_restart = lambda code: None
+    return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
+
+
+def _folder_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+_ESTABLISHED_CASES = ["env_and_dot_registry", "registry_only", "legacy_only"]
+
+
+@pytest.mark.parametrize("case", _ESTABLISHED_CASES)
+def test_established_inspection_and_finish_agree(
+    tmp_path, monkeypatch, case: str
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    ws = tmp_path / "workspace"
+    for name in ("work", "personal"):
+        vault = ws / name / "memory-vault"
+        vault.mkdir(parents=True)
+        (vault / "MEMORY.md").write_text(f"# {name}\n", encoding="utf-8")
+    runtime = ws / ".runtime"
+    runtime.mkdir()
+    if case == "env_and_dot_registry":
+        (ws / ".env").write_text("CIAO_VAULT_ROOT=.\n", encoding="utf-8")
+        (runtime / "workspaces.json").write_text(
+            json.dumps([{"name": "personal", "vault_root": "."}]), encoding="utf-8"
+        )
+    elif case == "registry_only":
+        (runtime / "workspaces.json").write_text(
+            json.dumps([
+                {"name": "personal", "vault_root": "personal/memory-vault"},
+                {"name": "work", "vault_root": "work/memory-vault"},
+            ]),
+            encoding="utf-8",
+        )
+    else:
+        (ws / ".env").write_text(
+            "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"memory-vault/research\"}]'\n",
+            encoding="utf-8",
+        )
+    client = _setup_api_client(tmp_path)
+    before = _folder_bytes(ws)
+
+    inspect = client.get("/api/setup/inspect-folder", params={"path": str(ws)})
+
+    assert inspect.status_code == 200, inspect.text
+    inspected = inspect.json()
+    assert _folder_bytes(ws) == before, "inspection must not write"
+    expected_names = {
+        "env_and_dot_registry": ["personal"],
+        "registry_only": ["personal", "work"],
+        "legacy_only": ["research"],
+    }[case]
+    assert sorted(inspected["existing_workspaces"]) == expected_names
+
+    finish = client.post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "python": _fake_engine_python(tmp_path),
+            "port": 9443,
+            "restart": False,
+        },
+    )
+
+    assert finish.status_code == 200, finish.text
+    registry = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert sorted(entry["name"] for entry in registry) == expected_names
+    if case == "env_and_dot_registry":
+        # Inspection and finish both select the operational root for ".".
+        assert Path(inspected["vault_root"]).resolve() == ws.resolve()
+        # A configured "." stays "." and is never reinterpreted.
+        assert registry[0]["vault_root"] == "."
+        assert (ws / ".env").read_text(encoding="utf-8").count("CIAO_VAULT_ROOT=.") == 1
+
+
+def _nested_vault(ws: Path, name: str) -> Path:
+    vault = ws / name / "memory-vault"
+    vault.mkdir(parents=True)
+    (vault / "entity-types.yaml").write_text(
+        "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
+        encoding="utf-8",
+    )
+    (vault / "MEMORY.md").write_text(f"# {name}\n", encoding="utf-8")
+    return vault
+
+
+def test_setup_inspection_and_finish_select_same_nested_vault(
+    tmp_path, monkeypatch
+) -> None:
+    from ciao.config import reset_reroot_cache
+
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    ws = (tmp_path / "workspace").resolve()
+    vault = _nested_vault(ws, "work")
+    client = _setup_api_client(tmp_path)
+
+    inspect = client.get("/api/setup/inspect-folder", params={"path": str(ws)})
+    assert inspect.status_code == 200, inspect.text
+    assert Path(inspect.json()["vault_root"]) == vault
+
+    finish = client.post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "python": _fake_engine_python(tmp_path),
+            "port": 9443,
+            "restart": False,
+        },
+    )
+    assert finish.status_code == 200, finish.text
+
+    assert "CIAO_VAULT_ROOT=work/memory-vault" in (ws / ".env").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    registry = json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    assert registry[0]["vault_root"] == "work/memory-vault"
+    reset_reroot_cache()
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(ws),
+        "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
+        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+    })
+    assert config.workspace_vault_root("personal") == vault
+
+
+def test_setup_ambiguous_non_native_finish_returns_400_without_writes(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    ws = (tmp_path / "workspace").resolve()
+    _nested_vault(ws, "work")
+    _nested_vault(ws, "personal")
+    client = _setup_api_client(tmp_path)
+    restarts: list[int] = []
+    client.app.state.request_restart = restarts.append
+    before = _folder_bytes(ws)
+
+    inspect = client.get("/api/setup/inspect-folder", params={"path": str(ws)})
+    finish = client.post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "python": _fake_engine_python(tmp_path),
+            "port": 9443,
+        },
+    )
+
+    assert inspect.status_code == 400
+    assert finish.status_code == 400
+    assert finish.json()["error"] == inspect.json()["error"]
+    message = finish.json()["error"]
+    assert message.index("personal/memory-vault") < message.index("work/memory-vault")
+    assert _folder_bytes(ws) == before
+    assert restarts == []
+    assert os.environ["CIAO_WORKSPACE"] == ""
+    assert os.environ["PWA_PORT"] == ""
+    assert not (tmp_path / "LaunchAgents").exists()
+
+
+def test_ambiguous_parent_can_be_retried_as_selected_nested_vault(
+    tmp_path, monkeypatch
+) -> None:
+    from ciao.config import reset_reroot_cache
+
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    ws = (tmp_path / "workspace").resolve()
+    work_vault = _nested_vault(ws, "work")
+    _nested_vault(ws, "personal")
+    client = _setup_api_client(tmp_path)
+
+    listing = client.get("/api/setup/list-dirs", params={"path": str(ws)})
+    assert listing.status_code == 200, listing.text
+    assert "work" in listing.text
+    refused = client.get("/api/setup/inspect-folder", params={"path": str(ws)})
+    assert refused.status_code == 400
+    assert "work/memory-vault" in refused.json()["error"]
+
+    # The wizard's path field is editable: navigate into the chosen nested
+    # vault and inspect that folder as the main Ciaobot folder.
+    navigated = client.get("/api/setup/list-dirs", params={"path": str(work_vault)})
+    assert navigated.status_code == 200, navigated.text
+    reinspected = client.get("/api/setup/inspect-folder", params={"path": str(work_vault)})
+    assert reinspected.status_code == 200, reinspected.text
+    assert Path(reinspected.json()["vault_root"]) == work_vault
+
+    finish = client.post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(work_vault),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "python": _fake_engine_python(tmp_path),
+            "port": 9443,
+            "restart": False,
+        },
+    )
+    assert finish.status_code == 200, finish.text
+
+    # The selected folder is its own vault; the parent gained no defaults.
+    assert "CIAO_VAULT_ROOT=." in (work_vault / ".env").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert not (ws / "memory-vault").exists()
+    reset_reroot_cache()
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(work_vault),
+        "CIAO_RUNTIME_ROOT": str(work_vault / ".runtime"),
+        "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+    })
+    assert config.workspace_vault_root("personal") == work_vault

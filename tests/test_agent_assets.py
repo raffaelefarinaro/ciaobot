@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -584,3 +585,40 @@ def test_frontmatter_string_round_trips_through_hand_reader(d: str) -> None:
 
     text = _frontmatter_string({"name": "x", "description": d}) + "\nbody"
     assert _parse_frontmatter(text)["description"] == d
+
+
+def test_adopted_per_root_vault_health_and_categories_use_registered_root(
+    tmp_path: Path,
+) -> None:
+    """A per-root workspace registered at an adopted folder: health, scan targets
+    and custom categories all read that folder, not the standard location."""
+    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.entity_types import load_entity_types
+    from ciao.web.agent_assets import workspace_health
+
+    root = tmp_path.resolve()
+    receipt = root / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    notes = root / "work" / "brain"
+    notes.mkdir(parents=True)
+    (notes / "entity-types.yaml").write_text(
+        "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
+        encoding="utf-8",
+    )
+    reset_reroot_cache()
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=root,
+        vault_root=root / "memory-vault",
+        state_path=root / ".runtime" / "state.json",
+        media_root=root / ".runtime" / "media",
+        workspaces={"work": WorkspaceConfig(name="work", vault_root="work/brain")},
+    )
+
+    checks = {c["id"]: c for c in workspace_health(config)["checks"]}
+
+    assert checks["vault-root-work"]["status"] == "ok"
+    assert checks["vault-writable-work"]["status"] == "ok"
+    assert config.vault_scan_targets() == [(notes, "work", Path("work/brain"))]
+    assert "client" in load_entity_types(config.agent_vault_root("work")).canonical_types()

@@ -522,6 +522,14 @@ Logs/                          Shared logs root: archives from before the split 
 secrets/                       OAuth credentials (gitignored).
 ```
 
+Ownership and the standard destination are separate questions, and the code keeps them apart.
+
+- **Registered ownership.** On a per-root install, `agent_vault_root(name)` (the vault whose `INDEX.md` and `VOCABULARY.md` a workspace owns) follows the registered `vault_root`, the same resolution that finds the workspace's notes. An explicitly adopted folder, such as `work/memory-vault`, `work/brain` or `.`, therefore owns its own aggregates, health checks, scan targets and custom categories. A registration that still points at the pre-re-rooting shared subfolder (`memory-vault/<name>`) is the superseded standard and keeps the derived location.
+- **Standard destination.** `canonical_workspace_vault_root(name)` does not consult the registry. On a per-root install it is `<agent root>/<vault folder name>`, the location the vault-location check and the re-root migration compare against. A registered nonstandard location never becomes the standard merely by being registered.
+- **Shared layout.** Before the re-rooting, every workspace resolves to the one shared vault's aggregate files, and `memory-vault/<name>` stays a notes subtree.
+
+Setup decides the vault location from existing configuration before it writes anything; `docs/DEVELOPMENT.md` describes the selection order and the manual recovery for an adopted vault that was recorded at the wrong place.
+
 ## Server and chat pipeline
 
 Linux production hosts run the engine under systemd. Settings uses the

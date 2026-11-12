@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
@@ -46,7 +46,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, WorkspaceConfig
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -1132,22 +1132,61 @@ def detect_vault_mode(workspace: Path | str) -> str:
     return "existing" if entries else "scratch"
 
 
-def _setup_registry_vaults(
-    registry_path: Path,
-    *,
-    workspace_root: Path,
-    configured_vault_root: Path,
-) -> list[tuple[str, Path]] | None:
-    """Resolve an existing setup registry without rediscovering vaults.
+def _is_real_file(path: Path) -> bool:
+    """A regular file that is not a symlink. Symlinks never count as evidence."""
+    return path.is_file() and not path.is_symlink()
 
-    A setup rerun must be idempotent even when the configured vault is a
-    container full of named workspaces. Rediscovering that container and then
-    scaffolding its root created a second MEMORY.md/INDEX.md/Logs layout.
-    Reuse the same resolver as the running app so legacy one-segment and
-    setup-selected roots keep the location already recorded for them.
+
+def detect_existing_vault_root(workspace: Path | str) -> Path:
+    """Return the absolute first-setup vault for an existing folder.
+
+    Bounded to the folder and its visible immediate children; nothing recurses.
+    A real direct ``memory-vault/`` wins outright. Otherwise the candidates are
+    the folder itself (``entity-types.yaml``), each child with its own
+    ``entity-types.yaml``, and each child's real ``memory-vault/``. Exactly one
+    wins, none means the folder is adopted as its own vault, and more than one
+    raises ``ValueError`` listing every candidate. Symlinks never count, and a
+    symlinked child is skipped entirely.
     """
-    if not registry_path.exists():
-        return None
+    root = Path(workspace).expanduser().resolve()
+    direct = root / "memory-vault"
+    if direct.is_dir() and not direct.is_symlink():
+        return direct
+    candidates: set[Path] = set()
+    if _is_real_file(root / "entity-types.yaml"):
+        candidates.add(root)
+    try:
+        children = sorted(root.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        children = []
+    for child in children:
+        if child.name.startswith(".") or child.is_symlink() or not child.is_dir():
+            continue
+        if _is_real_file(child / "entity-types.yaml"):
+            candidates.add(child)
+        nested = child / "memory-vault"
+        if nested.is_dir() and not nested.is_symlink():
+            candidates.add(nested)
+    if not candidates:
+        return root
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    ordered = sorted(candidates, key=lambda path: path.as_posix())
+    raise ValueError(
+        f"More than one existing vault was found in {root.as_posix()}: "
+        f"{', '.join(path.as_posix() for path in ordered)}. Setup will not choose "
+        "between them. To use one, set the main Ciaobot folder to that vault "
+        f"folder itself (for example {ordered[0].as_posix()}) and run setup again."
+    )
+
+
+def _read_setup_registry(registry_path: Path) -> dict[str, WorkspaceConfig]:
+    """Parse an existing setup registry without writing it.
+
+    Raises ``ValueError`` for an unreadable file, invalid JSON, or no valid
+    workspace entry. Setup and the folder inspection both read it before any
+    write, so an unusable registry is refused rather than rebuilt over.
+    """
     try:
         payload = json.loads(registry_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1164,7 +1203,7 @@ def _setup_registry_vaults(
     else:
         items = []
 
-    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.config import WorkspaceConfig
 
     workspaces: dict[str, WorkspaceConfig] = {}
     for item in items:
@@ -1177,8 +1216,18 @@ def _setup_registry_vaults(
         workspaces[name] = WorkspaceConfig(name=name, vault_root=raw_root)
     if not workspaces:
         raise ValueError("existing workspace registry has no valid workspaces")
+    return workspaces
 
-    config = CiaoConfig(
+
+def _setup_config(
+    workspace_root: Path,
+    configured_vault_root: Path,
+    workspaces: dict[str, WorkspaceConfig],
+) -> CiaoConfig:
+    """An in-memory config for resolving targets. Nothing is persisted from it."""
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig(
         pwa_auth_token="setup-registry",
         workspace_root=workspace_root,
         vault_root=configured_vault_root,
@@ -1186,10 +1235,165 @@ def _setup_registry_vaults(
         media_root=workspace_root / ".runtime" / "media",
         workspaces=workspaces,
     )
-    return [
-        (name, config.workspace_vault_root(name))
-        for name in config.workspace_names()
-    ]
+
+
+def _resolve_setup_registry(
+    workspaces: dict[str, WorkspaceConfig],
+    *,
+    workspace_root: Path,
+    configured_vault_root: Path,
+) -> list[tuple[str, Path]]:
+    """Resolve targets with the running app's own resolver, in memory only."""
+    config = _setup_config(workspace_root, configured_vault_root, workspaces)
+    return [(name, config.workspace_vault_root(name)) for name in config.workspace_names()]
+
+
+def _setup_registry_vaults(
+    registry_path: Path,
+    *,
+    workspace_root: Path,
+    configured_vault_root: Path,
+) -> list[tuple[str, Path]] | None:
+    """Resolve an existing setup registry without rediscovering vaults.
+
+    A setup rerun must be idempotent even when the configured vault is a
+    container full of named workspaces. Rediscovering that container and then
+    scaffolding its root created a second MEMORY.md/INDEX.md/Logs layout.
+    Reuse the same resolver as the running app so legacy one-segment and
+    setup-selected roots keep the location already recorded for them.
+    """
+    if not registry_path.exists():
+        return None
+    return _resolve_setup_registry(
+        _read_setup_registry(registry_path),
+        workspace_root=workspace_root,
+        configured_vault_root=configured_vault_root,
+    )
+
+
+@dataclass(frozen=True)
+class SetupVaultSelection:
+    """Where a setup run will put the vault, decided before any write.
+
+    ``vault_value`` is the global ``CIAO_VAULT_ROOT`` text and ``vault_path`` its
+    absolute form. ``registered_vaults`` holds the per-workspace targets when a
+    registry or legacy configuration exists, otherwise ``None``. ``import_legacy``
+    says the one-time ``CIAO_WORKSPACES`` import runs after validation.
+    ``established`` marks a location that is already configured; discovery never
+    overrides it.
+    """
+
+    root: Path
+    existing_env: dict[str, str]
+    vault_value: str
+    vault_path: Path
+    registered_vaults: list[tuple[str, Path]] | None
+    source: str
+    import_legacy: bool
+    established: bool
+
+
+def _preview_legacy_workspaces(
+    workspace_root: Path, raw: str, configured_vault_root: Path
+) -> dict[str, WorkspaceConfig]:
+    """What the one-time ``CIAO_WORKSPACES`` import would add, without importing.
+
+    Uses the importer's own parser and archived-name exclusion, so the preview
+    and the import agree. Writes nothing.
+    """
+    from ciao.config import _parse_workspaces_json
+
+    legacy = _parse_workspaces_json(raw)
+    config = _setup_config(workspace_root, configured_vault_root, legacy)
+    archived = config._archived_workspace_names()
+    return {
+        name: workspace
+        for name, workspace in config.workspaces.items()
+        if name.casefold() not in archived
+    }
+
+
+def select_setup_vault(
+    workspace: Path | str,
+    *,
+    vault_mode: str,
+    vault_root: Path | str | None = None,
+) -> SetupVaultSelection:
+    """Decide the setup vault from existing configuration, reading only.
+
+    Inspection, finish preflight and direct CLI setup all call this, so they
+    select the same location. Precedence: a nonblank ``.env`` ``CIAO_VAULT_ROOT``,
+    then the registry, then legacy ``CIAO_WORKSPACES``, then an explicit
+    argument, then the default. An unusable registry raises ``ValueError``.
+    """
+    root = Path(workspace).expanduser().resolve()
+    existing_env: dict[str, str] = {}
+    env_path = root / ".env"
+    if env_path.exists():
+        from dotenv import dotenv_values
+
+        existing_env = {key: (value or "") for key, value in dotenv_values(env_path).items()}
+    registry_path = root / RUNTIME_DIR_NAME / "workspaces.json"
+    workspaces = _read_setup_registry(registry_path) if registry_path.exists() else None
+    legacy_raw = existing_env.get("CIAO_WORKSPACES", "").strip()
+    legacy_configured = workspaces is None and bool(legacy_raw)
+    env_root = existing_env.get("CIAO_VAULT_ROOT", "").strip()
+    explicit = str(vault_root) if vault_root is not None else None
+
+    if env_root:
+        source = "env"
+    elif workspaces is not None:
+        source = "registry"
+    elif legacy_configured:
+        source = "legacy"
+    elif explicit is not None:
+        source = "explicit"
+    else:
+        source = "default"
+
+    if env_root:
+        vault_value = env_root
+    elif explicit is not None:
+        vault_value = explicit
+    elif workspaces is not None or legacy_configured:
+        vault_value = "memory-vault"
+    else:
+        vault_value = "memory-vault"
+        if vault_mode == "existing":
+            found = detect_existing_vault_root(root)
+            if found == root:
+                # Single-folder setup: the chosen folder is the user's notes.
+                vault_value = "."
+            else:
+                vault_value = found.relative_to(root).as_posix()
+                source = "discovery"
+    vault_path = Path(vault_value).expanduser()
+    if vault_path.is_absolute():
+        vault_value = str(vault_path)
+    else:
+        vault_path = root / vault_path
+
+    registered: list[tuple[str, Path]] | None = None
+    if workspaces is not None:
+        registered = _resolve_setup_registry(
+            workspaces, workspace_root=root, configured_vault_root=vault_path
+        )
+    elif legacy_configured:
+        previewed = _preview_legacy_workspaces(root, legacy_raw, vault_path)
+        if previewed:
+            registered = _resolve_setup_registry(
+                previewed, workspace_root=root, configured_vault_root=vault_path
+            )
+    return SetupVaultSelection(
+        root=root,
+        existing_env=existing_env,
+        vault_value=vault_value,
+        vault_path=vault_path,
+        registered_vaults=registered,
+        source=source,
+        import_legacy=legacy_configured,
+        established=source in ("env", "registry", "legacy"),
+    )
 
 
 def _service_platform() -> bool:
@@ -1220,6 +1424,7 @@ def setup_workspace(
     sync_failures: list[str] | None = None,
     exclusive_service_definition: bool = False,
     verified_host: HostOwnership | None = None,
+    _vault_selection: SetupVaultSelection | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1295,6 +1500,15 @@ def setup_workspace(
                     "choose a folder outside ~/Desktop, ~/Documents and ~/Downloads, such as "
                     "~/Ciaobot."
                 )
+    # Every read that decides the vault happens here, before the first write.
+    # A registry this run cannot read, or an ambiguous location, refuses now.
+    if _vault_selection is None:
+        selection = select_setup_vault(root, vault_mode=vault_mode, vault_root=vault_root)
+    elif _vault_selection.root != root:
+        raise ValueError("the validated setup selection belongs to another folder")
+    else:
+        selection = _vault_selection
+
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
 
@@ -1305,44 +1519,16 @@ def setup_workspace(
     written: list[Path] = []
     if receipt_created:
         written.append(runtime_root / "onboarding.json")
-    setup_selected_vault = vault_root is not None
-    vault_value = str(vault_root) if vault_root is not None else "memory-vault"
-    if vault_root is None and vault_mode == "existing":
-        # Single-folder setup: the chosen workspace IS the user's existing
-        # notes folder. A previously scaffolded vault keeps its place;
-        # otherwise the folder itself is the vault and the onboarding agent
-        # adapts its contents into the Ciaobot structure.
-        if not (root / "memory-vault").is_dir():
-            vault_value = "."
-
+    # An existing .env — the user's own, or a previous install — is the source
+    # of truth: every variable already in it wins over setup arguments. The
+    # recorded vault root keeps scaffolding anchored.
+    existing_env = selection.existing_env
+    setup_selected_vault = vault_root is not None or selection.source == "env"
+    vault_value = selection.vault_value
+    vault_path = selection.vault_path
     env_path = root / ".env"
-    existing_env: dict[str, str] = {}
-    if env_path.exists():
-        # An existing .env — the user's own, or a previous install — is the
-        # source of truth: every variable already in it wins over setup
-        # arguments. In particular the recorded vault root must keep
-        # scaffolding anchored (re-running setup with a stale or blank
-        # vault_root argument must not re-scatter MEMORY.md/INDEX.md at a
-        # bogus location).
-        from dotenv import dotenv_values
-
-        existing_env = {
-            key: (value or "") for key, value in dotenv_values(env_path).items()
-        }
-        existing_root = existing_env.get("CIAO_VAULT_ROOT", "").strip()
-        if existing_root:
-            vault_value = existing_root
-            setup_selected_vault = True
-
-    vault_path = Path(vault_value).expanduser()
-    if vault_path.is_absolute():
-        # Record the expanded path so .env stays unambiguous when the vault
-        # lives outside the workspace (e.g. "~/ciaobot-brain").
-        vault_value = str(vault_path)
-    else:
-        vault_path = root / vault_path
     workspaces_registry = root / ".runtime" / "workspaces.json"
-    if existing_env.get("CIAO_WORKSPACES", "").strip() and not workspaces_registry.exists():
+    if selection.import_legacy:
         # An install that still configures workspaces through the retired
         # variable usually has no registry file (the server never persisted
         # one while the variable was set). The upgrade installer reruns setup
