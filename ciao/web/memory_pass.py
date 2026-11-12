@@ -1046,11 +1046,12 @@ class MemoryPassCoordinator:
                 continue
             try:
                 timestamp = datetime.fromisoformat(str(row.get("ts", "")))
-            except ValueError:
+                if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                    continue
+                timestamp = timestamp.astimezone(UTC)
+            except (OverflowError, ValueError):
                 continue
-            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                continue
-            dated.append((timestamp.astimezone(UTC), index, action, text))
+            dated.append((timestamp, index, action, text))
         dated.sort(key=lambda item: (item[0], item[1]))
         if not dated:
             return ""

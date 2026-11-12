@@ -368,6 +368,7 @@ def test_recent_decisions_filter_sort_and_bound_before_fencing(
     rows.extend([
         {"dismissed_at": "invalid", "text": "bad-date"},
         {"dismissed_at": "2026-01-01T00:00:00", "text": "naive-date"},
+        {"dismissed_at": "0001-01-01T00:00:00+01:00", "text": "utc-overflow"},
         {"promoted_at": "2026-01-01T00:55:00+00:00", "text": "x" * 501},
     ])
     queue.with_suffix(".dismissed.jsonl").write_text(
