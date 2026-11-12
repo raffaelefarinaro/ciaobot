@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Generate favicon + PWA icon variants from the brand app icon.
-// Source: web/public/brand/ciaobot-icon.svg (the cream tile with the C mark;
-//         its corners are transparent).
+// Source: web/brand/ciaobot-icon-source.png (the supplied artwork).
+// Output: web/public/brand/ciaobot-mark-{ink,dots}.png (transparent masks)
 // Output: web/public/favicon.png (1024, transparent corners)
 //         web/public/icons/icon-{16,32,180,192,512}.png
 //         web/public/icons/icon-{192,512}-maskable.png (with safe-zone padding)
@@ -23,7 +23,7 @@
 // compression metadata for the same pixels). Running this on each build
 // creates a 1-byte ping-pong diff that the local<->cloud sync hooks then
 // auto-commit forever. Run `npm run build:icons` manually only when
-// `web/public/brand/ciaobot-icon.svg` actually changes, then commit the result once
+// `web/brand/ciaobot-icon-source.png` actually changes, then commit the result once
 // (preferably from the same machine each time, e.g. always the cloud box).
 
 import { mkdir } from 'node:fs/promises'
@@ -34,11 +34,12 @@ import sharp from 'sharp'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const webRoot = resolve(__dirname, '..')
-const SVG = resolve(webRoot, 'public/brand/ciaobot-icon.svg')
+const BRAND = resolve(webRoot, 'public/brand')
+const SOURCE = resolve(webRoot, 'brand/ciaobot-icon-source.png')
 const FAVICON = resolve(webRoot, 'public/favicon.png')
 const OUT = resolve(webRoot, 'public/icons')
 const SITE_IMG = resolve(webRoot, '../site/assets/img')
-// The tile's cream, kept in step with ciaobot-icon.svg.
+// The tile's cream.
 const BG = { r: 0xf8, g: 0xf4, b: 0xef, alpha: 1 }
 // Site favicon and standalone icon: [file, size].
 const SITE_SIZES = [['favicon.png', 32], ['logo.png', 192]]
@@ -51,14 +52,44 @@ const MASKABLE_SIZES = [192, 512]
 const SAFE_ZONE = 0.8
 
 async function main() {
-  if (!existsSync(SVG)) {
-    console.error(`[build-icons] source not found: ${SVG}`)
+  if (!existsSync(SOURCE)) {
+    console.error(`[build-icons] source not found: ${SOURCE}`)
     process.exit(1)
   }
   await mkdir(OUT, { recursive: true })
 
-  // Rasterise the vector tile once; every size below resamples this.
-  const SRC = await sharp(SVG, { density: 300 }).resize(1024, 1024).png().toBuffer()
+  // The reference has black outside its rounded tile; remove only those corner
+  // pixels, keeping the supplied artwork and its antialiased edges intact.
+  const { data, info } = await sharp(SOURCE).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  if (info.width !== 1254 || info.height !== 1254) throw new Error('Expected the 1254×1254 brand reference')
+  const ink = Buffer.alloc(720 * 720 * 4)
+  const dots = Buffer.alloc(720 * 720 * 4)
+  const alpha = n => Math.round(Math.max(0, Math.min(1, n)) * 255)
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      const i = (y * info.width + x) * 4
+      const [r, g, b] = data.subarray(i, i + 3)
+      if ((x < 250 || x >= 1004) && (y < 250 || y >= 1004)) {
+        const level = (r + g + b) / 3
+        if (level < 225) {
+          data[i] = 248
+          data[i + 1] = 244
+          data[i + 2] = 239
+          data[i + 3] = alpha(level / 245)
+        }
+      }
+      if (x >= 260 && x < 980 && y >= 250 && y < 970) {
+        const j = ((y - 250) * 720 + x - 260) * 4
+        ink[j] = ink[j + 1] = ink[j + 2] = 255
+        dots[j] = dots[j + 1] = dots[j + 2] = 255
+        ink[j + 3] = g - r > 3 ? alpha((245 - (r + g + b) / 3) / 205) : 0
+        dots[j + 3] = r - b > 4 ? alpha((245 - (r + g + b) / 3) / 100) : 0
+      }
+    }
+  }
+  await sharp(ink, { raw: { width: 720, height: 720, channels: 4 } }).png().toFile(resolve(BRAND, 'ciaobot-mark-ink.png'))
+  await sharp(dots, { raw: { width: 720, height: 720, channels: 4 } }).png().toFile(resolve(BRAND, 'ciaobot-mark-dots.png'))
+  const SRC = await sharp(data, { raw: info }).resize(1024, 1024).png().toBuffer()
   await sharp(SRC).png({ compressionLevel: 9 }).toFile(FAVICON)
   console.log(`[build-icons] wrote ${FAVICON}`)
 

@@ -63,7 +63,7 @@ describe('the open-source card star nudge', () => {
     const wrapper = await mountSettings()
     const card = wrapper.find('.open-source-card')
     expect(card.classes()).toContain('open-source-card--with-mark')
-    expect(wrapper.find('.open-source-mark svg.ciao-mark').exists()).toBe(true)
+    expect(wrapper.find('.open-source-mark .ciao-mark').exists()).toBe(true)
     expect(wrapper.findAll('button').map(b => b.text())).toContain('★ Star on GitHub')
     wrapper.unmount()
   })
