@@ -1,7 +1,7 @@
 import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { groupHomeTiers, orderedHomeChats } from '../lib/homeLanes'
-import { chatTierMark, railItemLabel, type RailItem } from '../lib/titleRail'
+import { chatTierMark, railItemLabel, sidebarProjectOrder, type RailItem } from '../lib/titleRail'
 import { markRailArrival, resetRailState, takeRailArrival, useTitleRail, type TitleRail } from './useTitleRail'
 
 const KEY = 'chat'
@@ -27,9 +27,7 @@ export function useChatRail(currentChatId: () => string): TitleRail {
       id => store.chatIsWorking(id),
       id => store.chatUnread(id) > 0,
     )).map(e => [e.chat.chat_id, e.tier]))
-    const projects = store.workspaceProjects
-    const sidebarProjects = [...projects.filter(p => p.is_auto), ...projects.filter(p => !p.is_auto)]
-    return sidebarProjects.flatMap(p => store.projectChats(p.project_id)
+    return sidebarProjectOrder(store.workspaceProjects).flatMap(p => store.projectChats(p.project_id)
       .filter(c => tierOf.has(c.chat_id))
       .map(chat => {
         const tier = tierOf.get(chat.chat_id)!

@@ -107,7 +107,7 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
-    components/TitleRail.vue  the swipeable title rail of an open chat's or automation's header (ChatPanel's `plainHeader` prop turns it off);
+    components/TitleRail.vue  the swipeable title rail of an open chat's, automation's or project's header (ChatPanel's `plainHeader` prop turns it off);
                            railMotion.css is the lean/arrival motion of the body under it
     components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and
                            Memory section rows; its `placeholder` mode is the row's loading shape, which
@@ -132,7 +132,7 @@ web/
                            drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer, useTitleRail (the generic rail model: items in sidebar order, an order frozen across rail switches, the arrival side),
-                          useChatRail and useScheduleRail (the chat and automation rails over it), usePullToClose (pull a title down to close),
+                          useChatRail, useScheduleRail and useProjectRail (the chat, automation and project rails over it), usePullToClose (pull a title down to close),
                           useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine

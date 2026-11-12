@@ -20,6 +20,17 @@ export interface RailItem {
   label: string
 }
 
+/**
+ * The sidebar's project order, top to bottom: the pinned projects (General and
+ * the other auto-managed ones) as the server orders them, then the user's
+ * projects in their drag order. `projects` is the workspace's list as the store
+ * sorts it. The chat rail walks each project's chats in this order; the project
+ * rail walks the projects themselves.
+ */
+export function sidebarProjectOrder<T extends { is_auto?: boolean }>(projects: readonly T[]): T[] {
+  return [...projects.filter(p => p.is_auto), ...projects.filter(p => !p.is_auto)]
+}
+
 /** Snapshot ids that still exist, in snapshot order, then new ids in fresh order. previous=null → fresh. */
 export function stableRailOrder(fresh: readonly string[], previous: readonly string[] | null): string[] {
   if (previous === null) return [...fresh]
