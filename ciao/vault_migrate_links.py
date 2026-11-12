@@ -369,7 +369,7 @@ def _read_marker(root: Path) -> dict[str, Any] | None:
         raise ReceiptUnavailable(path, _MARKER_UNREADABLE_MESSAGE.format(exc=exc), advice=_MARKER_ADVICE) from exc
     try:
         data = json.loads(raw)
-    except ValueError as exc:  # UnicodeDecodeError is one
+    except (ValueError, RecursionError) as exc:  # UnicodeDecodeError is a ValueError; deep nesting recurses
         raise ReceiptUnavailable(path, _MARKER_MALFORMED_MESSAGE, advice=_MARKER_ADVICE) from exc
     if not _valid_marker(data):
         raise ReceiptUnavailable(path, _MARKER_MALFORMED_MESSAGE, advice=_MARKER_ADVICE)
