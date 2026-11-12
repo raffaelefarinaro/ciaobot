@@ -48,6 +48,13 @@ from tests.test_native_installer import (
     _ownership,
     _public_event_pipe,
 )
+from tests.test_server_host_install import (
+    _OTHER_TEAM,
+    _SignedRunner,
+    _fixture,
+    _signed_fixture,
+    requires_posix_uid,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -2359,3 +2366,60 @@ def test_dead_event_channel_yields_event_channel_failed(tmp_path: Path) -> None:
     assert outcome.terminal is None
     assert outcome.failure_code == "event_channel_failed"
     assert "bootstrap" not in calls
+
+
+@requires_posix_uid
+@pytest.mark.parametrize(
+    ("case", "want"),
+    [("signed_to_legacy", "unknown_state"), ("other_team", HostPlan.replace)],
+)
+def test_plan_host_policy_refusals_with_the_real_classifier(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    want: object,
+) -> None:
+    # #2504: the real classifier decides. A signed host the release would replace
+    # with the legacy one is refused as unknown_state; a host of another Developer
+    # ID team is still replaced. Only the manifest, the archive digest and codesign
+    # are faked, so nothing is planned against a fake classifier.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+    installed_archive, _bundle, installed_entry = _signed_fixture(
+        tmp_path, label="installed"
+    )
+    server_host_install.install_server_host(
+        installed_archive,
+        installed_entry,
+        bundle_path=bundle,
+        ownership_path=record,
+        runner=_SignedRunner(),
+    )
+    if case == "signed_to_legacy":
+        _archive, _bundle, entry = _fixture(tmp_path)
+    else:
+        _archive, _bundle, entry = _signed_fixture(
+            tmp_path, team=_OTHER_TEAM, label="rotation"
+        )
+    monkeypatch.setattr(release_manifest, "verify_manifest", lambda *_a, **_k: {})
+    monkeypatch.setattr(release_manifest, "select_server_host_artifact", lambda _m: entry)
+    monkeypatch.setattr(server_host_install, "verify_host_archive", lambda *_a: None)
+    real_classify = server_host_install._classify_host
+    monkeypatch.setattr(
+        server_host_install,
+        "_classify_host",
+        lambda b, r, _runner, policy: real_classify(b, r, _SignedRunner(), policy),
+    )
+    artifacts = _artifacts(tmp_path)
+    before = _tree(home)
+
+    if isinstance(want, HostPlan):
+        plan, _entry, _owned = repair._plan_host(artifacts)
+        assert plan is want
+    else:
+        with pytest.raises(repair._Refusal) as caught:
+            repair._plan_host(artifacts)
+        assert caught.value.code == want
+    assert _tree(home) == before
