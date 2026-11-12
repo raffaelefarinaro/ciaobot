@@ -351,7 +351,7 @@ class HashedAssetCompression:
             for name, _ in headers
         )
         should_compress = eligible and accepts_gzip and not has_range and not has_condition
-        # Starlette 1.7 checks for a lowercase substring. Normalize only a
+        # Starlette's GZipMiddleware checks for a lowercase substring. Normalize only a
         # valid gzip negotiation so q=0, xgzip and uppercase tokens behave
         # according to HTTP token and quality-value rules.
         headers = [(name, value) for name, value in headers if name.lower() != b"accept-encoding"]

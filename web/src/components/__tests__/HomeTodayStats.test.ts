@@ -23,6 +23,10 @@ const TODAY = {
   tasks_completed: 3,
   avg_chats_opened_30d: 10.4,
   avg_messages_sent_30d: 151,
+  avg_chats_archived_30d: 4,
+  avg_memories_saved_30d: 1.13,
+  avg_projects_worked_on_30d: 2.5,
+  avg_tasks_completed_30d: 0.4,
 }
 
 function mountToday() {
@@ -35,7 +39,7 @@ describe('HomeTodayStats', () => {
     get.mockReset()
   })
 
-  it('shows today\'s counts with the 30-day averages', async () => {
+  it('shows today\'s counts with a 30-day average on every row', async () => {
     get.mockResolvedValue({ today: TODAY })
     const wrapper = mountToday()
     await flushPromises()
@@ -46,10 +50,9 @@ describe('HomeTodayStats', () => {
       'Chats opened', 'Messages sent', 'Chats archived', 'Memories saved', 'Projects worked on', 'Tasks completed',
     ])
     expect(rows.map(row => row.get('strong').text())).toEqual(['14', '212', '5', '7', '4', '3'])
-    expect(wrapper.findAll('.home-today-avg').map(node => node.text())).toEqual(['avg 10', 'avg 151'])
-    expect(rows[0].find('.home-today-avg').exists()).toBe(true)
-    expect(rows[1].find('.home-today-avg').exists()).toBe(true)
-    expect(rows[2].find('.home-today-avg').exists()).toBe(false)
+    expect(rows.map(row => row.get('.home-today-avg').text())).toEqual([
+      'avg 10', 'avg 151', 'avg 4', 'avg 1.1', 'avg 2.5', 'avg 0.4',
+    ])
     wrapper.unmount()
   })
 
@@ -86,7 +89,8 @@ describe('HomeTodayStats', () => {
     const partial = mountToday()
     await flushPromises()
     expect(partial.findAll('.rail-kv')[3].get('strong').text()).toBe('—')
-    expect(partial.findAll('.home-today-avg').map(node => node.text())).toEqual(['avg 10'])
+    expect(partial.findAll('.home-today-avg')).toHaveLength(5)
+    expect(partial.findAll('.rail-kv')[1].find('.home-today-avg').exists()).toBe(false)
     partial.unmount()
   })
 

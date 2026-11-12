@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   barPercent,
   busiestHour,
   formatCount,
   heatCellLabel,
   heatmapCells,
+  heatmapMonths,
   modelShares,
   periodText,
   topProjects,
@@ -16,6 +17,15 @@ import type { UsageStats } from '../lib/usageStats'
 const props = defineProps<{ stats: UsageStats | null; rangeDays: number }>()
 
 const cells = computed(() => heatmapCells(props.stats?.daily_messages ?? []))
+const weeks = computed(() => Math.ceil(cells.value.length / 7))
+const months = computed(() => heatmapMonths(cells.value))
+// Where the strip is wider than the card (a phone), open it on the latest weeks.
+const heatScroll = ref<HTMLElement | null>(null)
+watch(cells, async () => {
+  await nextTick()
+  const el = heatScroll.value
+  if (el) el.scrollLeft = el.scrollWidth
+}, { immediate: true })
 const projects = computed(() => topProjects(props.stats?.projects ?? []))
 const projectMax = computed(() => Math.max(0, ...projects.value.map(p => p.messages ?? 0)))
 const pipeline = computed(() => [
@@ -43,20 +53,25 @@ function hourTitle(h: number, v: number | null): string {
   <div class="usage-breakdown">
     <section class="usage-card" aria-labelledby="usage-activity-title">
       <h3 id="usage-activity-title" class="usage-card-title">Activity</h3>
-      <ol v-if="cells.length" class="usage-heat" role="list" tabindex="0" aria-label="Messages per day, last 26 weeks">
-        <li
-          v-for="(cell, i) in cells"
-          :key="cell.date ?? `pad-${i}`"
-          class="usage-heat-cell"
-          :class="{ 'usage-heat-cell--pad': !cell.date }"
-          :data-level="cell.level"
-          :aria-hidden="cell.date ? undefined : 'true'"
-          :aria-label="cell.date ? heatCellLabel(cell) : undefined"
-          :title="cell.date ? heatCellLabel(cell) : undefined"
-        />
-      </ol>
+      <div v-if="cells.length" ref="heatScroll" class="usage-heat-scroll" tabindex="0" :style="{ '--usage-weeks': weeks }">
+        <div class="usage-heat-months" aria-hidden="true">
+          <span v-for="m in months" :key="m.column" :style="{ gridColumnStart: m.column }">{{ m.label }}</span>
+        </div>
+        <ol class="usage-heat" role="list" aria-label="Messages per day, last 52 weeks">
+          <li
+            v-for="(cell, i) in cells"
+            :key="cell.date ?? `pad-${i}`"
+            class="usage-heat-cell"
+            :class="{ 'usage-heat-cell--pad': !cell.date }"
+            :data-level="cell.level"
+            :aria-hidden="cell.date ? undefined : 'true'"
+            :aria-label="cell.date ? heatCellLabel(cell) : undefined"
+            :title="cell.date ? heatCellLabel(cell) : undefined"
+          />
+        </ol>
+      </div>
       <p v-else class="usage-caption">No activity recorded yet.</p>
-      <p class="usage-legend" aria-hidden="true"><span class="usage-legend-scale">Less <span v-for="l in 5" :key="l" class="usage-heat-cell usage-legend-swatch" :data-level="l - 1" /> More</span> <span>· messages per day, last 26 weeks</span></p>
+      <p class="usage-legend" aria-hidden="true"><span class="usage-legend-scale">Less <span v-for="l in 5" :key="l" class="usage-heat-cell usage-legend-swatch" :data-level="l - 1" /> More</span> <span>· messages per day, last 52 weeks</span></p>
     </section>
     <div class="usage-pair">
       <section class="usage-card" aria-labelledby="usage-projects-title">
@@ -82,7 +97,7 @@ function hourTitle(h: number, v: number | null): string {
       </section>
     </div>
     <div class="usage-pair">
-      <section class="usage-card" aria-labelledby="usage-hours-title">
+      <section class="usage-card usage-card--fill" aria-labelledby="usage-hours-title">
         <h3 id="usage-hours-title" class="usage-card-title">When you work</h3>
         <div class="usage-hours" role="img" :aria-label="hoursLabel">
           <span v-for="(v, h) in hours" :key="h" class="usage-hour" :style="{ height: barPercent(v, hourMax) }" :title="hourTitle(h, v)" />
@@ -119,8 +134,15 @@ function hourTitle(h: number, v: number | null): string {
 .usage-card-title { margin: 0 0 10px; color: var(--fg2); font-size: calc(13px * var(--font-scale)); font-weight: 600; }
 .usage-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
 @container chat-pane (min-width: 820px) { .usage-pair { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); } }
-.usage-heat { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px); grid-auto-columns: 12px; gap: 3px; margin: 0; padding: 0 0 4px; list-style: none; overflow-x: auto; }
-.usage-heat:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+/* The year strip spans the card: week columns share the width, each cell stays
+   square, and below 10px a column the strip scrolls inside the card instead. */
+.usage-heat-scroll { --usage-heat-gap: 3px; overflow-x: auto; padding-bottom: 4px; }
+.usage-heat-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+.usage-heat-months, .usage-heat { display: grid; grid-template-columns: repeat(var(--usage-weeks), minmax(10px, 1fr)); column-gap: var(--usage-heat-gap); }
+.usage-heat-months { margin-bottom: 4px; color: var(--fg3); font-size: var(--text-xs); line-height: 1.2; }
+.usage-heat-months span { grid-row: 1; white-space: nowrap; }
+.usage-heat { grid-auto-flow: column; grid-template-rows: repeat(7, auto); row-gap: var(--usage-heat-gap); margin: 0; padding: 0; list-style: none; }
+.usage-heat .usage-heat-cell { width: auto; height: auto; aspect-ratio: 1; }
 .usage-heat-cell { display: inline-block; width: 12px; height: 12px; border-radius: 2px; background: var(--usage-heat-0); }
 .usage-heat-cell[data-level='1'] { background: var(--usage-heat-1); }
 .usage-heat-cell[data-level='2'] { background: var(--usage-heat-2); }
@@ -139,7 +161,9 @@ function hourTitle(h: number, v: number | null): string {
 .usage-pipeline { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .usage-pipeline-step { display: flex; justify-content: space-between; gap: var(--space-3); padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 12%, var(--bg2)); font-size: var(--text-base); }
 .usage-pipeline-step strong { font-weight: 650; font-variant-numeric: tabular-nums; }
-.usage-hours { display: flex; align-items: flex-end; gap: 2px; height: 90px; }
+/* Beside a taller Models card the chart takes the spare height, not empty space under the caption. */
+.usage-card--fill { display: flex; flex-direction: column; }
+.usage-hours { display: flex; flex: 1 1 auto; align-items: flex-end; gap: 2px; min-height: 90px; }
 .usage-hour { flex: 1; min-width: 0; border-radius: 2px 2px 0 0; background: var(--accent); opacity: 0.85; }
 .usage-hours-axis { display: flex; justify-content: space-between; margin-top: 4px; color: var(--fg2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .usage-caption { margin: 10px 0 0; color: var(--fg3); font-size: var(--text-sm); }
