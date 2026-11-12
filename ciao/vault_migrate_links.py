@@ -44,40 +44,41 @@ What this module will and will not touch
 
 Reversibility
 -------------
-Every rewrite is recorded in `<runtime_root>/migration/vault-links.json` as an
-exact `(offset, from, to)` triple in the *migrated* text, so
-`unmigrate_vault_links` is an inverse rather than a re-derivation: it walks each
-file's edits back to front, checks the text still reads as the receipt says, and
-restores the original bytes. That is what makes rewriting a user's own notes
-defensible.
-
-Which means the map may never *narrow*. A run that could not write some note
-records `status: "partial"` — so nothing downstream reads the vault as converted
-and the retry is not refused — and each later run adds its entries to the map
-rather than replacing it, keeping every note an earlier run converted restorable.
-Only entries for a note the new run rewrote itself are dropped, their offsets
-having been superseded.
+Applied migrations publish exact before and after images to a vault-bound receipt
+before replacing notes. A stable advisory lock serializes managed operations;
+current images classify retries and undo without trusting a progress counter.
+Legacy span maps are upgraded to prepared images before undo. External edits
+that do not match a recorded image are left untouched for manual recovery.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import stat
+from bisect import bisect_right
+from contextlib import contextmanager
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from ciao.os_support.locks import lock_exclusive
+from ciao.os_support.private import carry_mode, open_private
 from ciao.git_proc import EXACT_BYTES
 from ciao.vault_index import (
     EXCLUDED_TOP_DIRS,
     build_filename_index,
     is_excluded,
+    is_generated_vault_file,
+    load_vault_ignore,
     markdown_destination,
     resolve_related,
     scan_vault,
@@ -95,7 +96,6 @@ from ciao.vault_links import (
 logger = logging.getLogger(__name__)
 
 RECEIPT_NAME = "vault-links.json"
-RECEIPT_VERSION = 1
 
 VAULT_PREFIX = "memory-vault"
 
@@ -113,75 +113,167 @@ def receipt_path(runtime_root: Path) -> Path:
     return Path(runtime_root) / "migration" / RECEIPT_NAME
 
 
-def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
-    """Read the receipt file whatever its status.
+class ReceiptUnavailable(Exception):
+    """Receipt evidence cannot safely authorize a migration or undo."""
 
-    Two callers need the reverse map regardless of whether the run that wrote it
-    finished: `unmigrate_vault_links`, because a partial run's map is still an
-    exact inverse for the notes it *did* convert, and `write_receipt`, because a
-    retry has to carry those entries forward. Everything that asks "is this vault
-    converted?" wants :func:`read_receipt` instead.
-    """
-    path = receipt_path(runtime_root)
-    if not path.is_file():
-        return None
+    def __init__(self, path: Path, message: str) -> None:
+        self.path = path
+        super().__init__(f"{path}: {message}; restore the original vault layout or recover manually from archived receipts or git history")
+
+
+def _valid_receipt_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and not PureWindowsPath(value).drive and path.as_posix() == value and all(part not in ("", ".", "..") for part in value.split("/"))
+
+
+def _validate_receipt(data: Any, path: Path, vault_root: Path) -> dict[str, Any]:
+    def invalid(message: str) -> None:
+        raise ReceiptUnavailable(path, message)
+
+    if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data.get("schema_version") not in (1, 2):
+        invalid("invalid or unsupported receipt")
+    recorded = data.get("vault_root")
+    if not isinstance(recorded, str) or not recorded or not Path(recorded).is_absolute():
+        invalid("receipt has no valid absolute vault root")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        if Path(recorded).resolve(strict=True) != Path(vault_root).resolve(strict=True):
+            invalid(f"receipt belongs to another vault ({recorded})")
+    except OSError as exc:
+        raise ReceiptUnavailable(path, f"receipt vault identity cannot be verified ({exc})") from exc
+    version = data["schema_version"]
+    if data.get("status", "migrated" if version == 1 else None) not in (("migrated", "partial") if version == 1 else ("prepared", "partial", "migrated")):
+        invalid("invalid receipt status")
+    if version == 2 and data.get("operation") not in ("migrate", "undo"):
+        invalid("invalid receipt operation")
+    rewrites = data.get("rewrites")
+    if not isinstance(rewrites, list):
+        invalid("invalid rewrite map")
+    for entry in rewrites:
+        if (not isinstance(entry, dict) or not _valid_receipt_path(entry.get("path"))
+            or type(entry.get("offset")) is not int or entry["offset"] < 0
+            or not isinstance(entry.get("from"), str) or not entry["from"]
+            or not isinstance(entry.get("to"), str) or not entry["to"]):
+            invalid("invalid rewrite entry")
+    if version == 2:
+        files = data.get("files")
+        legacy = data.get("legacy_rewrites")
+        if not isinstance(files, list) or not isinstance(legacy, list):
+            invalid("invalid file images")
+        paths: set[str] = set()
+        for image in files:
+            if not isinstance(image, dict) or not _valid_receipt_path(image.get("path")) or image["path"] in paths:
+                invalid("invalid or duplicate image path")
+            paths.add(image["path"])
+            before, after = image.get("before_text"), image.get("after_text")
+            if not isinstance(before, str) or not isinstance(after, str) or before == after:
+                invalid("invalid file image")
+            for name, value in (("before_revision", before), ("after_revision", after)):
+                if image.get(name) != hashlib.sha256(value.encode("utf-8")).hexdigest():
+                    invalid("file image hash mismatch")
+        if any(not isinstance(e, dict) or e not in rewrites or e.get("path") in paths for e in legacy):
+            invalid("invalid legacy rewrite map")
+        for entry in rewrites:
+            if entry not in legacy:
+                matching = next((f for f in files if f["path"] == entry["path"]), None)
+                if matching is None or matching["after_text"][entry["offset"]:entry["offset"] + len(entry["to"])] != entry["to"]:
+                    invalid("rewrite does not match file image")
+        for image in files:
+            entries = sorted((e for e in rewrites if e["path"] == image["path"]), key=lambda e: e["offset"])
+            if not entries:
+                invalid("file image has no rewrite evidence")
+            previous_end = 0
+            restored = image["after_text"]
+            for entry in entries:
+                if entry["offset"] < previous_end:
+                    invalid("overlapping rewrite spans")
+                previous_end = entry["offset"] + len(entry["to"])
+            for entry in reversed(entries):
+                start = entry["offset"]
+                restored = restored[:start] + entry["from"] + restored[start + len(entry["to"]):]
+            if restored != image["before_text"]:
+                invalid("rewrite map does not reconstruct the before image")
+    else:
+        legacy = rewrites
+    for path_key in {e["path"] for e in legacy}:
+        entries = sorted((e for e in legacy if e["path"] == path_key), key=lambda e: e["offset"])
+        if any(a["offset"] + len(a["to"]) > b["offset"] for a, b in zip(entries, entries[1:])):
+            invalid("overlapping legacy rewrite spans")
+    result: dict[str, Any] = data
+    return result
+
+
+def _unsafe_receipt_path(path: Path) -> bool:
+    return (path.parent.is_symlink() or path.parent.is_junction()
+            or path.is_symlink() or path.is_junction())
+
+
+def peek_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | None:
+    """Read validated, vault-bound evidence regardless of status."""
+    path = receipt_path(runtime_root)
+    if _unsafe_receipt_path(path):
+        raise ReceiptUnavailable(path, "receipt path is a link")
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ReceiptUnavailable(path, "receipt is not a regular file")
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return None
-    return data if isinstance(data, dict) else None
+    except OSError as exc:
+        raise ReceiptUnavailable(path, f"receipt is unreadable ({exc})") from exc
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ReceiptUnavailable(path, "receipt is malformed") from exc
+    try:
+        return _validate_receipt(data, path, vault_root)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ReceiptUnavailable(path, "receipt contains invalid data") from exc
 
 
-def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
-    """The receipt of a *completed* migration, or None.
-
-    Gates on `status` rather than on the file existing, because a run that failed
-    to write some note left the vault half-converted: reading that receipt as
-    "already migrated" is what let the migration stop short of done and report
-    that it had finished — the normal re-run was refused, the upgrade notice went
-    quiet, and the unconverted note kept its wikilinks forever.
-
-    A receipt written before `status` existed records a completed run, so a
-    missing field reads as `"migrated"`; anything else would turn every install
-    that already did the work into a permanent false positive.
-    """
-    data = peek_receipt(runtime_root)
-    if data is None:
+def read_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | None:
+    """Return only a validated completed migration for this vault."""
+    data = peek_receipt(runtime_root, vault_root=vault_root)
+    if data is None or data.get("status", "migrated") != "migrated":
         return None
-    return data if data.get("status", "migrated") == "migrated" else None
+    if data["schema_version"] == 2 and data["operation"] != "migrate":
+        return None
+    return data
 
 
-def _carry_forward(
-    previous: list[Any],
-    fresh: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """The earlier entries this run's writes did not invalidate.
-
-    Merging two receipts is safe *per note*, which is the distinction the old
-    all-or-nothing rotation missed. An offset only means anything against the
-    exact bytes it was recorded against, so an entry for a note this run rewrote
-    is stale and is dropped. But a note this run left alone — every note of a
-    successful earlier batch, once the retry converts only what failed — is byte
-    for byte as its own entries describe it, and those carry over untouched.
-
-    The stale ones are dropped rather than shifted on purpose. A note only offers
-    a wikilink to a second run if someone hand-edited it since the first, and that
-    edit already moved the earlier spans by an amount no arithmetic here can
-    recover. Keeping them would be worse than losing them: one mismatched span
-    disqualifies the *whole* file in `unmigrate_vault_links`, so a stale entry
-    would take this run's good ones down with it. The superseded receipt is still
-    archived beside the active one either way.
-    """
-    rewritten = {str(entry.get("path", "")) for entry in fresh}
-    carried: list[dict[str, Any]] = []
-    for entry in previous:
-        if not isinstance(entry, dict):
-            continue
-        path = str(entry.get("path", ""))
-        if not path or path in rewritten:
-            continue
-        carried.append(entry)
-    return carried
+def _publish_receipt(runtime_root: Path, payload: dict[str, Any], *, archive: bool) -> Path:
+    """Serialize fully, then replace the active evidence without moving it away."""
+    encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    path = receipt_path(runtime_root)
+    if _unsafe_receipt_path(path):
+        raise OSError("unsafe receipt path")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _unsafe_receipt_path(path):
+        raise OSError("unsafe receipt path")
+    fd, temporary = tempfile.mkstemp(prefix=".vault-links-", suffix=".tmp", dir=path.parent)
+    replaced = False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+        if archive and path.exists():
+            archive_fd, archive_name = tempfile.mkstemp(prefix="vault-links.", suffix=".json", dir=path.parent)
+            try:
+                with os.fdopen(archive_fd, "wb") as stream:
+                    stream.write(path.read_bytes())
+                    stream.flush()
+            except BaseException:
+                Path(archive_name).unlink(missing_ok=True)
+                raise
+        if _unsafe_receipt_path(path):
+            raise OSError("unsafe receipt path")
+        os.replace(temporary, path)
+        replaced = True
+    finally:
+        if not replaced:
+            Path(temporary).unlink(missing_ok=True)
+    return path
 
 
 def _merge_notes(previous: Any, fresh: Any) -> list[dict[str, Any]]:
@@ -205,73 +297,6 @@ def _merge_notes(previous: Any, fresh: Any) -> list[dict[str, Any]]:
         seen.add(marker)
         merged.append(entry)
     return merged
-
-
-def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
-    """Persist the reverse map atomically, absorbing any earlier one.
-
-    Written through a `.tmp` sibling and `replace()` so a crash mid-write cannot
-    leave a truncated reverse map — a half-written receipt is worse than none,
-    because unmigration would restore part of a file.
-
-    The active receipt carries every run's entries for the notes that run still
-    describes, not just the last run's. Replacing it outright lost the earlier
-    batch: after a run that failed on one note, the retry that converted that note
-    left an active map naming only it, so the notes converted first could no
-    longer be restored — precisely the promise the reverse map exists to make.
-    :func:`_carry_forward` decides per note which earlier entries still hold. The
-    superseded file is kept under a timestamped name either way, as the raw record
-    of what one run did.
-
-    ``status`` is ``"partial"`` whenever the run left failures behind. That is
-    what stops a half-converted vault from presenting itself as finished.
-    """
-    path = receipt_path(runtime_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    previous = peek_receipt(runtime_root)
-    if path.is_file():
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
-    fresh: list[dict[str, Any]] = [
-        entry for entry in summary.get("rewrites", []) if isinstance(entry, dict)
-    ]
-    earlier = (previous or {}).get("rewrites", [])
-    rewrites = [
-        *_carry_forward(earlier if isinstance(earlier, list) else [], fresh),
-        *fresh,
-    ]
-    failed = summary.get("failed") or []
-    payload = {
-        "schema_version": RECEIPT_VERSION,
-        "status": "partial" if failed else "migrated",
-        "migrated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "vault_root": summary.get("vault_root", ""),
-        "git_head_before": summary.get("git_head_before", ""),
-        "files_scanned": summary.get("files_scanned", 0),
-        "files_rewritten": len({str(entry.get("path", "")) for entry in rewrites}),
-        "rewrites": rewrites,
-        "unresolved": _merge_notes(
-            (previous or {}).get("unresolved"), summary.get("unresolved", [])
-        ),
-        "anchors_dropped": _merge_notes(
-            (previous or {}).get("anchors_dropped"), summary.get("anchors_dropped", [])
-        ),
-        "failed": failed,
-    }
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
-    tmp.replace(path)
-    return path
-
-
-def remove_receipt(runtime_root: Path) -> bool:
-    """Drop the receipt so a later `migrate` is not gated by a reverted run."""
-    path = receipt_path(runtime_root)
-    try:
-        path.unlink()
-    except OSError:
-        return False
-    return True
 
 
 # ---- git rail --------------------------------------------------------------
@@ -556,6 +581,23 @@ def _is_whole_frontmatter_value(line: str, link: re.Match[str]) -> bool:
     return before.strip().strip("\"'") == "" and after.strip().strip("\"'") == ""
 
 
+def _normalized_text_and_boundaries(text: str) -> tuple[str, list[int]]:
+    """Map universal-newline character boundaries back to exact text."""
+    chars: list[str] = []
+    boundaries = [0]
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\r":
+            index += 2 if text[index:index + 2] == "\r\n" else 1
+            chars.append("\n")
+        else:
+            chars.append(char)
+            index += 1
+        boundaries.append(index)
+    return "".join(chars), boundaries
+
+
 def rewrite_note(
     text: str,
     source_path: Path | str,
@@ -568,17 +610,19 @@ def rewrite_note(
     computed against the *containing note's directory*, not the bundle root.
 
     Each change carries its offset and line in the **new** text plus the exact
-    `from`/`to` strings, which is what lets `unmigrate_vault_links` be an
-    inverse. An empty change list means the note is already in the target
+    `from`/`to` strings for the receipt's diagnostic map. An empty change list means the note is already in the target
     dialect, so the driver can leave the file's mtime alone.
     """
     source_dir = _vault_relative(Path(source_path)).parent.as_posix()
-    frontmatter = FRONTMATTER_RE.match(text)
+    normalized, boundaries = _normalized_text_and_boundaries(text)
+    if normalized.startswith("\ufeff"):
+        normalized, boundaries = normalized[1:], boundaries[1:]
+    frontmatter = FRONTMATTER_RE.match(normalized)
     edits: list[_Edit] = []
     if frontmatter is not None:
-        edits += _frontmatter_edits(text, frontmatter)
+        edits += _frontmatter_edits(normalized, frontmatter)
     edits += _body_edits(
-        text,
+        normalized,
         frontmatter.end() if frontmatter is not None else 0,
         source_dir,
         filename_index,
@@ -590,25 +634,28 @@ def rewrite_note(
     last = 0
     shift = 0
     for edit in edits:
-        parts.append(text[last:edit.start])
+        start, end = boundaries[edit.start], boundaries[edit.end]
+        parts.append(text[last:start])
         parts.append(edit.replacement)
         changes.append(
             {
                 "kind": edit.kind,
-                "offset": edit.start + shift,
-                "from": text[edit.start : edit.end],
+                "offset": start + shift,
+                "from": text[start:end],
                 "to": edit.replacement,
                 "ref": edit.ref,
                 "anchor": edit.anchor,
                 "resolved": edit.resolved,
             }
         )
-        shift += len(edit.replacement) - (edit.end - edit.start)
-        last = edit.end
+        shift += len(edit.replacement) - (end - start)
+        last = end
     parts.append(text[last:])
     new_text = "".join(parts)
+    normalized_output, output_boundaries = _normalized_text_and_boundaries(new_text)
+    line_starts = [output_boundaries[i + 1] for i, char in enumerate(normalized_output) if char == "\n"]
     for change in changes:
-        change["line"] = new_text.count("\n", 0, change["offset"]) + 1
+        change["line"] = bisect_right(line_starts, change["offset"]) + 1
     return new_text, changes
 
 
@@ -664,21 +711,12 @@ def is_skipped(relative: Path) -> bool:
     return any(part in _SKIP_DIRS for part in relative.parts[:-1])
 
 
-def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, Any]:
-    """Convert every note in a vault, recording an exact reverse map.
-
-    With ``apply=False`` (the default) nothing is written and the summary is the
-    diff preview. Idempotent: a converted note has no `[[` left to match, so a
-    second run reports zero rewrites rather than mangling markdown links.
-
-    A file is recorded only once its new text is safely on disk, so the receipt
-    can never claim a rewrite that failed to land — unmigration trusts it
-    literally.
-    """
+def migrate_vault_links(vault_root: Path, *, exclude_paths: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Plan note conversions without writing; the transaction owns application."""
     root = Path(vault_root)
     summary: dict[str, Any] = {
         "vault_root": str(root),
-        "applied": bool(apply),
+        "applied": False,
         "files_scanned": 0,
         "files_rewritten": 0,
         "rewrites": [],
@@ -690,13 +728,16 @@ def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, A
         summary["skipped"] = "vault root does not exist"
         return summary
 
+    _preflight(root)
     filename_index = build_filename_index(scan_vault(root))
+    images: list[dict[str, Any]] = []
     for md_path in sorted(root.rglob("*.md")):
         relative = md_path.relative_to(root)
-        if is_skipped(relative):
+        if is_skipped(relative) or relative.as_posix() in exclude_paths:
             continue
         try:
-            text = md_path.read_text(encoding="utf-8")
+            _safe_note(root, relative)
+            text = md_path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             summary["failed"].append({"path": relative.as_posix(), "error": str(exc)})
             continue
@@ -704,12 +745,7 @@ def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, A
         new_text, changes = rewrite_note(text, relative, filename_index)
         if not changes:
             continue
-        if apply:
-            try:
-                md_path.write_text(new_text, encoding="utf-8", newline="")
-            except OSError as exc:
-                summary["failed"].append({"path": relative.as_posix(), "error": str(exc)})
-                continue
+        images.append(_image(relative.as_posix(), text, new_text))
         summary["files_rewritten"] += 1
         path_key = relative.as_posix()
         for change in changes:
@@ -732,191 +768,318 @@ def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, A
                     {"path": path_key, "line": change["line"], "ref": change["ref"],
                      "anchor": change["anchor"]}
                 )
+    summary["_images"] = images
     return summary
 
 
-def unmigrate_vault_links(
-    vault_root: Path,
-    receipt: dict[str, Any],
-    *,
-    apply: bool = False,
-) -> dict[str, Any]:
-    """Restore the pre-migration text of every rewrite in ``receipt``.
+# ---- transaction helpers --------------------------------------------------
 
-    Edits are reversed back to front per file, so the offsets recorded against
-    the migrated text stay valid as the text shrinks. A file whose current text
-    disagrees with the receipt at any offset is reported and left **entirely**
-    untouched: a half-reverted note is a worse outcome than a skipped one, and
-    the mismatch means someone edited the note after the migration.
-    """
-    root = Path(vault_root)
-    summary: dict[str, Any] = {
-        "vault_root": str(root),
-        # The root the migration actually ran against, carried through so the
-        # caller can tell "the note changed since the migration" (a mismatch at
-        # a known offset) apart from "this is the wrong root" (every file
-        # missing). The receipt's paths are root-relative, so reversing from a
-        # different root reads nothing and restores nothing.
-        "receipt_vault_root": str(receipt.get("vault_root", ""))
-        if isinstance(receipt, dict)
-        else "",
-        "applied": bool(apply),
-        "files_restored": 0,
-        "restored": [],
-        "failed": [],
-    }
-    rewrites = receipt.get("rewrites") if isinstance(receipt, dict) else None
-    if not isinstance(rewrites, list) or not rewrites:
-        summary["skipped"] = "receipt records no rewrites to reverse"
-        return summary
 
-    by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for entry in rewrites:
-        if not isinstance(entry, dict):
-            continue
-        path = str(entry.get("path", ""))
-        if not path:
-            continue
-        by_path[path].append(entry)
+def _safe_note(root: Path, relative: Path) -> Path:
+    if not _valid_receipt_path(relative.as_posix()):
+        raise OSError("unsafe note path")
+    current = root
+    # These checks reject observed symlinks, not swaps after the final check.
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink() or current.is_junction():
+            raise OSError(f"link in vault path: {relative}")
+    if not current.is_file():
+        raise OSError(f"not a regular note: {relative}")
+    return current
 
-    for path_key, entries in sorted(by_path.items()):
-        note = root / path_key
+
+def _preflight(root: Path) -> None:
+    for name in (".ciaoignore", "entity-types.yaml"):
+        path = root / name
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise OSError(f"unsafe vault input: {name}")
+    ignore = load_vault_ignore(root)
+    for directory, directories, _ in os.walk(root, followlinks=False):
+        for name in directories:
+            path = Path(directory) / name
+            relative = path.relative_to(root) / "placeholder.md"
+            if not is_excluded(relative) or not is_skipped(relative):
+                if path.is_symlink() or path.is_junction():
+                    raise OSError(f"link in vault path: {path.relative_to(root)}")
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        index_candidate = not is_excluded(relative) and not ignore.matches(relative) and not is_generated_vault_file(relative.name)
+        if index_candidate or not is_skipped(relative):
+            _safe_note(root, relative)
+
+
+def _image(path: str, before: str, after: str) -> dict[str, str]:
+    return {"path": path, "before_text": before, "after_text": after,
+            "before_revision": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+            "after_revision": hashlib.sha256(after.encode("utf-8")).hexdigest()}
+
+
+def _replace_image(root: Path, image: dict[str, Any], *, undo: bool) -> bool:
+    relative = Path(image["path"])
+    target = _safe_note(root, relative)
+    current = target.read_bytes()
+    before, after = image["before_text"].encode("utf-8"), image["after_text"].encode("utf-8")
+    expected, replacement = (after, before) if undo else (before, after)
+    if current == replacement:
+        return False
+    if current != expected:
+        raise OSError("note conflicts with recorded images; preserved")
+    mode = stat.S_IMODE(target.stat().st_mode)
+    if not mode & 0o222:
+        raise PermissionError(f"Permission denied: {relative}")
+    fd, name = tempfile.mkstemp(prefix=".vault-links-", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            carry_mode(stream.fileno(), mode, temp=Path(name), original=target)
+            stream.write(replacement)
+            stream.flush()
+        _safe_note(root, relative)
+        if target.read_bytes() != expected:
+            raise OSError("note changed while preparing replacement")
+        os.replace(name, target)
+    finally:
+        Path(name).unlink(missing_ok=True)
+    return True
+
+
+@contextmanager
+def _transaction_lock(runtime: Path):
+    root = runtime.resolve()
+    directory = root / "migration"
+    if directory.is_symlink() or directory.is_junction():
+        raise OSError("unsafe migration directory")
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.is_symlink() or directory.is_junction():
+        raise OSError("unsafe migration directory")
+    lock = directory / "vault-links.lock"
+    if lock.is_symlink():
+        raise OSError("unsafe migration lock")
+    fd = open_private(lock, os.O_RDWR | os.O_CREAT, 0o600, follow_symlinks=False)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("migration lock is not regular")
+        lock_exclusive(fd, blocking=False)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _failure(root: Path, runtime: Path, apply: bool, error: Exception, *, undo: bool = False) -> dict[str, Any]:
+    message = str(error) or f"{type(error).__name__}: could not prepare recovery evidence; no notes changed"
+    failed = [{"path": str(receipt_path(runtime)), "error": message}]
+    if undo:
+        return {"vault_root": str(root), "receipt_vault_root": "", "applied": apply,
+                "files_restored": 0, "restored": [], "failed": failed}
+    return {"vault_root": str(root), "applied": apply, "files_scanned": 0,
+            "files_rewritten": 0, "rewrites": [], "unresolved": [], "anchors_dropped": [],
+            "failed": failed, "complete": False}
+
+
+def _legacy_image(root: Path, path: str, entries: list[dict[str, Any]]) -> dict[str, str]:
+    target = _safe_note(root, Path(path))
+    exact = target.read_bytes().decode("utf-8")
+    normalized, boundaries = _normalized_text_and_boundaries(exact)
+    spans: list[tuple[int, int, str]] = []
+    for entry in sorted(entries, key=lambda item: item["offset"]):
+        start = entry["offset"]
+        end = start + len(entry["to"])
+        if end > len(normalized) or normalized[start:end] != entry["to"] or (spans and start < spans[-1][1]):
+            raise OSError("legacy receipt spans no longer match; recover manually from archived receipt or git history")
+        spans.append((start, end, entry["from"]))
+    restored = exact
+    for start, end, original in reversed(spans):
+        restored = restored[:boundaries[start]] + original + restored[boundaries[end]:]
+    return _image(path, restored, exact)
+
+
+def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, force: bool = False) -> dict[str, Any]:
+    root = Path(vault_root).resolve()
+    runtime = Path(runtime_root).resolve()
+    resumed: set[str] = set()
+    recorded: dict[str, Any] | None = None
+    def run() -> dict[str, Any]:
+        nonlocal recorded
+        recorded = peek_receipt(runtime, vault_root=root)
+        git = vault_git_state(root)
+        if apply and recorded and recorded.get("operation") == "undo":
+            raise OSError("finish the interrupted undo first")
+        if apply and recorded and recorded.get("status", "migrated") == "migrated" and not force:
+            return {"skipped": "already migrated", "receipt_path": str(receipt_path(runtime)), "migrated_at": recorded.get("migrated_at", "")}
+        if apply and not force and git["dirty"] and (recorded is None or recorded.get("status", "migrated") == "migrated"):
+            return {"skipped": "vault has uncommitted changes", "git": git}
+        resume_files = (recorded or {}).get("files", []) if apply and recorded and recorded.get("status") in ("prepared", "partial") else []
+        resume_paths = frozenset(f["path"] for f in resume_files)
+        resume_failed: list[dict[str, str]] = []
+        if resume_files:
+            _preflight(root)
+        for image in resume_files:
+            try:
+                if _replace_image(root, image, undo=False):
+                    resumed.add(image["path"])
+            except (OSError, UnicodeError) as exc:
+                resume_failed.append({"path": image["path"], "error": str(exc)})
+        summary = migrate_vault_links(root, exclude_paths=resume_paths)
+        summary["failed"].extend(resume_failed)
+        summary["rewrites"].extend(entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in resumed)
+        summary["files_rewritten"] += len(resumed)
+        if resumed:
+            summary["resumed_files"] = len(resumed)
+        images = summary.pop("_images", [])
+        summary.update(applied=apply, git_head_before=git["head"], forced=bool(force), complete=not summary["failed"])
+        if not apply or "skipped" in summary:
+            return summary
+        summary["files_rewritten"] = len(resumed)
+        old_files = list((recorded or {}).get("files", []))
+        old_legacy = list((recorded or {}).get("legacy_rewrites", [])) if recorded and recorded.get("schema_version") == 2 else list((recorded or {}).get("rewrites", []))
+        legacy_by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for entry in old_legacy:
+            legacy_by_path[entry["path"]].append(entry)
+        for path, entries in legacy_by_path.items():
+            try:
+                _legacy_image(root, path, entries)
+            except (OSError, UnicodeError) as exc:
+                summary["failed"].append({"path": path, "error": str(exc)})
+        old_paths = {f["path"] for f in old_files} | {e["path"] for e in old_legacy}
+        fresh_images = []
+        for image in images:
+            existing = next((f for f in old_files if f["path"] == image["path"]), None)
+            if existing is not None and image == existing:
+                continue
+            if image["path"] in old_paths:
+                raise OSError("new rewrite conflicts with existing recovery evidence; undo or recover manually")
+            fresh_images.append(image)
+        fresh_paths = {f["path"] for f in fresh_images}
+        if (recorded and recorded.get("status", "migrated") == "migrated"
+                and not fresh_images and not summary["failed"]
+                and all(_safe_note(root, Path(f["path"])).read_bytes() == f["after_text"].encode("utf-8") for f in old_files)):
+            summary["receipt_path"] = str(receipt_path(runtime))
+            return summary
+        rewrites = list((recorded or {}).get("rewrites", [])) + [e for e in summary["rewrites"] if e["path"] in fresh_paths]
+        files = sorted(old_files + fresh_images, key=lambda image: image["path"])
+        payload = {"schema_version": 2, "status": "prepared", "operation": "migrate", "vault_root": str(root),
+                   "migrated_at": datetime.now(UTC).isoformat(), "git_head_before": git["head"],
+                   "files_scanned": summary["files_scanned"], "files_rewritten": len({e["path"] for e in rewrites}),
+                   "files": files, "legacy_rewrites": old_legacy, "rewrites": rewrites,
+                   "unresolved": _merge_notes((recorded or {}).get("unresolved"), summary["unresolved"]),
+                   "anchors_dropped": _merge_notes((recorded or {}).get("anchors_dropped"), summary["anchors_dropped"]),
+                   "failed": summary["failed"]}
         try:
-            text = note.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            summary["failed"].append({"path": path_key, "error": str(exc)})
-            continue
-        restored = text
-        mismatch = False
-        for entry in sorted(entries, key=lambda item: int(item.get("offset", 0)), reverse=True):
-            offset = int(entry.get("offset", 0))
-            migrated, original = str(entry.get("to", "")), str(entry.get("from", ""))
-            if restored[offset : offset + len(migrated)] != migrated:
-                summary["failed"].append(
-                    {
-                        "path": path_key,
-                        "offset": offset,
-                        "error": f"expected {migrated!r} — the note changed since migration",
-                    }
-                )
-                mismatch = True
-                break
-            restored = restored[:offset] + original + restored[offset + len(migrated) :]
-        if mismatch or restored == text:
-            continue
+            _publish_receipt(runtime, payload, archive=recorded is not None)
+        except (OSError, ValueError, MemoryError) as exc:
+            detail = "prior recovery receipt retained" if resumed else "no notes changed"
+            raise OSError(f"cannot prepare recovery receipt; {detail}: {exc}") from exc
+        summary["receipt_path"] = str(receipt_path(runtime))
+        for image in files:
+            try:
+                if image["path"] not in resume_paths and _replace_image(root, image, undo=False):
+                    summary["files_rewritten"] += 1
+            except (OSError, UnicodeError) as exc:
+                summary["failed"].append({"path": image["path"], "error": str(exc)})
+        summary["complete"] = not summary["failed"]
+        payload["status"] = "migrated" if summary["complete"] else "partial"
+        payload["failed"] = summary["failed"]
+        try:
+            _publish_receipt(runtime, payload, archive=False)
+        except (OSError, ValueError, MemoryError) as exc:
+            summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"settlement failed; recovery receipt retained: {exc}"})
+            summary["complete"] = False
+        return summary
+    try:
+        if apply:
+            with _transaction_lock(runtime):
+                return run()
+        return run()
+    except (ReceiptUnavailable, OSError, UnicodeError, ValueError, MemoryError) as exc:
+        failure = _failure(root, runtime, apply, exc)
+        if recorded is not None:
+            failure["receipt_path"] = str(receipt_path(runtime))
+        if resumed:
+            failure["files_rewritten"] = len(resumed)
+            failure["files_scanned"] = len(resumed)
+            failure["rewrites"] = [entry for entry in (recorded or {}).get("rewrites", []) if entry["path"] in resumed]
+            failure["receipt_path"] = str(receipt_path(runtime))
+            failure["resumed_files"] = len(resumed)
+        return failure
+
+
+def unmigrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, force: bool = False) -> dict[str, Any]:
+    del force
+    root = Path(vault_root).resolve()
+    runtime = Path(runtime_root).resolve()
+    def run() -> dict[str, Any]:
+        receipt = peek_receipt(runtime, vault_root=root)
+        if receipt is None:
+            return {"skipped": "no migration receipt to reverse", "receipt_path": str(receipt_path(runtime))}
+        summary: dict[str, Any] = {"vault_root": str(root), "receipt_vault_root": receipt["vault_root"], "applied": apply,
+                                   "files_restored": 0, "restored": [], "failed": []}
+        files = list(receipt.get("files", []))
+        legacy = receipt.get("legacy_rewrites", []) if receipt["schema_version"] == 2 else receipt["rewrites"]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for entry in legacy:
+            grouped[entry["path"]].append(entry)
+        for path, entries in grouped.items():
+            try:
+                files.append(_legacy_image(root, path, entries))
+            except (OSError, UnicodeError) as exc:
+                summary["failed"].append({"path": path, "error": str(exc)})
+        if summary["failed"]:
+            return summary
+        upgraded_paths = {f["path"] for f in files}
+        remaining = [e for e in legacy if e["path"] not in upgraded_paths]
+        rewrites = []
+        for entry in receipt["rewrites"]:
+            if entry in legacy and entry["path"] in upgraded_paths:
+                image = next(f for f in files if f["path"] == entry["path"])
+                normalized, boundaries = _normalized_text_and_boundaries(image["after_text"])
+                start = entry["offset"]
+                end = start + len(entry["to"])
+                assert normalized[start:end] == entry["to"]
+                entry = dict(entry, offset=boundaries[start], to=image["after_text"][boundaries[start]:boundaries[end]])
+            rewrites.append(entry)
+        payload = dict(receipt, schema_version=2, status="prepared", operation="undo", files=files, legacy_rewrites=remaining, rewrites=rewrites)
         if apply:
             try:
-                note.write_text(restored, encoding="utf-8", newline="")
-            except OSError as exc:
-                summary["failed"].append({"path": path_key, "error": str(exc)})
-                continue
-        summary["files_restored"] += 1
-        summary["restored"].append(path_key)
-    return summary
-
-
-# ---- gated entry points ----------------------------------------------------
-
-
-def migrate_links(
-    vault_root: Path,
-    runtime_root: Path,
-    *,
-    apply: bool = False,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Run the migration behind its safety rails and record the receipt.
-
-    Two refusals, both overridable with ``force``: an existing receipt (this
-    vault was already converted, and a second pass would overwrite the reverse
-    map that can undo the first), and uncommitted changes in the vault (so the
-    user keeps `git checkout` as an undo that needs nothing from us).
-
-    Neither refusal applies to a dry run. Both exist to protect a *write*, and
-    gating the preview meant the only way to see what the migration would do to a
-    dirty vault was to pass the flag that skips the check — exactly backwards.
-
-    The "already migrated" refusal reads a *completed* receipt only. A run that
-    could not write some note has not converted the vault, and gating the retry
-    on its receipt left the survivor full of wikilinks with the CLI reporting a
-    finished migration. ``summary["complete"]`` says which kind of run this was.
-    """
-    receipt = read_receipt(runtime_root)
-    recorded = peek_receipt(runtime_root)
-    git = vault_git_state(vault_root)
-    if apply and not force:
-        if receipt is not None:
-            return {
-                "skipped": "already migrated",
-                "receipt_path": str(receipt_path(runtime_root)),
-                "migrated_at": receipt.get("migrated_at", ""),
-            }
-        if git["dirty"]:
-            return {"skipped": "vault has uncommitted changes", "git": git}
-
-    summary = migrate_vault_links(vault_root, apply=apply)
-    summary["git_head_before"] = git["head"]
-    summary["forced"] = bool(force)
-    summary["complete"] = not summary["failed"]
-    # A forced re-run over an already-converted vault rewrites nothing, and
-    # recording *that* would replace a usable reverse map with an empty one —
-    # leaving `vault-unmigrate-links` with nothing to undo. A first run with
-    # nothing to convert still writes one, so the vault is marked migrated and
-    # the detect-and-offer path stops asking. Beyond that the receipt is rewritten
-    # only when the vault's *status* moved: down to "partial" because a note could
-    # not be written (a note we could not even read is not a note we can call
-    # converted), or up to "migrated" once a retry finds nothing left to fix. A
-    # retry that changes neither is not recorded at all, so repeatedly re-running
-    # a failing migration does not bury the reverse map under timestamped copies.
-    recorded_partial = (recorded or {}).get("status", "migrated") == "partial"
-    should_record = (
-        summary["rewrites"] or recorded is None or bool(summary["failed"]) != recorded_partial
-    )
-    if apply and "skipped" not in summary and should_record:
-        summary["receipt_path"] = str(write_receipt(runtime_root, summary))
-    elif recorded is not None:
-        summary["receipt_path"] = str(receipt_path(runtime_root))
-    return summary
-
-
-def unmigrate_links(
-    vault_root: Path,
-    runtime_root: Path,
-    *,
-    apply: bool = False,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Reverse the recorded migration, then drop the receipt.
-
-    The receipt is the only input: without it there is nothing to reverse
-    exactly, and guessing which markdown links used to be wikilinks would
-    rewrite links the user wrote by hand. The receipt is removed only after a
-    clean applied run, so a partial revert stays revertible.
-
-    There is deliberately no dirty-vault refusal here, unlike
-    :func:`migrate_links`. A successful migration *is* what makes the vault
-    dirty, so gating the reverse on cleanliness made recovery impossible in
-    exactly the state it exists for — the only way to undo was the flag that
-    skips the checks. Reversing is safe without the rail anyway: every span is
-    re-checked against the receipt before it is touched, and a file with one
-    mismatch is left completely alone.
-
-    Reads the receipt with :func:`peek_receipt`, so a *partial* migration is
-    still undoable. Whether the run finished is the migration side's question;
-    here the only question is which spans were rewritten, and a partial receipt
-    answers it exactly for the notes it names. Refusing to reverse one would
-    strand the converted notes with no way back, which is the opposite of the
-    guarantee.
-    """
-    receipt = peek_receipt(runtime_root)
-    if receipt is None:
-        return {
-            "skipped": "no migration receipt to reverse",
-            "receipt_path": str(receipt_path(runtime_root)),
-        }
-    del force  # accepted for CLI symmetry; nothing here needs overriding
-
-    summary = unmigrate_vault_links(vault_root, receipt, apply=apply)
-    if apply and not summary["failed"] and "skipped" not in summary:
-        summary["receipt_removed"] = remove_receipt(runtime_root)
-    return summary
+                _publish_receipt(runtime, payload, archive=receipt.get("operation") != "undo")
+            except (OSError, ValueError, MemoryError) as exc:
+                raise OSError(f"cannot prepare recovery receipt; no notes changed: {exc}") from exc
+        for image in files:
+            try:
+                if apply:
+                    changed = _replace_image(root, image, undo=True)
+                else:
+                    target = _safe_note(root, Path(image["path"]))
+                    current = target.read_bytes()
+                    if current not in (image["before_text"].encode(), image["after_text"].encode()):
+                        raise OSError("note conflicts with recorded images; preserved")
+                    changed = current == image["after_text"].encode()
+                if changed:
+                    summary["restored"].append(image["path"])
+                    summary["files_restored"] += 1
+            except (OSError, UnicodeError) as exc:
+                summary["failed"].append({"path": image["path"], "error": str(exc)})
+        if apply:
+            if summary["failed"]:
+                payload["status"] = "partial"
+                try:
+                    _publish_receipt(runtime, payload, archive=False)
+                except (OSError, ValueError, MemoryError) as exc:
+                    summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"settlement failed; recovery receipt retained, retry undo: {exc}"})
+            else:
+                try:
+                    active_receipt = receipt_path(runtime)
+                    if _unsafe_receipt_path(active_receipt):
+                        raise OSError("unsafe receipt path")
+                    active_receipt.unlink()
+                    summary["receipt_removed"] = True
+                except OSError as exc:
+                    summary["receipt_removed"] = False
+                    summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"cleanup failed; retry undo: {exc}"})
+        return summary
+    try:
+        if apply:
+            with _transaction_lock(runtime):
+                return run()
+        return run()
+    except (ReceiptUnavailable, OSError, UnicodeError, ValueError, MemoryError) as exc:
+        return _failure(root, runtime, apply, exc, undo=True)

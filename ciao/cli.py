@@ -2410,13 +2410,17 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if "skipped" in summary:
         return _print_link_migration_skip(summary)
 
-    verb = "Rewrote" if args.apply else "Would rewrite"
+    verb = ("Resumed" if summary.get("resumed_files") else "Planned") if args.apply and summary["failed"] else ("Rewrote" if args.apply else "Would rewrite")
     rewrites = summary["rewrites"]
     if rewrites:
+        planned_notes = len({change["path"] for change in rewrites})
+        displayed_notes = planned_notes if args.apply and summary["failed"] else summary["files_rewritten"]
         print(
-            f"{verb} {len(rewrites)} link(s) in {summary['files_rewritten']} "
+            f"{verb} {len(rewrites)} link(s) in {displayed_notes} "
             f"of {summary['files_scanned']} note(s):"
         )
+        if args.apply and summary["failed"]:
+            print(f"Rewrote {summary['files_rewritten']} of {planned_notes} planned note(s).")
         for change in rewrites:
             print(
                 f"  {change['path']}:{change['line']}  "
@@ -2428,8 +2432,7 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         # to stderr just below. A retry hit exactly this and told the operator
         # the vault was clean.
         print(
-            f"Rewrote nothing: every note with wikilinks failed to write "
-            f"({summary['files_scanned']} scanned)."
+            f"Migration did not complete ({summary['files_scanned']} scanned)."
         )
     else:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
@@ -2459,16 +2462,15 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
 
-    if args.apply and rewrites:
+    if args.apply and rewrites and summary.get("receipt_path"):
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unmigrate-links --apply`.")
         if not summary.get("complete", True):
             # The receipt is real and the undo works, but the migration is not
             # done. Printing only the success trailer read as "finished".
             print(
-                "This run did NOT finish: the notes listed under Failed still "
-                "use wikilinks. Fix the cause and re-run — the reverse map "
-                "carries forward, so nothing already converted is lost."
+                "This run did NOT finish. Review the failures and retry, or "
+                "use the retained receipt to undo the changes."
             )
     elif not args.apply and rewrites:
         print("\nRe-run with --apply to write these changes.")

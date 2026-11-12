@@ -72,6 +72,14 @@ def _no_shared_verdicts():
 # -- fixtures ----------------------------------------------------------------
 
 
+def _write_legacy_link_receipt(runtime: Path, summary: dict[str, Any]) -> None:
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema_version": 1, "vault_root": summary["vault_root"],
+                                "status": "partial" if summary.get("failed") else "migrated",
+                                "rewrites": summary.get("rewrites", [])}))
+
+
 def _cfg(
     tmp_path: Path,
     *,
@@ -397,12 +405,11 @@ def test_the_audit_resolves_its_own_verdict_rather_than_reading_the_cache(
 def test_a_completed_receipt_retires_the_notice_on_both_surfaces(
     tmp_path: Path,
 ) -> None:
-    from ciao.vault_migrate_links import write_receipt
 
     config = _cfg(tmp_path)
     _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
-    write_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
+    _write_legacy_link_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
 
     assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
     assert _tiles(config, runtime) == []
@@ -418,12 +425,11 @@ def test_a_partial_migration_leaves_the_finding_on_both_surfaces(
     The receipt is what retires the notice, so a run that could not write every
     note leaves it raised on both surfaces rather than half-silenced.
     """
-    from ciao.vault_migrate_links import write_receipt
 
     config = _cfg(tmp_path)
     _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
-    write_receipt(
+    _write_legacy_link_receipt(
         runtime,
         {
             "vault_root": str(config.vault_root),
@@ -489,8 +495,8 @@ def test_a_receipt_the_install_cannot_read_is_scanned_not_trusted(
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-links.json").write_text("{ not json", encoding="utf-8")
 
-    assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
-    assert [t.id for t in _tiles(config, runtime)] == ["vault-unmigrated-links"]
+    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
+    assert [t.id for t in _tiles(config, runtime)] == []
 
 
 def test_a_finding_names_a_note_because_one_was_found() -> None:
@@ -535,7 +541,6 @@ def test_a_changed_receipt_invalidates_the_stored_verdict(tmp_path: Path) -> Non
     one lands a token the stored answer was not computed for — which is what
     stops a verdict established before an un-migration from outliving it.
     """
-    from ciao.vault_migrate_links import write_receipt
 
     config = _cfg(tmp_path)
     _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
@@ -546,7 +551,7 @@ def test_a_changed_receipt_invalidates_the_stored_verdict(tmp_path: Path) -> Non
     # A partial receipt is a *different* receipt, so the answer it was computed
     # against no longer applies and Home has to look again — which it does, and
     # the notice stays raised, because the migration is not complete.
-    write_receipt(
+    _write_legacy_link_receipt(
         runtime,
         {"vault_root": str(config.vault_root), "failed": [{"path": "x", "error": "no"}]},
     )
@@ -556,7 +561,7 @@ def test_a_changed_receipt_invalidates_the_stored_verdict(tmp_path: Path) -> Non
     assert cached_links(config, runtime) is not None
 
     # A completed one puts the notice out of scope, and the stored answer with it.
-    write_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
+    _write_legacy_link_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
     assert cached_links(config, runtime) is None
     assert resolve_links(config, runtime) is None
 
@@ -1107,4 +1112,151 @@ def test_a_json_receipt_that_is_not_an_object_does_not_retire_the_notice(
         json.dumps(["not", "a", "receipt"]), encoding="utf-8"
     )
 
-    assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
+    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
+
+
+@pytest.mark.parametrize("version,status", [(1, None), (1, "migrated"), (2, "migrated")])
+def test_completed_receipt_is_bound_to_configured_vault(tmp_path: Path, monkeypatch, version: int, status: str | None) -> None:
+    from ciao.vault_migrate_links import migrate_links
+
+    config_a = _cfg(tmp_path / "a")
+    config_b = _cfg(tmp_path / "b")
+    _notes(config_a.vault_root, 1, wikilink="Missing")
+    _notes(config_b.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    assert migrate_links(config_a.vault_root, runtime, apply=True)["complete"]
+    path = runtime / "migration" / "vault-links.json"
+    if version == 1:
+        data = json.loads(path.read_bytes())
+        data["schema_version"] = 1
+        for key in ("operation", "files", "legacy_rewrites"):
+            data.pop(key)
+        if status is None:
+            data.pop("status")
+        path.write_text(json.dumps(data))
+    assert migration_notices._links_scope(config_a, runtime).vault is None
+    scope = migration_notices._links_scope(config_b, runtime)
+    assert scope.vault == config_b.vault_root and not scope.readable
+    scans = []
+    monkeypatch.setattr("ciao.vault_migrate_links.has_unmigrated_links", lambda root: scans.append(root))
+    assert resolve_links(config_b, runtime) is None
+    assert not scans
+    assert _stored_state(config_b.vault_root) == LINKS_FAILED
+
+
+def test_receipt_unavailability_warns_once_per_transition(tmp_path: Path, caplog) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir()
+    path.write_text("{")
+    for _ in range(3):
+        assert resolve_links(config, runtime) is None
+        assert cached_links(config, runtime) is None
+    assert len([r for r in caplog.records if "receipt unavailable" in r.message]) == 1
+    path.write_text("[]")
+    resolve_links(config, runtime)
+    assert len([r for r in caplog.records if "receipt unavailable" in r.message]) == 2
+    path.unlink()
+    resolve_links(config, runtime)
+    path.write_text("[]")
+    resolve_links(config, runtime)
+    assert len([r for r in caplog.records if "receipt unavailable" in r.message]) == 3
+
+
+@pytest.mark.parametrize("recorded", [None, "", "relative", "missing"])
+def test_missing_receipt_root_is_unknown(tmp_path: Path, monkeypatch, caplog, recorded: str | None) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir()
+    data: dict[str, Any] = {"schema_version": 1, "rewrites": []}
+    if recorded is not None:
+        data["vault_root"] = str(tmp_path / "missing") if recorded == "missing" else recorded
+    path.write_text(json.dumps(data))
+    scans = []
+    monkeypatch.setattr("ciao.vault_migrate_links.has_unmigrated_links", lambda root: scans.append(root))
+    scope = migration_notices._links_scope(config, runtime)
+    assert scope.vault == config.vault_root and not scope.readable
+    assert resolve_links(config, runtime) is None
+    assert _stored_state(config.vault_root) == LINKS_FAILED
+    assert not scans
+    resolve_links(config, runtime)
+    assert len([r for r in caplog.records if "receipt unavailable" in r.message]) == 1
+
+
+def test_moved_legacy_receipt_root_is_unknown_until_restored(tmp_path: Path, monkeypatch) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    _write_legacy_link_receipt(runtime, {"vault_root": str(config.vault_root)})
+    moved = tmp_path / "moved"
+    config.vault_root.rename(moved)
+    config.vault_root = moved
+    scans = []
+    monkeypatch.setattr("ciao.vault_migrate_links.has_unmigrated_links", lambda root: scans.append(root))
+    scope = migration_notices._links_scope(config, runtime)
+    assert scope.vault == moved and not scope.readable
+    assert resolve_links(config, runtime) is None
+    assert _stored_state(moved) == LINKS_FAILED
+    assert not scans
+    moved.rename(tmp_path / "memory-vault")
+    config.vault_root = tmp_path / "memory-vault"
+    assert migration_notices._links_scope(config, runtime).vault is None
+
+
+def test_unreadable_receipt_warning_survives_cache_expiry_and_resets(tmp_path: Path, monkeypatch, caplog) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir()
+    path.write_text("{}")
+    original = Path.read_bytes
+    def deny(self):
+        if self == path:
+            raise PermissionError("receipt denied")
+        return original(self)
+    scans = []
+    monkeypatch.setattr(Path, "read_bytes", deny)
+    monkeypatch.setattr("ciao.vault_migrate_links.has_unmigrated_links", lambda root: scans.append(root))
+    for now in (0, 100000):
+        assert resolve_links(config, runtime, now=now) is None
+        assert cached_links(config, runtime, now=now) is None
+        migration_notices.links_scan_is_stale(config, runtime, now=now + 100000)
+    warnings = lambda: [r for r in caplog.records if "receipt unavailable" in r.message]
+    assert len(warnings()) == 1 and warnings()[0].exc_info is None
+    assert _stored_state(config.vault_root) == LINKS_FAILED and not scans
+    migration_notices.reset_links_cache()
+    resolve_links(config, runtime)
+    assert len(warnings()) == 2 and not scans
+
+
+def test_incomplete_same_vault_receipt_remains_readable(tmp_path: Path) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    _write_legacy_link_receipt(runtime, {"vault_root": str(config.vault_root), "failed": ["incomplete"]})
+    scope = migration_notices._links_scope(config, runtime)
+    assert scope.vault == config.vault_root and scope.readable
+    assert resolve_links(config, runtime) is not None
+
+
+def test_invalid_receipt_warning_resets_after_valid_completion(tmp_path: Path, caplog) -> None:
+    config = _cfg(tmp_path)
+    _notes(config.vault_root, 1, wikilink="Missing")
+    runtime = _runtime(tmp_path)
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir()
+    path.write_text("{")
+    for _ in range(2):
+        assert resolve_links(config, runtime) is None
+    warnings = lambda: [r for r in caplog.records if "receipt unavailable" in r.message]
+    assert len(warnings()) == 1
+    _write_legacy_link_receipt(runtime, {"vault_root": str(config.vault_root)})
+    assert migration_notices._links_scope(config, runtime).vault is None
+    path.write_text("{")
+    assert resolve_links(config, runtime) is None
+    assert len(warnings()) == 2
