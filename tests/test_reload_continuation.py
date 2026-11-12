@@ -24,6 +24,7 @@ def _result(chat, *, is_error: bool = False) -> ResultEvent:
 
 
 class _FakeProvider:
+    provider = None  # ProviderService.provider before a provider exists
     background_work_outstanding = False
     background_activity_age = 0.0
 
@@ -61,7 +62,11 @@ async def _run(tmp_path: Path, first_turn, *, queue_during_first: str | None = N
             captured.append(ev)
 
     stream = pcm.start_stream(chat.chat_id, "initial")
+    drive = pcm._streaming.drive_task(chat.chat_id, stream)
+    assert drive is not None
     await asyncio.wait_for(asyncio.create_task(consume(stream)), timeout=5.0)
+    # The stream ends before drive()'s post-turn tail; await the tail too.
+    await asyncio.wait_for(drive, timeout=5.0)
     return pcm, chat, provider, turn_calls, seen_at_turn, captured
 
 

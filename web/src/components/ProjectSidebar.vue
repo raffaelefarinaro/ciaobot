@@ -3,7 +3,6 @@
     <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
       <div class="sidebar-brand-row">
         <template v-if="!collapsed">
-          <span class="sidebar-brand-mark" aria-hidden="true"><CiaoMark /></span>
           <BrandMark class="sidebar-brand" />
           <!-- Back / forward through in-app navigation, just before the
                collapse control; a hairline keeps the three from reading as
@@ -591,7 +590,7 @@
               :key="'recent-' + chat.chat_id"
               class="recent-item"
               :class="{
-                active: chat.chat_id === store.activeChatId,
+                active: chat.chat_id === selectedChatId,
                 remote: chat.local === false,
               }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
@@ -820,7 +819,7 @@
                   <SidebarRow
                     class="chat-item"
                     :text="chat.title"
-                    :active="chat.chat_id === store.activeChatId"
+                    :active="chat.chat_id === selectedChatId"
                     :unread="store.chatUnread(chat.chat_id) > 0"
                     :pending="chat.title_status === 'pending'"
                     :class="{
@@ -1044,7 +1043,6 @@ import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { inCodeMode } from '../lib/repo'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
-import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
@@ -1068,8 +1066,14 @@ const props = defineProps<{
   mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'
   /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
   canOpenBeside?: boolean
+  /** The second chat of a split, when its pane has the focus: a row click then replaces it,
+   *  and the sidebar marks it as the selected chat. Empty while the main pane is focused. */
+  focusedBesideChatId?: string
 }>()
-const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'new-task': []; 'open-beside': [chatId: string] }>()
+const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'new-task': []; 'open-beside': [chatId: string]; 'select-beside': [chatId: string] }>()
+
+/** The selected chat: the one in the focused pane of a split, else the open one. */
+const selectedChatId = computed(() => props.focusedBesideChatId || store.activeChatId)
 
 /** "Open beside" is offered only where the layout can show it, and never for the chat already on screen. */
 function canOpenChatBeside(chat: { chat_id: string; local?: boolean }): boolean {
@@ -1584,7 +1588,9 @@ watch(() => store.activeChatId, (chatId) => {
 }, { immediate: true })
 
 function selectChat(chatId: string) {
-  store.switchChat(chatId)
+  // A split with its second pane focused: the click goes to that pane, not the main one.
+  if (props.focusedBesideChatId) emit('select-beside', chatId)
+  else store.switchChat(chatId)
   emit('chat-selected')
 }
 
@@ -2017,14 +2023,6 @@ async function confirmDeleteChat(chatId: string) {
    the collapse control inside the 320px phone drawer. */
 @media (pointer: coarse) {
   .sidebar-header--expanded .sidebar-brand-row { gap: 6px; }
-}
-
-/* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
-.sidebar-brand-mark {
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  color: var(--accent);
 }
 
 .sidebar-brand-row :deep(.sidebar-brand) {

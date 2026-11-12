@@ -365,6 +365,43 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('sends a row click to the focused second pane of a split and marks its chat selected', async () => {
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    addOtherChat()
+    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined as never)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat', canOpenBeside: true, focusedBesideChatId: 'chat-other' },
+      global: { plugins: [router] },
+    })
+
+    const otherRow = () => wrapper.findAll('.chat-item').find(row => row.text().includes('Other chat'))!
+    const activeRow = () => wrapper.findAll('.chat-item').find(row => row.text().includes('Copy me'))!
+    expect(otherRow().classes()).toContain('active')
+    expect(activeRow().classes()).not.toContain('active')
+
+    await activeRow().trigger('click')
+    expect(wrapper.emitted('select-beside')).toEqual([[chatId]])
+    expect(switchChat).not.toHaveBeenCalled()
+
+    // The main pane focused again: a click opens the chat there, as without a split.
+    await wrapper.setProps({ focusedBesideChatId: '' })
+    expect(activeRow().classes()).toContain('active')
+    await otherRow().trigger('click')
+    expect(switchChat).toHaveBeenCalledWith('chat-other')
+    expect(wrapper.emitted('select-beside')).toHaveLength(1)
+
+    wrapper.unmount()
+  })
+
   it('lists Open beside in the row menu', async () => {
     const store = useProjectStore()
     store.activeChatId = chatId
@@ -667,6 +704,8 @@ describe('ProjectSidebar global new chat', () => {
   it('expanded_brand_row_has_bell_between_history_and_collapse', async () => {
     const wrapper = await mountSidebar('chat')
     const row = wrapper.get('.sidebar-brand-row').element
+    expect(wrapper.find('.sidebar-brand-mark').exists()).toBe(false)
+    expect(wrapper.get('.sidebar-brand .brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
     const order = Array.from(row.children).map((el) =>
       el.classList.contains('sidebar-history') ? 'history'
         : el.classList.contains('history-divider') ? 'divider'

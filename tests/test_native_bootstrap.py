@@ -1775,3 +1775,47 @@ def test_a_missing_final_native_restart_exits(
     with pytest.raises(_Exited):
         _post(client, isolated_home / "workspace")
     assert exits == [1]
+
+
+def test_ambiguous_native_finish_is_preclaim_and_retryable(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    workspace = isolated_home / "workspace"
+    for name in ("work", "personal"):
+        vault = workspace / name / "memory-vault"
+        vault.mkdir(parents=True)
+        (vault / "entity-types.yaml").write_text(
+            "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
+            encoding="utf-8",
+        )
+    real_setup = cli.setup_workspace
+    real_record = native_handoff.record_setup_completion
+
+    def must_not_run(*args, **kwargs):
+        pytest.fail("a write ran before the ambiguous vault was refused")
+
+    monkeypatch.setattr(cli, "setup_workspace", must_not_run)
+    monkeypatch.setattr(native_handoff, "record_setup_completion", must_not_run)
+
+    refused = _post(client, workspace)
+
+    assert refused.status_code == 400, refused.text
+    message = refused.json()["error"]
+    assert "personal/memory-vault" in message
+    assert "work/memory-vault" in message
+    assert restarts == []
+    assert getattr(client.app.state, "native_finish_claimed", False) is False
+    assert not native_handoff.result_path().exists()
+    assert not (launch / "com.ciao.server.plist").exists()
+
+    # The corrected request names the destination and runs exactly once.
+    monkeypatch.setattr(cli, "setup_workspace", real_setup)
+    monkeypatch.setattr(native_handoff, "record_setup_completion", real_record)
+    retried = _post(client, workspace, vault_root=str(workspace / "work" / "memory-vault"))
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["ok"] is True
+    assert restarts == [0]

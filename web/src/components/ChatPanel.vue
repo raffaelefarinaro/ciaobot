@@ -26,17 +26,18 @@
                  vertical centre. -->
             <ItemTitleRow
               class="chat-title-row"
-              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }"
+              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle, 'chat-title-row--editing': editingTitle }"
               :rail="titleRailOn && !editingTitle"
               :close-label="beside ? 'Close side chat' : 'Close chat'"
               @close="$emit('close')"
             >
               <input
                 v-if="editingTitle"
+                ref="titleInputEl"
                 class="title-input"
                 v-model="titleValue"
                 @keyup.enter="saveTitle"
-                @keyup.escape="editingTitle = false"
+                @keydown.escape.stop.prevent="cancelEditTitle"
                 @blur="saveTitle"
                 @click.stop
                 autofocus
@@ -73,7 +74,6 @@
                 @dblclick.stop="startEditTitle"
                 @click.stop
               >{{ chat.title }}</span>
-              <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
             </ItemTitleRow>
           </div>
         </div>
@@ -367,6 +367,7 @@
                   :retry="chat.retry"
                   :provider="chat.provider"
                   :streaming="view.isStreaming"
+                  :chat-id="chat.chat_id"
                   @continue="openRecoveryPicker(null)"
                   @try-now="tryRetryNow"
                   @stop="stopRetry"
@@ -406,6 +407,7 @@
                 :provider="chat.provider"
                 action-label="Retry"
                 :action-disabled="view.isStreaming"
+                :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
               </template>
@@ -534,6 +536,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
               @stop="stopRetry"
@@ -1513,7 +1516,6 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
-import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
@@ -1663,10 +1665,11 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-// `split`: two chats are on screen.
-const props = defineProps<{ chatId: string; filePinned?: boolean; plainHeader?: boolean; beside?: boolean; inactive?: boolean; split?: boolean }>()
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean }>()
 const emit = defineEmits<{
   close: []
+  // The second pane's rail picked another chat: the layout shows it in this pane.
+  'select-chat': [chatId: string]
   'open-sidebar': []
   // The title is being pulled down (px), and the pull ended (px, px per ms):
   // the layout moves the pane and decides whether to close.
@@ -1806,14 +1809,15 @@ const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
+const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
-const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
+const titleRailOn = computed(() => titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const railArrival = ref<-1 | 1 | 0>(takeChatRailArrival(props.beside))
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
@@ -4979,7 +4983,14 @@ function openRecoveryPicker(errorIdx: number | null) {
   showModelPicker.value = true
 }
 
-function startEditTitle() { titleValue.value = chat.value.title; editingTitle.value = true }
+async function startEditTitle() {
+  titleValue.value = chat.value.title
+  editingTitle.value = true
+  await nextTick()
+  titleInputEl.value?.focus()
+  titleInputEl.value?.select()
+}
+function cancelEditTitle() { titleValue.value = chat.value.title; editingTitle.value = false }
 async function saveTitle() {
   if (titleValue.value.trim() && titleValue.value !== chat.value.title) {
     await store.renameChat(chat.value.chat_id, titleValue.value.trim())
@@ -5267,7 +5278,7 @@ const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
-  const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
+  const next = titleRailOn.value && !props.beside ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
   if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
     if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
@@ -5744,7 +5755,6 @@ onMounted(() => {
    title is the one title that may take a second line, and the full title
    stays in the title attribute. `overflow-wrap: anywhere` breaks a title
    that has no spaces in it (a URL, a path). */
-.chat-title-signals { flex: none; margin-left: var(--space-1); }
 
 .chat-title-row .chat-title {
   flex: 0 1 auto;
@@ -5764,6 +5774,7 @@ onMounted(() => {
    centre its title on the chat rather than on the whole header. */
 /* ItemTitleRow's rail row, capped at the chat's reading measure. */
 .header-breadcrumb .chat-title-row--rail { max-width: var(--chat-measure); }
+.header-breadcrumb .chat-title-row--editing { flex: 1 1 auto; width: 100%; }
 
 .chat-title {
   cursor: pointer;
