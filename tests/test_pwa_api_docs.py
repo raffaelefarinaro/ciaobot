@@ -28,6 +28,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "browser Open/Run in Terminal button; host-only (session + loopback peer + "
         "loopback Host), takes an action id or a chat/project id, never a command or a path"
     ),
+    "/api/chats/{chat_id}/file-paths/resolve": (
+        "browser-only bounded completed-reply file discovery; signed session and origin, "
+        "no file content/action or agent surface"
+    ),
     "/api/auth": "browser login flow; the recipe's auth step covers this",
     "/api/auth/host-sign-in": (
         "browser login page 'Sign in on this computer'; loopback-only, opens a one-time "
