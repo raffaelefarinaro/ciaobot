@@ -174,7 +174,7 @@ describe('image-capability question card', () => {
     const respond = vi.spyOn(store, 'respondCapability')
 
     const wrapper = await mountPanel()
-    const cancel = wrapper.findAll('button.btn-sm').find(b => b.text() === 'Cancel')!
+    const cancel = wrapper.findAll('button.btn-small').find(b => b.text() === 'Cancel')!
     await cancel.trigger('click')
 
     expect(respond).toHaveBeenCalledWith(CHAT_ID, REQ_ID, 'cancel')
@@ -194,7 +194,7 @@ describe('image-capability question card', () => {
     const selector = wrapper.find('.model-selector-stub')
     expect(selector.attributes('data-disabled')).toBe('true')
     // Cancel is also disabled.
-    const cancel = wrapper.findAll('button.btn-sm').find(b => b.text() === 'Cancel')!
+    const cancel = wrapper.findAll('button.btn-small').find(b => b.text() === 'Cancel')!
     expect(cancel.attributes('disabled')).toBeDefined()
     // Countdown is clamped at 0.
     expect(card.text()).toContain('0s')

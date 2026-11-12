@@ -19,10 +19,20 @@ export const FOLDER_BROWSER_FEATURES = {
   unarchive: false, download: false, fullscreen: false, theme: false, language: false, pinned: false,
 } satisfies FeaturesConfig
 
-export async function fetchWorkspaceDir(path: string, chatId = '', signal?: AbortSignal): Promise<WorkspaceDirResult> {
+/**
+ * List a folder. With a chat or project (and no path) the engine starts in
+ * that project's own folder, not the workspace root.
+ */
+export async function fetchWorkspaceDir(
+  path: string,
+  chatId = '',
+  signal?: AbortSignal,
+  projectId = '',
+): Promise<WorkspaceDirResult> {
   const query = new URLSearchParams()
   if (path) query.set('path', path)
   if (chatId) query.set('chat_id', chatId)
+  else if (projectId) query.set('project_id', projectId)
   try {
     const resp = await fetch(`/api/workspace-dir?${query}`, { credentials: 'same-origin', signal })
     const body = await resp.json().catch(() => ({})) as Record<string, unknown>

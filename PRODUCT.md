@@ -62,7 +62,7 @@ Durable constraints:
 - The installed CLI is available as both `ciaobot` and the shorter compatibility name `ciao`; backend package and environment-variable compatibility names may continue to use `ciao`/`CIAO_*`.
 - The project is open source under the Apache 2.0 License and is maintained by Raffaele Farinaro.
 - Product communication should remain concrete, capable, and privacy-aware. It may describe verified functionality but must not imply that local-first storage means the model provider never receives data.
-- Existing identity assets include the Ciaobot mascot and product imagery and interface captures in `site/assets/img/`.
+- Existing identity assets include the Ciaobot C mark and wordmark (`web/public/brand/`) and product imagery and interface captures in `site/assets/img/`.
 
 ## Evidence on Hand
 

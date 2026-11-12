@@ -26,6 +26,10 @@ export interface UsageToday {
   tasks_completed: number | null
   avg_chats_opened_30d: number | null
   avg_messages_sent_30d: number | null
+  avg_chats_archived_30d: number | null
+  avg_memories_saved_30d: number | null
+  avg_projects_worked_on_30d: number | null
+  avg_tasks_completed_30d: number | null
 }
 
 export interface UsageDay { date: string; count: number | null }
@@ -47,7 +51,7 @@ export interface UsageStats {
 }
 
 const COUNT_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'memories_saved', 'tasks_completed', 'projects_worked_on', 'automation_runs', 'tokens'] as const
-const TODAY_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'memories_saved', 'projects_worked_on', 'tasks_completed', 'avg_chats_opened_30d', 'avg_messages_sent_30d'] as const
+const TODAY_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'memories_saved', 'projects_worked_on', 'tasks_completed', 'avg_chats_opened_30d', 'avg_messages_sent_30d', 'avg_chats_archived_30d', 'avg_memories_saved_30d', 'avg_projects_worked_on_30d', 'avg_tasks_completed_30d'] as const
 const PIPELINE_KEYS = ['proposed', 'accepted', 'notes_updated'] as const
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -90,6 +94,12 @@ export async function fetchUsageStats(workspace: string, range: StatsRange): Pro
 }
 
 export function formatCount(v: number | null): string { return v === null ? DASH : Math.round(v).toLocaleString('en-US') }
+
+/** A daily average: one decimal below 10, so a quiet row reads 0.4 rather than 0. */
+export function formatAverage(v: number | null): string {
+  if (v === null) return DASH
+  return Math.abs(v) < 10 ? String(Math.round(v * 10) / 10) : formatCount(v)
+}
 
 export function formatCompact(v: number | null): string {
   if (v === null) return DASH
@@ -138,6 +148,24 @@ export function heatmapCells(days: UsageDay[]): HeatCell[] {
   const max = Math.max(0, ...days.map(d => d.count ?? 0))
   const pad: HeatCell[] = Array.from({ length: weekdayIndex(days[0].date) }, () => ({ date: null, count: null, level: 0 }))
   return [...pad, ...days.map(d => ({ date: d.date, count: d.count, level: heatLevel(d.count, max) }))]
+}
+
+export interface HeatMonth { column: number; label: string }
+
+/** Month names over the heatmap: one at each week column where a new month starts (1-based columns). */
+export function heatmapMonths(cells: HeatCell[]): HeatMonth[] {
+  const months: HeatMonth[] = []
+  let previous = -1
+  for (let start = 0; start < cells.length; start += 7) {
+    const first = cells.slice(start, start + 7).find(c => c.date)
+    if (!first?.date) continue
+    const month = Number(first.date.slice(5, 7)) - 1
+    if (month !== previous) months.push({ column: start / 7 + 1, label: MONTHS[month]! })
+    previous = month
+  }
+  // A partial first month too close to the next label would collide with it.
+  if (months.length > 1 && months[1]!.column - months[0]!.column < 3) months.shift()
+  return months
 }
 
 export function heatCellLabel(cell: HeatCell): string {

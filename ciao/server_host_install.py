@@ -150,6 +150,7 @@ from ciao.server_host import (
     default_bundle_path,
     default_ownership_path,
     inspect_host_bundle,
+    is_adhoc_signed,
     read_host_ownership,
     read_superseded_ownership,
     verify_owned_host,
@@ -341,6 +342,18 @@ class ServerHostInstallError(ServerHostError):
     It subclasses :class:`ciao.server_host.ServerHostError` so a caller that
     catches that one type catches every refusal in the acquisition path,
     including the ones the B1 inspector raises while it inspects the bytes.
+    """
+
+
+class _SignedDowngradeRefused(ServerHostInstallError):
+    """:data:`POLICY_REFUSED` for a Developer ID signed host the release would
+    replace with the legacy ad-hoc one.
+
+    Install reports it as plain ``POLICY_REFUSED``; native repair, which replaces
+    every other policy-refused host, must refuse this one too (#2504): the swap
+    would discard the signed host and the privacy grants made to it. Under repair
+    only it also covers a host no record proves whose signature is not verifiably
+    ad-hoc (#2850).
     """
 
 
@@ -755,6 +768,8 @@ def _classify_host(
     record_path: Path,
     runner: Runner,
     policy: _EntryPolicy,
+    *,
+    repair: bool = False,
 ) -> tuple[str, HostOwnership | None]:
     """Classify what is at the target for the selected policy.
 
@@ -766,7 +781,9 @@ def _classify_host(
     legacy revision-4 host while the release selects the signed one, is
     ``replace``. Everything else is refused and left untouched, and so is a
     signed host this run may not rotate: a signed-to-legacy downgrade and a
-    different Developer ID team are :data:`POLICY_REFUSED`.
+    different Developer ID team are :data:`POLICY_REFUSED`. With ``repair=True`` and
+    a legacy policy, a host no record proves is refused too unless
+    :func:`is_adhoc_signed` verifies it as ad-hoc (#2850).
     """
     if os.path.islink(bundle):
         raise ServerHostInstallError(
@@ -782,6 +799,16 @@ def _classify_host(
                 bundle, ownership_path=record_path, runner=runner
             )
         except ServerHostError as exc:
+            if repair and not policy.signed and not is_adhoc_signed(bundle, runner=runner):
+                # #2850: no record proves it, so it may be a signed host whose
+                # record was lost. Repair may turn only a verified ad-hoc bundle
+                # into the legacy host.
+                raise _SignedDowngradeRefused(
+                    f"the host at {bundle} is not proven ours ({current_error}) and "
+                    f"is not verifiably ad-hoc signed; this release selects the "
+                    f"ad-hoc host, so it is left untouched",
+                    code=POLICY_REFUSED,
+                ) from exc
             raise ServerHostInstallError(
                 f"there is already a host at {bundle} that this installer cannot "
                 f"prove it owns ({current_error}); it is left untouched",
@@ -790,7 +817,7 @@ def _classify_host(
         return _REPLACE, superseded
     if not policy.signed:
         if current.signing is not None:
-            raise ServerHostInstallError(
+            raise _SignedDowngradeRefused(
                 f"the host at {bundle} is a Developer ID signed host and this "
                 f"release selects the ad-hoc one; a signed host is never replaced "
                 f"by a legacy one",
@@ -2748,8 +2775,11 @@ def repair_server_host(
 
     Still refused, with nothing touched: a symlink at the bundle path, an unfinished
     upgrade journal, an archive that fails :func:`verify_host_archive` or
-    :func:`inspect_host_bundle`, and an existing host's symlinked or non-regular
-    ownership record.
+    :func:`inspect_host_bundle`, an existing host's symlinked or non-regular
+    ownership record, and a Developer ID signed host when ``entry`` selects the
+    legacy ad-hoc one (:data:`POLICY_REFUSED`, #2504), and, when ``entry`` selects
+    the legacy host, a host no record proves whose bundle is not verifiably ad-hoc
+    signed (:data:`POLICY_REFUSED`, #2850).
 
     Replacing a host changes its code identity, so macOS privacy grants made to the
     old host, such as Full Disk Access, may have to be granted again.
@@ -2773,7 +2803,11 @@ def repair_server_host(
     with _upgrade_lock():
         _refuse_unfinished_journal(bundle, record_path)
         try:
-            kind, existing = _classify_host(bundle, record_path, runner, policy)
+            kind, existing = _classify_host(
+                bundle, record_path, runner, policy, repair=True
+            )
+        except _SignedDowngradeRefused:
+            raise
         except ServerHostInstallError as exc:
             if exc.code not in (HOST_EXISTS, POLICY_REFUSED):
                 raise

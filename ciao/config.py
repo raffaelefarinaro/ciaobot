@@ -882,7 +882,10 @@ class CiaoConfig:
         if not name or len(Path(name).parts) != 1:
             raise ValueError("workspace name must identify one vault folder")
         if self.agent_root(name) != self.workspace_root:
-            return self.agent_vault_root(name)
+            # Derived directly, not through agent_vault_root: that resolver
+            # follows the registry, and a registered nonstandard root must not
+            # become the canonical destination merely by being registered.
+            return self.agent_root(name) / self.vault_root.name
         candidate = self.vault_root / name
         if candidate.is_symlink():
             raise ValueError("workspace vault folder must not be a symlink")
@@ -944,8 +947,19 @@ class CiaoConfig:
 
         Written as ``agent_root / <vault dir name>`` because that is literally
         what the migration produces: ``workspace_reroot.plan`` moves each vault
-        to ``<name>/<vault dir name>``.
+        to ``<name>/<vault dir name>``. A registered per-root workspace is the
+        exception: its registered root is its vault (notes ownership), so an
+        adopted folder such as ``work/brain`` or ``.`` owns its own aggregates.
         """
+        if self._rerooted() and self.workspace(name) is not None:
+            # A registered per-root workspace owns the vault its notes resolve
+            # to, which may be an explicitly adopted folder rather than the
+            # standard one under its agent root. A registration still pointing
+            # at the pre-rerooting shared subfolder is the superseded standard,
+            # not an adoption, so it keeps the derived location.
+            registered = self.workspace_vault_root(name)
+            if registered != self.vault_root / name:
+                return registered
         return self.agent_root(name) / self.vault_root.name
 
     @property

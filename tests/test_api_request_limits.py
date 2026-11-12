@@ -45,7 +45,7 @@ def _app() -> Starlette:
 
     return Starlette(routes=[
         Route("/api/write", receive_body, methods=["POST"]),
-        Route("/api/projects/{project_id}/files", receive_body, methods=["POST"]),
+        Route("/api/chats/{chat_id}/attachments", receive_body, methods=["POST"]),
         Route("/api/skills/import", receive_body, methods=["POST"]),
         Route("/api/workspace-file", receive_body, methods=["POST"]),
         Route("/api/echo", echo_body, methods=["POST"]),
@@ -124,7 +124,7 @@ def test_false_small_content_length_does_not_bypass_limit() -> None:
 
 def test_large_upload_route_gets_exception_but_generic_multipart_does_not() -> None:
     client = TestClient(ApiRequestBodyLimitMiddleware(_app()))
-    admitted = client.post("/api/projects/p/files", content=b"x" * (DEFAULT_BODY_LIMIT + 1))
+    admitted = client.post("/api/chats/c/attachments", content=b"x" * (DEFAULT_BODY_LIMIT + 1))
     refused = client.post("/api/write", content=b"x" * (DEFAULT_BODY_LIMIT + 1), headers={"content-type": "multipart/form-data; boundary=x"})
     assert admitted.status_code == 200
     assert refused.status_code == 413
@@ -252,7 +252,7 @@ def test_a_deep_body_labelled_multipart_on_a_json_route_is_still_scanned() -> No
 
 
 @pytest.mark.parametrize(
-    "path", ["/api/projects/p/files", "/api/chats/c/attachments", "/api/chats/c/images", "/api/skills/import"]
+    "path", ["/api/chats/c/attachments", "/api/chats/c/images", "/api/skills/import"]
 )
 def test_upload_routes_take_random_binary_unscanned(path: str) -> None:
     # Random bytes trip the bracket-depth scan more often the longer they are
@@ -336,7 +336,7 @@ def test_starlette_middleware_topology_matches_route_exceptions_and_default() ->
     client = TestClient(app, raise_server_exceptions=False)
     client.cookies.set("ciao_session", serializer.dumps({"user": "owner"}))
     oversized_upload = client.post(
-        "/api/projects/p/files", content=b"x" * (DEFAULT_BODY_LIMIT + 1)
+        "/api/chats/c/attachments", content=b"x" * (DEFAULT_BODY_LIMIT + 1)
     )
     oversized_default = client.post("/api/write", content=b"x" * (DEFAULT_BODY_LIMIT + 1))
     assert oversized_upload.status_code == 200
@@ -459,7 +459,6 @@ def test_create_app_registers_limit_middleware_and_matches_real_routes(tmp_path:
     middleware = ApiRequestBodyLimitMiddleware(app)
     for method, path, limit in (
         ("POST", "/api/chats/c/attachments", UPLOAD_BODY_LIMIT),
-        ("POST", "/api/projects/p/files", UPLOAD_BODY_LIMIT),
         ("POST", "/api/chats/c/images", IMAGE_BODY_LIMIT),
         ("POST", "/api/workspace-file", WORKSPACE_WRITE_BODY_LIMIT),
         ("POST", "/api/chats/c/attachments/near-miss", DEFAULT_BODY_LIMIT),
@@ -507,7 +506,6 @@ def test_exact_route_limits_are_admitted_without_allocating_the_body(tmp_path: P
 
     for path, cap in (
         ("/api/chats/c/attachments", 513 * 1024 * 1024),
-        ("/api/projects/p/files", 513 * 1024 * 1024),
         ("/api/chats/c/images", 1001 * 1024 * 1024),
         ("/api/workspace-file", 13 * 1024 * 1024),
         ("/api/skills/import", 10 * 1024 * 1024),
@@ -524,7 +522,6 @@ def test_method_and_path_near_misses_get_default_cap(tmp_path: Path) -> None:
         ("GET", "/api/chats/c/images"),
         ("PUT", "/api/chats/c/attachments"),
         ("POST", "/api/chats/c/images/extra"),
-        ("POST", "/api/projects/p/files/extra"),
         ("POST", "/api/workspace-file/extra"),
     ):
         scope = {"type": "http", "method": method, "path": path, "headers": []}
@@ -549,7 +546,6 @@ def test_documented_limit_plus_one_is_rejected_without_reading(tmp_path: Path) -
 
     for path, cap in (
         ("/api/chats/c/attachments", 513 * 1024 * 1024),
-        ("/api/projects/p/files", 513 * 1024 * 1024),
         ("/api/chats/c/images", 1001 * 1024 * 1024),
         ("/api/workspace-file", 13 * 1024 * 1024),
         ("/api/skills/import", 10 * 1024 * 1024),
@@ -581,7 +577,6 @@ def test_factory_route_ceilings_and_plus_one_are_checked_from_length_only(tmp_pa
 
     for path, cap in (
         ("/api/chats/c/attachments", UPLOAD_BODY_LIMIT),
-        ("/api/projects/p/files", UPLOAD_BODY_LIMIT),
         ("/api/chats/c/images", IMAGE_BODY_LIMIT),
         ("/api/workspace-file", WORKSPACE_WRITE_BODY_LIMIT),
     ):
@@ -867,7 +862,6 @@ def test_rolled_multipart_is_parsed_by_request_form(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("path", [
-    "/api/projects/p/files",
     "/api/chats/c/attachments",
     "/api/chats/c/images",
 ])
@@ -903,7 +897,6 @@ def test_multipart_upload_routes_skip_json_preparse_and_replay_rolled_body(
         return Response("ok")
 
     route_path = {
-        "/api/projects/p/files": "/api/projects/{project_id}/files",
         "/api/chats/c/attachments": "/api/chats/{chat_id}/attachments",
         "/api/chats/c/images": "/api/chats/{chat_id}/images",
     }[path]

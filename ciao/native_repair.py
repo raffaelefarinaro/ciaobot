@@ -452,8 +452,10 @@ def _plan_host(
     try:
         policy = server_host_install._entry_policy(entry)
         state, _ = server_host_install._classify_host(
-            bundle, record, subprocess.run, policy
+            bundle, record, subprocess.run, policy, repair=True
         )
+    except server_host_install._SignedDowngradeRefused:
+        raise _Refusal("unknown_state") from None
     except ServerHostInstallError as exc:
         if exc.code not in {server_host_install.HOST_EXISTS, server_host_install.POLICY_REFUSED}:
             raise _Refusal("unknown_state") from None
