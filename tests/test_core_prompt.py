@@ -106,7 +106,7 @@ def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "`AGENTS.md` is the authoritative workspace guide and bounded-memory source" in append
+    assert "`AGENTS.md` is the authoritative native workspace guide and bounded-memory source" in append
     assert "Do not duplicate its memory" in append
     assert "competing `CLAUDE.md`" in append
     assert "ciao vault search" in append
