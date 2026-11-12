@@ -119,6 +119,21 @@ describe('MemoryMapView keyboard and touch access', () => {
     vi.restoreAllMocks()
   })
 
+  it('loads in the shared skeleton, drawn as nodes and links', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return new Promise(() => {})
+      return Promise.resolve({})
+    })
+    const wrapper = await mountView()
+    await nextTick()
+    const skeleton = wrapper.get('.skeleton.skeleton--graph')
+    expect(skeleton.attributes('role')).toBe('status')
+    expect(skeleton.attributes('aria-label')).toBe('Loading vault graph')
+    expect(wrapper.find('.mm-canvas-wrap').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Mapping your vault')
+    wrapper.unmount()
+  })
+
   async function mountList() {
     const wrapper = await mountView()
     await flushPromises()

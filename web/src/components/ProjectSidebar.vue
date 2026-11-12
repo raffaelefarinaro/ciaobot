@@ -332,19 +332,8 @@
          Projects label in the chat sidebar. -->
     <template v-if="!collapsed && (mode === 'schedules')">
       <div ref="schedulesListEl" class="schedules-list">
-        <template v-if="taskStore.loading">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading automations…</span>
-          </div>
-          <div aria-hidden="true" class="mm-skeleton-block">
-            <span class="mm-shimmer-line" style="width: 100%; height: 36px; margin-bottom: 8px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 36px; margin-bottom: 8px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 36px;"></span>
-          </div>
-        </template>
+        <SidebarListSkeleton v-if="!taskStore.schedulesLoaded && !taskStore.scheduleLoadError" label="Loading automations" :rows="3" />
         <template v-else>
-
           <template v-if="scheduleGroups.oneOffs.length">
           <div class="schedule-group schedule-group--once">
             <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
@@ -447,14 +436,15 @@
               <span class="settings-nav-heading-name">{{ workspaceLabel(store.activeWorkspace) || 'Workspace' }}</span>
             </template>
           </h2>
-          <router-link
+          <SidebarRow
             v-for="item in group.items"
             :key="item.to"
             :to="item.to"
             class="settings-nav-item"
-            :class="{ active: route.path === item.to }"
+            :text="item.label"
+            :active="route.path === item.to"
             :aria-current="route.path === item.to ? 'page' : undefined"
-          >{{ item.label }}</router-link>
+          />
         </div>
       </nav>
     </template>
@@ -467,41 +457,32 @@
       <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
         <template v-for="(group, gi) in MEMORY_NAV" :key="gi">
           <h2 v-if="group.label" class="sidebar-list-label">{{ group.label }}</h2>
-          <router-link
+          <SidebarRow
             v-for="item in group.items"
             :key="item.section"
             :to="memorySectionPath(item.section)"
             class="settings-nav-item memory-nav-item"
-            :class="{ active: mm.section === item.section }"
+            :text="item.label"
+            :active="mm.section === item.section"
             :aria-current="mm.section === item.section ? 'page' : undefined"
             :aria-label="memoryNavLabel(item)"
           >
-            <span class="memory-nav-label">{{ item.label }}</span>
             <span
               v-if="memoryNavCount(item.section) !== null"
               class="memory-nav-count"
               :class="{ 'memory-nav-count--due': item.due && (memoryNavCount(item.section) ?? 0) > 0 }"
               aria-hidden="true"
             >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
-          </router-link>
+          </SidebarRow>
         </template>
       </nav>
 
       <div v-if="mm.section === 'map'" class="mm-sidebar-scroll">
         <template v-if="mm.loading">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading vault graph…</span>
-          </div>
           <div class="mm-search">
             <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
           </div>
-          <div class="mm-skeleton-block" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
-          </div>
+          <SidebarListSkeleton class="mm-sidebar-skeleton" label="Loading vault graph" :rows="4" />
         </template>
         <template v-else>
           <div class="mm-search">
@@ -541,15 +522,7 @@
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <template v-if="!store.bootstrapped && store.projects.length === 0">
-          <div class="project-list" role="status" aria-live="polite" aria-label="Loading chats">
-            <div v-for="i in 3" :key="i" class="project-group">
-              <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
-              <div class="chat-list">
-                <div class="sidebar-row-skeleton chat-item"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
-                <div class="sidebar-row-skeleton chat-item"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
-              </div>
-            </div>
-          </div>
+          <SidebarListSkeleton label="Loading chats" :groups="3" :rows="2" nested />
         </template>
         <template v-else>
           <!-- Recent chats (max 5) -->
@@ -1020,6 +993,8 @@ import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWo
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
 import SidebarRow from './SidebarRow.vue'
+import SidebarListSkeleton from './SidebarListSkeleton.vue'
+import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV_GROUPS } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
@@ -1313,56 +1288,16 @@ const workspaceSchedules = useWorkspaceSchedules()
 // The sidebar's automation groups, in the order the open automation's title rail walks.
 const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))
 
-// ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
+// ── Keyboard navigation for the schedules list: one flat list, the same
+// roaming as Home's chats and the Automations overview (lib/listRoaming.ts). ──
 const schedulesListEl = ref<HTMLElement | null>(null)
-
-function focusableSchedules(): HTMLElement[] {
-  const root = schedulesListEl.value
-  if (!root) return []
-  return Array.from(root.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])'))
-}
-
-function focusScheduleElement(element: HTMLElement) {
-  element.focus()
-  element.scrollIntoView({ block: 'nearest' })
-}
-
-function clamp(value: number, lower: number, upper: number): number {
-  return Math.min(upper, Math.max(lower, value))
-}
 
 function onArrow(key: string): boolean {
   if (props.collapsed) return false
-  const items = focusableSchedules()
-  if (!items.length) return false
-  const active = document.activeElement as HTMLElement | null
-  let index = items.indexOf(active as HTMLElement)
-  if (index < 0) {
-    // Start from the active route, or the first item. This mirrors the
-    // homepage's anchorLane logic but for a flat list.
-    const activeLink = rootActiveScheduleElement(items)
-    if (activeLink) {
-      index = items.indexOf(activeLink)
-    } else {
-      items[0]?.focus()
-      items[0]?.scrollIntoView({ block: 'nearest' })
-      return true
-    }
-  }
-  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
-  if (!delta) return false
-  const nextIndex = clamp(index + delta, 0, items.length - 1)
-  if (nextIndex === index) return true
-  focusScheduleElement(items[nextIndex])
-  return true
-}
-
-function rootActiveScheduleElement(items: HTMLElement[]): HTMLElement | null {
-  // The router-link for the current /schedules/:id carries .active (or
-  // .router-link-active). Prefer it so arrows start where the user is.
-  const active = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
-  if (active && items.includes(active)) return active
-  return null
+  const rows = Array.from(schedulesListEl.value?.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])') ?? [])
+  // Arrows start where the user is: the row for the open automation.
+  const current = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
+  return roamFocus([rows], key, 'list', () => listAnchor(rows, current))
 }
 
 defineExpose({ onArrow })
@@ -2688,13 +2623,6 @@ async function confirmDeleteChat(chatId: string) {
   padding-left: 22px;
   margin-left: 4px;
 }
-.sidebar-row-skeleton {
-  display: flex;
-  align-items: center;
-  min-height: var(--touch);
-  pointer-events: none;
-}
-
 /* Interval-automation marker on a chat row. Accent while the cadence is live,
    muted when it is paused, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
@@ -3291,42 +3219,12 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-nav-item {
-  display: flex;
-  align-items: center;
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: 7px;
-  text-decoration: none;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-}
-.settings-nav-item:hover {
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-.settings-nav-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.settings-nav-item.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-@media (pointer: coarse) {
-  .settings-nav-item { min-height: var(--touch); }
-}
-
-/* Memory's sections: Settings' list with a count at the row's end. */
+/* Memory's sections: Settings' rows (SidebarRow) with a count at the row's end.
+   The fill alone marks the open section, as for chats. */
 .memory-nav-list .sidebar-list-label { margin-top: 8px; }
 .memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
-.memory-nav-item { gap: 8px; }
-.memory-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-nav-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.memory-nav-count { flex: none; padding-right: 6px; color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .memory-nav-count--due { color: var(--accent); font-weight: 650; }
-.memory-nav-item.active { font-weight: 600; }
 
 /* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {
@@ -3362,57 +3260,10 @@ async function confirmDeleteChat(chatId: string) {
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-.mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
-.mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
-.mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
-.mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
-.mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
-.mm-stat--skeleton { display: flex; flex-direction: column; justify-content: center; gap: 0; min-height: 52px; }
 
-.mm-loading-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  margin-bottom: var(--space-3);
-}
-.mm-shimmer-line {
-  display: block;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
-  background-size: 200% 100%;
-  /* The skeleton line keeps a sweep of its own. The naming placeholder's
-     keyframes live in components/titleShimmer.css, and a scoped style block
-     cannot name the @keyframes another block declares: Vue renames them per
-     block, so the name here would never resolve. */
-  animation: mm-shimmer-sweep 1.4s ease-in-out infinite;
-}
-@keyframes mm-shimmer-sweep {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-.mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
-.mm-shimmer-line--l { width: 78%; height: 8px; }
-.mm-skeleton-block { margin-top: var(--space-3); }
-@media (prefers-reduced-motion: reduce) {
-  .mm-shimmer-line { animation: none; }
-}
-.history-loading-spinner {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: history-loading-spin 0.8s linear infinite;
-}
-@keyframes history-loading-spin {
-  to { transform: rotate(360deg); }
-}
 
 .mm-search { margin-top: var(--space-3); }
+.mm-sidebar-skeleton { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
 
 .mm-chip-row { display: flex; flex-direction: column; gap: 2px; }

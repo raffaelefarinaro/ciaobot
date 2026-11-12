@@ -8,6 +8,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { mount } from '@vue/test-utils'
@@ -297,6 +299,29 @@ describe('ProjectSidebar review section', () => {
     mm.loadedWorkspace = 'personal'
     await nextTick()
     expect(map.get('.memory-nav-count').text()).toBe('1')
+  })
+
+  it('loads the map\'s filters in the sidebar row shape', async () => {
+    const mm = useMemoryMapStore()
+    mm.setSection('map')
+    mm.loading = true
+    const wrapper = await mountSidebar()
+    const skeleton = wrapper.get('.mm-sidebar-scroll .sidebar-skeleton')
+    expect(skeleton.text()).toBe('Loading vault graph…')
+    expect(skeleton.attributes('aria-label')).toBeUndefined()
+    expect(skeleton.findAll('.sidebar-row--placeholder').length).toBeGreaterThan(0)
+    expect(wrapper.find('.mm-sidebar-scroll input').attributes('disabled')).toBeDefined()
+  })
+
+  it('draws the sections as sidebar rows with no bold for the open one', async () => {
+    useMemoryMapStore().setSection('review')
+    const wrapper = await mountSidebar()
+    const current = wrapper.get('.memory-nav-item[aria-current="page"]')
+    expect(current.classes()).toEqual(expect.arrayContaining(['sidebar-row', 'active']))
+    expect(current.get('.sidebar-row-title').text()).toBe('To decide')
+    const source = readFileSync(join(__dirname, '..', 'ProjectSidebar.vue'), 'utf8')
+    expect(source).not.toMatch(/\.memory-nav-item\.active\s*\{[^}]*font-weight/)
+    expect(source).not.toMatch(/\.settings-nav-item\s*\{/)
   })
 
   it('marks the section on screen as the current page', async () => {
