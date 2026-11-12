@@ -179,22 +179,6 @@
           />
         </section>
 
-        <!-- The terminal is not a repository feature. A project without a
-             repository still needs a shell — a provider sign-in, an install,
-             an MCP server that stopped answering — so the terminal has a
-             section of its own, outside the repository's, and every project
-             has one. -->
-        <section class="project-section project-terminal" aria-labelledby="project-terminal-title">
-          <div class="section-head">
-            <h3 id="project-terminal-title">Terminal</h3>
-          </div>
-          <p class="section-hint">
-            A shell on the engine's own machine, in the linked repository or the
-            workspace folder. Nothing runs until you start a session.
-          </p>
-          <BrowserTerminalButton :project-id="project.project_id" />
-        </section>
-
         <section class="project-section" aria-labelledby="project-chats-title">
           <div class="section-head">
             <h3 id="project-chats-title">Chats</h3>
@@ -312,32 +296,51 @@
         </section>
       </div>
 
-      <aside class="page-rail project-rail" aria-label="Project summary">
-        <section class="rail-section">
-          <h3 class="rail-title">Now</h3>
-          <div class="rail-kvs">
-            <div class="rail-kv"><span>Need you</span><strong :class="{ 'rail-attention': needsInputCount > 0 }">{{ needsInputCount }}</strong></div>
-            <div class="rail-kv"><span>Working</span><strong>{{ workingCount }}</strong></div>
-            <div class="rail-kv"><span>Unread</span><strong>{{ totalUnread }}</strong></div>
-            <div class="rail-kv"><span>Active chats</span><strong>{{ activeChats.length }}</strong></div>
-            <div v-if="archiveData" class="rail-kv"><span>Archived</span><strong>{{ archiveData.total }}</strong></div>
-            <div v-if="project.created_at" class="rail-kv"><span>Created</span><strong>{{ formatDate(project.created_at) }}</strong></div>
+      <!-- Laid out like Chat details: one window of hairline-separated
+           sections in the chat rail's row grammar (chatDetails.css), so a
+           project and its chats read the same. -->
+      <aside class="page-rail project-rail" :aria-labelledby="`${uid}-rail-title`">
+        <div class="project-rail-head">
+          <h2 :id="`${uid}-rail-title`" class="rail-title">Project details</h2>
+        </div>
+        <!-- Ways out of the page, like Chat details' Open section. The
+             terminal is not a repository feature: every project has one. -->
+        <section class="cd-section cd-block project-rail-open" :aria-labelledby="`${uid}-rail-open`">
+          <div class="cd-head"><h3 :id="`${uid}-rail-open`" class="cd-heading">Open</h3></div>
+          <div class="cd-rows">
+            <BrowserTerminalButton :project-id="project.project_id" />
+            <!-- The project's files live in the folder browser, opened at
+                 this project's folder, not in a list on this page. -->
+            <button v-if="project.vault_folder" type="button" class="cd-row cd-row--link rail-browse" @click="browseProjectFolder">
+              <AppIcon class="cd-icon" name="folder" />
+              <span class="cd-main">
+                <span class="cd-primary">Browse files</span>
+                <span class="cd-detail cd-mono">{{ project.vault_folder }}</span>
+              </span>
+              <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+            </button>
+            <p v-if="browseError" class="cd-detail cd-detail--error rail-browse-error" role="alert">{{ browseError }}</p>
+            <button v-if="project.vault_doc_path" type="button" class="cd-row cd-row--link rail-doc" @click="openContextDoc">
+              <AppIcon class="cd-icon" name="doc" />
+              <span class="cd-main">
+                <span class="cd-primary">Project doc</span>
+                <span class="cd-detail cd-mono">{{ project.vault_doc_path }}</span>
+              </span>
+              <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+            </button>
           </div>
+          <p v-if="!project.vault_folder" class="cd-empty">No vault folder: this project's chats and context live in Ciaobot.</p>
         </section>
-        <section class="rail-section">
-          <h3 class="rail-title">Lives in</h3>
-          <p v-if="project.vault_folder" class="rail-path"><code>{{ project.vault_folder }}</code></p>
-          <p v-else class="rail-note">No vault folder: this project's chats and context live in Ciaobot.</p>
-          <p v-if="project.vault_doc_path" class="rail-note">
-            Project doc <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
-          </p>
-          <!-- The project's files live in the folder browser, opened at this
-               project's folder, rather than in a list on this page. -->
-          <button v-if="project.vault_folder" type="button" class="btn-small rail-browse" @click="browseProjectFolder">
-            <AppIcon name="folder" :size="16" />
-            Browse files
-          </button>
-          <p v-if="browseError" class="rail-note rail-browse-error" role="alert">{{ browseError }}</p>
+        <section class="cd-section cd-block project-rail-now" :aria-labelledby="`${uid}-rail-now`">
+          <div class="cd-head"><h3 :id="`${uid}-rail-now`" class="cd-heading">Now</h3></div>
+          <div class="cd-rows">
+            <div class="cd-row rail-kv"><span class="cd-primary">Need you</span><span class="cd-value" :class="{ 'rail-attention': needsInputCount > 0 }">{{ needsInputCount }}</span></div>
+            <div class="cd-row rail-kv"><span class="cd-primary">Working</span><span class="cd-value">{{ workingCount }}</span></div>
+            <div class="cd-row rail-kv"><span class="cd-primary">Unread</span><span class="cd-value">{{ totalUnread }}</span></div>
+            <div class="cd-row rail-kv"><span class="cd-primary">Active chats</span><span class="cd-value">{{ activeChats.length }}</span></div>
+            <div v-if="archiveData" class="cd-row rail-kv"><span class="cd-primary">Archived</span><span class="cd-value">{{ archiveData.total }}</span></div>
+            <div v-if="project.created_at" class="cd-row rail-kv"><span class="cd-primary">Created</span><span class="cd-value">{{ formatDate(project.created_at) }}</span></div>
+          </div>
         </section>
       </aside>
     </div>
@@ -1029,6 +1032,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 
 <style scoped src="./railMotion.css"></style>
 <style scoped src="./headerFold.css"></style>
+<style scoped src="./chatDetails.css"></style>
 
 <style scoped>
 .project-view {
@@ -1233,16 +1237,6 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 
 .repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
 .repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
-
-/* The terminal's button is a block of its own under the section's sentence,
-   so it is a 44px target on touch — the same box the chat rail gives it.
-   The colour is the page's action colour: this page's actions are links, and
-   a quiet grey one alone under a heading would read as prose. */
-.project-terminal :deep(.terminal-button) {
-  display: block;
-  margin-top: var(--space-2);
-  color: var(--accent);
-}
 
 .text-action:disabled {
   cursor: default;
@@ -1510,38 +1504,42 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   color: var(--fg2);
 }
 
-/* Rail ----------------------------------------------------------------- */
-.project-rail .rail-title {
-  margin-top: 0;
-}
-
-.rail-path {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.rail-path code {
-  color: var(--fg2);
-  font-family: var(--font-mono);
+/* Rail: the Chat details window (ChatPanel .chat-rail) — the sidebar's
+   surface, a 1px border and a large radius, sections split by one hairline. */
+.project-rail {
+  align-self: start;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg2);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
   font-size: var(--text-sm);
 }
-
-.rail-browse {
-  display: inline-flex;
+:global(:root.theme-light) .project-rail {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
+}
+/* The chat rail's width: the two rails are the same window. */
+.project-grid { --page-rail: 320px; }
+/* Chat details' 44px title bar (ChatPanel .chat-rail-head), without its
+   close button: the project rail is not a drawer. */
+.project-rail-head {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: var(--space-2);
-  min-height: var(--touch);
+  min-height: 44px;
+  margin: -16px -16px 16px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
 }
-
-.rail-browse-error {
-  color: var(--error);
-}
-
-.project-rail .link-btn {
-  overflow-wrap: anywhere;
-  text-align: left;
-}
+.project-rail-head .rail-title { margin-bottom: 0; }
+.project-rail > .cd-block { padding: 14px 0 12px; }
+.project-rail-head + .cd-block { padding-top: 2px; }
+.project-rail > .cd-block:last-child { padding-bottom: 0; }
+.project-rail > .cd-block + .cd-block { border-top: 1px solid var(--border); }
+/* A count row: label and value, no icon column. */
+.rail-kv { grid-template-columns: minmax(0, 1fr) auto; min-height: 32px; }
+.rail-kv .rail-attention { color: var(--warning); }
+.rail-browse-error { margin: 2px 0 4px; }
 
 @media (pointer: coarse) {
   .text-action,

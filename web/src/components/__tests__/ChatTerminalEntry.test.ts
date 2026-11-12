@@ -294,7 +294,7 @@ describe('the ways into the browser terminal', () => {
 
     // The repository section carries the checkout facts, not a second way in.
     expect(wrapper.find('.chat-repo-section').exists()).toBe(true)
-    expect(wrapper.find('.chat-repo-section').text()).not.toContain('Open in Terminal')
+    expect(wrapper.find('.chat-repo-section .terminal-row').exists()).toBe(false)
     const entries = wrapper.findAll('.chat-rail-terminal button')
     expect(entries).toHaveLength(1)
   })
@@ -317,9 +317,9 @@ describe('the ways into the browser terminal', () => {
     // repository of its own unless one is linked.
     const wrapper = await mountProject(makeProject({ name: 'General' }))
 
-    const section = wrapper.get('.project-terminal')
-    const button = section.get('button')
-    expect(button.text()).toBe('Open in Terminal')
+    // The rail's Open section carries it, as Chat details does for a chat.
+    const button = wrapper.get('.project-rail-open .terminal-row')
+    expect(button.text()).toContain('Terminal')
     await button.trigger('click')
     await flushPromises()
 
@@ -334,7 +334,7 @@ describe('the ways into the browser terminal', () => {
     // An auto project with no repository has no repository section at all —
     // and still has one way into the terminal.
     expect(wrapper.find('.project-repo').exists()).toBe(false)
-    expect(wrapper.findAll('.project-terminal button')).toHaveLength(1)
+    expect(wrapper.findAll('.project-rail-open .terminal-row')).toHaveLength(1)
   })
 
   it('gives a project with a repository exactly one terminal entry', async () => {
@@ -342,9 +342,8 @@ describe('the ways into the browser terminal', () => {
 
     // The repository section carries the checkout facts, not a second way in.
     expect(wrapper.find('.project-repo').exists()).toBe(true)
-    expect(wrapper.get('.project-repo').text()).not.toContain('Open in Terminal')
-    const entries = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
-    expect(entries).toHaveLength(1)
+    expect(wrapper.find('.project-repo .terminal-row').exists()).toBe(false)
+    expect(wrapper.findAll('.terminal-row')).toHaveLength(1)
   })
 
   it('mounts the terminal panel when the signal was already set', async () => {

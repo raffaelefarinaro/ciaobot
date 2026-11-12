@@ -292,7 +292,7 @@ describe('ProjectView layout', () => {
     const rows = Object.fromEntries(
       wrapper.findAll('.project-rail .rail-kv').map(row => [
         row.get('span').text(),
-        row.get('strong').text(),
+        row.get('.cd-value').text(),
       ]),
     )
     expect(rows['Need you']).toBe('2')

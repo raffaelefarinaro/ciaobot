@@ -1354,7 +1354,7 @@
         <div class="cd-head"><h3 :id="domId('chat-rail-open')" class="cd-heading">Open</h3></div>
         <div class="cd-rows">
           <div class="chat-rail-terminal">
-            <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
+            <BrowserTerminalButton :chat-id="chat.chat_id" />
           </div>
           <button type="button" class="cd-row cd-row--link chat-rail-browse" aria-label="Browse files" @click="openWorkspaceFolder">
             <AppIcon class="cd-icon" name="folder" />

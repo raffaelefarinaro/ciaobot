@@ -1,8 +1,9 @@
 /*
  * Chat details' one section and row grammar (DESIGN.md, Chat details).
- * Shared by ChatPanel's rail and the section components it renders; each
- * pulls it in with `<style scoped src="./chatDetails.css"></style>`, so the
- * rules compile per component and reach nothing outside Chat details.
+ * Shared by ChatPanel's rail, the section components it renders and the
+ * project page's rail, which is laid out like Chat details; each pulls it in
+ * with `<style scoped src="./chatDetails.css"></style>`, so the rules compile
+ * per component and reach nothing else.
  * The `cd-` prefix is used nowhere else in web/src or web/e2e.
  */
 .cd-section { min-width: 0; }

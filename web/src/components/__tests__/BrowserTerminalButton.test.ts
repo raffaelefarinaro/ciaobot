@@ -102,9 +102,9 @@ describe('BrowserTerminalButton', () => {
     wrapper.unmount()
   })
 
-  it('renders the row variant as the Terminal row of Chat details', async () => {
+  it('renders as the Terminal row of Chat details', async () => {
     const store = useTerminalStore()
-    const wrapper = mount(BrowserTerminalButton, { props: { chatId: 'c1', variant: 'row' } })
+    const wrapper = mount(BrowserTerminalButton, { props: { chatId: 'c1' } })
     const button = wrapper.get('button')
     expect(button.classes()).toContain('cd-row')
     expect(button.classes()).toContain('cd-row--link')
