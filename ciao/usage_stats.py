@@ -44,9 +44,18 @@ logger = logging.getLogger(__name__)
 
 RANGES: tuple[int, ...] = (7, 30, 90, 365)
 DEFAULT_RANGE = 30
-DAILY_DAYS = 182
+DAILY_DAYS = 364
 AVG_DAYS = 30
 TOP_PROJECTS = 8
+# The Today rows Home shows; each carries its average over the AVG_DAYS before today.
+_TODAY_KEYS = (
+    "chats_opened",
+    "messages_sent",
+    "chats_archived",
+    "memories_saved",
+    "projects_worked_on",
+    "tasks_completed",
+)
 
 # Mirrors ``CiaoControlPlane._ENGINE_HELPER_KINDS``: helper chats the engine
 # starts from its own prompt, so they are not chats a person opened.
@@ -554,6 +563,7 @@ def build_response(
     previous = pick(_days(today - timedelta(days=range_days), range_days))
     prior = pick(_days(today - timedelta(days=1), AVG_DAYS))
     today_totals = _totals(pick([today]))
+    prior_daily = [_totals([bucket]) for bucket in prior]
 
     project_counts: dict[str, int] = {}
     hours = [0] * 24
@@ -579,14 +589,11 @@ def build_response(
         "range_days": range_days,
         "generated_at": generated_at.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "today": {
-            "chats_opened": today_totals["chats_opened"],
-            "messages_sent": today_totals["messages_sent"],
-            "chats_archived": today_totals["chats_archived"],
-            "memories_saved": today_totals["memories_saved"],
-            "projects_worked_on": today_totals["projects_worked_on"],
-            "tasks_completed": today_totals["tasks_completed"],
-            "avg_chats_opened_30d": round(sum(b.chats_opened for b in prior) / AVG_DAYS, 1),
-            "avg_messages_sent_30d": round(sum(b.messages_sent for b in prior) / AVG_DAYS, 1),
+            **{key: today_totals[key] for key in _TODAY_KEYS},
+            **{
+                f"avg_{key}_30d": round(sum(day[key] for day in prior_daily) / AVG_DAYS, 1)
+                for key in _TODAY_KEYS
+            },
         },
         "totals": _totals(current),
         "previous": _totals(previous),

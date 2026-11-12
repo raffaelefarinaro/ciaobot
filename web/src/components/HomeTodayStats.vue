@@ -9,7 +9,7 @@
         <dt>{{ row.label }}</dt>
         <dd>
           <strong>{{ formatCount(row.value) }}</strong>
-          <span v-if="row.avg !== null" class="home-today-avg">avg {{ formatCount(row.avg) }}</span>
+          <span v-if="row.avg !== null" class="home-today-avg">avg {{ formatAverage(row.avg) }}</span>
         </dd>
       </div>
     </dl>
@@ -19,7 +19,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { fetchUsageStats, formatCount, type UsageToday } from '../lib/usageStats'
+import { fetchUsageStats, formatAverage, formatCount, type UsageToday } from '../lib/usageStats'
 import { useProjectStore } from '../stores/projects'
 
 const projects = useProjectStore()
@@ -38,16 +38,18 @@ async function load() {
 onMounted(load)
 watch(() => projects.activeWorkspace, load)
 
+const ROWS = [
+  ['chats_opened', 'Chats opened'],
+  ['messages_sent', 'Messages sent'],
+  ['chats_archived', 'Chats archived'],
+  ['memories_saved', 'Memories saved'],
+  ['projects_worked_on', 'Projects worked on'],
+  ['tasks_completed', 'Tasks completed'],
+] as const
+
 const rows = computed(() => {
   const t = today.value
-  return [
-    { key: 'chats_opened', label: 'Chats opened', value: t?.chats_opened ?? null, avg: t?.avg_chats_opened_30d ?? null },
-    { key: 'messages_sent', label: 'Messages sent', value: t?.messages_sent ?? null, avg: t?.avg_messages_sent_30d ?? null },
-    { key: 'chats_archived', label: 'Chats archived', value: t?.chats_archived ?? null, avg: null },
-    { key: 'memories_saved', label: 'Memories saved', value: t?.memories_saved ?? null, avg: null },
-    { key: 'projects_worked_on', label: 'Projects worked on', value: t?.projects_worked_on ?? null, avg: null },
-    { key: 'tasks_completed', label: 'Tasks completed', value: t?.tasks_completed ?? null, avg: null },
-  ]
+  return ROWS.map(([key, label]) => ({ key, label, value: t?.[key] ?? null, avg: t?.[`avg_${key}_30d`] ?? null }))
 })
 </script>
 
