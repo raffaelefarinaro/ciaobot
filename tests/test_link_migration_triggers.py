@@ -1,12 +1,21 @@
 """The three OKF migration triggers: detect and surface, never rewrite."""
 from __future__ import annotations
 from pathlib import Path
+import json
 import pytest
 from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import DetectionContext, detect_actions
 from ciao.os_audit import audit_upgrade_notices
-from ciao.vault_migrate_links import has_unmigrated_links, write_receipt
+from ciao.vault_migrate_links import has_unmigrated_links
 from types import SimpleNamespace
+
+
+def _write_legacy_receipt(runtime: Path, summary: dict) -> None:
+    path = runtime / "migration" / "vault-links.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema_version": 1, "vault_root": summary["vault_root"],
+                                "status": "partial" if summary.get("failed") else "migrated",
+                                "rewrites": summary.get("rewrites", [])}))
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +77,7 @@ def test_notice_stops_once_a_receipt_exists(tmp_path: Path) -> None:
     somewhere the migration declined to touch."""
     v = _vault(tmp_path)
     rt = tmp_path / ".runtime"
-    write_receipt(rt, {"vault_root": str(v), "files_rewritten": 1})
+    _write_legacy_receipt(rt, {"vault_root": str(v), "files_rewritten": 1})
     result = audit_upgrade_notices(_cfg(v), runtime_dir=rt)
     assert "unmigrated_vault_links" not in {n["type"] for n in result["notices"]}
 
@@ -79,7 +88,7 @@ def test_notice_keeps_asking_after_a_partial_migration(tmp_path: Path) -> None:
     half-finished migration go quiet on every surface at once."""
     v = _vault(tmp_path)
     rt = tmp_path / ".runtime"
-    write_receipt(rt, {
+    _write_legacy_receipt(rt, {
         "vault_root": str(v),
         "rewrites": [{"path": "other.md", "offset": 0, "from": "x", "to": "y"}],
         "failed": [{"path": "personal/a.md", "error": "Permission denied"}],

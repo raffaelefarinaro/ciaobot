@@ -528,6 +528,7 @@ class _CacheEntry:
 
 _CACHE: dict[str, _CacheEntry] = {}
 _CACHE_LOCK = threading.Lock()
+_RECEIPT_WARNINGS: dict[tuple[str, str], tuple[str, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -569,13 +570,25 @@ def _links_scope(config: Any, runtime_dir: Path | None) -> _Scope:
     if vault_raw is None:
         return _Scope()
     vault = Path(vault_raw)
-    try:
-        from ciao.vault_migrate_links import read_receipt
+    from ciao.vault_migrate_links import ReceiptUnavailable, read_receipt
 
-        completed = read_receipt(runtime_dir)
+    key = (str(runtime_dir.resolve()), str(vault.resolve()))
+    try:
+        completed = read_receipt(runtime_dir, vault_root=vault)
+    except ReceiptUnavailable as exc:
+        token = _links_token(runtime_dir, vault)
+        warning = (token, str(exc))
+        with _CACHE_LOCK:
+            changed = _RECEIPT_WARNINGS.get(key) != warning
+            _RECEIPT_WARNINGS[key] = warning
+        if changed:
+            logger.warning("migration notices: link-migration receipt unavailable: %s", exc)
+        return _Scope(vault=vault, token=token, readable=False)
     except Exception:  # noqa: BLE001 — advisory; an unreadable receipt is unknown
         logger.exception("migration notices: link-migration receipt read failed")
         return _Scope(vault=vault, token=_links_token(runtime_dir, vault), readable=False)
+    with _CACHE_LOCK:
+        _RECEIPT_WARNINGS.pop(key, None)
     if completed is not None:
         return _Scope()
     return _Scope(vault=vault, token=_links_token(runtime_dir, vault))
@@ -794,6 +807,7 @@ def reset_links_cache() -> None:
     """Drop every stored verdict. Test-only isolation hook."""
     with _CACHE_LOCK:
         _CACHE.clear()
+        _RECEIPT_WARNINGS.clear()
 
 
 # -- unrehomed person notes --------------------------------------------------
