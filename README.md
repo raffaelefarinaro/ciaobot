@@ -1,7 +1,7 @@
 # Ciaobot
 
 <p align="center">
-  <img src="site/assets/img/hero.png" alt="Ciaobot mascot saying Ciao!" width="100%">
+  <img src="site/assets/img/hero.png" alt="Ciaobot" width="100%">
 </p>
 
 Ciaobot is your **second brain and personal assistant**: a persistent personal workspace for the agents you already use, [Claude Code](https://github.com/anthropics/claude-code) and [OpenCode](https://opencode.ai).

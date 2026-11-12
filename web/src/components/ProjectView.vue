@@ -231,97 +231,6 @@
           <p v-else class="empty-row">No active chats in this project. <button type="button" class="link-btn" @click="newChat">Start one</button></p>
         </section>
 
-        <section
-          v-if="showFilesSection"
-          class="project-section project-files"
-          :class="{ 'drag-over': dragOver }"
-          aria-labelledby="project-files-title"
-          @dragover.prevent="onDragOver"
-          @dragleave="onDragLeave"
-          @drop.prevent="onDrop"
-        >
-          <div class="section-head">
-            <h3 id="project-files-title">Files<span v-if="files.length" class="section-count">{{ files.length }}</span></h3>
-            <div class="section-actions">
-              <span v-if="filesLoading" class="status">Loading…</span>
-              <span v-else-if="uploading" class="status">Uploading…</span>
-              <button type="button" class="text-action" @click="triggerUpload" :disabled="uploading">Upload</button>
-              <input
-                ref="uploadInput"
-                type="file"
-                multiple
-                class="hidden-input"
-                @change="onFilePicked"
-              />
-            </div>
-          </div>
-
-          <div v-if="filesError" class="upload-errors">
-            <div class="upload-error">{{ filesError }}</div>
-          </div>
-
-          <div v-if="uploadErrors.length" class="upload-errors">
-            <div v-for="(err, i) in uploadErrors" :key="i" class="upload-error">
-              {{ err.filename }}: {{ err.error }}
-            </div>
-            <button class="btn-tiny" @click="uploadErrors = []">Dismiss</button>
-          </div>
-
-          <p v-if="!files.length && !filesLoading && !filesError" class="empty-row">
-            No files yet. Drop one here or use Upload.
-          </p>
-
-          <div v-if="markdownFiles.length" class="file-group">
-            <div class="file-group-label">Markdown</div>
-            <button
-              v-for="f in markdownFiles"
-              type="button"
-              :key="f.path"
-              class="file-row"
-              @click="openFile(f)"
-            >
-              <AppIcon class="file-icon" name="doc" :size="18" />
-              <span class="file-name">{{ f.path }}</span>
-              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-            </button>
-          </div>
-
-          <div v-if="imageFiles.length" class="file-group">
-            <div class="file-group-label">Images</div>
-            <button
-              v-for="f in imageFiles"
-              type="button"
-              :key="f.path"
-              class="file-row"
-              @click="openFile(f)"
-            >
-              <img
-                class="file-thumb"
-                :src="`/api/workspace-image?path=${encodeURIComponent(f.vault_path)}`"
-                :alt="f.path"
-                loading="lazy"
-              />
-              <span class="file-name">{{ f.path }}</span>
-              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-            </button>
-          </div>
-
-          <div v-if="otherFiles.length" class="file-group">
-            <div class="file-group-label">Other</div>
-            <button
-              v-for="f in otherFiles"
-              type="button"
-              :key="f.path"
-              class="file-row"
-              @click="openFile(f)"
-            >
-              <AppIcon class="file-icon" name="file" :size="18" />
-              <span class="file-name">{{ f.path }}</span>
-              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-            </button>
-          </div>
-        </section>
-
         <section class="project-section project-automations" aria-labelledby="project-automations-title">
           <div class="section-head">
             <div>
@@ -422,6 +331,13 @@
           <p v-if="project.vault_doc_path" class="rail-note">
             Project doc <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
           </p>
+          <!-- The project's files live in the folder browser, opened at this
+               project's folder, rather than in a list on this page. -->
+          <button v-if="project.vault_folder" type="button" class="btn-small rail-browse" @click="browseProjectFolder">
+            <AppIcon name="folder" :size="16" />
+            Browse files
+          </button>
+          <p v-if="browseError" class="rail-note rail-browse-error" role="alert">{{ browseError }}</p>
         </section>
       </aside>
     </div>
@@ -498,14 +414,6 @@ import { branchLabel, findRepoInstructions } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
 import type { ChatInfo, ChatArchivePage, Schedule } from '../lib/types'
-
-interface ProjectFile {
-  path: string
-  vault_path: string
-  kind: 'markdown' | 'image' | 'text' | 'binary'
-  size: number
-  mtime: string
-}
 
 const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{
@@ -627,7 +535,7 @@ function scheduleFrequencyLabel(schedule: Schedule): string {
 
 // Past timestamps go through the shared helper — this file already had a
 // private formatRelative removed once for forking the dialect (DESIGN_SYSTEM
-// §6), and the same options as formatFileTime keep the two readings identical.
+// §6).
 // formatRelative is past-only (it clamps negative elapsed time to zero), so a
 // future next_run would read as "just now" and gets an absolute date instead.
 function automationTimestamp(iso: string | null | undefined): string {
@@ -1085,54 +993,12 @@ function formatDate(iso: string): string {
 
 // ── Files ──────────────────────────────────────────────────────────────
 const fileViewer = useFileViewerStore()
-const files = ref<ProjectFile[]>([])
-const filesLoading = ref(false)
-const uploading = ref(false)
-const uploadErrors = ref<{ filename: string; error: string }[]>([])
-const uploadInput = ref<HTMLInputElement | null>(null)
-const dragOver = ref(false)
+const browseError = ref('')
 
-// Folder-backed projects only. Single-file personal projects (the file
-// itself acts as the readme) and manual projects without a vault entry both
-// return an empty list from the API; we hide the section in those cases to
-// avoid a permanent "No files yet" with no way to add any.
-const showFilesSection = computed(() => Boolean(project.value?.vault_folder))
-
-const markdownFiles = computed(() => files.value.filter(f => f.kind === 'markdown'))
-const imageFiles = computed(() => files.value.filter(f => f.kind === 'image'))
-const otherFiles = computed(() =>
-  files.value.filter(f => f.kind !== 'markdown' && f.kind !== 'image')
-)
-
-// Surface the load status so a 404/500 (e.g. server hasn't been redeployed
-// after a backend change) shows in the UI instead of silently looking like
-// "no files". Empty list with no error == genuinely empty folder.
-const filesError = ref('')
-
-async function loadFiles(): Promise<void> {
-  if (!project.value || !project.value.vault_folder) {
-    files.value = []
-    filesError.value = ''
-    return
-  }
-  filesLoading.value = true
-  filesError.value = ''
-  try {
-    const resp = await fetch(`/api/projects/${project.value.project_id}/files`, {
-      credentials: 'same-origin',
-    })
-    if (resp.ok) {
-      files.value = await resp.json()
-    } else {
-      files.value = []
-      filesError.value = `Couldn't load files (HTTP ${resp.status}). Try redeploying the server.`
-    }
-  } catch (e) {
-    files.value = []
-    filesError.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    filesLoading.value = false
-  }
+/** Rail › Browse files: the folder browser at this project's own folder. */
+async function browseProjectFolder(): Promise<void> {
+  if (!project.value) return
+  browseError.value = await fileViewer.openProjectFolder(project.value.project_id)
 }
 
 function openContextDoc(): void {
@@ -1140,96 +1006,10 @@ function openContextDoc(): void {
   if (path) fileViewer.open(path)
 }
 
-function openFile(f: ProjectFile): void {
-  const isDoc = f.kind === 'markdown' || f.kind === 'text' || /\.(pdf|pptx)$/i.test(f.vault_path)
-  if (f.kind === 'image') {
-    fileViewer.openImage(f.vault_path)
-  } else if (isDoc) {
-    fileViewer.open(f.vault_path)
-  } else {
-    // Binary: hand off to the workspace-binary endpoint. PDFs render
-    // inline in a new tab; everything else downloads with the original
-    // filename via Content-Disposition.
-    const url = `/api/workspace-binary?path=${encodeURIComponent(f.vault_path)}`
-    window.open(url, '_blank')
-  }
-}
-
-function triggerUpload(): void {
-  uploadInput.value?.click()
-}
-
-async function onFilePicked(e: Event): Promise<void> {
-  const input = e.target as HTMLInputElement
-  if (!input.files || !input.files.length) return
-  await uploadFiles(Array.from(input.files))
-  input.value = '' // reset so picking the same file again still fires change
-}
-
-async function uploadFiles(picked: File[]): Promise<void> {
-  if (!project.value || !picked.length) return
-  uploading.value = true
-  const form = new FormData()
-  picked.forEach((f, i) => form.append(`file${i}`, f, f.name))
-  try {
-    const resp = await fetch(`/api/projects/${project.value.project_id}/files`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: form,
-    })
-    if (!resp.ok) {
-      uploadErrors.value = [
-        ...uploadErrors.value,
-        { filename: '(upload)', error: `HTTP ${resp.status}` },
-      ]
-    } else {
-      const body = await resp.json()
-      if (body.errors?.length) {
-        uploadErrors.value = [...uploadErrors.value, ...body.errors]
-      }
-    }
-  } catch (e) {
-    uploadErrors.value = [
-      ...uploadErrors.value,
-      { filename: '(upload)', error: e instanceof Error ? e.message : String(e) },
-    ]
-  } finally {
-    uploading.value = false
-    await loadFiles()
-  }
-}
-
-function onDragOver(): void {
-  dragOver.value = true
-}
-
-function onDragLeave(): void {
-  dragOver.value = false
-}
-
-async function onDrop(e: DragEvent): Promise<void> {
-  dragOver.value = false
-  const dt = e.dataTransfer
-  if (!dt || !dt.files || !dt.files.length) return
-  await uploadFiles(Array.from(dt.files))
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-// File mtimes read as prose and want an exact date once they are old enough,
-// so they pass suffix + absoluteAfterDays to the shared helper. There is
-// deliberately only one relative-time implementation in the app.
-function formatFileTime(iso: string): string {
-  return formatRelative(iso, { suffix: true, absoluteAfterDays: 7 })
-}
-
 async function reloadAll() {
   archivedPage.value = 0
-  await Promise.all([loadFiles(), loadAutomations()])
+  browseError.value = ''
+  await loadAutomations()
 }
 onMounted(() => {
   document.addEventListener('click', closeProjectActionsOnOutside)
@@ -1241,7 +1021,7 @@ onBeforeUnmount(() => {
 // Re-fetch when the user navigates between projects without unmounting
 // the component (Vue keeps it alive across :projectId changes), and when the
 // project itself arrives after mount: a deep link renders before the project
-// list has loaded, so the first load saw no vault folder and showed no files.
+// list has loaded.
 watch(() => [props.projectId, project.value?.vault_folder], async () => {
   await reloadAll()
 })
@@ -1730,113 +1510,6 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   color: var(--fg2);
 }
 
-/* Files section ------------------------------------------------------- */
-.project-files {
-  border-radius: var(--radius-sm);
-  transition: background 120ms var(--ease), box-shadow 120ms var(--ease);
-}
-
-.project-files.drag-over {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
-}
-
-.hidden-input {
-  display: none;
-}
-
-.btn-tiny {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--fg2);
-  border-radius: var(--radius-sm);
-  padding: 2px 8px;
-  font-size: var(--text-xs);
-  cursor: pointer;
-  font-family: var(--font);
-  align-self: flex-start;
-}
-.btn-tiny:hover { color: var(--fg); border-color: var(--fg2); background: var(--bg3); }
-
-.upload-errors {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: var(--space-2);
-  background: color-mix(in srgb, var(--error) 8%, transparent);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-}
-.upload-error {
-  font-size: var(--text-sm);
-  color: var(--error);
-}
-
-.file-group {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-2);
-}
-
-.file-group-label {
-  padding: 6px 2px 4px;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-
-.file-row {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--touch);
-  gap: 10px;
-  padding: 6px 2px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  min-width: 0;
-}
-.file-row:hover .file-name { color: var(--accent); }
-
-.file-icon {
-  width: 24px;
-  text-align: center;
-  flex-shrink: 0;
-  color: var(--fg2);
-}
-
-.file-thumb {
-  width: 32px;
-  height: 32px;
-  object-fit: cover;
-  border-radius: var(--radius-xs);
-  background: var(--bg3);
-  flex-shrink: 0;
-}
-
-.file-name {
-  flex: 1;
-  font-size: var(--text-base);
-  color: var(--fg);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-
-.file-meta {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-
 /* Rail ----------------------------------------------------------------- */
 .project-rail .rail-title {
   margin-top: 0;
@@ -1853,6 +1526,18 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   font-size: var(--text-sm);
 }
 
+.rail-browse {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-2);
+  min-height: var(--touch);
+}
+
+.rail-browse-error {
+  color: var(--error);
+}
+
 .project-rail .link-btn {
   overflow-wrap: anywhere;
   text-align: left;
@@ -1864,13 +1549,11 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 @media (max-width: 768px) {
-  .file-meta { display: none; }
   .automation-row { flex-wrap: wrap; row-gap: 2px; }
   .automation-next { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-name,
-  .project-files { transition: none; }
+  .chat-name { transition: none; }
 }
 </style>

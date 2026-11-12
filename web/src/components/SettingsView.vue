@@ -328,11 +328,11 @@
              optional app window SettingsAppInstall owns. -->
         <SettingsEngineLogin />
 
-        <!-- Open source. The face image on the right appears only while the
+        <!-- Open source. The Ciaobot mark on the right appears only while the
              GitHub-star ask is still live (housekeeping detects it via the
              `starred` / snoozed receipt): once the user has starred or
              dismissed, the card quiets back to prose. -->
-        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
+        <div class="card open-source-card" :class="{ 'open-source-card--with-mark': showStarNudge }">
           <div class="settings-card-header">
             <p class="section-title">Open source</p>
             <p class="hint">
@@ -350,13 +350,7 @@
               <button class="btn-small" @click="dismissStarNudge">Later</button>
             </div>
           </div>
-          <img
-            v-if="showStarNudge"
-            class="open-source-face"
-            src="/face.png"
-            alt=""
-            draggable="false"
-          />
+          <span v-if="showStarNudge" class="open-source-mark" aria-hidden="true"><CiaoMark /></span>
         </div>
       </template>
 
@@ -1393,6 +1387,7 @@
 </template>
 
 <script setup lang="ts">
+import CiaoMark from './CiaoMark.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
@@ -3929,27 +3924,26 @@ onUnmounted(stopUpdatePoll)
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-rail { display: none; }
 }
-/* Open-source card with the star ask still live: the pixel face sits on the
+/* Open-source card with the star ask still live: the Ciaobot mark sits on the
    right, out of the prose's flow. Without the nudge the card has no class and
    no image renders, so plain cards are untouched. */
 .open-source-card {
   position: relative;
 }
 
-.open-source-face {
+.open-source-mark {
   position: absolute;
   right: var(--space-4);
   top: var(--space-4);
   width: 64px;
   height: 64px;
-  image-rendering: pixelated;
-  -webkit-user-drag: none;
+  color: var(--fg);
   opacity: 0.9;
   pointer-events: none;
 }
 
-/* Keep the title clear of the face on narrow cards too. */
-.open-source-card--with-face .settings-card-header {
+/* Keep the title clear of the mark on narrow cards too. */
+.open-source-card--with-mark .settings-card-header {
   padding-right: 84px;
 }
 

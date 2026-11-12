@@ -47,10 +47,7 @@ def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
         match, _child_scope = route.matches(scope)
         if match is Match.FULL:
             route_path = getattr(route, "path", "")
-            if method == "POST" and route_path in {
-                "/api/projects/{project_id}/files",
-                "/api/chats/{chat_id}/attachments",
-            }:
+            if method == "POST" and route_path == "/api/chats/{chat_id}/attachments":
                 return UPLOAD_BODY_LIMIT, "multipart_only"
             if method == "POST" and route_path == "/api/chats/{chat_id}/images":
                 return IMAGE_BODY_LIMIT, "multipart_only"
