@@ -774,14 +774,94 @@ def test_observer_in_a_dirty_git_vault(tmp_path: Path, monkeypatch: pytest.Monke
     assert seen["observed_only"] is True and "skipped" not in seen
 
     _note(vault, "C.md", "See [[B]].\n")
+    marker_before = (vault / m.MARKER_NAME).read_bytes()
+    publishes = _spy(monkeypatch, "_publish_receipt", "_publish_marker")
     skipped = migrate_links(vault, b, apply=True)
     assert skipped["skipped"] == "vault has uncommitted changes"
+    assert publishes == []
     assert (vault / "C.md").read_bytes() == b"See [[B]].\n"
+    assert (vault / m.MARKER_NAME).read_bytes() == marker_before
+    assert not receipt_path(b).exists()
 
     plain = tmp_path / "plain"
     init(plain)
     _note(plain, "B.md", "# B edited\n")
+    planned = _spy(monkeypatch, "migrate_vault_links")
     assert migrate_links(plain, tmp_path / "c", apply=True)["skipped"] == "vault has uncommitted changes"
+    assert planned == [] and publishes == []
+    assert not (plain / m.MARKER_NAME).exists() and not receipt_path(tmp_path / "c").exists()
+
+
+def _spy(monkeypatch: pytest.MonkeyPatch, *names: str) -> list[str]:
+    calls: list[str] = []
+    for name in names:
+        real = getattr(m, name)
+        monkeypatch.setattr(m, name, lambda *a, _n=name, _real=real, **k: (calls.append(_n), _real(*a, **k))[1])
+    return calls
+
+
+def _plant_marker(vault: Path, kind: str, tmp_path: Path) -> str:
+    """Put an untrustworthy marker in the vault; return the refusal it must produce."""
+    path = vault / m.MARKER_NAME
+    path.unlink(missing_ok=True)
+    payloads = {"not-json": b"{", "not-utf8": b"\xff\xfe", "deep": b"[" * 100_000,
+                "extra-key": json.dumps({"format": 1, "operation_id": "0" * 32, "state": "migrated", "x": 1}).encode()}
+    if kind in payloads:
+        path.write_bytes(payloads[kind])
+        return m._MARKER_MALFORMED_MESSAGE
+    if kind == "directory":
+        path.mkdir()
+    else:
+        outside = tmp_path / "outside-marker.json"
+        outside.write_text(json.dumps({"format": 1, "operation_id": "0" * 32, "state": "migrated"}))
+        try:
+            path.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    return m._MARKER_UNSAFE_MESSAGE
+
+
+def _marker_entry(vault: Path) -> tuple[str, Any]:
+    path = vault / m.MARKER_NAME
+    if path.is_symlink():
+        return "link", os.readlink(path)
+    if path.is_dir():
+        return "dir", None
+    return "file", path.read_bytes()
+
+
+_BAD_MARKERS = pytest.mark.parametrize("kind", ["not-json", "not-utf8", "deep", "extra-key", "symlink", "directory"])
+
+
+@_BAD_MARKERS
+def test_untrustworthy_marker_refuses_migration(tmp_path: Path, kind: str) -> None:
+    vault, runtime = tmp_path / "vault", tmp_path / "runtime"
+    _seed(vault)
+    notes = _notes(vault)
+    refusal = _plant_marker(vault, kind, tmp_path)
+    entry = _marker_entry(vault)
+
+    result = migrate_links(vault, runtime, apply=True)
+
+    assert result["complete"] is False and refusal in result["failed"][0]["error"]
+    assert _notes(vault) == notes and _marker_entry(vault) == entry
+    assert not receipt_path(runtime).exists()
+    with pytest.raises(ReceiptUnavailable, match=refusal):
+        read_receipt(runtime, vault_root=vault)
+
+
+@_BAD_MARKERS
+def test_untrustworthy_marker_refuses_undo(tmp_path: Path, kind: str) -> None:
+    vault, runtime = _migrated(tmp_path)
+    notes, receipt = _notes(vault), receipt_path(runtime).read_bytes()
+    refusal = _plant_marker(vault, kind, tmp_path)
+    entry = _marker_entry(vault)
+
+    result = unmigrate_links(vault, runtime, apply=True)
+
+    assert result["files_restored"] == 0 and refusal in result["failed"][0]["error"]
+    assert _notes(vault) == notes and _marker_entry(vault) == entry
+    assert receipt_path(runtime).read_bytes() == receipt
 
 
 def test_unmigrated_marker_with_nothing_to_convert_writes_nothing(tmp_path: Path) -> None:
