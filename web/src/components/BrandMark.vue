@@ -44,6 +44,7 @@ async function onBrandClick() {
 <style scoped>
 .brand {
   display: inline-flex;
+  font-size: var(--text-lg);
   cursor: pointer;
   transition: opacity 120ms var(--ease);
   min-height: var(--touch);
@@ -56,7 +57,7 @@ async function onBrandClick() {
 .brand:active { opacity: 0.7; }
 .brand-label {
   display: block;
-  width: calc(5.5 * var(--text-lg));
+  width: 5.5em;
   height: auto;
 }
 .brand-logo--light { display: none; }

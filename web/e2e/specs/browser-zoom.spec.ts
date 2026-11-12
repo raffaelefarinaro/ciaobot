@@ -43,6 +43,20 @@ test.describe('zoom and text scaling', () => {
     ).toBeLessThanOrEqual(0)
   })
 
+  test('the phone header wordmark follows its compact font size', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await boot(page)
+    const brand = page.locator('.header-center .brand')
+    await expect(brand).toBeVisible()
+    const sizes = await brand.evaluate((el) => ({
+      font: parseFloat(getComputedStyle(el).fontSize),
+      image: Array.from(el.querySelectorAll('img')).find(img => getComputedStyle(img).display !== 'none')!.getBoundingClientRect().width,
+      compact: 12 * parseFloat(getComputedStyle(el).getPropertyValue('--font-scale')),
+    }))
+    expect(sizes.font).toBeCloseTo(sizes.compact, 1)
+    expect(sizes.image / sizes.font).toBeCloseTo(5.5, 1)
+  })
+
   test('the largest in-app font scale keeps the composer usable', async ({ page }) => {
     // 1.5 is the top of the range Settings > Appearance offers. Setting it
     // before boot is how a returning user arrives, since main.ts restores the
