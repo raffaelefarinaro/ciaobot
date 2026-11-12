@@ -15,7 +15,7 @@ import {
   type AppearancePayload,
   type Theme,
 } from '../lib/appearance'
-import { FONT_SCALE_STEP, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScale } from './useFontScale'
+import { DEFAULT_FONT_SCALE, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScale } from './useFontScale'
 
 const settings = ref<AppearancePayload>({ ...DEFAULT_APPEARANCE })
 const loaded = ref(false)
@@ -32,15 +32,14 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-/** Nearest step of the engine's 0.05 grid, clamped to the allowed range. */
-function snapFontScale(value: number): number {
-  const steps = Math.round((value - MIN_FONT_SCALE) / FONT_SCALE_STEP)
-  return round2(Math.min(MAX_FONT_SCALE, Math.max(MIN_FONT_SCALE, MIN_FONT_SCALE + steps * FONT_SCALE_STEP)))
-}
-
 function validFontScale(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
     && value >= MIN_FONT_SCALE - 1e-9 && value <= MAX_FONT_SCALE + 1e-9
+}
+
+/** What the engine says the scale is: an unset value is the shipped default. */
+function engineFontScale(): number {
+  return settings.value.font_scale ?? DEFAULT_FONT_SCALE
 }
 
 function validColors(value: unknown): value is AppearancePayload['custom_colors'] {
@@ -63,12 +62,11 @@ export function applyAppearanceSettings(value: Partial<AppearancePayload>): void
     // earlier one; saveTheme applies the engine value once the last settles.
     if (themeSaves.value === 0) applyTheme(value.theme)
   }
-  if (value.font_scale === null) settings.value.font_scale = null
-  else if (validFontScale(value.font_scale)) {
-    settings.value.font_scale = round2(value.font_scale)
+  if (value.font_scale === null || validFontScale(value.font_scale)) {
+    settings.value.font_scale = value.font_scale === null ? null : round2(value.font_scale)
     // A local change that is waiting to be saved, or is being saved, is newer
     // than whatever the engine just said: keep it and let the save settle it.
-    if (!fontChangePending()) setFontScale(settings.value.font_scale)
+    if (!fontChangePending()) setFontScale(engineFontScale())
   }
   if (validColors(value.custom_colors)) settings.value.custom_colors = value.custom_colors
   if (typeof value.revision === 'string') settings.value.revision = value.revision
@@ -79,15 +77,16 @@ export function applyAppearanceSettings(value: Partial<AppearancePayload>): void
 }
 
 /**
- * An engine that has never stored a theme or font scale takes this browser's
- * current values once; after that the engine wins. One attempt per page life:
- * a lost race (409) is settled by the winner's change event.
+ * An engine that has never stored a theme takes this browser's theme once; after
+ * that the engine wins. An unset font scale is the shipped default and is never
+ * seeded, so a later default change still reaches installs nobody resized
+ * (#2715). One attempt per page life: a lost race (409) is settled by the
+ * winner's change event.
  */
 function seedMissing(): void {
   if (seeded) return
   const patch: Partial<AppearancePayload> = {}
   if (settings.value.theme === null) patch.theme = readLocalTheme()
-  if (settings.value.font_scale === null) patch.font_scale = snapFontScale(fontScale.value)
   if (Object.keys(patch).length === 0) return
   seeded = true
   void save(patch).catch(() => {})
@@ -144,7 +143,7 @@ async function flushFontScale(): Promise<void> {
     await save({ font_scale: sent })
   } catch {
     // The engine wins on failure (a 409 already reloaded its value).
-    if (settings.value.font_scale !== null) setFontScale(settings.value.font_scale)
+    setFontScale(engineFontScale())
     return
   } finally {
     fontSaves--
@@ -153,18 +152,18 @@ async function flushFontScale(): Promise<void> {
   if (round2(fontScale.value) !== sent) {
     // The user moved again while the save was in flight: save that too.
     void flushFontScale()
-  } else if (settings.value.font_scale !== null) {
+  } else {
     // Nothing newer locally: whatever the engine stored is what we show.
-    setFontScale(settings.value.font_scale)
+    setFontScale(engineFontScale())
   }
 }
 
 watch(fontScale, (next) => {
-  if (!loaded.value || round2(next) === settings.value.font_scale) return
+  if (!loaded.value || round2(next) === engineFontScale()) return
   if (fontTimer) clearTimeout(fontTimer)
   fontTimer = setTimeout(() => {
     fontTimer = null
-    if (round2(fontScale.value) !== settings.value.font_scale) void flushFontScale()
+    if (round2(fontScale.value) !== engineFontScale()) void flushFontScale()
   }, 300)
 })
 

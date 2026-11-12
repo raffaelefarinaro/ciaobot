@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.app_settings import AppSettings, AppSettingsStore
+from ciao.app_settings import DEFAULT_FONT_SCALE, AppSettings, AppSettingsStore
 
 
 def test_new_install_backup_seed_preserves_explicit_flags(tmp_path):
@@ -625,6 +625,55 @@ def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
         AppSettingsStore(path).update({"font_scale": huge})
     path.write_text('{"font_scale": 1' + "0" * 400 + "}")
     assert AppSettingsStore(path).appearance_payload()["font_scale"] is None
+
+
+def test_legacy_default_font_scale_moves_to_the_new_default_once(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"font_scale": 1.2, "theme": "dark"}))
+
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["font_scale"] == DEFAULT_FONT_SCALE == 1.15
+    stored = json.loads(path.read_text())
+    assert stored["font_scale"] == 1.15
+    assert stored["font_scale_migrated"] is True
+    assert stored["theme"] == "dark"
+
+    # A 1.2 picked after the migration is kept, not moved again.
+    store.update({"font_scale": 1.2})
+    assert AppSettingsStore(path).appearance_payload()["font_scale"] == 1.2
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"font_scale": 1.3},
+        {"theme": "dark"},
+        {"font_scale": 1.2, "font_scale_migrated": True},
+    ],
+)
+def test_font_scale_without_the_legacy_default_is_left_alone(tmp_path, document):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps(document))
+    before = path.read_bytes()
+
+    payload = AppSettingsStore(path).appearance_payload()
+
+    assert path.read_bytes() == before
+    assert payload["font_scale"] == document.get("font_scale")
+
+
+def test_font_scale_chosen_on_a_new_install_is_not_migrated(tmp_path):
+    path = tmp_path / "app_settings.json"
+    AppSettingsStore(path).update({"font_scale": 1.2})
+    assert AppSettingsStore(path).appearance_payload()["font_scale"] == 1.2
+
+
+def test_the_font_scale_marker_cannot_be_patched(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    store.update({"font_scale_migrated": True})
+    assert store.settings.font_scale_migrated is False
+    assert "font_scale_migrated" not in json.loads(path.read_text())
 
 
 def test_body_font_roundtrip_and_rejects_unknown(tmp_path):

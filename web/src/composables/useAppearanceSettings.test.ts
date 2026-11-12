@@ -55,16 +55,18 @@ describe('applyAppearanceSettings', () => {
     expect(document.documentElement.style.getPropertyValue('--font-scale')).toBe('1.35')
   })
 
-  it('seeds an engine that never stored a theme or font scale, once', async () => {
+  it('an engine reset to unset brings the default back', () => {
+    applyAppearanceSettings({ font_scale: null, revision: 'r3' })
+    expect(useFontScale().fontScale.value).toBe(1.15)
+    expect(useAppearanceSettings().settings.value.font_scale).toBeNull()
+  })
+
+  it('seeds an engine that never stored a theme, once, and not the font scale', async () => {
     localStorage.setItem('ciao-theme', 'light')
     const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...base, theme: 'light', revision: 'r3' })
     applyAppearanceSettings({ text_contrast: 'normal', theme: null, font_scale: null, revision: 'r2' })
     await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
-    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', {
-      theme: 'light',
-      font_scale: useFontScale().fontScale.value,
-      revision: 'r2',
-    })
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { theme: 'light', revision: 'r2' })
     applyAppearanceSettings({ text_contrast: 'normal', theme: null, font_scale: null, revision: 'r2' })
     await nextTick()
     expect(patch).toHaveBeenCalledTimes(1)
@@ -166,18 +168,34 @@ describe('font scale persistence', () => {
     expect(useFontScale().fontScale.value).toBe(1.2)
   })
 
-  it('seeds a font scale snapped to the 0.05 grid', async () => {
-    // seeding is once per page life, so this needs a fresh module
+  it('saves a change away from the unset default', async () => {
+    vi.useFakeTimers()
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...base, font_scale: 1.2, revision: 'r2' })
+    applyAppearanceSettings({ ...base, font_scale: null, revision: 'r1' })
+    await nextTick()
+    expect(useFontScale().fontScale.value).toBe(1.15)
+    useFontScale().set(1.2)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { font_scale: 1.2, revision: 'r1' })
+  })
+
+  it('never writes the font scale back when nobody changed it', async () => {
+    // seeding is once per page life, so this needs a fresh module; the stale
+    // 1.2 is the paint cache an upgraded browser still holds
+    vi.useFakeTimers()
+    localStorage.setItem('ciao-font-scale', '1.2')
+    localStorage.setItem('ciao-theme', 'dark')
     vi.resetModules()
     const freshApi = (await import('../lib/api')).api
     const fresh = await import('./useAppearanceSettings')
     const freshScale = (await import('./useFontScale')).useFontScale()
     const patch = vi.spyOn(freshApi, 'patch').mockResolvedValue({ ...base, revision: 'r8' })
-    localStorage.setItem('ciao-theme', 'dark')
-    freshScale.set(1.23)
     fresh.applyAppearanceSettings({ text_contrast: 'normal', theme: 'dark', font_scale: null, revision: 'r0' })
-    await vi.waitFor(() => expect(patch).toHaveBeenCalled())
-    expect(patch.mock.calls[0][1]).toMatchObject({ font_scale: 1.25 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(patch).not.toHaveBeenCalled()
+    expect(freshScale.fontScale.value).toBe(1.15)
+    expect(document.documentElement.style.getPropertyValue('--font-scale')).toBe('1.15')
   })
 })
 
