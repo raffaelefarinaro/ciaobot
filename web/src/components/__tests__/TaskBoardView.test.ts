@@ -759,7 +759,7 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('opens the detail dialog from the keyboard and hands focus back on Escape', async () => {
+  it('opens the task as a page from the keyboard and hands focus back on Escape', async () => {
     apiGet.mockImplementation((url: string) => Promise.resolve(
       url.includes('/api/tasks?')
         ? { workspace: 'personal', tasks: BOARD }
@@ -777,9 +777,16 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
+    // On the board's own route the open task is a page, not a modal dialog:
+    // the board steps aside (still mounted), nothing is made inert, and the
+    // header carries the shared close.
     const sheet = wrapper.get('.task-sheet')
-    expect(sheet.attributes('role')).toBe('dialog')
-    expect(sheet.attributes('aria-modal')).toBe('true')
+    expect(sheet.attributes('role')).toBe('region')
+    expect(sheet.attributes('aria-modal')).toBeUndefined()
+    expect(wrapper.get('.task-view > .page-grid').attributes('style')).toContain('display: none')
+    expect(document.querySelector('[inert]')).toBeNull()
+    expect(wrapper.get('.task-detail-page .close-btn').attributes('aria-label')).toBe('Close task')
+    expect(document.activeElement).toBe(sheet.get('#task-detail-name').element)
     expect(sheet.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Ship the board')
     // The description the list row does not carry is read by id, at the
     // workspace being drawn.
@@ -907,7 +914,7 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
     expect(wrapper.get('.task-body').text()).toBe('OLD')
-    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await wrapper.get('.task-detail-page .close-btn').trigger('click')
     await nextTick()
 
     // Another writer edits the body. The board re-reads and reports the new
@@ -1164,7 +1171,7 @@ describe('TaskBoardView', () => {
     await nextTick()
 
     await wrapper.get('#task-detail-name').setValue('Renamed')
-    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await wrapper.get('.task-detail-page .close-btn').trigger('click')
     await flushPromises()
     await nextTick()
     expect(apiPatch).toHaveBeenCalledTimes(1)
@@ -1175,7 +1182,7 @@ describe('TaskBoardView', () => {
       workspace: 'personal',
       task: { ...task({ title: 'Renamed' }), revision: THIRD_REVISION, body: '' },
     })
-    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await wrapper.get('.task-detail-page .close-btn').trigger('click')
     await flushPromises()
     await nextTick()
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
@@ -1411,7 +1418,7 @@ describe('TaskBoardView', () => {
     // different tasks, either of which can answer first.
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
     await nextTick()
-    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await wrapper.get('.task-detail-page .close-btn').trigger('click')
     await nextTick()
     await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
     await nextTick()
@@ -2828,7 +2835,7 @@ describe('TaskBoardView', () => {
       expect(switchChat).toHaveBeenCalledWith('chat-3')
 
       // Re-opening re-reads: a turn may have reported since.
-      await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+      await wrapper.get('.task-detail-page .close-btn').trigger('click')
       await flushPromises()
       await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
       await flushPromises()

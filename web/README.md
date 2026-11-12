@@ -78,8 +78,13 @@ web/
                            CommandPaletteModal, FileViewerModal, NotificationBell (the inbox bell and its popover or phone sheet), NotificationInboxList (the inbox body), HomeNoticeWindow, HousekeepingStrip (Home's single "Needs you" list above the composer: workspace-health errors, operator notices and update tasks, one title, one line and one primary button per row) with NeedsYouRow (the row and its ⋯ menu), and WebhookTriggers)
     components/TaskBoardView.vue  the `/tasks` route entry point: a thin wrapper that
                            renders `TaskWorkspaceSurface.vue` and forwards its
-                           `open-sidebar` request. The surface owns the board, the full
-                           task editor, resolution and delegation state. Its
+                           `open-sidebar` request and the open task's pull-to-close, and
+                           exposes its previous / next task, close and New task to
+                           ChatLayout. The surface owns the board, the full task editor,
+                           resolution and delegation state. On `/tasks/<id>` the open task
+                           is a page (the board kept mounted behind it, a TitleRail over
+                           the board's tasks within its filter); a switch writes the open
+                           task first under the overlay's strict close rule. Its
                            `mode="overlay"` + `taskId` form is the same editor over another
                            screen, with no board chrome and no address change, an awaited
                            `requestClose()`, and a `detail-close` that distinguishes the
