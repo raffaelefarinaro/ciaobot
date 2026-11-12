@@ -1797,6 +1797,40 @@ and an already-interrupted old undo can require manual recovery. Path checks
 reject observed descendant symlinks but do not confine an adversarial swap after
 the final check. The advisory lock excludes managed migrations, not editors.
 
+**Link-receipt identity (#2837).** The runtime receipt (`<runtime>/migration/vault-links.json`,
+schema 3) binds three things: the canonical vault path, the vault directory's
+inode (`null` on a filesystem that reports none) and the id of the link operation
+it belongs to. A different inode at the same path means the vault was replaced,
+restored or re-created, and every read and every applied operation refuses with
+`ReceiptUnavailable` before touching a note. The vault also carries a portable
+`.ciao-vault-links.json` marker with exactly three keys (`format`, `operation_id`,
+`state`). It holds no path, inode, host or timestamp, is written only by
+operations that change notes, and is committed and travels with git, so another
+runtime or a clone sees the same link state. Completion for a runtime is its own
+*current* receipt, else the marker's `migrated` state (reported as
+`observed_only`, with no receipt written). A receipt whose operation id no longer
+matches the marker is stale: it never claims completion and never authorizes undo
+or resume, and running the migration again archives it and starts a new one. That
+strands undo evidence when another runtime later migrates new notes: it stays on
+disk and in the archives for manual recovery, and the newer owner's undo restores
+only that owner's notes. Legacy schema-1 and schema-2 receipts are adopted
+automatically, once, on the first `read_receipt`: the exact original bytes go to
+`vault-links-legacy-<sha256>.json` beside the receipt and the schema-3 view is
+published, with writes only under `<runtime>/migration/`; if adoption cannot
+write, the legacy receipt keeps its old meaning. A vault replaced at the same
+path *before* adoption inherits the legacy receipt, which is the accepted
+trust-on-first-use limit. Replacement is detected whenever the new directory has
+a different inode: always on APFS and NTFS, and on any filesystem when the
+original was renamed away, but not on ext4 or tmpfs after a plain delete and
+`mkdir` that reuses the inode number, and not where inodes are `null`. Two
+runtimes operating on one vault at the same instant are not serialized, because
+no lock can live in a tracked vault; the compare-before-publish on the marker and
+the exact-byte note guards only narrow that window. Re-rooting stashes the marker
+with the regenerated root notes (restored by undo) and each split root starts
+without one; relocation leaves it at the shared root. To recover by hand, move
+the receipt aside to start a new migration, or restore the marker from git
+history.
+
 
 Three surfaces answer "what did an upgrade leave for this install?": the Home
 strip (`ciao/operator_actions.py`, polled every 60s and on window focus), the
@@ -1818,7 +1852,7 @@ maintainer is checking:
 
 - **What makes it applicable?** One rule, shared, and never one a surface gets to
   read differently. For the wikilink notice: a runtime root to read the receipt
-  from, no *completed* migration receipt (`read_receipt` gates on
+  from, no *completed* migration (the runtime's own current receipt, or else the vault link marker's `migrated` state; `read_receipt` gates on
   `status == "migrated"`, so a run that could not write every note does not silence
   it), and an actual wikilink still in the vault. There is deliberately **no**
   `vault_mode` term. It was there once, as a Home-side shortcut, and adopting it
@@ -1878,8 +1912,8 @@ it is deliberately the same window `update_tasks.APPLICABILITY_TTL_S` gives its
 detectors: one clock for how fast this engine looks at somebody's own notes,
 rather than one per surface. Re-establishing a positive answer is cheap (the walk
 stops at the first hit); re-establishing a clean one costs the whole vault, which
-is why the window is minutes rather than seconds. The stored answer is keyed on the
-receipt file's own mtime and size, so a migration, an un-migration and a retry of a
+is why the window is minutes rather than seconds. The stored answer is keyed on `receipt_token`: the
+receipt's and the vault link marker's mtime and size and the vault directory's inode, so a migration, an un-migration and a retry of a
 partial one each land a token it was not computed for, and on the runtime root and
 vault path, so two installs in one process cannot share one. A completed receipt
 means there is nothing to scan for, so a migrated install is not woken every 60s.
@@ -1901,8 +1935,8 @@ keep, and which shape a given install is in is `vault_relocate.plan`'s answer to
 give rather than this notice's to pre-empt.
 
 The bound on the Home side is asserted, not assumed: `tests/test_migration_notices.py`
-counts filesystem accesses under the vault across detection passes, at one note and
-at four hundred, and fails on any of them, with a companion test proving the
+counts opens and directory listings under the whole vault across detection passes, at one note and
+at four hundred, and fails on any of them except the vault link marker's, with a companion test proving the
 recorder sees a walk. A timing assertion would pass on a fast tmpfs and fail in CI.
 The scan is proven to run on a worker thread and to go through `run_read`, and the
 cold path is asserted end to end — one poll starts one detached scan and reports no
@@ -1912,7 +1946,7 @@ Of the two notices #816 named, the link migration is still not a catalog row, an
 the test says so. A catalog task needs a registered completion check that reads a
 real postcondition, and for `unmigrated_vault_links` the only "evidence" the work
 was done is the condition's absence recomputed each render, which makes the check
-a tautology — and its receipt is per *install*, not per vault, so a
+a tautology — and its receipt is per *install*, not per vault, while completion is shared per vault through the link marker, so a
 per-workspace loop over its remedy is not available either. Do not add a row
 because a card looks like a task.
 
@@ -1935,7 +1969,7 @@ Taken from the merged tree, and every cell is pinned by a test.
 | `workspace-unmigrated` | operator-actions tile, **blocking** | install | 2 registry reads + one receipt peek, no vault walk | **None.** Renders until `workspace_reroot.read_receipt` returns a record; absence of a receipt is not proof the work was done | **Yes** | `ciao workspace-reroot [--rehearse\|--apply\|--undo\|--repair]`, retried at every start by `migrate_if_needed` | **never.** A dismissible, revision-suppressed task is precisely wrong for a blocker that must not go away until the migration runs |
 | `vault-location:{workspace}` | audit `vault_outside_vault_root` **and** the workspace-scoped `vault-relocate` catalog card (#800's last slice), which replaced the Home tile | workspace | 2 resolved paths + one `is_dir()`, no walk — the cheapest notice here, and cheap enough for a task detector, a 60s poll and an audit alike | `vault_relocate.read_receipt` — a `status: "relocated"` receipt **and** the current layout agreeing. No tolerance for a missing `status` (unlike `vault_rehome`): every run names its own, so a status-less file is not this engine's record. A `refused` receipt, an unparseable one, and one naming another workspace are all *not* completion | No | `ciao vault-relocate {name} [--apply\|--undo]` | `vault-relocate-review-needed` / `vault-relocate-recorded` |
 | `vault-vocabulary` | tile | install | one `vault_migration.read_receipt` | `unresolved` non-empty — a real postcondition for the **mechanical** renames only; nothing records the categorisation decision a person still owes | No | the tile's run button — the only re-scan, since #814: it re-migrates each reported vault and rewrites **that vault's keyed receipt**, the file the card's own install-wide read is built from. `ciao sync-skills` writes the receipts at install and never re-scans | none yet — #814 made the mechanical half write the receipt its chat half needs, so the two halves agree; the row itself is still to be added |
-| `vault-unmigrated-links` | tile + audit `unmigrated_vault_links`, one `resolve_links`/`cached_links` | install | receipt read **plus** a bounded off-loop walk — Home reads the published verdict, the audit walks itself | `vault_migrate_links.read_receipt` — per **install**, bound to the recorded canonical vault; foreign or invalid evidence is unknown | No | `ciao vault-migrate-links [--apply]`, `ciao vault-unmigrate-links --apply` | none: a per-workspace loop over its remedy is not available |
+| `vault-unmigrated-links` | tile + audit `unmigrated_vault_links`, one `resolve_links`/`cached_links` | install | receipt read **plus** a bounded off-loop walk — Home reads the published verdict, the audit walks itself | `vault_migrate_links.read_receipt`: runtime receipt per **install**, bound to the canonical vault path and directory inode; completion is shared across runtimes and clones through the vault's `.ciao-vault-links.json`; foreign, replaced, stale or invalid evidence is unknown | No | `ciao vault-migrate-links [--apply]`, `ciao vault-unmigrate-links --apply` | none: a per-workspace loop over its remedy is not available |
 | `unrehomed_people` | audit `unrehomed_people` (one `rehomed_people_finding`) **and** the `unrehomed-people` catalog card (#833), which asks a narrower question (`rehome_legacy_candidates`) | install | the **notice**: registry read + one receipt read, no vault walk. The **card**: four cheap gates, then one `vault_rehome.plan_rehome` walk — off-loop through `run_read`, at most once per `APPLICABILITY_TTL_S` | `vault_rehome.read_receipt` — a **completed** receipt. Only a *completed* one, and the truthful no-op receipt counts solely as a record of an inspection the operator already approved | No | `ciao vault-rehome [--apply]`, `ciao vault-unrehome --apply` | `unrehomed-people-review-needed` / `unrehomed-people-rehome-recorded` |
 | `learnings-cleanup` | the `learnings-cleanup` catalog card (#728-E) | workspace | `plan_cleanup` per workspace, TTL-cached off-loop | an **attended** receipt (`reviewed`/`approvals`, `removed_by != system`) naming the revision the document has now | No | `ciao learnings-cleanup [--apply --approval-file FILE]`, `--revert` | `learnings-cleanup-review-needed` / `learnings-cleanup-review-recorded` |
 | `skill-triage-pending` | operator-actions tile | install | one `workspace_reroot.read_receipt`, one `stat`, one table read. No vault walk: the sheet's path comes from the receipt, not from a search | **The sheet's own blank cells.** `undecided_skill_triage` counts the rows whose **Destination** cell is empty, so filling one in is the operator recording a decision and the count falls to zero (#810). A real postcondition, and the only notice here whose completion is the operator writing something rather than a receipt appearing | No | none, deliberately: attributing a customised skill to a root is a judgement about the user's own work, so the remedy is the chat that walks them through the sheet. `ciao sync-skills` mirrors whatever they moved | none — see below |
