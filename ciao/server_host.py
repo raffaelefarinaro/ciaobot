@@ -103,6 +103,7 @@ __all__ = [
     "host_move_argv",
     "host_interpreter",
     "inspect_host_bundle",
+    "is_adhoc_signed",
     "parse_service_command",
     "read_host_ownership",
     "read_superseded_ownership",
@@ -1360,6 +1361,28 @@ def _require_signed_universal(bundle: Path, runner: Runner) -> None:
             f"the host executable is not exactly {sorted(ARCHITECTURES)}: {shape!r}",
             code=INSPECTION_FAILED,
         )
+
+
+def is_adhoc_signed(bundle_path: Path, *, runner: Runner = subprocess.run) -> bool:
+    """True only when ``codesign -dv`` reads ``bundle_path`` as ad-hoc signed (#2850).
+
+    A Developer ID signature, no signature, an unreadable one, a probe that cannot
+    run, or a display that repeats ``Signature`` or names any ``Authority`` or team
+    is ``False``: the caller treats every answer but a verified ad-hoc one as signed.
+    """
+    try:
+        shown = _display(bundle_path, runner)
+    except ServerHostError:
+        return False
+    if shown is None:
+        return False
+    lines = shown.splitlines()
+    signatures = [line for line in lines if line.startswith("Signature=")]
+    if len(signatures) != 1 or _display_value(shown, "Signature") != "adhoc":
+        return False
+    if any(line.startswith("Authority=") for line in lines):
+        return False
+    return _display_value(shown, "TeamIdentifier") in (None, "not set")
 
 
 def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
