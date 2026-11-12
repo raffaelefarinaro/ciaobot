@@ -113,6 +113,11 @@ namespaces = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# A coroutine a test created and never ran fails the test that dropped it (#2842).
+filterwarnings = [
+    "error:coroutine .* was never awaited:RuntimeWarning",
+    "error:Exception ignored.*<coroutine object:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.mypy]
 python_version = "3.12"

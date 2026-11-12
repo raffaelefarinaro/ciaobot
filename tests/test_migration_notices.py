@@ -958,9 +958,12 @@ async def test_shutdown_cancels_a_scan_in_flight_and_waits_for_it(
 
         # Nothing in flight, and a task that failed: neither may raise.
         await migration_notices.shutdown_links_scan(state)
-        state.links_scan_task = asyncio.create_task(_fails())
+        failed = asyncio.create_task(_fails())
+        state.links_scan_task = failed
         await asyncio.sleep(0)
         await migration_notices.shutdown_links_scan(state)
+        # Observed here, as production's _observe_links_scan callback would.
+        assert isinstance(failed.exception(), RuntimeError)
 
 
 async def _fails() -> None:

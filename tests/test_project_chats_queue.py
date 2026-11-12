@@ -988,6 +988,8 @@ async def test_ask_user_question_interrupts_live_provider(tmp_path: Path) -> Non
     stop_calls: list[str] = []
 
     class _FakeProvider:
+        provider = None  # ProviderService.provider before a provider exists
+
         async def stop_active(self) -> bool:
             stop_calls.append(chat.chat_id)
             return True
@@ -1014,7 +1016,11 @@ async def test_ask_user_question_interrupts_live_provider(tmp_path: Path) -> Non
             pass
 
     stream = pcm.start_stream(chat.chat_id, "initial")
+    drive = pcm._streaming.drive_task(chat.chat_id, stream)
+    assert drive is not None
     await asyncio.wait_for(consume(stream), timeout=5.0)
+    # The stream ends before drive()'s post-turn tail; await the tail too.
+    await asyncio.wait_for(drive, timeout=5.0)
 
     assert stop_calls == [chat.chat_id], "expected one interrupt on AskUserQuestion"
     assert pcm._chats[chat.chat_id].pending_question == (
