@@ -231,3 +231,145 @@ describe('McpAuthBody Turn off', () => {
     expect(w.find('.needs-you-turn-off-scope').exists()).toBe(false)
   })
 })
+
+describe('McpAuthBody opens the sign-in page', () => {
+  const PLUGIN = 'plugin:scandit-sdk:scandit'
+
+  function fakeTab() {
+    return { closed: false, opener: {} as unknown, location: { href: '' }, close: vi.fn() }
+  }
+
+  function signIn(w: VueWrapper) {
+    return w.findAll('button').find(b => b.text() === 'Sign in')!
+  }
+
+  function steps(w: VueWrapper) {
+    return w.findAll('.needs-you-steps li')
+  }
+
+  it('opens a tab in the Claude click and sends it to the address that arrives later', async () => {
+    const tab = fakeTab()
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'working', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+
+    await signIn(w).trigger('click')
+    expect(openSpy).toHaveBeenCalledWith('', '_blank')
+    await flushPromises()
+    expect(tab.location.href).toBe('')
+
+    await w.setProps({
+      action: action({ state: 'waiting', params: { server: PLUGIN, provider: 'claude', url: 'https://auth.example/authorize?a=1', session_id: 's1' } }),
+    })
+    expect(tab.location.href).toBe('https://auth.example/authorize?a=1')
+    expect(tab.opener).toBeNull()
+    expect(steps(w)[0].text()).toBe('Sign-in page opened')
+    expect(steps(w)[0].classes()).toContain('is-done')
+    expect(steps(w)[0].attributes('aria-current')).toBeUndefined()
+    expect(steps(w)[1].attributes('aria-current')).toBe('step')
+    expect(tab.close).not.toHaveBeenCalled()
+  })
+
+  it('sends the tab to the OpenCode address in the start answer', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize?x=1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: 'linear', provider: 'opencode' } }))
+
+    await signIn(w).trigger('click')
+    await flushPromises()
+
+    expect(tab.location.href).toBe('https://mcp.linear.app/authorize?x=1')
+    expect(tab.close).not.toHaveBeenCalled()
+  })
+
+  it('leaves step 1 to do when the pop-up was blocked, and ticks it when the link is clicked', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'working', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+
+    await signIn(w).trigger('click')
+    await flushPromises()
+    await w.setProps({
+      action: action({ state: 'waiting', params: { server: PLUGIN, provider: 'claude', url: 'https://auth.example/authorize?a=1', session_id: 's1' } }),
+    })
+
+    expect(steps(w)[0].text()).toBe('Open the sign-in page')
+    expect(steps(w)[0].classes()).not.toContain('is-done')
+    expect(steps(w)[0].attributes('aria-current')).toBe('step')
+
+    await w.get('a.needs-you-btn').trigger('click')
+
+    expect(steps(w)[0].text()).toBe('Sign-in page opened')
+    expect(steps(w)[0].classes()).toContain('is-done')
+  })
+
+  it('closes the waiting tab on failure', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'working', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+    await signIn(w).trigger('click')
+    await flushPromises()
+
+    await w.setProps({ action: action({ state: 'failed', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }) })
+
+    expect(tab.close).toHaveBeenCalled()
+  })
+
+  it('closes the waiting tab when the start is refused', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockRejectedValueOnce(new Error('boom'))
+    const w = mountBody(action({ state: 'failed', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+
+    await w.findAll('button').find(b => b.text() === 'Try again')!.trigger('click')
+    await flushPromises()
+
+    expect(tab.close).toHaveBeenCalled()
+  })
+
+  it('closes the waiting tab and does not navigate it to an unsafe address', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'waiting', params: { server: PLUGIN, provider: 'claude', url: 'javascript:alert(1)', session_id: 's1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+
+    await signIn(w).trigger('click')
+    await flushPromises()
+
+    expect(tab.close).toHaveBeenCalled()
+    expect(tab.location.href).toBe('')
+  })
+
+  it('closes the waiting tab on unmount', async () => {
+    const tab = fakeTab()
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+    apiPost.mockResolvedValueOnce({
+      action: action({ state: 'working', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }),
+    })
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude', session_id: 's1' } }))
+    await signIn(w).trigger('click')
+    await flushPromises()
+
+    w.unmount()
+    wrapper = null
+
+    expect(tab.close).toHaveBeenCalled()
+  })
+
+  it('shows the plugin server by its own name', () => {
+    const w = mountBody(action({ state: 'open', params: { server: PLUGIN, provider: 'claude' } }))
+    expect(w.find('button[aria-label="Turn off scandit"]').exists()).toBe(true)
+  })
+})

@@ -23,20 +23,27 @@ async function raiseSignIn(page: Page, state?: 'waiting'): Promise<void> {
   expect(res.ok(), 'the fixture refused the action').toBe(true)
 }
 
-/** Record the pop-ups the page opens, instead of opening them. */
+type Popup = { args: unknown[]; href: string; opener: boolean }
+
+/** Record the pop-ups the page opens, and hand back a tab the page can navigate. */
 async function recordPopups(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    const opened: unknown[][] = []
-    ;(window as Window & { __opened?: unknown[][] }).__opened = opened
+    const opened: { args: unknown[]; tab: unknown }[] = []
+    ;(window as Window & { __opened?: typeof opened }).__opened = opened
     window.open = ((...args: unknown[]) => {
-      opened.push(args)
-      return null
-    }) as typeof window.open
+      const tab = { closed: false, opener: window as unknown, location: { href: '' }, close() { this.closed = true } }
+      opened.push({ args, tab })
+      return tab
+    }) as unknown as typeof window.open
   })
 }
 
-async function popups(page: Page): Promise<unknown[][]> {
-  return page.evaluate(() => (window as Window & { __opened?: unknown[][] }).__opened ?? [])
+/** What each recorded pop-up was given: its arguments, where its tab went, and whether its opener was cut. */
+async function popups(page: Page): Promise<Popup[]> {
+  return page.evaluate(() => {
+    const opened = (window as Window & { __opened?: { args: unknown[]; tab: { location: { href: string }; opener: unknown } }[] }).__opened ?? []
+    return opened.map(({ args, tab }) => ({ args, href: tab.location.href, opener: tab.opener === null }))
+  })
 }
 
 test.describe('the needs-you card', () => {
@@ -58,16 +65,16 @@ test.describe('the needs-you card', () => {
 
     await card.getByRole('button', { name: 'Sign in', exact: true }).click()
 
-    // The page opened in a new tab, with no opener, at the address the engine sent.
+    // One tab opened in the click, and it went to the address the engine sent, with no opener.
     await expect.poll(() => popups(page)).toHaveLength(1)
     const [call] = await popups(page)
-    const [url, target, features] = call as string[]
-    expect(url).toMatch(/^https:\/\/auth\.example\.invalid\/authorize/)
-    expect(target).toBe('_blank')
-    expect(features).toBe('noopener,noreferrer')
+    expect(call.args).toEqual(['', '_blank'])
+    await expect.poll(async () => (await popups(page))[0].href).toMatch(/^https:\/\/auth\.example\.invalid\/authorize/)
+    expect((await popups(page))[0].opener).toBe(true)
 
-    // The wait is shown, with a link the user can use again.
+    // The wait is shown, step 1 is ticked because this card opened the page, and the link works again.
     await expect(card.locator('.needs-you-card-title')).toHaveText('Waiting for linear to connect…')
+    await expect(card.locator('.needs-you-steps li').first()).toHaveText('Sign-in page opened')
     await expect(card.getByRole('link', { name: 'Open the sign-in page again' })).toHaveAttribute('target', '_blank')
 
     await card.getByRole('button', { name: 'Not now', exact: true }).click()

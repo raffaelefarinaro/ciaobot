@@ -96,7 +96,8 @@ describe('NeedsYouCard', () => {
   })
 
   it('Sign in starts the action and opens the page in a new tab without an opener', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const tab = { closed: false, opener: {} as unknown, location: { href: '' }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
     apiPost.mockResolvedValueOnce({
       action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize?x=1' } }),
     })
@@ -105,18 +106,22 @@ describe('NeedsYouCard', () => {
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/start', {})
-    expect(openSpy).toHaveBeenCalledWith('https://mcp.linear.app/authorize?x=1', '_blank', 'noopener,noreferrer')
+    expect(openSpy).toHaveBeenCalledWith('', '_blank')
+    expect(tab.location.href).toBe('https://mcp.linear.app/authorize?x=1')
+    expect(tab.opener).toBeNull()
   })
 
   it('never opens an address that is not http or https', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const tab = { closed: false, opener: {} as unknown, location: { href: '' }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
     apiPost.mockResolvedValueOnce({
       action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'javascript:alert(1)' } }),
     })
     const card = mountCard()
     await button(card, 'Sign in').trigger('click')
     await flushPromises()
-    expect(openSpy).not.toHaveBeenCalled()
+    expect(tab.location.href).toBe('')
+    expect(tab.close).toHaveBeenCalled()
   })
 
   it('a waiting card links to the page and shows the steps', () => {
@@ -131,7 +136,9 @@ describe('NeedsYouCard', () => {
 
     const steps = card.findAll('.needs-you-steps li')
     expect(steps).toHaveLength(3)
-    expect(steps[1].attributes('aria-current')).toBe('step')
+    expect(steps[0].text()).toBe('Open the sign-in page')
+    expect(steps[0].attributes('aria-current')).toBe('step')
+    expect(steps[1].attributes('aria-current')).toBeUndefined()
     expect(card.find('.needs-you-card-spinner').exists()).toBe(true)
     expect(button(card, 'Not now').exists()).toBe(true)
   })

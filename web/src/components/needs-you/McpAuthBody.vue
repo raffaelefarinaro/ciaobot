@@ -4,12 +4,15 @@
  * its steps. The card owns Not now and Continue the chat / Done; this body
  * never renders them. It also owns Turn off, which turns the server off for this
  * workspace and removes the card, and the line that says where Turn off applies.
+ * Sign in opens a placeholder tab in the click and sends it to the sign-in page once the engine has the address; step 1 is ticked only once this card opened the page.
  */
-import { computed, ref, useId, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import {
   actionCopy,
   chatActionErrorReason,
+  MCP_AUTH_OPEN_STEP,
   MCP_AUTH_STEPS,
+  mcpServerName,
   mcpTurnOffErrorText,
   mcpTurnOffScopeText,
   safeExternalUrl,
@@ -27,7 +30,7 @@ const store = useProjectStore()
 const starting = ref(false)
 const turningOff = ref(false)
 const copy = computed(() => actionCopy(props.action))
-const server = computed(() => props.action.params.server ?? '')
+const server = computed(() => mcpServerName(props.action.params.server ?? ''))
 const scopeText = computed(() => mcpTurnOffScopeText(props.action.params.provider ?? ''))
 const scopeId = useId()
 const url = computed(() => safeExternalUrl(props.action.params.url))
@@ -35,6 +38,34 @@ const isClaude = computed(() => props.action.params.provider === 'claude')
 const sessionId = computed(() => props.action.params.session_id ?? '')
 /** This body's root, so a focus inside it can be seen before it leaves. */
 const bodyEl = ref<HTMLElement | null>(null)
+/** The tab opened in the Sign in click, waiting for the engine's address. */
+let pendingTab: Window | null = null
+/** The sign-in page was opened from this card, on this device. */
+const opened = ref(false)
+const steps = computed(() => (opened.value ? MCP_AUTH_STEPS : [MCP_AUTH_OPEN_STEP, ...MCP_AUTH_STEPS.slice(1)]))
+
+function closePendingTab(): void {
+  pendingTab?.close()
+  pendingTab = null
+}
+
+/** Send the waiting tab to the sign-in page, once the address is known. */
+function navigatePendingTab(target: string | null): void {
+  if (!pendingTab || !target) return
+  if (!pendingTab.closed) {
+    pendingTab.opener = null
+    pendingTab.location.href = target
+    opened.value = true
+  }
+  pendingTab = null
+}
+
+// Claude's address arrives a poll after the start answers.
+watch(url, target => navigatePendingTab(target))
+watch(() => props.action.state, state => {
+  if (state === 'failed' || state === 'done') closePendingTab()
+})
+onBeforeUnmount(closePendingTab)
 const PASTE_HINT = 'Signing in on this phone? After you approve, the page fails to load. Copy its address and paste it here.'
 /** A sign-in that ends on an unreachable loopback page: this device is not the engine's computer. */
 const showPaste = computed(() => props.action.state === 'waiting'
@@ -79,15 +110,23 @@ async function start(): Promise<void> {
   starting.value = true
   emit('error', '')
   emit('notice', '')
+  // A pop-up opened after an await is blocked, so the placeholder tab opens in the click.
+  closePendingTab()
+  opened.value = false
+  pendingTab = window.open('', '_blank')
   try {
     const next = await store.startChatAction(props.chatId, props.action.id)
     if (next === null) {
+      closePendingTab()
       emit('notice', 'This card changed on another device. The newer state is shown.')
     } else if (next.state === 'waiting') {
-      const target = safeExternalUrl(next.params.url)
-      if (target) window.open(target, '_blank', 'noopener,noreferrer')
+      navigatePendingTab(safeExternalUrl(next.params.url))
+      closePendingTab()   // no-op after a navigation; closes it for an unsafe or missing URL
+    } else if (next.state !== 'working') {
+      closePendingTab()
     }
   } catch (e) {
+    closePendingTab()
     if (chatActionErrorReason(e) === 'invalid_state') {
       emit('notice', 'This card changed on another device. The newer state is shown.')
     } else {
@@ -103,10 +142,10 @@ async function start(): Promise<void> {
   <div ref="bodyEl" class="needs-you-mcp">
     <ol v-if="action.state === 'waiting'" class="needs-you-steps">
       <li
-        v-for="(step, i) in MCP_AUTH_STEPS"
+        v-for="(step, i) in steps"
         :key="step"
-        :class="{ 'is-done': i === 0, 'is-now': i === 1 }"
-        :aria-current="i === 1 ? 'step' : undefined"
+        :class="{ 'is-done': opened && i === 0, 'is-now': i === (opened ? 1 : 0) }"
+        :aria-current="i === (opened ? 1 : 0) ? 'step' : undefined"
       >{{ step }}</li>
     </ol>
 
@@ -124,6 +163,7 @@ async function start(): Promise<void> {
       :href="url"
       target="_blank"
       rel="noopener noreferrer"
+      @click="opened = true"
     >{{ copy?.primaryLabel }}</a>
 
     <button
