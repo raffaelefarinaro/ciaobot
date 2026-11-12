@@ -3777,7 +3777,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
       :data-rail-host="overlay ? undefined : ''"
       @click.self="overlay && requestDetailClose()"
     >
-      <PaneHeader v-if="!overlay" :brand="false" @open-sidebar="emit('open-sidebar')">
+      <PaneHeader v-if="!overlay" :brand="false" phone-overflow @open-sidebar="emit('open-sidebar')">
         <template #title>
           <div class="header-left">
             <ItemTitleRow :rail="taskRailOn" close-label="Close task" @close="requestDetailClose()">

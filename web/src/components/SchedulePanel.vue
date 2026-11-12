@@ -6,8 +6,9 @@
       @open-sidebar="emit('open-sidebar')"
     />
     <!-- Like an open chat: no brand or page tag, so on a phone the close,
-         title and actions share one row. -->
-    <PaneHeader v-else :brand="false" @open-sidebar="emit('open-sidebar')">
+         title and actions share one row, and Back and the bell fold into ⋯.
+         The New automation form has no ⋯ menu, so it keeps them in the header. -->
+    <PaneHeader v-else :brand="false" :phone-overflow="!!schedule" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <!-- The same title row as an open chat: close, then the title rail of
