@@ -40,7 +40,7 @@ const OUT = resolve(webRoot, 'public/icons')
 const SITE_IMG = resolve(webRoot, '../site/assets/img')
 // The tile's cream, kept in step with ciaobot-icon.svg.
 const BG = { r: 0xf8, g: 0xf4, b: 0xef, alpha: 1 }
-// Site favicon and nav-brand image: [file, size].
+// Site favicon and standalone icon: [file, size].
 const SITE_SIZES = [['favicon.png', 32], ['logo.png', 192]]
 
 const ANY_SIZES = [16, 32, 180, 192, 512]
