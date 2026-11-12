@@ -1,35 +1,61 @@
 <template>
-  <div v-if="project" class="project-view">
-    <PaneHeader page-tag="Project" @open-sidebar="emit('open-sidebar')">
+  <div v-if="project" class="project-view" data-rail-host>
+    <!-- Like an open chat or automation: no brand or page tag, so on a phone
+         close, title and actions share one row. -->
+    <PaneHeader :brand="false" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Close" aria-label="Close project">&times;</button>
-          <input
-            v-if="editingName"
-            class="title-input"
-            v-model="nameDraft"
-            aria-label="Project name"
-            @keyup.enter="saveName"
-            @keyup.escape="editingName = false"
-            @blur="saveName"
-            autofocus
-          />
-          <!-- The project name is the title. Its workspace is named once, in
-               the sidebar's workspace scope, so it is not repeated here. -->
-          <h2 v-else class="project-title" @dblclick="startEditName">{{ project.name }}</h2>
+          <!-- The same title row as an open chat: close, then the title rail of
+               the workspace's projects (swipe or arrow keys to move along it,
+               pull the title down to go back Home, double-click to rename), or
+               the plain title when there is nothing to move to. -->
+          <ItemTitleRow :rail="titleRailOn && !editingName" close-label="Close project" @close="$emit('close')">
+            <input
+              v-if="editingName"
+              class="title-input"
+              v-model="nameDraft"
+              aria-label="Project name"
+              @keyup.enter="saveName"
+              @keyup.escape="editingName = false"
+              @blur="saveName"
+              autofocus
+            />
+            <!-- Keyed by project and by a refused switch, so a slide still
+                 pending from the last project, or one the user cancelled, never
+                 leaves the strip resting on a neighbour. -->
+            <TitleRail
+              v-else-if="titleRailOn"
+              :key="`${project.project_id}:${railRemount}`"
+              ref="titleRailRef"
+              :items="titleRail.items.value"
+              :current-id="project.project_id"
+              group-label="Projects in this workspace"
+              @select="onRailSelect"
+              @rename="startEditName"
+              @lean="railLean = $event"
+              @pull="emit('pull', $event)"
+              @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
+            />
+            <!-- The project name is the title. Its workspace is named once, in
+                 the sidebar's workspace scope, so it is not repeated here. -->
+            <h2 v-else class="pane-title project-title" @dblclick="startEditName">{{ project.name }}</h2>
+          </ItemTitleRow>
         </div>
       </template>
       <template #actions>
-        <button type="button" class="btn-small project-new-chat" aria-haspopup="dialog" @click="newChat">New chat</button>
+        <!-- On a phone the header is one row like a chat's: New chat and
+             Complete fold into the ⋯ menu (headerFold.css), which every
+             project then has. -->
+        <button type="button" class="btn-small project-new-chat fold-wide" aria-haspopup="dialog" @click="newChat">New chat</button>
         <button
-          v-if="project.vault_folder && !project.is_auto"
-          class="btn-small"
+          v-if="canComplete"
+          class="btn-small fold-wide"
           @click="doComplete"
         >Complete</button>
         <div
-          v-if="!project.is_auto"
           ref="projectActionsEl"
           class="project-actions"
+          :class="{ 'fold-phone': project.is_auto }"
         >
           <button
             ref="projectActionsTrigger"
@@ -50,14 +76,25 @@
             aria-label="Project actions"
             @keydown="onProjectActionsKeydown"
           >
-            <button type="button" role="menuitem" class="danger" @click="doDelete">Delete project</button>
+            <button type="button" role="menuitem" class="fold-phone" aria-haspopup="dialog" @click="closeProjectActions(false); newChat()">New chat</button>
+            <button v-if="canComplete" type="button" role="menuitem" class="fold-phone" @click="closeProjectActions(false); doComplete()">Complete</button>
+            <button v-if="!project.is_auto" type="button" role="menuitem" class="danger" @click="doDelete">Delete project</button>
           </div>
         </div>
       </template>
     </PaneHeader>
 
-    <div class="page-grid project-grid">
-      <div class="page-main">
+    <!-- Keyed by project: a step from the rail mounts the page fresh, so its
+         arrival animation plays on every step, even two the same way. -->
+    <div
+      :key="project.project_id"
+      class="page-grid project-grid"
+      data-rail-lean
+      :class="railMotionClass(railLean, railArrival)"
+      :style="railLeanStyle(railLean)"
+      @animationend="onArrivalEnd"
+    >
+      <div class="page-main" data-rail-column>
         <section class="project-section project-context" aria-labelledby="project-context-title">
           <div class="section-head">
             <h3 id="project-context-title">Context</h3>
@@ -438,7 +475,7 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
-import { useRouter } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter, type RouteLocationNormalized } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -451,6 +488,10 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
+import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
+import { takeProjectRailArrival, useProjectRail } from '../composables/useProjectRail'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import RepoPickerDialog from './RepoPickerDialog.vue'
 import { branchLabel, findRepoInstructions } from '../lib/repo'
@@ -467,7 +508,13 @@ interface ProjectFile {
 }
 
 const props = defineProps<{ projectId: string }>()
-const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
+const emit = defineEmits<{
+  close: []
+  'open-sidebar': []
+  // A downward drag on the title rail, and its release: ChatLayout's pull-to-close.
+  pull: [dy: number]
+  'pull-end': [dy: number, velocity: number]
+}>()
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
@@ -652,6 +699,80 @@ watch(() => allChats.value.filter(chat => chat.archived).map(chat => chat.chat_i
 })
 onBeforeUnmount(() => { archiveRequest++ })
 
+const canComplete = computed(() => !!project.value?.vault_folder && !project.value?.is_auto)
+
+// ── Title rail ─────────────────────────────────────────────────────────
+// The workspace's projects in the sidebar's order. The view stays mounted
+// across projects, so an arrival from the rail is read on each change of
+// project rather than at setup.
+const titleRail = useProjectRail(() => props.projectId)
+const titleRailOn = computed(() => titleRail.items.value.length > 1)
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
+const railLean = ref(0)
+const railArrival = ref<-1 | 1 | 0>(0)
+// Bumped when a switch is refused, so the rail remounts centred on this project.
+const railRemount = ref(0)
+// Only the page's own arrival ends it, not an animation bubbling up from inside it.
+function onArrivalEnd(e: AnimationEvent): void {
+  if (e.target === e.currentTarget) railArrival.value = 0
+}
+watch(() => props.projectId, () => {
+  railLean.value = 0
+  railArrival.value = takeProjectRailArrival()
+})
+
+/** An edit that moving to another project would throw away. */
+function holdsDraft(): boolean {
+  const nameDirty = editingName.value && !!project.value && nameDraft.value.trim() !== project.value.name
+  return nameDirty || (editingContext.value && contextDirty.value)
+}
+
+/**
+ * Every way off this project goes through the router: the rail (swipe, keys,
+ * chord), pull to close, ×, Escape, a sidebar row, Back. One guard asks before
+ * any of them drops an unsaved name or context, and a refusal keeps the
+ * project, its draft and its address.
+ */
+async function confirmLeave(to: RouteLocationNormalized): Promise<boolean> {
+  if (to.params.projectId === props.projectId || !holdsDraft()) return true
+  const leave = await askConfirm('Discard your unsaved changes to this project?', {
+    title: 'Unsaved changes',
+    confirmLabel: 'Discard changes',
+    destructive: true,
+  })
+  if (!leave) {
+    railLean.value = 0
+    railRemount.value++
+    return false
+  }
+  editingName.value = false
+  editingContext.value = false
+  return true
+}
+onBeforeRouteLeave(to => confirmLeave(to))
+onBeforeRouteUpdate(to => confirmLeave(to))
+
+// A swipe or a click on a neighbour: the route guard asks about a draft, and a
+// refused or failed switch remounts the rail centred on this project.
+async function onRailSelect(id: string): Promise<void> {
+  await titleRail.select(id).catch(() => {
+    railLean.value = 0
+    railRemount.value++
+  })
+}
+
+// Previous / next project (the previous / next chat chord): the rail slides the
+// neighbour in before switching, like a swipe. Never over a draft: the chord
+// does nothing while the name or the context is being edited.
+function selectAdjacent(direction: -1 | 1): boolean {
+  if (!titleRailOn.value || editingName.value || editingContext.value) return false
+  // A sheet or menu of this page is open: its action belongs to this project.
+  if (actionsOpen.value || closureOpen.value || repoPickerOpen.value) return false
+  return titleRailRef.value ? titleRailRef.value.slide(direction) : titleRail.step(direction)
+}
+
+defineExpose({ selectAdjacent })
+
 // ── Name edit ──────────────────────────────────────────────────────────
 const editingName = ref(false)
 const nameDraft = ref('')
@@ -682,19 +803,24 @@ function closeProjectActions(restoreFocus = false) {
   if (restoreFocus) void nextTick(() => projectActionsTrigger.value?.focus())
 }
 
+/** The menu's items as drawn: the phone-only ones (fold-phone) are in the DOM
+ *  at every width, but hidden on a wider pane, and focus must skip them. */
+function menuItems(): HTMLButtonElement[] {
+  return Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+    .filter(item => getComputedStyle(item).display !== 'none')
+}
+
 function toggleProjectActions() {
   if (actionsOpen.value) {
     closeProjectActions(true)
     return
   }
   actionsOpen.value = true
-  void nextTick(() => {
-    projectActionsMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
-  })
+  void nextTick(() => { menuItems()[0]?.focus() })
 }
 
 function onProjectActionsKeydown(event: KeyboardEvent) {
-  const items = Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  const items = menuItems()
   if (!items.length) return
   const current = items.indexOf(document.activeElement as HTMLButtonElement)
   if (event.key === 'Escape') {
@@ -787,6 +913,9 @@ const showRepoSection = computed(() => Boolean(project.value && (!project.value.
 watch(() => props.projectId, () => {
   repoPickerOpen.value = false
   repoError.value = ''
+  // A completion sheet belongs to the project it was opened on.
+  closureOpen.value = false
+  closureProjectId.value = ''
 })
 
 function openRepoPicker() {
@@ -847,6 +976,8 @@ function openArchive(chat: { archive_path?: string }) {
 }
 
 const closureOpen = ref(false)
+/** The project the open completion sheet is about, fixed when it opened. */
+const closureProjectId = ref('')
 const closureEl = ref<HTMLElement | null>(null)
 const closureNoteField = ref<HTMLTextAreaElement | null>(null)
 const closureOutcome = ref<'completed' | 'stopped'>('completed')
@@ -872,9 +1003,12 @@ async function doComplete() {
   closureNote.value = ''
   closureError.value = ''
   openTaskCount.value = null
-  closureOpen.value = true
   const workspace = project.value.workspace
   const projectId = project.value.project_id
+  // The view stays mounted across projects (the rail, Back), so the sheet
+  // completes the project it was opened on, never whichever is showing now.
+  closureProjectId.value = projectId
+  closureOpen.value = true
   try {
     const data = await api.get<{ tasks?: Array<{ id?: string; project_id?: string; status?: string }> }>(
       `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
@@ -889,14 +1023,15 @@ async function doComplete() {
 }
 
 async function submitClosure() {
-  if (!project.value || closureBusy.value) return
+  const projectId = closureProjectId.value
+  if (!projectId || closureBusy.value) return
   // The note is optional in the field itself: a blank (or whitespace-only)
   // note closes the project without a note, like the task board's completion sheet.
   const note = closureNote.value.trim()
   closureBusy.value = true
   closureError.value = ''
   try {
-    await store.completeProject(project.value.project_id, {
+    await store.completeProject(projectId, {
       outcome: closureOutcome.value,
       note,
     })
@@ -1108,6 +1243,9 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 })
 </script>
 
+<style scoped src="./railMotion.css"></style>
+<style scoped src="./headerFold.css"></style>
+
 <style scoped>
 .project-view {
   flex: 1;
@@ -1181,43 +1319,13 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   padding-bottom: var(--space-6);
 }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  text-align: left;
-}
+/* The title row is ItemTitleRow (close, then the rail or the title); the left
+   cell only gives it the header's room. */
+.header-left { display: flex; align-items: center; min-width: 0; flex: 1; text-align: left; }
 
-.desktop-only { display: inline-flex; }
-@media (max-width: 768px) { .desktop-only { display: none; } }
-
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.close-btn:hover { color: var(--fg); }
-
+/* The plain title is the shared .pane-title, as on a chat or an automation. */
 .project-title {
-  min-width: 0;
   margin: 0;
-  overflow: hidden;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   cursor: text;
 }
 

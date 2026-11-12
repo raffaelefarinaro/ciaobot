@@ -1,10 +1,12 @@
-"""The hidden code-mode continuation never shows as a user row and never shifts turn_index."""
+"""Hidden continuations never show as a user row and never shift turn_index.
+
+The legacy code-mode continuation is no longer sent, but transcripts written
+before code mode became automatic still hold it.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -13,9 +15,8 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import Request
 
-from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT
+from ciao.cli_envelopes import LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT
 from ciao.config import CiaoConfig
-from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import transcript_service
@@ -72,60 +73,22 @@ def _request(
     return Request(scope)
 
 
-async def _drive(pcm: ProjectChatManager, chat_id: str, prompt: str) -> None:
-    stream = pcm.start_stream(chat_id, prompt)
-
-    async def consume() -> None:
-        async for _ in stream.subscribe():
-            pass
-
-    await asyncio.wait_for(asyncio.create_task(consume()), timeout=5.0)
-
-
 @pytest.mark.asyncio
-async def test_hidden_continuation_keeps_code_mode_markers_aligned(
+async def test_a_legacy_code_mode_continuation_keeps_turn_markers_aligned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A transcript written while code mode was a switch still hides its continuation."""
     pcm = _make_manager(tmp_path)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     project = pcm.create_project("Linked", workspace="work")
-    project.repo_path = str(repo)
     chat = pcm.create_chat(project.project_id, title="code-markers")
     cid = chat.chat_id
-    calls: list[str] = []
-
-    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        calls.append(prompt)
-        if prompt == "initial":
-            pcm.set_code_mode(cid, True, actor="agent")
-            assert pcm.arm_code_mode_continuation(cid) is True
-        elif prompt == "second":
-            pcm.set_code_mode(cid, False, actor="agent")
-        yield ResultEvent(
-            type="result",
-            result="answer",
-            session_id="sess-x",
-            is_error=False,
-            effective_model=chat.model,
-            usage={},
-            quota={},
-            cost_usd=0.0,
-        )
-
-    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
-    await _drive(pcm, cid, "initial")
-    assert calls == ["initial", CODE_MODE_CONTINUE_PROMPT]
-    await _drive(pcm, cid, "second")
-    assert chat.user_turn_count == 2
 
     chat.session_id = "sess-markers"
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: [
             _Msg("user", "initial"),
             _Msg("assistant", "a1"),
-            _Msg("user", CAPSULE + CODE_MODE_CONTINUE_PROMPT),
+            _Msg("user", CAPSULE + LEGACY_CODE_MODE_CONTINUE_PROMPT),
             _Msg("assistant", "a2"),
             _Msg("user", "second"),
             _Msg("assistant", "a3"),
@@ -136,7 +99,7 @@ async def test_hidden_continuation_keeps_code_mode_markers_aligned(
     response = await chat_messages(_request(pcm, pcm._config, cid))
     messages = json.loads(response.body)
 
-    assert CODE_MODE_CONTINUE_PROMPT not in response.body.decode()
+    assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in response.body.decode()
     users = [(m["content"], m["turn_index"]) for m in messages if m["role"] == "user"]
     assert users == [("initial", 0), ("second", 1)]
 
@@ -152,7 +115,7 @@ def test_opencode_render_skips_the_continuation_without_shifting_turn_index(
         return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
 
     rows = _render_opencode_thread(
-        {"info": {}, "messages": [user("a"), user(CAPSULE + CODE_MODE_CONTINUE_PROMPT), user("b")]},
+        {"info": {}, "messages": [user("a"), user(CAPSULE + LEGACY_CODE_MODE_CONTINUE_PROMPT), user("b")]},
         chat,
     )
     users = [(r["content"], r["turn_index"]) for r in rows if r["role"] == "user"]
@@ -179,7 +142,7 @@ session_id: sess-archived
 ### User
 
 ```text
-{CAPSULE}{CODE_MODE_CONTINUE_PROMPT}
+{CAPSULE}{LEGACY_CODE_MODE_CONTINUE_PROMPT}
 ```
 
 ### Assistant
@@ -353,7 +316,7 @@ def _oc_expected(tmp_path: Path) -> list[dict]:
     ]
 
 
-@pytest.mark.parametrize("prompt", [CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
+@pytest.mark.parametrize("prompt", [LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
 @pytest.mark.parametrize("capsule", [False, True])
 @pytest.mark.asyncio
 async def test_claude_hidden_continuation_marks_completed_answer_without_adding_rows(
@@ -387,7 +350,7 @@ async def test_claude_hidden_continuation_marks_completed_answer_without_adding_
     assert [item["i"] for item in envelope["items"]] == list(range(7))
 
 
-@pytest.mark.parametrize("prompt", [CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
+@pytest.mark.parametrize("prompt", [LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
 @pytest.mark.parametrize("capsule", [False, True])
 def test_opencode_hidden_continuation_marks_completed_answer_without_adding_rows(
     tmp_path: Path,
@@ -422,7 +385,7 @@ def test_opencode_child_transcript_does_not_inherit_completion_phase(
         "info": {},
         "messages": [
             _oc_assistant(_oc_text(ANSWER_ONE)),
-            _oc_user(CAPSULE + CODE_MODE_CONTINUE_PROMPT),
+            _oc_user(CAPSULE + LEGACY_CODE_MODE_CONTINUE_PROMPT),
             _oc_assistant(_oc_text(ANSWER_TWO)),
         ],
     }
@@ -431,7 +394,7 @@ def test_opencode_child_transcript_does_not_inherit_completion_phase(
 
     assert [r["content"] for r in rows] == [ANSWER_ONE, ANSWER_TWO]
     assert all("phase" not in r for r in rows)
-    assert CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
+    assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
 
 
 def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None:
@@ -540,7 +503,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
         claude_messages = [
             _Msg("user", "First question."),
             _Msg("assistant", ANSWER_ONE),
-            _Msg("user", CODE_MODE_CONTINUE_PROMPT),
+            _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
             _Msg("assistant", second_answer),
             _Msg("user", RELOAD_CONTINUE_PROMPT),
             _claude_blocks(
@@ -555,7 +518,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
             "messages": [
                 _oc_user("First question."),
                 _oc_assistant(_oc_text(ANSWER_ONE)),
-                _oc_user(CODE_MODE_CONTINUE_PROMPT),
+                _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
                 _oc_assistant(_oc_text(second_answer)),
                 _oc_user(RELOAD_CONTINUE_PROMPT),
                 _oc_assistant(
@@ -580,7 +543,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
         claude_messages = [
             _Msg("user", "First question."),
             _Msg("assistant", ANSWER_ONE),
-            _Msg("user", CODE_MODE_CONTINUE_PROMPT),
+            _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
             _Msg("user", RELOAD_CONTINUE_PROMPT),
             _claude_blocks(
                 {"type": "text", "text": NARRATION},
@@ -594,7 +557,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
             "messages": [
                 _oc_user("First question."),
                 _oc_assistant(_oc_text(ANSWER_ONE)),
-                _oc_user(CODE_MODE_CONTINUE_PROMPT),
+                _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
                 _oc_user(RELOAD_CONTINUE_PROMPT),
                 _oc_assistant(
                     _oc_text(NARRATION),
@@ -639,7 +602,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
         ("First question.", 0),
         ("Next question.", 1),
     ]
-    assert CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
+    assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
     assert RELOAD_CONTINUE_PROMPT not in json.dumps(rows)
     assert next(r for r in rows if r["content"] == ANSWER_TWO)["sent_at"] == COMPLETED_AT
 
@@ -659,7 +622,7 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
         chat.session_id = "sess-no-answer"
         messages = [
             _Msg("user", "First question."),
-            _Msg("user", CODE_MODE_CONTINUE_PROMPT),
+            _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
             _Msg("assistant", ANSWER_TWO),
             _Msg("user", "Next question."),
         ]
@@ -670,7 +633,7 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
                 "info": {},
                 "messages": [
                     _oc_user("First question."),
-                    _oc_user(CODE_MODE_CONTINUE_PROMPT),
+                    _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
                     _oc_assistant(_oc_text(ANSWER_TWO)),
                     _oc_user("Next question."),
                 ],
@@ -685,4 +648,4 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
         {"role": "user", "content": "Next question.", "turn_index": 1},
     ]
     assert not any(r.get("phase") for r in rows)
-    assert CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
+    assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)

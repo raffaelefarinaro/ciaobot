@@ -2,6 +2,7 @@ import DOMPurify from 'dompurify'
 import { Marked, Renderer, type Tokens } from 'marked'
 
 import { isAppRouteHref } from './appLinks'
+import { isImageFilePath } from './chatActivity'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { linkifyChatIds } from './chatLinks'
 import { COMMENT_TAGS } from './commentContext'
@@ -17,9 +18,12 @@ type FileMarkdownOptions = {
   openLocal?: boolean
 }
 
-/** Per-render opt-in: may a refused `file:` link become an openable button? */
+/** Per-render options for a transcript render. */
 type RenderOptions = {
+  /** May a refused `file:` link become an openable button? */
   openLocal?: boolean
+  /** The chat the message belongs to: its workspace resolves relative image paths. */
+  chatId?: string
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
@@ -40,6 +44,13 @@ const DEAD_LINK_CLASS = 'markdown-dead-link'
  * another one's opt-in.
  */
 let openLocalFiles = false
+
+/**
+ * The chat whose message is being rendered, for the duration of one render
+ * (same lifetime and reasoning as `openLocalFiles`). '' when the caller named
+ * none.
+ */
+let renderChatId = ''
 
 /**
  * Whether a link target can be followed. The sanitizer's own URI policy
@@ -255,6 +266,18 @@ chatMarkdownRenderer.codespan = function codespan(this: Renderer, token: Tokens.
   return `<a href="${escapeAttr(url)}">${code}</a>`
 }
 
+// A workspace-relative image (`![shot](memory-vault/x.png)`) left as written
+// is a src relative to the /chat/... route: the browser loads the app shell
+// and shows a broken image. The chat's own workspace resolves it, the same
+// way a file link in the message resolves on click (/api/chats/{id}/file-path).
+chatMarkdownRenderer.image = function image(this: Renderer, token: Tokens.Image): string {
+  const target = renderChatId ? chatFileHref(token.href) : ''
+  if (!target || !isImageFilePath(target)) return Renderer.prototype.image.call(this, token)
+  const src = `/api/workspace-image?path=${encodeURIComponent(target)}&chat_id=${encodeURIComponent(renderChatId)}`
+  const title = token.title ? ` title="${escapeAttr(token.title)}"` : ''
+  return `<img src="${escapeAttr(src)}" alt="${escapeAttr(token.text)}"${title} loading="lazy">`
+}
+
 const chatMarkdownParser = new Marked({
   ...MARKDOWN_OPTIONS,
   renderer: chatMarkdownRenderer,
@@ -438,6 +461,7 @@ export function renderMarkdown(
   opts: RenderOptions = {},
 ): string {
   openLocalFiles = !!opts.openLocal
+  renderChatId = opts.chatId || ''
   try {
     const lifted = liftCommentReferences(text)
     const html = lifted.restore(chatMarkdownParser.parse(lifted.text) as string)
@@ -449,6 +473,7 @@ export function renderMarkdown(
     return neutralizeDeadAnchors(sanitizeHtml(text))
   } finally {
     openLocalFiles = false
+    renderChatId = ''
   }
 }
 

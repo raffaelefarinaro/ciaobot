@@ -107,7 +107,21 @@ MEMORY_PASS_PROMPT = (
     "remove the superseded line rather than annotating it. When the two "
     "sources genuinely conflict and the correct answer is not clear, show "
     "both to the note's owner and let them decide instead of picking "
-    "silently. Type every "
+    "silently. "
+    "A single chat's passing remark, or an inference from a search that "
+    "found nothing, is never the later correction of a decision a note "
+    "records: keep both and show the conflict instead. "
+    "Also check every note you touch against the transcript: correct a "
+    "stored fact the transcript plainly contradicts, citing it (a recorded "
+    "decision follows the rule above instead), and "
+    "downgrade a claim stated as settled when the transcript shows it was "
+    "uncertain. Write present-tense facts, not a story of the session "
+    "(\"Integration tests need FOO=1\", not \"the agent then tried...\"): "
+    "drop first-person narration and dead-end guesses, but keep what was "
+    "tried and why it failed as a fact. Never copy a secret, API key, token "
+    "or password into memory, even when the transcript shows one: name the "
+    "credential (\"the deploy token\") instead of its value. "
+    "Type every "
     "note you create from the **Categories** section of the vault's "
     "`VOCABULARY.md` — the `type:` it lists, in the folder it names for that "
     "category — and when a note fits none of them, queue a new-category "
@@ -116,6 +130,8 @@ MEMORY_PASS_PROMPT = (
     "recorded. Do not do anything outside memory and the vault: no "
     "messages, emails, commits, pushes or external calls. "
     "Every item you queue with `ciao memory-proposal-add` (repository facts included) must carry `--decide nightly|you` and `--decide-reason-file FILE` (one line). Use `nightly` when more context would settle it: other chats, existing notes, a duplicate check. Use `you` only for a judgement about the operator's identity or preferences. "
+    "Work in few turns: read the transcript once, find related notes with "
+    "one search, and batch independent reads and edits into one turn. "
     "Finish with a short "
     "list of what you changed."
 )
@@ -1069,9 +1085,9 @@ class MemoryPassCoordinator:
         )
 
     def _repo_section(self, helper: dict) -> str:
-        """The linked-repository section, or nothing unless the source chat was in code mode."""
+        """The linked-repository section, or nothing unless the source chat is in code mode."""
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
-        if chat is None or not chat.code_mode:
+        if chat is None or not self._host.linked_repo_for_chat(chat):
             return ""
         project = self._host._projects.get(chat.project_id)
         repo_path = str(getattr(project, "repo_path", "") or "")

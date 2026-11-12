@@ -2119,9 +2119,9 @@ watch(
   .fv-backdrop { padding: 0; }
   .fv-modal {
     border-radius: 0;
-    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
-    height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
-    margin-top: var(--safe-top);
+    max-height: calc(100dvh - var(--chrome-top) - var(--safe-bottom));
+    height: calc(100dvh - var(--chrome-top) - var(--safe-bottom));
+    margin-top: var(--chrome-top);
     margin-bottom: var(--safe-bottom);
     width: 100vw;
   }

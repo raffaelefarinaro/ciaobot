@@ -49,7 +49,7 @@ class _Recorder:
 
 class _Pcm:
     def __init__(self, folder: Path) -> None:
-        chat = SimpleNamespace(id="c1", project_id="p1", code_mode=False, repo_location=None)
+        chat = SimpleNamespace(id="c1", project_id="p1", repo_location=None)
         self.project = SimpleNamespace(id="p1", repo_path=str(folder), workspace="")
         self.chat = chat
 
@@ -58,6 +58,10 @@ class _Pcm:
 
     def get_project(self, project_id: str) -> Any:
         return self.project if project_id == "p1" else None
+
+    def linked_repo_for_chat(self, chat: Any) -> str:
+        """The engine's code-mode rule: the project's linked repo, when it exists."""
+        return self.project.repo_path if Path(self.project.repo_path).is_dir() else ""
 
 
 def _client(

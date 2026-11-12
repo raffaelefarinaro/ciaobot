@@ -154,24 +154,24 @@ def strip_injected_context(content: str) -> str:
     return stripped or content
 
 
-#: The hidden turn the drive loop sends after an agent switched its own chat
-#: into code mode mid-turn (`ciao chat update --code on`). Not something the
-#: user typed: renderers hide it and turn counters skip it.
-CODE_MODE_CONTINUE_PROMPT = (
+#: The hidden turn the engine sent when an agent switched its own chat into
+#: code mode mid-turn, before code mode became automatic. Never sent any more,
+#: but transcripts written before then still hold it, and their turn numbering
+#: (forks, edits, retries) relies on it staying hidden.
+LEGACY_CODE_MODE_CONTINUE_PROMPT = (
     "[Ciaobot] Code mode is now on: repository instructions, skills and write "
     "access are loaded. Continue the user's request."
 )
 
 #: The hidden turn the drive loop sends after an agent ran `ciao chat reload`:
 #: the provider was dropped at the end of the turn and the session resumed.
-#: Hidden exactly like CODE_MODE_CONTINUE_PROMPT: renderers hide it and turn
-#: counters skip it.
+#: Not something the user typed: renderers hide it and turn counters skip it.
 RELOAD_CONTINUE_PROMPT = (
     "[Ciaobot] MCP servers, plugins and skills were reloaded and the session "
     "resumed. Continue the user's request."
 )
 _HIDDEN_CONTINUATIONS = frozenset(
-    " ".join(p.split()) for p in (CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT)
+    " ".join(p.split()) for p in (LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT)
 )
 
 
@@ -315,17 +315,54 @@ _NATIVE_SUMMARY_RE = re.compile(
 )
 _NATIVE_LABEL_CAP = 120
 _RUN_ID_RE = re.compile(r"[^,()]+")
+# First summary line of a Task subagent completion: 'Agent "X" finished'.
+_AGENT_SUMMARY_RE = re.compile(r'^Agent "(?P<label>.*)" [a-z]')
+_AGENT_TAIL_LINES = 50
 
 
 @dataclass(frozen=True)
 class NativeTaskRun:
-    """A provider-native background shell that finished (Bash, Monitor)."""
+    """A provider-native background task that finished (Bash, Monitor, Agent)."""
 
     label: str
     run_id: str
     status: str  # ok | cancelled | failed
     exit_code: int | None
     error: str
+    # Last lines of a subagent's inline report; shells carry none.
+    tail: tuple[str, ...] = ()
+
+
+def _native_status(raw_status: str) -> str:
+    if raw_status == "completed":
+        return "ok"
+    if raw_status in ("killed", "stopped"):
+        return "cancelled"
+    return "failed"
+
+
+def subagent_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
+    """Parse a Task subagent completion (``Agent "X" finished``), else None.
+
+    The report travels inline in ``<result>`` (older CLIs put it after the
+    summary's first line), so the run keeps its last lines as the tail.
+    """
+    summary_lines = fields.get("summary", "").strip().splitlines()
+    match = _AGENT_SUMMARY_RE.match(summary_lines[0]) if summary_lines else None
+    if match is None:
+        return None
+    label = " ".join(match.group("label").split())[:_NATIVE_LABEL_CAP]
+    task_id = fields.get("task-id", "")
+    report = fields.get("result") or "\n".join(summary_lines[1:])
+    tail = tuple(line for line in report.splitlines() if line.strip())[-_AGENT_TAIL_LINES:]
+    return NativeTaskRun(
+        label=label or "agent",
+        run_id=task_id if _RUN_ID_RE.fullmatch(task_id) else "agent",
+        status=_native_status(fields.get("status", "")),
+        exit_code=None,
+        error="",
+        tail=tail,
+    )
 
 
 def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
@@ -342,13 +379,7 @@ def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
     label = " ".join(match.group("label").split())[:_NATIVE_LABEL_CAP]
     task_id = fields.get("task-id", "")
     run_id = task_id if _RUN_ID_RE.fullmatch(task_id) else "task"
-    raw_status = fields.get("status", "")
-    if raw_status == "completed":
-        status = "ok"
-    elif raw_status in ("killed", "stopped"):
-        status = "cancelled"
-    else:
-        status = "failed"
+    status = _native_status(fields.get("status", ""))
     code = next(
         (match.group(key) for key in ("c1", "c2", "c3") if match.group(key) is not None),
         None,

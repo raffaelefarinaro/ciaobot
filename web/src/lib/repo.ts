@@ -1,3 +1,5 @@
+import type { ProjectRepo } from './types'
+
 /** Last path segment, POSIX or Windows separators, trailing separators ignored. */
 export function repoName(path: string): string {
   return path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() || path
@@ -36,4 +38,13 @@ export async function findRepoInstructions(
     if (resp.status !== 404) throw new Error(`Could not read ${name} (HTTP ${resp.status}).`)
   }
   return null
+}
+
+/**
+ * Whether chats of a project with this repo link work in code mode. Mirrors the
+ * engine rule: a chat is in code mode exactly when its project is linked to a
+ * repository that exists on this machine. There is no per-chat switch.
+ */
+export function inCodeMode(repo: ProjectRepo | null | undefined): repo is ProjectRepo {
+  return !!repo && !repo.missing
 }

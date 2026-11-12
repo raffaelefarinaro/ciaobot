@@ -32,7 +32,6 @@ from ciao.schedules import supports_auto_archive
 # id shape the catalog stopped accepting must stop being accepted here too, in
 # the same commit.
 from ciao.update_task_catalog import SCOPES
-from ciao.web.document_conversion import ANYDOC_EXTENSIONS
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -50,15 +49,6 @@ _PROJECT_TEXT_EXTS = frozenset({
 _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
 })
-
-_PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
-})
-
-# Convertible documents are kept as uploaded beside their Markdown copy.
-_PROJECT_UPLOAD_EXTS = (
-    _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS | ANYDOC_EXTENSIONS
-)
 
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -351,29 +341,25 @@ _PROVIDER_QUOTA_RE = re.compile(
 )
 
 
-def _is_terminal_quota_error(text: str) -> bool:
-    """Recognize a weekly or monthly usage limit, retried once a day instead.
-
-    A weekly limit resets days away, so an hourly retry would only burn
-    attempts (and schedule runs) against a provider that keeps refusing. The
-    caller arms the daily "quota_terminal" retry for these, not the hourly one.
-    """
+def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
-    return any(
+    # Weekly, monthly and "upgrade for higher limits" phrasings are ordinary
+    # usage limits: retried hourly like any other.
+    if any(
         needle in low
         for needle in (
             "weekly usage limit",
-            "weekly limit",
-            "monthly limit",
             "upgrade for higher limits",
         )
-    )
-
-
-def _is_retryable_quota_error(text: str) -> bool:
-    low = (text or "").lower()
-    if _is_terminal_quota_error(text):
-        return False
+    ):
+        return True
+    # A bare "weekly/monthly limit" also appears in third-party API errors a
+    # tool can surface (a billing plan's monthly limit), so it counts only
+    # with an exhaustion verb: a week of hourly replays is not cheap.
+    if any(noun in low for noun in ("weekly limit", "monthly limit")) and any(
+        verb in low for verb in ("reached", "exceeded", "exhausted", "hit your")
+    ):
+        return True
     # Claude Code uses "You've hit your session limit" in its user-facing
     # exhaustion banner, while the API-shaped error says "reached your
     # session usage limit". Both should arm the deferred hourly retry.

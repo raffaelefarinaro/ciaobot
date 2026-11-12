@@ -55,6 +55,19 @@ export interface WorkspaceProviderOption {
 export type ProviderOverrideField = 'model' | 'thinking' | 'permission_mode' | 'insights_model'
 export type ProviderOverrides = Record<string, Partial<Record<ProviderOverrideField, string>>>
 
+export type ClaudeTrimKind = 'tool' | 'skill' | 'setting'
+// One entry of the engine's Claude context-trim catalog (GET /api/workspaces claude_trim_options; ciao/claude_trim.py).
+export interface ClaudeTrimOption {
+  key: string            // "<kind>:<name>", e.g. "tool:NotebookEdit"
+  kind: ClaudeTrimKind
+  name: string
+  label: string
+  reason: string
+  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" (open set)
+  default_trimmed: boolean
+  locked: boolean
+}
+
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
@@ -72,6 +85,8 @@ export interface WorkspaceInfo {
   agent_fs_scope?: 'workspace' | 'machine' | null
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
   provider_overrides?: ProviderOverrides
+  // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
+  claude_trim?: Record<string, boolean>
 }
 
 export interface WorkspacesResponse {
@@ -82,6 +97,8 @@ export interface WorkspacesResponse {
   provider_options?: WorkspaceProviderOption[]
   // The scope a workspace with no File access choice runs under on this engine.
   default_agent_fs_scope: 'workspace' | 'machine'
+  // Catalog the Settings "Claude context trimming" card renders, in engine order.
+  claude_trim_options?: ClaudeTrimOption[]
 }
 
 /** One archived workspace, from `GET /api/workspaces/archived`. */
@@ -236,8 +253,6 @@ export interface RepoLocation {
   exists: boolean
 }
 
-export type CodeModeActor = 'user' | 'agent'
-
 export interface ChatInfo {
   chat_id: string
   project_id: string
@@ -345,10 +360,6 @@ export interface ChatInfo {
   actions?: ChatAction[]
   // Server sends `{}` for no location; test `repo_location.path`, not the object.
   repo_location?: Partial<RepoLocation>
-  // G1: always sent; optional for older payloads/test stubs.
-  code_mode?: boolean
-  // Visible user turns so far; code mode cannot be turned off once above 0.
-  user_turn_count?: number
 }
 
 /**
@@ -659,7 +670,6 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
-  | { type: 'chat_code_mode'; chat_id: string; project_id: string; code_mode: boolean; actor: CodeModeActor; at: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
@@ -2154,6 +2164,16 @@ export interface ProposalHistoryRow {
   reason?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
+  /** The transcript turn the write cited, when its receipt recorded one.
+   * ABSENT — not zero — for a decision with no citation (an operator edit, an
+   * import from another agent) and for every row written before the receipt
+   * carried provenance. */
+  source_turn?: number
+  /** The 1-based line of that turn's `## Turn N` heading in `source_path`, so
+   * the viewer opens where the fact starts instead of at the top of a file
+   * that can hold hundreds of turns. ABSENT when the archive no longer parses
+   * that turn; the link then opens the file and says nothing more. */
+  source_line?: number
   /** The receipt that performed this decision. ABSENT — not falsy — for every
    * decision the receipt protocol never recorded: History renders those as
    * "No change snapshot available" rather than offering an undo it cannot
@@ -2247,6 +2267,10 @@ export interface ProposalHistoryChange {
   undoable: boolean
   changed: boolean
   ts: string
+  /** The transcript turns the write cited, when it was extracted from one.
+   * Empty for a receipt that cited nothing. Optional because a payload written
+   * before this field existed carries none. */
+  source_turns?: number[]
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a

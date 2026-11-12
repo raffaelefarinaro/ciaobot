@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   chatLocationDiffers,
-  chatRepoTag,
   repoChip,
-  sidebarBranchChip,
   sidebarCodeBadgeTitle,
 } from './repoLocation'
 import type { ProjectRepo, RepoLocation } from './types'
@@ -12,42 +10,30 @@ const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missin
 const here: RepoLocation = { path: '/r/app', branch: 'main', is_worktree: false, exists: true }
 
 describe('repoLocation', () => {
-  it('never tags a chat in an unlinked project', () => {
+  it('never reports a location for an unlinked project', () => {
     const loc = { path: '/r/app-wt', branch: 'x', is_worktree: true, exists: true }
     expect(chatLocationDiffers(null, loc)).toBe(false)
-    expect(chatRepoTag(undefined, loc)).toBeNull()
+    expect(chatLocationDiffers(undefined, loc)).toBe(false)
   })
 
-  it('does not tag a chat without a location', () => {
-    expect(chatRepoTag(repo, {})).toBeNull()
-    expect(chatRepoTag(repo, null)).toBeNull()
-    expect(chatRepoTag(repo, undefined)).toBeNull()
+  it('does not differ without a location', () => {
+    expect(chatLocationDiffers(repo, {})).toBe(false)
+    expect(chatLocationDiffers(repo, null)).toBe(false)
+    expect(chatLocationDiffers(repo, undefined)).toBe(false)
   })
 
-  it('does not tag a chat on the main checkout and branch', () => {
-    expect(chatRepoTag(repo, here)).toBeNull()
-    expect(chatRepoTag(repo, { ...here, path: '/r/app/' })).toBeNull()
+  it('does not differ on the main checkout and branch', () => {
+    expect(chatLocationDiffers(repo, here)).toBe(false)
+    expect(chatLocationDiffers(repo, { ...here, path: '/r/app/' })).toBe(false)
   })
 
-  it('tags a worktree even on the same branch', () => {
-    const tag = chatRepoTag(repo, { ...here, is_worktree: true, path: '/r/app-wt' })
-    expect(tag).toEqual({ label: '⑂ main', title: 'Worktree: /r/app-wt', removed: false })
+  it('differs for a worktree even on the same branch, and for another branch', () => {
+    expect(chatLocationDiffers(repo, { ...here, is_worktree: true, path: '/r/app-wt' })).toBe(true)
+    expect(chatLocationDiffers(repo, { ...here, branch: 'feat-x' })).toBe(true)
   })
 
-  it('tags another branch in the main checkout', () => {
-    const tag = chatRepoTag(repo, { ...here, branch: 'feat-x' })
-    expect(tag?.label).toBe('⑂ feat-x')
-    expect(tag?.title).toBe('/r/app')
-  })
-
-  it('labels a detached HEAD', () => {
-    expect(chatRepoTag(repo, { ...here, branch: '' })?.label).toBe('⑂ detached')
-  })
-
-  it('marks a removed worktree', () => {
-    const tag = chatRepoTag(repo, { path: '/r/wt', branch: 'x', is_worktree: true, exists: false })
-    expect(tag?.removed).toBe(true)
-    expect(tag?.title).toBe('Worktree removed: /r/wt')
+  it('labels a detached HEAD in the chip', () => {
+    expect(repoChip(repo, { ...here, branch: '' })?.branch).toBe('detached')
   })
 
   it('chip uses the project repo name for a worktree and hides dirtiness', () => {
@@ -59,16 +45,6 @@ describe('repoLocation', () => {
     const chip = repoChip({ ...repo, missing: true }, {})
     expect(chip).toMatchObject({ missing: true, dirty: null, name: 'app' })
     expect(repoChip(null, here)).toBeNull()
-  })
-
-  it('marks a code-off sidebar branch chip as inactive', () => {
-    const wt = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
-    const off = sidebarBranchChip(repo, wt)
-    expect(off?.title).toBe('Worktree: /r/app-wt (code mode off)')
-    expect(off?.label).toBe('⑂ feat-x')
-    expect(off?.removed).toBe(false)
-    expect(sidebarBranchChip(repo, here)).toBeNull()
-    expect(sidebarBranchChip(repo, { ...wt, exists: false })?.removed).toBe(true)
   })
 
   it('names the full repository branch and worktree in the code badge tooltip', () => {

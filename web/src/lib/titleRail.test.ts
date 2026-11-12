@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { railItemLabel, railNeighbours, settledIndex, stableRailOrder } from './chatRail'
+import { railItemLabel, railNeighbours, settledIndex, stableRailOrder, sidebarProjectOrder } from './titleRail'
 
 describe('stableRailOrder', () => {
   it('returns fresh when there is no snapshot', () => {
@@ -59,5 +59,14 @@ describe('railItemLabel', () => {
   it('omits the project when it is empty', () => {
     expect(railItemLabel({ title: 'Fix CI', project: '', tier: 'quiet', titlePending: false }))
       .toBe('Fix CI')
+  })
+})
+
+describe('sidebarProjectOrder', () => {
+  it('puts the pinned and auto projects first, keeping each group in its given order', () => {
+    const order = sidebarProjectOrder([
+      { id: 'a' }, { id: 'auto1', is_auto: true }, { id: 'b' }, { id: 'auto2', is_auto: true },
+    ])
+    expect(order.map(p => p.id)).toEqual(['auto1', 'auto2', 'a', 'b'])
   })
 })

@@ -87,9 +87,7 @@ from ciao.models import (
     tool_call_facts,
     tool_work_dirs,
 )
-from ciao.execution_modes import (
-    harness_skill_overrides,
-)
+from ciao.claude_trim import claude_settings_layer
 from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import build_detached_shell_deny_hook
 from ciao.providers.permission_gate import PermissionGate
@@ -946,16 +944,23 @@ class ClaudeProvider(BaseSDKProvider):
         The guide fingerprint makes a guide or memory edit reach the model,
         as it did when every turn started a fresh CLI.
         The linked repo is an add-dir, fixed at spawn.
+        The settings layer is fixed at spawn.
         """
         env = tuple(sorted(
             (k, v) for k, v in (request.extra_env or {}).items() if k != "CIAO_MODEL"
         ))
+        settings_layer = (
+            request.claude_settings
+            if request.claude_settings is not None
+            else claude_settings_layer({})
+        )
         return (
             request.thinking_level,
             tuple(request.disallowed_tools or ()),
             env,
             _guide_fingerprint(Path(self.workspace_root)),
             linked_repo_of(request),
+            json.dumps(settings_layer, sort_keys=True),
         )
 
     def _warn_tasks_stopped(self, reason: str) -> None:
@@ -1151,8 +1156,8 @@ class ClaudeProvider(BaseSDKProvider):
             # stream. See _SDK_MAX_BUFFER_BYTES and issue #137.
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             env=cli_env,
-            # Per-workspace tool denylist (e.g. the default harness set, or
-            # ``Bash``). Empty list = no denylist applied.
+            # Per-workspace tool denylist: trim catalog denies plus workspace
+            # extras (e.g. ``Bash``). Empty list = no denylist applied.
             disallowed_tools=list(request.disallowed_tools or []),
             # Agents are discovered from .claude/agents/ via setting_sources
             # below. No manual frontmatter parsing needed.
@@ -1160,10 +1165,13 @@ class ClaudeProvider(BaseSDKProvider):
             # Inline settings layer (highest precedence, additive — it does
             # NOT replace the sources above; verified against the bundled CLI:
             # all 68 workspace skills and 8 agents still resolve with this
-            # set). Used to drop the bundled `schedule` / `loop` skills out of
-            # the model's context entirely, since Ciaobot's own schedules and
-            # automations supersede them. See HARNESS_DISABLED_SKILLS.
-            settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
+            # set). The per-workspace trim layer from ciao/claude_trim.py:
+            # skillOverrides plus the disable* keys.
+            settings=json.dumps(
+                request.claude_settings
+                if request.claude_settings is not None
+                else claude_settings_layer({})
+            ),
             hooks={
                 "UserPromptSubmit": [HookMatcher(hooks=[self._slash_context_hook])],
                 # Native run_in_background Bash and Monitor are tracked and

@@ -72,6 +72,8 @@
       </div>
     </div>
 
+    <SettingsClaudeTrim />
+
     <SettingsWorkspaceModels />
 
     <div class="card">
@@ -116,6 +118,7 @@
 import { inject } from 'vue'
 import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
+import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'

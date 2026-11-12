@@ -1031,7 +1031,13 @@ while the server is running, because the live schedule store may be writing it.
   Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
   `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
-  minutes). `linux-server-latest-python` repeats the `linux-server` gates on
+  minutes). For a PR into `develop` whose three-dot diff from its base changes
+  `web/`, `linux-e2e` runs after `linux-web`: it installs Chromium on Ubuntu
+  and runs `npm run test:e2e` from the PR merge checkout. That command's npm
+  prehook builds both the PWA and terminal harness from the tested checkout.
+  PRs without a `web/` change skip this job. Failed Linux browser runs upload
+  `linux-playwright-traces` when Playwright produced traces.
+  `linux-server-latest-python` repeats the `linux-server` gates on
   Python 3.14, the newest interpreter `requires-python` admits; it is not a
   required check. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
@@ -1040,8 +1046,9 @@ while the server is running, because the live schedule store may be writing it.
   is gated by `if: github.event_name != 'pull_request' || github.base_ref ==
   'main'`, so it runs on pushes (including to `develop`) and on PRs into `main`,
   but not on a PR into `develop`. Nothing builds the app any more, so there is
-  no diff for it to react to; a macOS-only regression in a `develop` PR shows up
-  on the post-merge push run instead.
+  no diff for it to react to. The macOS job retains browser coverage on pushes
+  to `develop` and PRs into `main`; web changes in develop PRs also get the
+  Linux browser check before merge.
   The `windows` job (`windows-latest`, every PR and push) is blocking since
   #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
   (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate: on
@@ -1224,7 +1231,15 @@ One-time GitHub setup for a fresh clone or repo admin:
 ./scripts/configure-github-branches.sh
 ```
 
-That sets `develop` as the default branch and protects both branches. `develop` requires `linux-server`, `linux-web` and `windows`, with admins exempt so the post-release sync PR can merge. `main` takes changes only through a pull request and requires those three plus the macOS `test` job, for admins too.
+When run by an admin, the script sets `develop` as the default branch and
+applies protection to both branches. The checked-in declaration adds
+`linux-e2e` to develop's required contexts; GitHub skips that job on develop
+PRs without a `web/` change. Admins remain exempt on `develop` so the
+post-release sync PR can merge. `main` continues to require `linux-server`,
+`linux-web`, `windows` and macOS `test`, including for admins.
+This source change does not update live branch protection: activating the new
+required context needs separate maintainer approval and an admin action after
+the workflow is present and `linux-e2e` has reported on a PR.
 
 ### GitHub code scanning
 

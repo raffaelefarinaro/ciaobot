@@ -13,6 +13,8 @@ vi.mock('../../lib/confirm', () => ({ askConfirm }))
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  onBeforeRouteLeave: vi.fn(),
+  onBeforeRouteUpdate: vi.fn(),
 }))
 
 function seed(repo: unknown = null) {

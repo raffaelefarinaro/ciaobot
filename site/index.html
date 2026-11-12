@@ -31,6 +31,7 @@
         <a href="guide.html">Guide</a>
         <a href="features.html">Features</a>
         <a href="memory.html">Memory</a>
+        <a href="trust.html">Trust</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -86,11 +87,67 @@
         <p>Useful details become reviewable Markdown notes, not a locked-in database.</p>
       </a>
     </section>
+
+    <section id="answers" aria-label="Straight answers">
+      <div class="narrow">
+        <p class="eyebrow">Before you install</p>
+        <h2>Straight answers</h2>
+        <p>The six questions people ask before installing Ciaobot.</p>
+
+        <details class="guide-details">
+          <summary>Does it cost extra?</summary>
+          <div class="details-body">
+            <p>Ciaobot is free and open source. There is nothing to buy from us: no subscription, no paid tier. You pay the AI provider you already use, if you pay one at all — Claude Code runs on your Claude subscription, and OpenCode can reach a paid API, a free tier, or a model running on your own machine.</p>
+            <p>What it consumes is model turns: one per chat turn, and a memory pass of its own each time you archive a chat. <a href="evals.html">The evaluation page</a> publishes what those turns cost on our test machine.</p>
+          </div>
+        </details>
+
+        <details class="guide-details">
+          <summary>Where does my data go?</summary>
+          <div class="details-body">
+            <p>Notes, chats and memory stay in the folder you picked, as plain files. A chat turn sends the message and the context it needs to the model provider you chose. Beyond that, the only traffic is an update check to GitHub and the integrations you connect: Google, a webhook trigger, a backup repository. <a href="trust.html#leaves">What leaves the machine, in detail →</a></p>
+          </div>
+        </details>
+
+        <details class="guide-details">
+          <summary>Does it work with the laptop shut?</summary>
+          <div class="details-body">
+            <p>Not while it is shut. Ciaobot is a small server on the computer where you installed it, so a closed lid means nothing answers — including from your phone. When it wakes, a daily or weekly routine that was missed runs once: only the most recent missed slot, not a backlog. Interval routines pick their cadence back up instead.</p>
+            <p>If you want it always available, run it on a machine that stays on, such as a small VPS. <a href="remote.html">Using it from other devices →</a></p>
+          </div>
+        </details>
+
+        <details class="guide-details">
+          <summary>Can I use my existing notes?</summary>
+          <div class="details-body">
+            <p>Yes. Point the installer at the folder with <code>--workspace</code>, or choose it during setup. Existing notes are left where they are: the first chat inventories the folder and re-files only what it can classify clearly, leaving anything ambiguous in place, and it does not delete or overwrite existing files.</p>
+            <p>Two caveats matter: keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive, because sync conflicts damage files and Git history; and if the folder already sits in a Git repository, that repository's history covers it too. <a href="guide.html#before-you-start">Before you start →</a></p>
+          </div>
+        </details>
+
+        <details class="guide-details">
+          <summary>What happens if I stop using it?</summary>
+          <div class="details-body">
+            <p>You keep the folder. Notes are Markdown, archived chats are readable copies, and the Git history stays with them. Uninstall the app and your files are untouched; open them in Obsidian or any editor, or hand the folder to another agent.</p>
+            <p>What you lose is the part that was Ciaobot: the review queue, the nightly pass, the search index and the schedules. The index is rebuilt from your files whenever it is needed, so it is the cheapest thing to lose.</p>
+          </div>
+        </details>
+
+        <details class="guide-details">
+          <summary>Can the assistant be wrong?</summary>
+          <div class="details-body">
+            <p>Yes, and the design assumes it. The assistant is told to say when the notes do not hold an answer instead of guessing, and to treat a snippet as a pointer to a note rather than as the answer. The memory pass marks what it is unsure of and leaves it in <strong>To decide</strong>, and a confident write still lands in <strong>History</strong> with its reason and, where possible, an undo.</p>
+            <p>That reduces the damage of a wrong answer; it does not remove it. In our November 2026 run the best model passed 56 of 63 task runs, and the memory comparison found that reading the note beats reading the snippet. <a href="evals.html#care">The evaluation page says what those numbers cannot establish →</a></p>
+          </div>
+        </details>
+      </div>
+    </section>
   </main>
 
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

@@ -3,7 +3,7 @@ import { COMPOSER, boot, isolate } from '../support/app'
 
 /**
  * Chat details' Repository section (#1546) is laid out by the browser: the
- * repo, branch and Code mode rows, and the rail never scrolling sideways.
+ * repo and branch rows, and the rail never scrolling sideways.
  */
 const CHAT_PATH = '/chat/alpha-chat-1'
 
@@ -22,9 +22,9 @@ test('the Repository section is compact and the rail does not scroll sideways', 
   await expect(section).not.toContainText('Open AGENTS.md')
   await expect(section).not.toContainText('This chat works in')
 
-  await expect(section.locator('.repo-code-info')).toHaveCount(0)
-  await expect(section.locator('.repo-code-row .cd-detail:not(.sr-only)').first())
-    .toHaveText(/Loads the repository's instructions|Locked on for this chat/)
+  // Code mode follows the project's repository link: no switch, no note.
+  await expect(section.getByRole('switch')).toHaveCount(0)
+  await expect(section).not.toContainText('code mode')
 
   await expect(page.locator('.chat-rail-agent-context').getByText('Always loaded', { exact: true })).toBeVisible()
 

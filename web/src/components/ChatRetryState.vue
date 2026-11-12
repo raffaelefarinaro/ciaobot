@@ -18,14 +18,11 @@ const props = defineProps<{
 }>()
 defineEmits<{ (e: 'continue'): void; (e: 'try-now'): void; (e: 'stop'): void }>()
 
-// Quota retries back off from an hour (1h, 2h, 4h, then 8h), weekly/monthly
-// limits wait a day; connection, startup and auth retries 30s.
+// Every usage-limit retry waits an hour; connection, startup and auth retries 30s.
 const title = computed(() => {
   if (isProviderAuthError(props.retry.last_error)) return 'Signed out — retrying this turn'
   const seconds = props.retry.interval_seconds || 0
   if (seconds && seconds < 3600) return 'Retrying this turn shortly'
-  if (seconds >= 86400) return 'Retrying this turn once a day'
-  if (seconds > 3600) return 'Retrying this turn every few hours'
   return 'Retrying this turn every hour'
 })
 

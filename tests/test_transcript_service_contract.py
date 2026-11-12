@@ -847,12 +847,12 @@ async def test_a_hidden_continuation_does_not_shift_the_numbering(
     must not consume an index for the rows after it.
     """
     store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
-    for prompt in ("initial", cli_envelopes.CODE_MODE_CONTINUE_PROMPT, "second"):
+    for prompt in ("initial", cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT, "second"):
         _record_turn(store, prompt, "answer")
     session = [
         _sdk_user("initial"),
         _sdk_assistant("a1"),
-        _sdk_user(cli_envelopes.CODE_MODE_CONTINUE_PROMPT),
+        _sdk_user(cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT),
         _sdk_assistant("a2"),
         _sdk_user("second"),
         _sdk_assistant("a3"),
@@ -883,7 +883,7 @@ async def test_a_hidden_continuation_does_not_shift_the_numbering(
         ("second", 1, "2026-10-22T10:01:00Z"),
     ]
     assert all(
-        cli_envelopes.CODE_MODE_CONTINUE_PROMPT not in str(row.get("content") or "")
+        cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT not in str(row.get("content") or "")
         for row in rows
     )
 
@@ -1278,13 +1278,17 @@ async def test_claude_two_bash_notifications_in_one_record_make_one_card(
 
 
 @pytest.mark.asyncio
-async def test_claude_subagent_notification_still_renders_the_status_line(
+async def test_claude_subagent_notification_renders_the_background_run_card(
     monkeypatch,
 ) -> None:
     record = _native_record("agent1", "completed", 'Agent "Review" completed')
     rows = await _render_user_records(monkeypatch, [record])
 
-    assert rows == [{"role": "system", "content": '\U0001F916 Agent "Review" completed'}]
+    assert len(rows) == 1
+    assert rows[0]["origin"] == "background_run"
+    assert rows[0]["content"].startswith("[Ciaobot] 1 background run finished.")
+    assert "— Review (agent1, ok)" in rows[0]["content"]
+    assert "(no output)" not in rows[0]["content"]
 
 
 def test_overlay_pairs_usage_per_user_segment_across_wake_turns() -> None:

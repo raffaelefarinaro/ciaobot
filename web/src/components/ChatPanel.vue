@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -21,22 +21,16 @@
       <template #title>
         <div class="header-left">
           <div class="header-breadcrumb">
-            <div class="chat-title-row" :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }">
-              <!-- Same 18px stroke icon in the same 30px box as the trailing header
-                   actions, so the close control reads as one of them. It used to be
-                   a `&times;` character at 20px, which is a different size from
-                   every icon around it and sits on the text baseline rather than in
-                   a box - visibly out of line beside the breadcrumb. It sits in the
-                   title row so it shares the title's vertical centre: with the
-                   project on a second line under the title, a close button outside
-                   the row centred itself against both lines and drifted below the
-                   title it belongs to. -->
-              <button class="btn-icon close-btn" @click="$emit('close')" :title="beside ? 'Close side chat' : 'Close chat'" :aria-label="beside ? 'Close side chat' : 'Close chat'">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
+            <!-- The shared title row of an open item: close, then the rail or
+                 the title. The close sits in the row so it shares the title's
+                 vertical centre. -->
+            <ItemTitleRow
+              class="chat-title-row"
+              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }"
+              :rail="titleRailOn && !editingTitle"
+              :close-label="beside ? 'Close side chat' : 'Close chat'"
+              @close="$emit('close')"
+            >
               <input
                 v-if="editingTitle"
                 class="title-input"
@@ -47,11 +41,12 @@
                 @click.stop
                 autofocus
               />
-              <ChatTitleRail
+              <TitleRail
                 v-else-if="titleRailOn"
                 ref="titleRailRef"
                 class="title-rail"
                 :items="titleRail.items.value"
+                group-label="Chats in this workspace"
                 :current-id="chat.chat_id"
                 @select="titleRail.select"
                 @rename="startEditTitle"
@@ -79,7 +74,7 @@
                 @click.stop
               >{{ chat.title }}</span>
               <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
-            </div>
+            </ItemTitleRow>
           </div>
         </div>
       </template>
@@ -152,9 +147,10 @@
     <div
       ref="chatColumnEl"
       class="chat-column"
-      :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
-      :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
-      @animationend="railArrival = 0"
+      data-rail-lean
+      :class="railMotionClass(railLean, railArrival)"
+      :style="railLeanStyle(railLean)"
+      @animationend="e => { if (e.target === e.currentTarget) railArrival = 0 }"
     >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
@@ -172,7 +168,7 @@
       <!-- Selecting a message (click or Enter) outlines it and shows its
          actions, leaving the rest of the transcript readable; clicking the
          message again or pressing Esc puts it back. -->
-      <div class="messages-content">
+      <div class="messages-content" data-rail-column>
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
              right-aligned user bubble, the left-aligned assistant bubbles with
@@ -1364,15 +1360,12 @@
           </button>
         </div>
       </section>
-      <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
+      <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
           :repo="project.repo"
           :location="chat.repo_location ?? null"
           :chat-id="chat.chat_id"
-          :code-mode="codeModeOn"
-          :code-mode-locked="codeModeLocked"
-          :archived="!!chat.archived"
         />
       </div>
       <!-- What the agent is given. The project also lives here on wide panes;
@@ -1380,7 +1373,6 @@
       <div ref="railContextEl" class="chat-rail-agent-context cd-block" tabindex="-1">
         <AgentContextSection
           :project="project"
-          :code-mode="codeModeOn"
           :context-pct="contextPct"
           :compacted="contextUsage.compacted"
           :compacting="compacting"
@@ -1512,9 +1504,11 @@ import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage,
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
-import ChatTitleRail from './ChatTitleRail.vue'
+import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
-import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
@@ -1543,7 +1537,6 @@ import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
@@ -1813,13 +1806,13 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => chat.value.chat_id)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
 const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeRailArrival())
-const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
+const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
   if (!titleRailOn.value) return false
@@ -2113,12 +2106,6 @@ onMounted(() => {
 })
 
 const project = computed(() => view.project)
-const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
-// The chat payload's turn count only refreshes on refetch, so a user row in the
-// loaded transcript locks the switch as soon as the first message is sent.
-const codeModeLocked = computed(() =>
-  isCodeModeLocked(chat.value)
-  || (codeModeOn.value && view.activeMessages.some(m => m.role === 'user')))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -4082,7 +4069,7 @@ function renderMarkdown(text: string): string {
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true, chatId: props.chatId })
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
@@ -5279,9 +5266,9 @@ async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
   const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
-  if (next) markRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
+  if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
-    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markRailArrival(0); return }
+    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.
@@ -5735,13 +5722,6 @@ onMounted(() => {
   text-align: left;
 }
 
-/* Sizing, hover fill and touch padding all come from PaneHeader's shared
-   .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
-   as the trailing actions, since closing the chat is not the errand you came
-   here for. `flex: none` keeps the box its own size inside the title row. */
-.close-btn { color: var(--fg3); flex: none; }
-.close-btn:hover { color: var(--fg); }
-
 /* The title header names the conversation only; project context lives in
    Chat details and the sidebar rather than competing with the title. */
 .header-breadcrumb {
@@ -5755,14 +5735,6 @@ onMounted(() => {
 
 .header-breadcrumb .chat-title {
   flex: 0 1 auto;
-}
-.header-breadcrumb .chat-title-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 100%;
 }
 /* A long title wraps to at most two lines instead of pushing the code badge
    out of the header. PaneHeader's shared .pane-title rules are `nowrap` with
@@ -5788,16 +5760,8 @@ onMounted(() => {
 /* Rail mode: close and the title block share one vertical centre, and the row is
    the reading column's width (it starts where the column starts), so the rail can
    centre its title on the chat rather than on the whole header. */
-.chat-column--leaning { will-change: transform, opacity; }
-.chat-column:not(.chat-column--leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
-.chat-column--arrive-next { animation: chat-arrive 260ms var(--ease) both; --arrive-from: 12%; }
-.chat-column--arrive-prev { animation: chat-arrive 260ms var(--ease) both; --arrive-from: -12%; }
-@keyframes chat-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) {
-  .chat-column:not(.chat-column--leaning) { transition: none; }
-  .chat-column--arrive-next, .chat-column--arrive-prev { animation: none; }
-}
-.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
+/* ItemTitleRow's rail row, capped at the chat's reading measure. */
+.header-breadcrumb .chat-title-row--rail { max-width: var(--chat-measure); }
 
 .chat-title {
   cursor: pointer;
@@ -7040,7 +7004,7 @@ details[open] > .activity-summary::before {
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 12px 40px rgb(0 0 0 / 12%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -8038,13 +8002,6 @@ details[open] > .activity-summary::before {
   .message { padding: 8px 10px; }
 }
 
-/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
-   the menu already leave the chat, so the close control is not lost. Hidden, not
-   removed, so desktop keeps it. */
-@media (max-width: 767px) {
-  .close-btn { display: none; }
-}
-
 @media (max-width: 768px) {
   /* Keep the title header compact while preserving safe tap targets. */
   :deep(.pane-header) {
@@ -8120,6 +8077,13 @@ details[open] > .activity-summary::before {
     padding: 0;
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
+}
+/* Touch phones: the surface is rounder (--radius-composer), so the controls
+   on its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .composer-surface .composer-chip,
+  .composer-surface .image-btn,
+  .composer-surface .send-btn { border-radius: 999px; }
 }
 
 /* Chat comment selection trigger + composer */
@@ -8299,4 +8263,5 @@ details[open] > .activity-summary::before {
 <!-- The shared naming placeholder: the same bar the sidebar shows while the
      engine names a chat. -->
 <style scoped src="./titleShimmer.css"></style>
+<style scoped src="./railMotion.css"></style>
 <style scoped src="./chatDetails.css"></style>

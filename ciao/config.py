@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any, cast
 # so the stock workspace-evidence set below can be derived from it (see
 # `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
 from ciao.entity_types import stock_entity_type_registry
-from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
+from ciao.claude_trim import claude_settings_layer, load_claude_trim, trim_tool_denies
+from ciao.execution_modes import credential_path_deny_rules
 from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
@@ -27,34 +28,6 @@ from ciao.providers.opencode import OpencodeSettings
 if TYPE_CHECKING:
     from ciao.provider_registry import ProviderDescriptor
 
-
-# Harness tools that are irrelevant inside the Ciaobot PWA regardless of
-# workspace. The PWA is the notification, plan-approval, and scheduling
-# surface, so the CLI's own plan-mode, cron, /loop wakeup, routine-trigger,
-# desktop/phone push, notebook-edit, and design-system-sync tools just
-# duplicate it (or have no UI to render them). Denied as bare tool names so
-# their definitions drop out of the model payload, shrinking every request.
-# See "What I'd do next" in ciao-improvements and the aihero.dev
-# "kill the bloat in Claude Code's system prompt" guide for the rationale.
-_DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "EnterPlanMode",
-    "ExitPlanMode",
-    "DesignSync",
-    "NotebookEdit",
-    "CronCreate",
-    "CronDelete",
-    "CronList",
-    "ScheduleWakeup",
-    "PushNotification",
-    "RemoteTrigger",
-    # The CLI's bundled `schedule` / `loop` skills. They're already hidden
-    # from the model by the `skillOverrides` settings layer (see
-    # HARNESS_DISABLED_SKILLS in ciao/execution_modes.py for why); these
-    # `Skill(<name>)` deny rules are the second lever, blocking execution
-    # ("Skill execution blocked by permission rules") if one is re-enabled
-    # downstream.
-    *(f"Skill({name})" for name in HARNESS_DISABLED_SKILLS),
-)
 
 # The self-hosted n8n MCP used to be denied by default in a workspace literally
 # named ``personal``. Ciaobot no longer ships an opinion about it: n8n is
@@ -495,8 +468,7 @@ class WorkspaceConfig:
     name: str
     vault_root: str
     default_provider: str = "claude"
-    # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
-    # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
+    # Extra tools to deny on top of the trim catalog. None, [] and 'none' all mean no extras.
     disallowed_tools: list[str] | None = None
     # Whether this workspace's Claude chats load the Claude account's claude.ai
     # connectors (remote MCP servers). Off sets ENABLE_CLAUDEAI_MCP_SERVERS=false
@@ -519,6 +491,8 @@ class WorkspaceConfig:
     # chats and schedules in this workspace. Empty/missing = engine default.
     # Never set from an agent surface.
     provider_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Sparse per-workspace Claude context-trim overrides (ciao/claude_trim.py); only keys that differ from the catalog default.
+    claude_trim: dict[str, bool] = field(default_factory=dict)
 
     def effective_agent_fs_scope(self) -> str:
         """The scope the agent runs under: the explicit choice, else the platform default."""
@@ -575,6 +549,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         claude_ai_connectors=_coerce_claude_ai_connectors(
             data.get("claude_ai_connectors")
         ),
+        claude_trim=load_claude_trim(data.get("claude_trim")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,
@@ -712,12 +687,10 @@ def _split_csv(raw: str) -> list[str]:
 
 
 def _parse_disallowed_tools(raw: str) -> list[str] | None:
-    """Parse a CSV denylist. Empty/missing → None (use defaults);
-    ``"none"`` → ``[]`` (explicit opt-out); CSV → parsed list.
+    """Parse a CSV denylist. Empty/missing → None, ``"none"`` → ``[]`` — both mean no extras since trims moved to claude_trim.
 
-    The None vs []-empty distinction matters because every workspace has
-    built-in defaults (the harness tool denylist). Operators who want zero
-    denylist set the literal ``"none"``.
+    The None vs []-empty distinction is kept for callers, but the harness
+    trims now live in ``claude_trim``, so neither value drops a default deny.
     """
     cleaned = raw.strip()
     if not cleaned:
@@ -1266,6 +1239,9 @@ class CiaoConfig:
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
+            # Sparse: a workspace on the catalog defaults keeps no key.
+            if workspace.claude_trim:
+                row["claude_trim"] = workspace.claude_trim
             # Only an explicit choice is stored; an unset scope keeps no key
             # so it keeps following the platform it loads on.
             if workspace.agent_fs_scope is not None:
@@ -1337,9 +1313,11 @@ class CiaoConfig:
             return []
         legacy = _parse_workspaces_json(raw)
         # Overrides can carry a permission mode and are operator-set in
-        # Settings only; an environment import never brings them in.
+        # Settings only; an environment import never brings them in. The same
+        # holds for Claude context trims.
         for imported_workspace in legacy.values():
             imported_workspace.provider_overrides = {}
+            imported_workspace.claude_trim = {}
         # A workspace archived in Settings left the registry on purpose; the
         # variable must not bring it back while its folder sits in the archive.
         archived = self._archived_workspace_names()
@@ -1654,14 +1632,13 @@ class CiaoConfig:
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
-        The effective denylist is the workspace's extra tools
-        (``disallowed_tools``), which defaults to the harness set
-        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace. Every chat
-        blocks the PWA-irrelevant harness tools (plan mode, cron, /loop wakeup,
-        routine trigger, push, notebook edit, design-system sync). MCP servers
-        are scoped by where they are declared — each workspace's own agent-root
-        ``.mcp.json`` and the provider's local scope — and every declared server
-        loads; an ``mcp__<server>`` entry in ``disallowed_tools`` blocks one.
+        Denies are additive. The harness trims come from the workspace's
+        ``claude_trim`` map (see ``ciao/claude_trim.py``), with the catalog
+        defaults for every option it does not name. ``disallowed_tools`` adds
+        extra tools on top of them, and an ``mcp__<server>`` entry there blocks
+        one MCP server. MCP servers are otherwise scoped by where they are
+        declared — each workspace's own agent-root ``.mcp.json`` and the
+        provider's local scope — and every declared server loads.
 
         Prepended to all of it, unconditionally, is
         :func:`credential_path_deny_rules` — the ``.env`` / ``.runtime`` /
@@ -1678,18 +1655,25 @@ class CiaoConfig:
         the credential denies above exist in both places and must stay in sync.
 
         An unregistered workspace name — a stale reference, or a renamed or
-        deleted workspace — gets the defaults rather than an empty denylist. It
-        was the one input that reached the model with nothing denied.
+        deleted workspace — gets the catalog defaults rather than an empty
+        denylist. It was the one input that reached the model with nothing denied.
         """
         workspace_config = self.workspace(workspace)
-        extras = workspace_config.disallowed_tools if workspace_config else None
-        if extras is None:
-            extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+        trim = workspace_config.claude_trim if workspace_config else {}
+        extras = (workspace_config.disallowed_tools or []) if workspace_config else []
         # The resolved runtime root, not just the `**/.runtime/**` name: an
         # operator who moved it with `CIAO_RUNTIME_ROOT` must not lose the
         # guard on the stores it holds.
         fixed = credential_path_deny_rules(self.state_path.parent)
-        return list(dict.fromkeys([*fixed, *extras]))
+        return list(dict.fromkeys([*fixed, *trim_tool_denies(trim), *extras]))
+
+    def claude_settings_for_workspace(self, workspace: str | None) -> dict[str, Any]:
+        """The Claude CLI settings layer (``skillOverrides`` plus ``disable*`` keys) for this workspace.
+
+        Built from the workspace's ``claude_trim``; an unregistered workspace gets the catalog defaults.
+        """
+        workspace_config = self.workspace(workspace)
+        return claude_settings_layer(workspace_config.claude_trim if workspace_config else {})
 
     def memory_pass_denied_tools(self, workspace: str | None) -> list[str]:
         """Tool denies carried only by the end-of-conversation memory pass.

@@ -878,40 +878,38 @@ def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
     assert _is_retryable_quota_error("explain how rate limit headers work") is False
 
 
+OLLAMA_SESSION_LIMIT = (
+    "API Error: Request rejected (429) · you (x) have reached your session usage "
+    "limit, upgrade for higher limits: https://ollama.com/upgrade"
+)
 OLLAMA_WEEKLY_LIMIT = (
     "API Error: Request rejected (429) · you (x) have reached your weekly usage "
     "limit, upgrade for higher limits: https://ollama.com/upgrade"
 )
 
 
-def test_weekly_usage_limit_is_terminal_not_hourly() -> None:
-    """A weekly limit resets days out; it takes the daily retry, never the hourly one."""
-    from ciao.web.chat_service import (
-        _is_retryable_quota_error,
-        _is_terminal_quota_error,
-    )
+def test_weekly_and_monthly_limits_are_ordinary_retryable_quota_errors() -> None:
+    """There is no daily tier: weekly, monthly and "upgrade" phrasings retry like any limit."""
+    from ciao.web.chat_service import _is_retryable_quota_error
 
-    assert _is_terminal_quota_error(OLLAMA_WEEKLY_LIMIT) is True
-    assert _is_retryable_quota_error(OLLAMA_WEEKLY_LIMIT) is False
-    assert _is_terminal_quota_error("You've hit your monthly limit") is True
-    assert _is_retryable_quota_error("You've hit your monthly limit") is False
+    assert _is_retryable_quota_error(OLLAMA_WEEKLY_LIMIT) is True
+    assert _is_retryable_quota_error(OLLAMA_SESSION_LIMIT) is True
+    assert _is_retryable_quota_error("You've hit your weekly usage limit") is True
+    assert _is_retryable_quota_error("You've hit your monthly limit") is True
 
 
 def test_session_limit_and_capacity_stay_retryable() -> None:
-    from ciao.web.chat_service import (
-        _is_terminal_quota_error,
-        _is_retryable_quota_error,
-    )
+    from ciao.web.chat_service import _is_retryable_quota_error
 
     session = "API Error: Request rejected (429) · you have reached your session usage limit"
     capacity = "Model is at capacity, try again shortly"
     for text in (session, capacity, "You've hit your session limit - resets 2:20pm"):
-        assert _is_terminal_quota_error(text) is False
         assert _is_retryable_quota_error(text) is True
 
 
-async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
-    """A weekly limit surfaces as an error and arms the once-a-day retry."""
+@pytest.mark.parametrize("limit_text", [OLLAMA_SESSION_LIMIT, OLLAMA_WEEKLY_LIMIT])
+async def test_ollama_limit_error_arms_hourly_quota_retry(tmp_path: Path, limit_text: str) -> None:
+    """Ollama session and weekly limits both arm the ordinary hourly quota retry."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
@@ -922,7 +920,7 @@ async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
         yield AssistantTextDelta(type="assistant", text="partial… ")
         yield ResultEvent(
             type="result",
-            result=OLLAMA_WEEKLY_LIMIT,
+            result=limit_text,
             session_id="",
             is_error=True,
             effective_model=chat.model,
@@ -939,8 +937,8 @@ async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
-    assert updated.retry_kind == "quota_terminal"
-    assert updated.retry_interval_seconds == 86400
+    assert updated.retry_kind == "quota"
+    assert updated.retry_interval_seconds == 3600
     assert any(e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events)
     assert any(
         e.get("type") == "result" and e.get("is_error") for e in events
@@ -948,41 +946,15 @@ async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_terminal_quota_retries_stop_after_cap(tmp_path: Path) -> None:
-    """After _MAX_TERMINAL_QUOTA_RETRIES daily retries, a further weekly limit arms nothing."""
-    from ciao.web.project_chats import _MAX_TERMINAL_QUOTA_RETRIES
+def test_bare_monthly_limit_without_exhaustion_is_not_a_quota_error() -> None:
+    from ciao.web.chat_service import _is_retryable_quota_error
 
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("retry", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="retry-test")
-    chat.retry_attempts = _MAX_TERMINAL_QUOTA_RETRIES
-    chat.retry_kind = "quota_terminal"
-    pcm._save()
-
-    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        yield ResultEvent(
-            type="result",
-            result=OLLAMA_WEEKLY_LIMIT,
-            session_id="",
-            is_error=True,
-            effective_model=chat.model,
-            usage={},
-            quota={},
-            cost_usd=0.0,
-        )
-
-    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
-
-    stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=10.0)
-
-    updated = pcm.get_chat(chat.chat_id)
-    assert updated is not None
-    assert updated.retry_status != "pending"
+    assert not _is_retryable_quota_error("Stripe: this plan has a monthly limit of 100 invoices")
+    assert _is_retryable_quota_error("You have reached your monthly limit")
 
 
-def test_terminal_quota_reset_at_uses_claude_weekly_bucket(tmp_path: Path) -> None:
-    """The daily retry lands just after a rejected Claude weekly bucket resets."""
+def test_quota_reset_at_ignores_rejected_weekly_bucket(tmp_path: Path) -> None:
+    """A rejected weekly bucket no longer moves the retry: it stays hourly."""
     import json
     import time
 
@@ -995,40 +967,27 @@ def test_terminal_quota_reset_at_uses_claude_weekly_bucket(tmp_path: Path) -> No
     store.parent.mkdir(parents=True, exist_ok=True)
     resets_at = int(time.time()) + 3 * 86400
     store.write_text(
-        json.dumps({
-            "buckets": {
-                "seven_day": {"status": "rejected", "resets_at": resets_at},
-                "five_hour": {"status": "allowed", "resets_at": resets_at + 60},
-            },
-        }),
+        json.dumps({"buckets": {"seven_day": {"status": "rejected", "resets_at": resets_at}}}),
         encoding="utf-8",
     )
-
-    from datetime import UTC, datetime
-
-    expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
-    assert pcm._quota_reset_at(chat, "quota_terminal") == (
-        expected.isoformat().replace("+00:00", "Z")
-    )
+    assert pcm._quota_reset_at(chat, "quota") is None
 
     chat.provider = "opencode"
-    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+    store.write_text(
+        json.dumps({"buckets": {"five_hour": {"status": "rejected", "resets_at": resets_at}}}),
+        encoding="utf-8",
+    )
+    assert pcm._quota_reset_at(chat, "quota") is None
     chat.provider = "claude"
 
     store.write_text(
-        json.dumps({"buckets": {"seven_day": {"status": "allowed", "resets_at": resets_at}}}),
+        json.dumps({"buckets": {"five_hour": {"status": "rejected", "resets_at": 1}}}),
         encoding="utf-8",
     )
-    assert pcm._quota_reset_at(chat, "quota_terminal") is None
-
-    store.write_text(
-        json.dumps({"buckets": {"seven_day": {"status": "rejected", "resets_at": 1}}}),
-        encoding="utf-8",
-    )
-    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+    assert pcm._quota_reset_at(chat, "quota") is None
 
     store.write_text("{not json", encoding="utf-8")
-    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+    assert pcm._quota_reset_at(chat, "quota") is None
 
 
 def test_quota_reset_at_uses_claude_five_hour_bucket_for_session_limits(tmp_path: Path) -> None:
@@ -1057,22 +1016,12 @@ def test_quota_reset_at_uses_claude_five_hour_bucket_for_session_limits(tmp_path
 
     expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
     assert pcm._quota_reset_at(chat, "quota") == expected.isoformat().replace("+00:00", "Z")
-    # The weekly bucket is not rejected, and other kinds read no bucket at all.
-    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+    # Other kinds read no bucket at all.
     assert pcm._quota_reset_at(chat, "connection") is None
 
 
-def test_quota_retry_interval_backs_off_and_caps() -> None:
-    from ciao.web.project_chats import _MAX_QUOTA_RETRIES, _quota_retry_interval
-
-    schedule = [_quota_retry_interval(n) for n in range(_MAX_QUOTA_RETRIES + 4)]
-    hour = 3600
-    assert schedule[:5] == [hour, 2 * hour, 4 * hour, 8 * hour, 8 * hour]
-    assert max(schedule) == 8 * hour
-
-
-async def test_consecutive_quota_retries_back_off(tmp_path: Path) -> None:
-    """Each further session-limit failure waits twice as long, up to the cap."""
+async def test_consecutive_quota_retries_stay_hourly(tmp_path: Path) -> None:
+    """Each further session-limit failure waits the same hour: no backoff."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
@@ -1100,7 +1049,7 @@ async def test_consecutive_quota_retries_back_off(tmp_path: Path) -> None:
         await asyncio.wait_for(_consume(retried), timeout=10.0)
         intervals.append(pcm.get_chat(chat.chat_id).retry_interval_seconds)  # type: ignore[union-attr]
 
-    assert intervals == [3600, 7200, 14400, 28800, 28800]
+    assert intervals == [3600] * 5
     pcm.stop_chat_retry(chat.chat_id)
 
 
@@ -1365,8 +1314,8 @@ async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_five_hour_session_limit_gets_six_hourly_attempts(tmp_path: Path) -> None:
-    """A session limit that clears inside the 5-hour window is retried six times."""
+async def test_session_limit_gets_a_week_of_hourly_attempts(tmp_path: Path) -> None:
+    """A limit that never clears is retried hourly for a week, then stops."""
     from ciao.web.project_chats import _MAX_QUOTA_RETRIES
 
     pcm = _make_manager(tmp_path)
@@ -1876,3 +1825,31 @@ async def test_try_now_past_the_quota_cap_stops_instead_of_firing(tmp_path: Path
     assert pcm.try_chat_retry_now(chat.chat_id) is None
     assert calls == []
     assert chat.retry_status == "stopped"
+
+
+def test_legacy_quota_terminal_retry_kind_loads_as_quota(tmp_path: Path) -> None:
+    """A chat persisted with the retired "quota_terminal" kind resumes as "quota"."""
+    import json
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="legacy")
+    pcm.set_chat_retry(chat.chat_id, "job", reason="weekly limit")
+    chat.retry_kind = "quota_terminal"
+    chat.retry_interval_seconds = 24 * 60 * 60
+    from ciao.web import chat_service
+    chat.retry_next_at = chat_service._iso_after(20 * 60 * 60)
+    pcm._save()
+    path = tmp_path / ".runtime" / "web_projects.json"
+    assert "quota_terminal" in path.read_text(encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+    restored = reloaded.get_chat(chat.chat_id)
+    assert restored is not None
+    assert restored.retry_status == "pending"
+    assert restored.retry_kind == "quota"
+    # Resumes hourly: no "every hour" card that still waits a day.
+    assert restored.retry_interval_seconds == 3600
+    due = chat_service._parse_iso(restored.retry_next_at)
+    assert due is not None and due <= chat_service._parse_iso(chat_service._iso_after(3600 + 5))
+    json.loads(path.read_text(encoding="utf-8"))

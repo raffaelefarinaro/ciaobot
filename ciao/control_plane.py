@@ -212,17 +212,6 @@ RELOAD_OWN_NOTE = (
     "automatically with the reloaded MCP servers, plugins and skills. End your turn "
     "now; do not ask the user to reconnect anything."
 )
-CODE_MODE_ON_NOTE = (
-    "Code mode is on. Follow these repository instructions now; repository skills and "
-    "write access load when this turn ends and the conversation continues automatically."
-)
-CODE_MODE_ON_OWN_NEXT_TURN_NOTE = (
-    "Code mode is on. Follow these repository instructions now; repository skills and "
-    "write access load on your next turn."
-)
-CODE_MODE_ON_NEXT_TURN_NOTE = (
-    "Code mode is on. Repository instructions, skills and write access load on that chat's next turn."
-)
 
 
 class ControlPlaneError(ValueError):
@@ -2810,7 +2799,6 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
-        code_mode: bool | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
@@ -2818,12 +2806,20 @@ class CiaoControlPlane:
             # ownership check still runs against the resolved id.
             project_id = self._resolve_project_id(principal, project_id)
             self._project(principal, project_id)
-        requested_mode = mode
         if mode is not None:
-            # A normal/auto MCP caller must not upgrade its own or another
-            # chat to bypass through the auto-approved metadata tool. Keep the
-            # same ceiling used for newly-created child chats.
-            mode = self._child_mode(principal, mode)
+            # A normal/auto caller must not raise its own or another chat's
+            # permission mode: that is the user's call (`chat needs-action
+            # permission_mode`). Refuse instead of clamping, so the caller cannot
+            # mistake a clamped write for a switch. Lowering is always allowed.
+            clamped = self._child_mode(principal, mode)
+            if mode in _MODE_RANK and clamped != mode:
+                raise ControlPlaneError(
+                    "mode_escalation_refused",
+                    f"Only the user can raise this chat's permission mode (requested {mode}, "
+                    f"ceiling {clamped}). Ask for it with `ciao chat needs-action permission_mode "
+                    f"--mode {mode}`; nothing was changed.",
+                )
+            mode = clamped
         try:
             updated = self.pcm.update_chat(
                 chat_id,
@@ -2841,48 +2837,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_project", str(exc)) from None
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
-        turned_on = False
-        continues = False
-        if code_mode is not None:
-            # Read after update_chat: moving a chat to another project turns
-            # code mode off there, so the switch below is judged against that.
-            before = self.pcm.get_chat(chat_id)
-            was_on = bool(getattr(before, "code_mode", False))
-            try:
-                switched = self.pcm.set_code_mode(chat_id, code_mode, actor="agent")
-            except ControlPlaneError:
-                raise
-            except ValueError as exc:
-                raise ControlPlaneError("code_mode_unavailable", str(exc)) from exc
-            if switched is None:
-                raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
-            updated = switched
-            turned_on = code_mode and not was_on
-            continues = bool(
-                turned_on
-                and chat_id == principal.chat_id
-                and self.pcm.arm_code_mode_continuation(chat_id)
-            )
         result = updated.to_dict(local=self.pcm.is_session_local(updated))
-        if requested_mode and requested_mode != mode:
-            result["mode_clamped"] = True
-            result["requested_mode"] = requested_mode
-        if turned_on:
-            from ciao import repo_link
-
-            project = self.pcm.get_project(updated.project_id)
-            ins = repo_link.read_repo_instructions(project.repo_path)
-            result["repo_instructions"] = {
-                "name": ins.name,
-                "text": ins.text,
-                "truncated": ins.truncated,
-            }
-            if continues:
-                result["note"] = CODE_MODE_ON_NOTE
-            elif chat_id == principal.chat_id:
-                result["note"] = CODE_MODE_ON_OWN_NEXT_TURN_NOTE
-            else:
-                result["note"] = CODE_MODE_ON_NEXT_TURN_NOTE
         return _ok(result)
 
     def chat_send(self, principal: AgentPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:

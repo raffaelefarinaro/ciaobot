@@ -433,7 +433,7 @@ describe('ChatPanel retry from error bubble', () => {
       next_at: '2026-10-11T23:00:00Z',
       last_error: 'session usage limit',
       attempts: 1,
-      interval_seconds: 4 * 3600,
+      interval_seconds: 3600,
     }
     await flushPromises()
 
@@ -441,7 +441,7 @@ describe('ChatPanel retry from error bubble', () => {
     const cards = wrapper.findAll('.injected-card')
     expect(cards).toHaveLength(1)
     expect(cards[0].find('.injected-card-facts').text()).toContain('Retry failed')
-    expect(cards[0].find('.retry-state-title').text()).toBe('Retrying this turn every few hours')
+    expect(cards[0].find('.retry-state-title').text()).toBe('Retrying this turn every hour')
     expect(wrapper.find('.retry-card').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -739,31 +739,19 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('says a weekly or monthly limit retries once a day', async () => {
+  it('says a weekly or monthly limit retries every hour, never once a day', async () => {
     const { wrapper, store } = await mountPanel()
     store.chats[0].retry = {
       status: 'pending',
-      next_at: '2026-10-06T15:45:00Z',
+      next_at: '2026-10-05T16:45:00Z',
       last_error: 'weekly usage limit',
       attempts: 0,
-      interval_seconds: 86400,
+      interval_seconds: 3600,
     }
     await flushPromises()
-    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn once a day')
-    wrapper.unmount()
-  })
-
-  it('does not promise an hourly retry once a quota retry has backed off', async () => {
-    const { wrapper, store } = await mountPanel()
-    store.chats[0].retry = {
-      status: 'pending',
-      next_at: '2026-10-05T19:45:00Z',
-      last_error: 'session usage limit',
-      attempts: 2,
-      interval_seconds: 4 * 3600,
-    }
-    await flushPromises()
-    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every few hours')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(wrapper.text()).not.toContain('once a day')
+    expect(wrapper.text()).not.toContain('every few hours')
     wrapper.unmount()
   })
 

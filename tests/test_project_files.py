@@ -365,12 +365,17 @@ def test_upload_accepts_space_and_emoji_joiner_names(tmp_path: Path, name: str) 
     assert (folder / name).read_bytes() == b"png"
 
 
-def test_upload_rejects_unsupported_extension(tmp_path: Path) -> None:
-    _make_work_project(tmp_path, "2026-q2-foo")
+@pytest.mark.parametrize("name", ["clip.mp4", "archive.tar.gz", "Makefile"])
+def test_upload_accepts_any_file_type(tmp_path: Path, name: str) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
     pcm = _make_manager(tmp_path)
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
-    with pytest.raises(ValueError):
-        pcm.save_project_file_upload(proj.project_id, b"x", "trojan.exe")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"x", name)
+
+    assert entry["path"] == name
+    assert entry["kind"] == "binary"
+    assert (folder / name).read_bytes() == b"x"
 
 
 def test_upload_rejects_oversized(tmp_path: Path) -> None:
@@ -458,15 +463,17 @@ def test_upload_route_round_trip(tmp_path: Path) -> None:
         f"/api/projects/{proj.project_id}/files",
         files={
             "file1": ("a.md", b"alpha", "text/markdown"),
-            "file2": ("b.exe", b"bad", "application/octet-stream"),
+            "file2": ("b.mp4", b"video", "video/mp4"),
+            "file3": (".hidden", b"bad", "application/octet-stream"),
         },
     )
     assert resp.status_code == 200
     body = resp.json()
     saved_paths = {e["path"] for e in body["saved"]}
-    assert "a.md" in saved_paths
+    assert {"a.md", "b.mp4"} <= saved_paths
     assert "absolute_path" not in resp.text
-    assert any(e["filename"] == "b.exe" for e in body["errors"])
+    assert len(body["errors"]) == 1
+    assert (folder / "b.mp4").read_bytes() == b"video"
     assert (folder / "a.md").read_bytes() == b"alpha"
 
 

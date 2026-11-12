@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import NotificationBell from '../NotificationBell.vue'
+import SidebarRow from '../SidebarRow.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -606,7 +607,7 @@ describe('ProjectSidebar chat actions', () => {
     await nextTick()
 
     expect(wrapper.find('.chat-item .title-shimmer').exists()).toBe(false)
-    expect(wrapper.get('.chat-item .chat-title').text()).toBe('Deploy the API')
+    expect(wrapper.get('.chat-item .sidebar-row-title').text()).toBe('Deploy the API')
 
     wrapper.unmount()
   })
@@ -620,10 +621,12 @@ describe('ProjectSidebar chat actions', () => {
     const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
     expect(css).toMatch(/\.title-shimmer\s*\{[^}]*flex:\s*1/)
     expect(css).toMatch(/animation:\s*title-shimmer-sweep/)
-    // The extracted stylesheet cannot declare keyframes for another block, so
-    // the mobile skeleton keeps its own sweep in the sidebar's block.
-    expect(source).toMatch(/animation:\s*mm-shimmer-sweep/)
-    expect(source).toMatch(/@keyframes\s+mm-shimmer-sweep/)
+    // The loading skeleton is the row's own placeholder (SidebarListSkeleton
+    // over SidebarRow), which keeps its sweep beside its keyframes.
+    expect(source).not.toMatch(/mm-shimmer/)
+    const row = readFileSync(join(here, 'SidebarRow.vue'), 'utf8')
+    expect(row).toMatch(/animation:\s*sidebar-row-sweep/)
+    expect(row).toMatch(/@keyframes\s+sidebar-row-sweep/)
   })
 })
 
@@ -647,7 +650,7 @@ describe('ProjectSidebar global new chat', () => {
     vi.restoreAllMocks()
   })
 
-  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules') {
+  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules' | 'tasks') {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: { template: '<div />' } }],
@@ -692,6 +695,105 @@ describe('ProjectSidebar global new chat', () => {
     })
     wrapper.findComponent(NotificationBell).vm.$emit('navigate')
     expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('loads the automation list as sidebar rows, not a spinner and bars', async () => {
+    // The sidebar waits on the automation list itself (not the store's combined load), as the panel does.
+    useTaskStore().schedulesLoaded = false
+    const wrapper = await mountSidebar('schedules')
+    const skeleton = wrapper.get('.schedules-list .sidebar-skeleton')
+    expect(skeleton.attributes('role')).toBe('status')
+    // Announced once: the text, with no aria-label repeating it.
+    expect(skeleton.text()).toBe('Loading automations…')
+    expect(skeleton.attributes('aria-label')).toBeUndefined()
+    expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(3)
+    expect(skeleton.find('.sidebar-row--placeholder').attributes('aria-hidden')).toBe('true')
+    expect(wrapper.find('.history-loading-spinner').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('loads the chat list in the same row shape, rows hung under their project', async () => {
+    const store = useProjectStore()
+    store.projects = []
+    store.bootstrapped = false
+    const wrapper = await mountSidebar('chat')
+    const skeleton = wrapper.get('.chats-scroll-area .sidebar-skeleton')
+    expect(skeleton.text()).toBe('Loading chats…')
+    expect(skeleton.findAll('.sidebar-skeleton-rows--nested')).toHaveLength(3)
+    expect(skeleton.findAll('.sidebar-row--placeholder')).toHaveLength(6)
+    wrapper.unmount()
+  })
+
+  it('lists the board\'s lanes as sidebar rows, with New on the To do label', async () => {
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    const row = (id: string, title: string, status: string, extra: Record<string, unknown> = {}) => ({
+      id, title, status, project_id: '', due: '', assignee: 'user', chat_id: '', attempt_id: '', linked_chats: [],
+      created_at: '2026-03-01T09:00:00+00:00', updated_at: '2026-03-01T09:00:00+00:00', revision: 'a'.repeat(64),
+      relative_path: `Tasks/${id}.md`, attempt_state: '', attempt_outcome: '', attempt_summary: '', attempt_detail: '',
+      live_attempt_id: '', completed_at: null, has_resolution: false, ...extra,
+    })
+    board.rows = [
+      row('a', 'Plan the launch', 'backlog'),
+      row('b', 'Wire the store', 'in_progress', { attempt_state: 'running' }),
+      row('c', 'Check the copy', 'in_review', { attempt_state: 'ready_for_review' }),
+    ] as never
+    board.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar('tasks')
+    const list = wrapper.get('.task-sidebar-list')
+    expect(list.findAll('.schedule-group-header').map(h => h.text())).toEqual(['To do', 'In progress', 'In review'])
+    const rows = list.findAll('.task-sidebar-item')
+    expect(rows.map(r => r.get('.sidebar-row-title').text())).toEqual(['Plan the launch', 'Wire the store', 'Check the copy'])
+    expect(rows[0].classes()).toContain('sidebar-row')
+    expect(rows[0].attributes('href')).toBe('/tasks/a')
+    // The rail's marks: none, working, ready to review.
+    expect(rows[0].find('.schedule-mark').exists()).toBe(false)
+    expect(rows[1].find('.schedule-mark').attributes('title')).toBe('The agent is working on this task')
+    expect(rows[2].find('.task-review-mark').exists()).toBe(true)
+
+    // Arrows roam the rows top to bottom, across lanes.
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+    ;(rows[0].element as HTMLElement).focus()
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(rows[1].element)
+    vm.onArrow('ArrowDown')
+    expect(document.activeElement).toBe(rows[2].element)
+    await list.get('[aria-label="New task"]').trigger('click')
+    expect(wrapper.emitted('new-task')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('loads the task list in the sidebar row shape, and offers Retry when the first read fails', async () => {
+    const wrapper = await mountSidebar('tasks')
+    expect(wrapper.get('.task-sidebar-list .sidebar-skeleton').text()).toBe('Loading tasks…')
+
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    const reload = vi.spyOn(board, 'reload').mockResolvedValue()
+    board.loadError = 'The engine did not answer.'
+    await nextTick()
+    const error = wrapper.get('.task-sidebar-error')
+    expect(error.attributes('role')).toBe('alert')
+    expect(error.text()).toContain('The engine did not answer.')
+    await error.get('button').trigger('click')
+    expect(reload).toHaveBeenCalledWith('personal')
+    wrapper.unmount()
+  })
+
+  it('agrees with the rail: a done task carries no working mark', async () => {
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    board.rows = [{
+      id: 'd', title: 'Shipped', status: 'done', project_id: '', due: '', assignee: 'agent', chat_id: '', attempt_id: '',
+      linked_chats: [], created_at: '2026-03-01T09:00:00+00:00', updated_at: new Date().toISOString(), revision: 'a'.repeat(64),
+      relative_path: 'Tasks/d.md', attempt_state: 'running', attempt_outcome: '', attempt_summary: '', attempt_detail: '',
+      live_attempt_id: '', completed_at: new Date().toISOString(), has_resolution: false,
+    }] as never
+    board.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar('tasks')
+    const done = wrapper.get('.task-sidebar-item')
+    expect(done.find('.schedule-mark').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -740,7 +842,7 @@ describe('ProjectSidebar global new chat', () => {
 
   it('puts New automation on the Routines label', async () => {
     const wrapper = await mountSidebar('schedules')
-    useTaskStore().loading = false
+    useTaskStore().schedulesLoaded = true
     await nextTick()
     const button = wrapper.get('button[aria-label="New automation"]')
     expect(button.text()).toBe('New')
@@ -777,15 +879,61 @@ describe('ProjectSidebar global new chat', () => {
         archive_policy: 'manual',
       } as never]
       const wrapper = await mountSidebar('schedules')
-      useTaskStore().loading = false
+      useTaskStore().schedulesLoaded = true
       await nextTick()
-      const row = wrapper.get('.schedule-item .schedule-time')
+      const row = wrapper.get('.schedule-item .sidebar-row-meta')
       expect(row.text()).toBe('01:01')
       wrapper.unmount()
     } finally {
       if (previousTz === undefined) delete process.env.TZ
       else process.env.TZ = previousTz
     }
+  })
+
+  it('draws automation rows with the chat row component, keeping groups, badges and state', async () => {
+    const base = {
+      prompt: 'p', daily_time_utc: '09:00', timezone_name: 'UTC', frequency: 'daily', enabled: true,
+      scope: 'user', workspace: 'personal', web_project_id: 'project-1', next_run: '', last_triggered_on: '',
+      days_of_week: null, interval_minutes: 0, day_of_month: null, run_at_date: null, web_chat_id: null,
+      missed: false, model: '', archive_policy: 'manual',
+    }
+    useTaskStore().schedules = [
+      { ...base, schedule_id: 'r1', title: 'Routine one' },
+      { ...base, schedule_id: 'r2', title: 'Paused routine', enabled: false },
+      { ...base, schedule_id: 'r3', title: 'Missed routine', missed: true },
+      { ...base, schedule_id: 's1', title: 'System job', scope: 'system', frequency: 'interval', interval_minutes: 15 },
+    ] as never
+    const wrapper = await mountSidebar('schedules')
+    useTaskStore().schedulesLoaded = true
+    await nextTick()
+
+    const rows = wrapper.findAllComponents(SidebarRow)
+    expect(rows.map(r => r.props('text'))).toEqual(['Routine one', 'Paused routine', 'Missed routine', 'System job'])
+    // The same row element, title and badge classes as a chat row.
+    expect(rows.every(r => r.element.classList.contains('sidebar-row') && r.element.classList.contains('schedule-item'))).toBe(true)
+    expect(rows[0].get('.sidebar-row-title').text()).toBe('Routine one')
+    expect(rows[1].get('.sidebar-row-meta').text()).toBe('off')
+    expect(rows[1].get('.sidebar-row-title').classes()).toContain('sidebar-row-title--muted')
+    expect(rows[2].find('.missed-dot').exists()).toBe(true)
+    expect(rows[3].get('.sidebar-row-meta').text()).toBe('15m')
+    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Routines', 'System'])
+    wrapper.unmount()
+  })
+
+  it('lists Usage between Tasks and Settings in the main nav', async () => {
+    const wrapper = await mountSidebar('chat')
+    const labels = wrapper.findAll('.nav-links .nav-item-label').map(l => l.text())
+    expect(labels.slice(-3)).toEqual(['Tasks', 'Usage', 'Settings'])
+    const usage = wrapper.get('.nav-links a[href="/stats"]')
+    expect(usage.attributes('aria-label')).toBe('usage')
+    expect(usage.classes()).not.toContain('nav-item--active')
+    wrapper.unmount()
+  })
+
+  it('marks Usage active on the usage page', async () => {
+    const wrapper = await mountSidebar('stats' as 'chat')
+    expect(wrapper.get('.nav-links a[href="/stats"]').classes()).toContain('nav-item--active')
+    wrapper.unmount()
   })
 
   it('leaves the vault lists to the map rail', async () => {
@@ -1123,29 +1271,9 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
-  it('tags a chat only when it worked outside the main checkout', async () => {
+  it('tags every chat of a linked project with a quiet code marker', async () => {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].repo_location = { path: '/r/app', branch: 'main', is_worktree: false, exists: true }
-    store.chats.push({
-      ...store.chats[0],
-      chat_id: 'chat-wt',
-      title: 'In a worktree',
-      repo_location: { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true },
-    })
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    const tags = wrapper.findAll('.chat-repo-tag')
-    expect(tags).toHaveLength(1)
-    expect(tags[0].text()).toBe('⑂ feat-x')
-    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt (code mode off)')
-    wrapper.unmount()
-  })
-
-  it('tags a code-mode chat with a quiet code marker', async () => {
-    const store = useProjectStore()
-    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].code_mode = true
     const wrapper = await mountSidebar()
     await flushPromises()
     expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
@@ -1158,17 +1286,22 @@ describe('ProjectSidebar accessible context menus', () => {
     await flushPromises()
     expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
     unlinked.unmount()
+
+    store.projects[0].repo = { path: '/r/app', branch: '', dirty: false, missing: true }
+    const missing = await mountSidebar()
+    await flushPromises()
+    expect(missing.find('.chat-code-tag').exists()).toBe(false)
+    missing.unmount()
   })
 
-  function worktreeChat(codeMode: boolean) {
+  function worktreeChat() {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
-    store.chats[0].code_mode = codeMode
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('shows only the code badge when code mode and a worktree both apply', async () => {
-    worktreeChat(true)
+  it('names the worktree branch and folder in the code badge', async () => {
+    worktreeChat()
     const wrapper = await mountSidebar()
     await flushPromises()
     const code = wrapper.get('.chat-code-tag')
@@ -1178,41 +1311,20 @@ describe('ProjectSidebar accessible context menus', () => {
     expect(code.attributes('title')).toContain('/r/app-wt')
     expect(code.attributes('aria-label')).toContain('feat-x')
     expect(code.attributes('aria-label')).toContain('/r/app-wt')
-    expect(wrapper.find('.chat-repo-tag').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('keeps the dimmed branch tag when code mode is off', async () => {
-    worktreeChat(false)
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    const chip = wrapper.get('.chat-repo-tag')
-    expect(chip.text()).toBe('⑂ feat-x')
-    expect(chip.classes()).toContain('chat-repo-tag--code-off')
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
     wrapper.unmount()
   })
 
   it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
-    worktreeChat(true)
+    worktreeChat()
     const wrapper = await mountSidebar()
     await flushPromises()
     const badge = wrapper.get('.chat-code-tag')
     // A fine pointer hides the row's marks while its actions show, so the
     // facts the badge carries live in the row's own title too.
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(true)
     expect(wrapper.get('.chat-item').attributes('title'))
       .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
     expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
     expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
-    wrapper.unmount()
-  })
-
-  it('dims the branch chip of a chat whose code mode is off', async () => {
-    worktreeChat(false)
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    expect(wrapper.get('.chat-repo-tag').classes()).toContain('chat-repo-tag--code-off')
     wrapper.unmount()
   })
 })

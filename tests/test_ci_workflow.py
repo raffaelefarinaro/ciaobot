@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -520,10 +521,294 @@ def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
     )
 
 
+def _web_changes_script() -> str:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    step = workflow.split("    - name: Detect web changes", 1)[1]
+    run = step.split("      run: |\n", 1)[1]
+    lines: list[str] = []
+    for line in run.splitlines():
+        if line.startswith("        "):
+            lines.append(line[8:])
+        elif not line.strip():
+            lines.append("")
+        else:
+            break
+    return "\n".join(lines)
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _init_git(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "CI workflow test")
+    _git(repo, "config", "user.email", "ci-workflow@example.invalid")
+
+
+def _commit_file(repo: Path, name: str, content: str, message: str) -> str:
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    _git(repo, "add", "--", name)
+    _git(repo, "commit", "-qm", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _run_web_detector(
+    repo: Path, output: Path, base_sha: str | None, head_sha: str | None
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "GITHUB_OUTPUT": str(output),
+    }
+    if base_sha is not None:
+        env["PR_BASE_SHA"] = base_sha
+    if head_sha is not None:
+        env["PR_HEAD_SHA"] = head_sha
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", _web_changes_script()],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ("add", "true"),
+        ("modify", "true"),
+        ("delete", "true"),
+        ("rename_out", "true"),
+        ("rename_in", "true"),
+        ("backend", "false"),
+        ("docs", "false"),
+        ("prefix", "false"),
+    ],
+)
+def test_web_change_detector_uses_pr_three_dot_diff(
+    tmp_path: Path, change: str, expected: str
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    seed = {"web/a.ts": "a", "outside/a.ts": "o", "web-other/a.ts": "p"}
+    for name, content in seed.items():
+        _commit_file(repo, name, content, f"seed {name}")
+    base = _git(repo, "rev-parse", "HEAD")
+    if change == "add":
+        head = _commit_file(repo, "web/new.ts", "new", "add web file")
+    elif change == "modify":
+        head = _commit_file(repo, "web/a.ts", "changed", "modify web file")
+    elif change == "delete":
+        _git(repo, "rm", "web/a.ts")
+        _git(repo, "commit", "-qm", "delete web file")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "rename_out":
+        _git(repo, "mv", "web/a.ts", "outside/renamed.ts")
+        _git(repo, "commit", "-qm", "move file out of web")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "rename_in":
+        _git(repo, "mv", "outside/a.ts", "web/renamed.ts")
+        _git(repo, "commit", "-qm", "move file into web")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "backend":
+        head = _commit_file(repo, "ciao/change.py", "x", "backend change")
+    elif change == "docs":
+        head = _commit_file(repo, "docs/change.md", "x", "docs change")
+    else:
+        head = _commit_file(repo, "web-other/change.ts", "x", "prefix change")
+
+    output = tmp_path / "github-output"
+    result = _run_web_detector(repo, output, base, head)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == f"web_changed={expected}\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+def test_web_change_detector_ignores_base_only_web_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    ancestor = _commit_file(repo, "README.md", "seed", "common ancestor")
+    _git(repo, "checkout", "-qb", "base")
+    base = _commit_file(repo, "web/base-only.ts", "base", "base web change")
+    _git(repo, "checkout", "-qb", "head", ancestor)
+    head = _commit_file(repo, "docs/head.md", "head", "head docs change")
+    assert _git(repo, "diff", "--name-only", f"{base}..{head}", "--", "web/")
+    output = tmp_path / "github-output"
+    result = _run_web_detector(repo, output, base, head)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "web_changed=false\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+def test_web_change_detector_handles_fork_head_without_branch_name(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    _init_git(upstream)
+    base = _commit_file(upstream, "README.md", "base", "base")
+    fork = tmp_path / "fork"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(fork)], check=True)
+    _git(fork, "config", "user.name", "Fork test")
+    _git(fork, "config", "user.email", "fork@example.invalid")
+    head = _commit_file(fork, "web/fork.ts", "fork", "fork web change")
+
+    merge_checkout = tmp_path / "merge-checkout"
+    _init_git(merge_checkout)
+    _git(merge_checkout, "fetch", str(upstream), base)
+    _git(merge_checkout, "checkout", "-qb", "pr-merge", "FETCH_HEAD")
+    _git(merge_checkout, "fetch", str(fork), head)
+    _git(merge_checkout, "merge", "--no-ff", "-m", "synthetic PR merge", "FETCH_HEAD")
+    _git(merge_checkout, "checkout", "--detach", "HEAD")
+    _git(merge_checkout, "branch", "-D", "pr-merge")
+    output = tmp_path / "github-output"
+    result = _run_web_detector(merge_checkout, output, base, head)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "web_changed=true\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+@pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "a1b2c3d", "a" * 39, "a" * 41, "g" * 40, "--help", "$(touch sentinel)"],
+)
+def test_web_change_detector_rejects_invalid_sha_inputs(
+    tmp_path: Path, side: str, value: str | None
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    commit = _commit_file(repo, "README.md", "seed", "seed")
+    base, head = commit, commit
+    if side == "PR_BASE_SHA":
+        base = value
+    else:
+        head = value
+    output = tmp_path / "github-output"
+    result = _run_web_detector(repo, output, base, head)
+    assert result.returncode != 0
+    assert not output.exists() or "web_changed=" not in output.read_text(encoding="utf-8")
+    assert not (repo / "sentinel").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+@pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
+@pytest.mark.parametrize("invalid", ["f" * 40, "blob"])
+def test_web_change_detector_fails_for_unknown_commits(
+    tmp_path: Path, side: str, invalid: str
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    commit = _commit_file(repo, "README.md", "seed", "seed")
+    if invalid == "blob":
+        blob = _git(repo, "hash-object", "-w", "README.md")
+        invalid_sha = blob
+    else:
+        invalid_sha = invalid
+    output = tmp_path / "github-output"
+    base, head = commit, commit
+    if side == "PR_BASE_SHA":
+        base = invalid_sha
+    else:
+        head = invalid_sha
+    result = _run_web_detector(repo, output, base, head)
+    assert result.returncode != 0
+    assert not output.exists() or "web_changed=" not in output.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+def test_web_change_detector_fails_for_disconnected_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    base = _commit_file(repo, "README.md", "base", "base")
+    _git(repo, "checkout", "--orphan", "other")
+    _git(repo, "rm", "-rf", ".")
+    head = _commit_file(repo, "README.md", "head", "orphan head")
+    output = tmp_path / "github-output"
+    result = _run_web_detector(repo, output, base, head)
+    assert result.returncode != 0
+    assert not output.exists() or "web_changed=" not in output.read_text(encoding="utf-8")
+
+
+def test_develop_web_prs_run_linux_e2e() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    assert "  paths:" not in workflow
+    assert "web_changed: ${{ steps.web-changes.outputs.web_changed }}" in workflow
+    assert "fetch-depth: 0" in workflow
+    assert "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}" in workflow
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in workflow
+    assert "on:\n  push:\n    branches: [ develop ]\n  pull_request:\n    branches: [ develop, main ]" in workflow
+    assert "git diff --no-renames --name-only \"${PR_BASE_SHA}...${PR_HEAD_SHA}\" -- web/" in _web_changes_script()
+    assert "github.event_name == 'pull_request' && github.base_ref == 'develop'" in workflow
+    jobs = re.split(r"(?m)^  (?=[a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
+    web = by_name["linux-web"]
+    assert "fetch-depth: 0" in web
+    assert "outputs:\n      web_changed: ${{ steps.web-changes.outputs.web_changed }}" in web
+    e2e = by_name["linux-e2e"]
+    assert "needs: linux-web" in e2e
+    assert "needs.linux-web.outputs.web_changed == 'true'" in e2e
+    assert "runs-on: ubuntu-24.04" in e2e
+    commands = ["npm ci", "npx playwright install --with-deps chromium", "npm run test:e2e"]
+    assert [e2e.index(command) for command in commands] == sorted(e2e.index(command) for command in commands)
+    assert "working-directory: web" in e2e
+    assert e2e.index("npm ci") < e2e.index("playwright install")
+    assert "permissions:" not in e2e
+    assert "actions/upload-artifact@v7" in e2e
+    assert "name: linux-playwright-traces" in e2e
+    assert "path: web/test-results/" in e2e
+    assert "retention-days: 7" in e2e
+    assert "if: failure()" in e2e
+    assert "permissions:\n  contents: read" in workflow
+
+
+def test_branch_protection_declares_conditional_linux_e2e_for_develop() -> None:
+    script = (
+        Path(__file__).parents[1] / "scripts" / "configure-github-branches.sh"
+    ).read_text(encoding="utf-8")
+    blocks = re.findall(r"(?ms)^\w+_json\(\) \{\n  cat <<'JSON'\n(.*?)\nJSON\n\}", script)
+    assert len(blocks) == 2
+    develop, main = (json.loads(block) for block in blocks)
+    assert develop["required_status_checks"]["contexts"] == [
+        "linux-server", "linux-web", "linux-e2e", "windows"
+    ]
+    assert main["required_status_checks"]["contexts"] == [
+        "linux-server", "linux-web", "windows", "test"
+    ]
+    assert develop["enforce_admins"] is False
+    assert main["enforce_admins"] is True
+
+
 def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
-    # A develop PR waits on the two parallel Linux jobs and on the Windows
-    # import and win32 mypy gates. The Windows suites take over a quarter of
-    # an hour on a hosted runner, so they share the macOS job's gate: pushes
+    # A develop PR waits on the two parallel Linux jobs, conditional Linux
+    # browser coverage for web changes, and the Windows import/win32 mypy
+    # gates. The Windows suites take over a quarter hour, so they run on pushes
     # to develop and release PRs into main.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"

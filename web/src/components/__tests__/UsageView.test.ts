@@ -58,15 +58,32 @@ describe('UsageView', () => {
     expect(tokens.find('.usage-kpi-delta').exists()).toBe(false)
   })
 
-  it('shows dashes and no deltas while loading', async () => {
+  it('draws the shared skeleton on the first load, not a grid of dashes', async () => {
     get.mockReturnValue(new Promise(() => {}))
     const wrapper = mountView()
     await nextTick()
 
-    expect(wrapper.findAll('.usage-kpi-value').every(v => v.text() === '—')).toBe(true)
-    expect(wrapper.find('.usage-kpi-delta').exists()).toBe(false)
+    const skeleton = wrapper.find('.skeleton[role="status"]')
+    expect(skeleton.exists()).toBe(true)
+    expect(skeleton.attributes('aria-label')).toBe('Loading usage')
+    expect(wrapper.find('.usage-kpi').exists()).toBe(false)
+    expect(wrapper.find('.usage-breakdown').exists()).toBe(false)
+    // The range picker stays usable while the numbers load.
+    expect(wrapper.findAll('[role="group"][aria-label="Range"] button')).toHaveLength(4)
     expect(wrapper.find('.page-main').attributes('aria-busy')).toBe('true')
     expect(wrapper.find('.spinner, [role="progressbar"]').exists()).toBe(false)
+  })
+
+  it('keeps the grid with dashes, not the skeleton, while a new range loads', async () => {
+    get.mockResolvedValueOnce(SAMPLE)
+    const wrapper = mountView()
+    await flushPromises()
+    get.mockReturnValueOnce(new Promise(() => {}))
+    await wrapper.findAll('[role="group"][aria-label="Range"] button')[0].trigger('click')
+
+    expect(wrapper.find('.skeleton').exists()).toBe(false)
+    expect(wrapper.findAll('.usage-kpi-value').every(v => v.text() === '—')).toBe(true)
+    expect(wrapper.find('.usage-kpi-delta').exists()).toBe(false)
   })
 
   it('offers four pressed toggles and reloads on a new range', async () => {

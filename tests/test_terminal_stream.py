@@ -169,11 +169,17 @@ class FakePcm:
     def get_project(self, project_id: str) -> Any:
         return self._projects.get(project_id)
 
+    def linked_repo_for_chat(self, chat: Any) -> str:
+        """The engine's code-mode rule: the project's linked repo, when it exists."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        return raw if raw and Path(raw).is_dir() else ""
+
 
 def _pcm(root: Path) -> FakePcm:
     """One chat in one project, and that project's folder is ``root``."""
     project = SimpleNamespace(id="p1", repo_path=str(root), workspace="")
-    chat = SimpleNamespace(id="c1", project_id="p1", code_mode=False, repo_location={})
+    chat = SimpleNamespace(id="c1", project_id="p1", repo_location={})
     return FakePcm({"c1": chat}, {"p1": project})
 
 

@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.claude_trim import catalog_payload
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import host_terminal
@@ -46,6 +47,7 @@ from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_predictions
 from ciao import service_backend
+from ciao import transcripts
 from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
@@ -278,6 +280,8 @@ def _workspaces_payload(config) -> dict:
         # What a workspace that never chose a File access scope runs under on
         # this engine. The PWA labels its "Default" option from this value.
         "default_agent_fs_scope": default_agent_fs_scope(),
+        # Catalog the Settings trim card renders; engine-owned so the PWA never restates defaults.
+        "claude_trim_options": catalog_payload(),
     }
 
 
@@ -2613,9 +2617,6 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
-    code_mode = body.get("code_mode")
-    if code_mode is not None and not isinstance(code_mode, bool):
-        return JSONResponse({"error": "code_mode must be a boolean"}, status_code=400)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2626,8 +2627,6 @@ async def chat_detail(request: Request) -> Response:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
-        if chat is not None and code_mode is not None:
-            chat = pcm.set_code_mode(chat_id, code_mode, actor="user")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -3682,7 +3681,7 @@ def _is_same_chat_target(requested: str, found: Path) -> bool:
     return [p.lower() for p in found.parts[-count:]] == [p.lower() for p in wanted.parts]
 
 
-def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
+def _resolve_chat_file(roots: list[Path], raw: str, *, fuzzy: bool = True) -> Path | Response:
     """Resolve a chat link against the chat's own roots only.
 
     Each root is tried on its own, exact matches before fuzzy ones, so a
@@ -3697,6 +3696,8 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
         result = _resolve_workspace_path([root], raw, allow_fuzzy=False)
         if not isinstance(result, Response) or result.status_code != 404:
             return result
+    if not fuzzy:
+        return JSONResponse({"error": "not found"}, status_code=404)
     requested = _LINE_SUFFIX_RE.sub("", raw)
     fuzzy_roots = [
         root for index, root in enumerate(roots)
@@ -3712,17 +3713,19 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
-async def chat_file_path(request: Request) -> Response:
-    """Canonical file identity for a link emitted in a chat's workspace.
+async def _resolve_in_chat(
+    request: Request, chat_id: str, *, fuzzy: bool = True
+) -> Path | Response:
+    """Resolve the request's ``path`` the way *chat_id*'s file links resolve.
 
-    Resolves against the chat's agent root and its workspace vault root, and
-    nothing else. A missing file must not match a same-named file in another
-    workspace, so fuzzy matching is confined to those two roots. Absolute
-    paths retain the viewer's existing policy.
+    A relative path anchors to the chat's agent root, then its workspace vault
+    root, and fuzzy matching (when *fuzzy*) stays inside those roots. This is
+    anchoring, not confinement: an absolute or ``..`` path follows the viewers'
+    existing no-sandbox policy (``_resolve_workspace_path``). ``fuzzy=False``
+    skips the directory walk and answers 404 when no exact match exists.
     """
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
-    chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     workspace = pcm._workspace_for_chat(chat_id)
@@ -3731,9 +3734,20 @@ async def chat_file_path(request: Request) -> Response:
         config.workspace_vault_root(workspace).resolve(),
     ]))
     # The fuzzy pass walks the directory tree, so it runs off the event loop.
-    result = await asyncio.to_thread(
-        _resolve_chat_file, roots, request.query_params.get("path", "").strip()
+    return await asyncio.to_thread(
+        _resolve_chat_file, roots, request.query_params.get("path", "").strip(), fuzzy=fuzzy
     )
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
+    """
+    result = await _resolve_in_chat(request, request.path_params["chat_id"])
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
@@ -5359,11 +5373,23 @@ async def workspace_image(request: Request) -> Response:
 
     Used by the markdown viewer to resolve relative image references (e.g.
     ``![alt](images/foo.png)`` inside a vault doc) against the doc's folder.
+
+    With ``chat_id`` a relative path anchors to that chat's agent and vault
+    roots (``_resolve_in_chat``) instead of ``workspace_root``, exactly, with
+    no fuzzy walk: a chat message's embedded image
+    (``![shot](memory-vault/x.png)``) is served this way, and a message full of
+    made-up image paths must not trigger directory walks. This anchors; it
+    does not confine: absolute and ``..`` paths follow the same no-sandbox
+    policy as without ``chat_id``.
     """
-    config = request.app.state.config
-    raw = request.query_params.get("path", "").strip()
-    roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    chat_id = request.query_params.get("chat_id", "").strip()
+    result: Path | Response
+    if chat_id:
+        result = await _resolve_in_chat(request, chat_id, fuzzy=False)
+    else:
+        roots = _allowed_roots(request.app.state.config)
+        raw = request.query_params.get("path", "").strip()
+        result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
         return result
     resolved = result
@@ -8711,7 +8737,47 @@ def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
         "undoable": is_undoable(receipt),
         "changed": bool(receipt.get("changed", True)),
         "ts": str(receipt.get("ts", "")),
+        # The turns this write cited, when the fact was extracted from a
+        # transcript. The receipt records them verbatim under ``provenance``
+        # (see ``_provenance_row``); History uses the first one to open the
+        # archive where the fact starts. A receipt with no citation — an
+        # operator edit, an import from another agent — carries an empty list,
+        # which is how the row can say the source is not pointed at a turn
+        # rather than pointing at turn 1.
+        "source_turns": _cited_turns(receipt),
     }
+
+
+def _cited_turns(receipt: dict[str, Any]) -> list[int]:
+    """The transcript turns a receipt's evidence names, in order.
+
+    Two shapes carry one: a region write records ``provenance.source_message_ids``
+    (:class:`ciao.fact_candidates.FactCandidate`), and a learning records the
+    ``sources``/``observations`` it was filed from. Both are read so a row can
+    point at a turn whichever write produced it.
+
+    Only positive integers are kept. ``source_message_ids`` is typed as
+    ``tuple[int, ...]``, and a malformed value must not become a line number in
+    the viewer — a link to the wrong line asserts the wrong evidence.
+    """
+    turns: list[int] = []
+
+    def take(values: Any) -> None:
+        for value in values if isinstance(values, (list, tuple)) else ():
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                turns.append(value)
+
+    provenance = receipt.get("provenance")
+    if isinstance(provenance, dict):
+        take(provenance.get("source_message_ids"))
+    for key in ("sources", "observations"):
+        rows = receipt.get(key)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                take([row.get("turn")])
+    return turns
 
 
 #: A retirement is reversible, but not by an undo: the note went to the review
@@ -8969,6 +9035,49 @@ def _source_index(config: Any) -> dict[str, str]:
     return index
 
 
+def _first_cited_turn(row: dict[str, Any]) -> int:
+    """The turn this decision's write cited, or ``0`` when it cited none."""
+    change = row.get("change")
+    if not isinstance(change, dict):
+        return 0
+    turns = change.get("source_turns")
+    if not isinstance(turns, list) or not turns:
+        return 0
+    first = turns[0]
+    return first if isinstance(first, int) and first > 0 else 0
+
+
+def _attach_source_line(
+    row: dict[str, Any], path: str, turn: int, archives: dict[str, str]
+) -> None:
+    """Point the row at the line where its cited turn starts.
+
+    ``source_turn``/``source_line`` are ABSENT — not zero — when the archive
+    cannot be read or no longer parses a turn with that number, which is what
+    lets History fall back to opening the file at the top and say nothing it
+    cannot back up. A transcript an operator edited by hand is exactly the case
+    where a wrong line would be worse than no line.
+
+    Runs off the event loop (:func:`asyncio.to_thread`), and reads each archive
+    at most once per request.
+    """
+    if not path.lower().endswith(".md"):
+        return
+    text = archives.get(path)
+    if text is None:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        archives[path] = text
+    if not text:
+        return
+    line = transcripts.archive_turn_line(text, turn)
+    if line:
+        row["source_turn"] = turn
+        row["source_line"] = line
+
+
 async def proposals_history(request: Request) -> JSONResponse:
     """Every recorded proposal decision across workspaces, newest first.
 
@@ -9062,10 +9171,18 @@ async def proposals_history(request: Request) -> JSONResponse:
     # resolved, and only once per request. Off the event loop: it lists a
     # directory tree.
     index = await asyncio.to_thread(_source_index, config)
+    # One read per archive per request: two facts from the same chat are the
+    # common case, and a transcript can be a few hundred kilobytes.
+    archives: dict[str, str] = {}
     for row in served:
         path = index.get(str(row.get("source", "")))
         if path:
             row["source_path"] = path
+            turn = _first_cited_turn(row)
+            if turn:
+                await asyncio.to_thread(
+                    _attach_source_line, row, path, turn, archives
+                )
         hint = _restore_hint(row)
         if hint:
             row["reversible_by"] = hint

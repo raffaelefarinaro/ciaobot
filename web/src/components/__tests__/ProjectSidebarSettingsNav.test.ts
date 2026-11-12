@@ -70,4 +70,15 @@ describe('ProjectSidebar settings nav', () => {
     expect(active[0].attributes('aria-current')).toBe('page')
     wrapper.unmount()
   })
+
+  it('draws each section as a sidebar row, the same row as a chat', async () => {
+    const wrapper = await mountSettingsSidebar('/settings/general')
+    const links = wrapper.findAll('.settings-nav-list a')
+    expect(links.length).toBe(SETTINGS_NAV_GROUPS.flatMap(g => g.items).length)
+    for (const link of links) {
+      expect(link.classes()).toContain('sidebar-row')
+      expect(link.find('.sidebar-row-title').text()).toBeTruthy()
+    }
+    wrapper.unmount()
+  })
 })

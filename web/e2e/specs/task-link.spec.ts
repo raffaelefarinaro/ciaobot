@@ -144,14 +144,16 @@ test.describe('a task link in a chat reply', () => {
     await expect(page.locator(EDITOR)).toBeHidden()
   })
 
-  test('a direct /tasks/<id> still opens the board route editor', async ({ page }) => {
-    await boot(page, `/tasks/${TASK_ID}`, EDITOR)
+  test('a direct /tasks/<id> opens the task as the board route\'s page', async ({ page }) => {
+    await boot(page, `/tasks/${TASK_ID}`, '.task-detail-page')
 
-    // The board keeps its own route and its own editor: this is not the
-    // overlay, and the address is the one the user navigated to.
+    // The board's own route opens the task as a page, not the overlay: the
+    // board steps aside, the address is the one the user navigated to, and
+    // there is no modal sheet.
     await expect(page).toHaveURL(new RegExp(`/tasks/${TASK_ID}$`))
-    await expect(page.locator('.task-lanes')).toBeVisible()
-    await expect(page.locator(EDITOR).locator('#task-detail-name')).toHaveValue(TITLE)
+    await expect(page.locator('.task-lanes')).toBeHidden()
+    await expect(page.locator(EDITOR)).toHaveCount(0)
+    await expect(page.locator('.task-detail-page #task-detail-name')).toHaveValue(TITLE)
   })
 })
 

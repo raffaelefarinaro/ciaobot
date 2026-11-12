@@ -127,7 +127,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
-import { joinRepoPath, repoName } from '../lib/repo'
+import { inCodeMode, joinRepoPath, repoName } from '../lib/repo'
 import { writeClipboard } from '../lib/codeCopy'
 import AppIcon from './AppIcon.vue'
 import { fetchSystemPrompt } from '../lib/systemPrompt'
@@ -143,8 +143,6 @@ const props = defineProps<{
   compacting: boolean
   /** The chat is streaming or a compact request is in flight. */
   compactDisabled: boolean
-  /** Code mode is effectively on (chat.code_mode and a linked repo). */
-  codeMode?: boolean
   /** Bumped by a caller that points at this section ("See what Ciao knows"): opens Always loaded. */
   revealKey?: number
 }>()
@@ -211,8 +209,8 @@ const briefText = computed(() => {
 })
 const briefTokens = computed(() => tokensFor(briefText.value.length))
 
-// undefined = no row; null = code mode is on but the repo has no instructions.
-const repoInstr = computed(() => (props.codeMode && props.project?.repo) ? (props.project.repo.instructions ?? null) : undefined)
+// undefined = no row (not in code mode); null = code mode, but the repo has no instructions.
+const repoInstr = computed(() => inCodeMode(props.project?.repo) ? (props.project.repo.instructions ?? null) : undefined)
 const repoInstrPath = computed(() => repoInstr.value && props.project?.repo ? joinRepoPath(props.project.repo.path, repoInstr.value.name) : '')
 const repoInstrLabel = computed(() => repoInstr.value && props.project?.repo ? `${repoName(props.project.repo.path)}/${repoInstr.value.name}` : '')
 

@@ -121,6 +121,12 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     })
   }, { flush: 'sync' })
 
+  // Re-fit on every draft change, not only on the textarea's input event: an
+  // inserted [Image N], a renumbered image ref, a slash insert or a recalled
+  // prompt sets the draft in code, and a stale height clips the new line.
+  // `post` runs after Vue has written the new value into the textarea.
+  watch(draft, () => autoResize(), { flush: 'post' })
+
   function clearDraft(id: string): void {
     writeChatDraft(id, '')
     draft.value = ''
