@@ -74,9 +74,11 @@ _GLOBAL_PROMOTIONS: dict[str, str] = {
 
 # Generated aggregates that a per-root rebuild replaces (P10.6). They are not
 # moved and not preserved: an index that still describes the old prefixed layout
-# is worse than an absent one, because it reads as current.
+# is worse than an absent one, because it reads as current. The link-migration
+# marker describes the shared root's link state; split roots start without one
+# (see `vault_migrate_links.MARKER_NAME`, spelled here to keep this module light).
 _REGENERATED_ROOT_NOTES: frozenset[str] = frozenset(
-    {"INDEX.md", "MEMORY.md", "VOCABULARY.md"}
+    {"INDEX.md", "MEMORY.md", "VOCABULARY.md", ".ciao-vault-links.json"}
 )
 
 # Filesystem cruft that carries no vault content. Listed explicitly rather than

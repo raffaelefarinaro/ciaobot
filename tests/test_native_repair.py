@@ -8,6 +8,7 @@ effect is an injected fake, so no test touches the real HOME, LaunchAgents,
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import plistlib
@@ -662,6 +663,159 @@ def test_repair_policy_rejects_a_non_positive_deadline() -> None:
     with pytest.raises(native.NativeCoordinatorError) as caught:
         _RepairPolicy(poll_interval=0)
     assert caught.value.failure_code == "internal_error"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["run_timeout", "readiness_timeout", "readiness_interval", "poll_interval", "port_bind_timeout"],
+)
+@pytest.mark.parametrize(
+    "value",
+    [True, 0, -1, float("nan"), float("inf"), native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1],
+)
+def test_shared_policy_rejects_invalid_values(field: str, value: object) -> None:
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        _RepairPolicy(**{field: value})  # type: ignore[arg-type]
+    assert caught.value.reason == "invalid_timeout"
+    assert caught.value.failure_code == "internal_error"
+
+
+def test_repair_policy_accepts_the_maximum_timeout() -> None:
+    _RepairPolicy(run_timeout=native.COORDINATOR_MAX_TIMEOUT_SECONDS)
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [lambda _port, _host: None, lambda _port, _host: "yes"],
+)
+def test_shared_bind_wait_probe_contract_rejects_non_boolean(
+    tmp_path: Path, probe: Callable[[int, str], object]
+) -> None:
+    _workspace(tmp_path)
+    deps, calls = _deps(tmp_path, port_bindable=probe)
+    outcome, events = _run(deps)
+    assert _phase_events(events)[-1] == ("failed", "activation_refused")
+    assert outcome.failure_code == "activation_refused"
+    assert "bootstrap" not in calls
+
+
+def test_shared_bind_wait_probe_contract_maps_probe_exception(tmp_path: Path) -> None:
+    _workspace(tmp_path)
+
+    def fail(_port: int, _host: str) -> bool:
+        raise OSError("probe failed")
+
+    deps, calls = _deps(tmp_path, port_bindable=fail)
+    outcome, events = _run(deps)
+    assert _phase_events(events)[-1] == ("failed", "activation_refused")
+    assert outcome.failure_code == "activation_refused"
+    assert "bootstrap" not in calls
+
+
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [(native._Cancelled(), "cancelled"), (native._TimedOut(), "internal_error")],
+)
+def test_shared_bind_wait_probe_contract_propagates_control_errors(
+    tmp_path: Path, error: Exception, failure: str
+) -> None:
+    _workspace(tmp_path)
+
+    def probe(_port: int, _host: str) -> bool:
+        raise error
+
+    deps, calls = _deps(tmp_path, port_bindable=probe)
+    outcome, events = _run(deps)
+    assert _phase_events(events)[-1] == ("failed", failure)
+    assert outcome.failure_code == failure
+    assert "bootstrap" not in calls
+
+
+def test_shared_bind_wait_checks_stage_before_probing(tmp_path: Path) -> None:
+    _workspace(tmp_path)
+    cancellation = NativeCancellation()
+    probes: list[tuple[int, str]] = []
+
+    def write_definition(target: RepairTarget, rendered: bytes) -> str:
+        cancellation.cancel()
+        return hashlib.sha256(rendered).hexdigest()
+
+    def probe(port: int, host: str) -> bool:
+        probes.append((port, host))
+        return True
+
+    deps, calls = _deps(
+        tmp_path, write_definition=write_definition, port_bindable=probe
+    )
+    outcome, events = _run(deps, cancellation=cancellation)
+    assert _phase_events(events)[-1] == ("failed", "cancelled")
+    assert outcome.failure_code == "cancelled"
+    assert probes == []
+    assert "bootstrap" not in calls
+
+
+def test_shared_bind_wait_rechecks_stage_after_wait_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _workspace(tmp_path)
+    cancellation = NativeCancellation()
+    probes: list[tuple[int, str]] = []
+
+    def probe(port: int, host: str) -> bool:
+        probes.append((port, host))
+        return len(probes) > 1
+
+    def wait(_seconds: float, _cancellation: NativeCancellation, _poll: float) -> None:
+        if probes:
+            cancellation.cancel()
+
+    monkeypatch.setattr(native, "_wait_observing", wait)
+    deps, calls = _deps(tmp_path, port_bindable=probe)
+    outcome, events = _run(deps, cancellation=cancellation)
+    assert probes == [(PORT, DEFAULT_PWA_HOST)]
+    assert "bootstrap" not in calls
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_attempted is False
+    assert _phase_events(events)[-1] == ("failed", "cancelled")
+
+
+def test_repair_bind_timeout_refuses_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _workspace(tmp_path)
+    timeout = 0.173
+    real_after = native._Deadline.after
+
+    def after(seconds: float) -> native._Deadline:
+        if seconds == timeout:
+            return native._Deadline(time.monotonic() - 1)
+        return real_after(seconds)
+
+    monkeypatch.setattr(native._Deadline, "after", after)
+    deps, calls = _deps(tmp_path, port_bindable=lambda _port, _host: False)
+    policy = _RepairPolicy(port_bind_timeout=timeout)
+    outcome, events = _run(deps, policy=policy)
+    assert _phase_events(events)[-1] == ("failed", "activation_refused")
+    assert outcome.failure_code == "activation_refused"
+    assert "bootstrap" not in calls
+
+
+def test_repair_waits_for_bind_probe_and_passes_target_host(tmp_path: Path) -> None:
+    _workspace(tmp_path)
+    probes: list[tuple[int, str]] = []
+
+    def bindable(port: int, host: str) -> bool:
+        probes.append((port, host))
+        return len(probes) == 2
+
+    deps, _calls = _deps(
+        tmp_path,
+        classify=lambda _own=None: _target(tmp_path, host="127.0.0.1"),
+        port_bindable=bindable,
+    )
+    outcome, _events = _run(deps)
+    assert outcome.terminal == "service_ready"
+    assert probes == [(PORT, "127.0.0.1"), (PORT, "127.0.0.1")]
 
 
 def test_repair_protocol_and_budget_constants() -> None:

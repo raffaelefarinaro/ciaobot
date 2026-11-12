@@ -370,6 +370,33 @@ def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
     assert after == before
 
 
+def test_link_marker_at_the_shared_root_is_stashed_not_refused(tmp_path: Path) -> None:
+    from ciao import vault_migrate_links, vault_relocate
+
+    install, vault, runtime = _git_install(tmp_path)
+    marker = vault / ".ciao-vault-links.json"
+    marker.write_text('{"format":1,"operation_id":"' + "a" * 32 + '","state":"migrated"}\n', encoding="utf-8")
+    original = marker.read_bytes()
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "marker")
+
+    result = plan(install, vault, ["personal", "work"])
+    assert result.refused is False and result.unclassified == [] and result.refusals == []
+    assert "memory-vault/.ciao-vault-links.json" in result.regenerated
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    assert not list(install.glob("*/memory-vault/.ciao-vault-links.json"))
+    stashed = runtime / "migration" / "reroot-regenerated"
+    assert original in [p.read_bytes() for p in stashed.rglob("*") if p.is_file()]
+
+    assert undo(install, runtime)["status"] == "undone"
+    assert marker.read_bytes() == original
+
+    name = vault_migrate_links.MARKER_NAME
+    assert name in workspace_reroot._REGENERATED_ROOT_NOTES and name in vault_relocate._SHARED_NAMES
+
+
 def _schedule_store(runtime: Path, schedules: list[dict]) -> Path:
     path = runtime / "schedules.json"
     path.write_text(
