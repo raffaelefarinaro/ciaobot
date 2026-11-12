@@ -1095,13 +1095,13 @@ export function usageStats(range) {
   const days = [7, 30, 90, 365].includes(range) ? range : 30
   const now = new Date()
   const daily = []
-  for (let i = 181; i >= 0; i--) {
+  for (let i = 363; i >= 0; i--) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i))
     daily.push({ date: d.toISOString().slice(0, 10), count: (i * 37) % 23 })
   }
   return {
     range_days: days, generated_at: now.toISOString(),
-    today: { chats_opened: 14, messages_sent: 212, chats_archived: 5, memories_saved: 7, projects_worked_on: 4, tasks_completed: 3, avg_chats_opened_30d: 10.4, avg_messages_sent_30d: 151 },
+    today: { chats_opened: 14, messages_sent: 212, chats_archived: 5, memories_saved: 7, projects_worked_on: 4, tasks_completed: 3, avg_chats_opened_30d: 10.4, avg_messages_sent_30d: 151, avg_chats_archived_30d: 3.8, avg_memories_saved_30d: 5.2, avg_projects_worked_on_30d: 2.6, avg_tasks_completed_30d: 1.4 },
     totals: { chats_opened: 248, messages_sent: 4517, chats_archived: 171, memories_saved: 112, tasks_completed: 37, projects_worked_on: 16, automation_runs: 180, tokens: 71500000 },
     previous: { chats_opened: 210, messages_sent: 3702, chats_archived: 157, memories_saved: 85, tasks_completed: 31, projects_worked_on: 13, automation_runs: 173, tokens: null },
     daily_messages: daily,
