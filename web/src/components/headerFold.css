@@ -1,0 +1,16 @@
+/*
+ * How an open item's header folds on a phone (767px and under, where the close
+ * button also goes): a header action marked `fold-wide` shows only on a wider
+ * pane, and its mirror in the ⋯ menu (`ItemHeaderMenu`) marked `fold-phone`
+ * only on a phone, so close, title and actions share one row. CSS only, so the
+ * header never waits on a media-query listener and both states are in the DOM.
+ * Pulled in with `<style scoped src="./headerFold.css">` by each host
+ * (SchedulePanel, ProjectView, TaskWorkspaceSurface), whose own markup and
+ * slot content carry its scope.
+ */
+@media (min-width: 768px) {
+  .fold-phone { display: none !important; }
+}
+@media (max-width: 767px) {
+  .fold-wide { display: none !important; }
+}

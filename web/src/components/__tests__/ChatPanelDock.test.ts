@@ -148,6 +148,8 @@ async function mountPanel(
         RouterLink: RouterLinkStub,
         // Real: the rail's shell rows are the unit under test here.
         ShellRows: false,
+        // Real: the shared title row holds the close button.
+        ItemTitleRow: false,
       },
     },
   })

@@ -52,6 +52,8 @@ import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import ItemHeaderMenu from './ItemHeaderMenu.vue'
 import { railLeanStyle, railMotionClass, type RailItem } from '../lib/titleRail'
 import { markRailArrival, takeRailArrival, useTitleRail } from '../composables/useTitleRail'
 import { useDragSort, type DragCommit, type DragScope } from '../composables/useDragSort'
@@ -3778,19 +3780,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
       <PaneHeader v-if="!overlay" :brand="false" @open-sidebar="emit('open-sidebar')">
         <template #title>
           <div class="header-left">
-            <div class="item-title-row" :class="{ 'item-title-row--rail': taskRailOn }">
-              <button
-                type="button"
-                class="btn-icon close-btn"
-                title="Close task"
-                aria-label="Close task"
-                @click="requestDetailClose()"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
+            <ItemTitleRow :rail="taskRailOn" close-label="Close task" @close="requestDetailClose()">
               <!-- Keyed by task and by a refused switch, so a slide still pending
                    from the last task, or one whose draft could not be written,
                    never leaves the strip resting on a neighbour. -->
@@ -3808,7 +3798,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                 @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
               />
               <span v-else class="pane-title">{{ detailTask?.title || detailForm.title || 'Task' }}</span>
-            </div>
+            </ItemTitleRow>
           </div>
         </template>
         <template #actions>
@@ -3818,29 +3808,16 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
           <p class="task-saved" role="status" aria-live="polite">{{ detailSaveLine }}</p>
           <button
             type="button"
-            class="btn-small task-delete task-header-wide"
+            class="btn-small task-delete fold-wide"
             :disabled="detailSaving"
             @click="deleteTask"
           >Delete</button>
-          <DropdownMenuRoot :modal="false">
-            <DropdownMenuTrigger as-child>
-              <button type="button" class="btn-icon task-header-narrow" aria-label="More task actions">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
-                </svg>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuPortal>
-              <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
-                <div class="task-page-menu">
-                  <p class="task-page-menu-note" aria-hidden="true">{{ detailSaveLine }}</p>
-                  <DropdownMenuItem as-child :disabled="detailSaving">
-                    <button type="button" class="danger" @click="deleteTask">Delete task…</button>
-                  </DropdownMenuItem>
-                </div>
-              </DropdownMenuContent>
-            </DropdownMenuPortal>
-          </DropdownMenuRoot>
+          <ItemHeaderMenu label="More task actions" phone-only>
+            <p class="item-header-menu-note" aria-hidden="true">{{ detailSaveLine }}</p>
+            <DropdownMenuItem as-child :disabled="detailSaving">
+              <button type="button" class="danger" @click="deleteTask">Delete task…</button>
+            </DropdownMenuItem>
+          </ItemHeaderMenu>
         </template>
       </PaneHeader>
       <div
@@ -4334,6 +4311,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 </template>
 
 <style scoped src="./railMotion.css"></style>
+<style scoped src="./headerFold.css"></style>
 
 <style scoped>
 /* The pane root. It is also the element `NARROW_PANE_PX` observes: a block
@@ -5476,10 +5454,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   min-height: 0;
 }
 .task-detail-page .header-left { display: flex; align-items: center; min-width: 0; flex: 1; }
-.task-detail-page .item-title-row { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; }
-.task-detail-page .item-title-row--rail { flex: 1 1 auto; width: 100%; }
-.task-detail-page .close-btn { color: var(--fg3); flex: none; }
-.task-detail-page .close-btn:hover { color: var(--fg); }
 .task-detail-page .task-saved {
   margin: 0;
   max-width: 14rem;
@@ -5499,39 +5473,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
   color: var(--error);
 }
-.task-detail-page .task-header-narrow { display: none; }
-.task-page-menu {
-  z-index: 100;
-  min-width: 200px;
-  padding: 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
-}
-.task-page-menu-note {
-  margin: 0;
-  padding: 6px 12px;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-.task-page-menu button {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--touch);
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.task-page-menu button:hover,
-.task-page-menu button[data-highlighted] { background: var(--bg3); outline: none; }
-.task-page-menu button.danger { color: var(--error); }
 .task-detail-pane {
   display: flex;
   flex-direction: column;
@@ -5545,12 +5486,9 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   margin: 0 auto;
   box-sizing: border-box;
 }
-@media (max-width: 768px) {
-  /* A phone's header is one row: the menu and Back leave the page, and the save
-     line is still announced but not drawn. */
-  .task-detail-page .close-btn,
-  .task-detail-page .task-header-wide { display: none; }
-  .task-detail-page .task-header-narrow { display: inline-flex; }
+@media (max-width: 767px) {
+  /* A phone's header is one row (headerFold.css): the save line is still the
+     live region, but drawn only as the ⋯ menu's note. */
   .task-detail-page .task-saved {
     position: absolute;
     width: 1px;

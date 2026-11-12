@@ -164,7 +164,7 @@ test.describe('the task page, phone', () => {
     await expect(header.locator('.task-delete')).toBeHidden()
     await header.getByRole('button', { name: 'More task actions' }).click()
     await expect(page.getByRole('menuitem', { name: 'Delete task…' })).toBeVisible()
-    await expect(page.locator('.task-page-menu-note')).toHaveText('Changes save as you go.')
+    await expect(page.locator('.item-header-menu-note')).toHaveText('Changes save as you go.')
     await page.keyboard.press('Escape')
     await expect(page.getByRole('menuitem', { name: 'Delete task…' })).toHaveCount(0)
     await expect(page.locator('.task-detail-page')).toBeVisible()
