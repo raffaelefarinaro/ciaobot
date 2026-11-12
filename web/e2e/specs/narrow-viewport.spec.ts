@@ -43,7 +43,7 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
     const result = await page.evaluate(() => {
       const card = document.querySelector('.question-form-card')!
       const body = card.querySelector('.question-form-body')!
-      const button = card.querySelector('.question-card-actions .primary')!
+      const button = card.querySelector('.question-card-actions .btn-primary')!
       const rect = (el: Element) => el.getBoundingClientRect()
       const c = rect(card), b = rect(button), v = window.visualViewport
       const left = v?.offsetLeft ?? 0, top = v?.offsetTop ?? 0
@@ -52,7 +52,7 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
       // rounded transparent corners and correctly hit-tests its parent.
       const points = [[b.left + b.width / 2, b.top + b.height / 2], [b.left + 10, b.top + 10], [b.right - 10, b.top + 10], [b.left + 10, b.bottom - 10], [b.right - 10, b.bottom - 10]]
       const hits = points.map(([x, y]) => { const hit = document.elementFromPoint(x, y); return hit === button || button.contains(hit) })
-      const cancel = card.querySelector('.question-card-actions .btn-sm:not(.primary)')!
+      const cancel = card.querySelector('.question-card-actions .btn-small:not(.btn-primary)')!
       const app = rect(document.querySelector('#ciao-app')!)
       return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, app: app.toJSON(), bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea.chat-input')!), composerBar: rect(document.querySelector('.composer-bar')!), viewportBottom: bottom }
     })
@@ -199,9 +199,9 @@ test.describe('narrow viewport', () => {
       `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
 
-    // The heatmap is 182 day cells; its strip scrolls inside its own card.
-    await expect(page.locator('.usage-heat-cell:not(.usage-heat-cell--pad):not(.usage-legend-swatch)')).toHaveCount(182)
-    const strip = await page.locator('.usage-heat').boundingBox()
+    // The heatmap is 364 day cells; its strip scrolls inside its own card.
+    await expect(page.locator('.usage-heat-cell:not(.usage-heat-cell--pad):not(.usage-legend-swatch)')).toHaveCount(364)
+    const strip = await page.locator('.usage-heat-scroll').boundingBox()
     const card = await page.locator('.usage-card:has(.usage-heat)').boundingBox()
     expect(strip).not.toBeNull()
     expect(card).not.toBeNull()
@@ -721,7 +721,7 @@ test('content-driven question layout at 390, 361, and mocked 280 visual viewport
       column: { clientHeight: column.clientHeight, scrollHeight: column.scrollHeight, scrollTop: column.scrollTop, overflowY: getComputedStyle(column).overflowY },
       card: rect('.question-form-card').toJSON(),
       body: { bounds: rect('.question-form-body').toJSON(), clientHeight: body.clientHeight, scrollHeight: body.scrollHeight },
-      send: rect('.question-card-actions .primary').toJSON(),
+      send: rect('.question-card-actions .btn-primary').toJSON(),
       composer: rect('textarea.chat-input').toJSON(),
     }
   })
