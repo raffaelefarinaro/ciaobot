@@ -749,7 +749,7 @@ Ground rules, so the suite stays worth blocking CI on:
 
 ```bash
 npx playwright install chromium   # first time only, ~95 MB, outside node_modules
-npm run test:e2e                  # rebuilds the PWA, then runs the suite
+npm run test:e2e                  # prehook builds the PWA and terminal harness, then runs the suite
 npm run test:e2e -- --headed      # watch it
 npm run test:e2e -- --ui          # pick and step through a spec
 ```
@@ -758,8 +758,10 @@ npm run test:e2e -- --ui          # pick and step through a spec
 downloaded separately, so a contributor who never runs this suite pays only the
 package (~18 MB of `node_modules`), not the browser.
 
-CI runs it as a blocking step of the existing `test` job, straight after
-`npm run build`, reusing that job's install and build output.
+CI runs it on Linux for develop PRs whose three-dot diff changes `web/`; the
+job checks out the PR merge ref and runs `npm run test:e2e`, whose npm prehook
+builds both the PWA and terminal harness from that checkout. The macOS `test`
+job retains browser coverage on develop pushes and PRs into `main`.
 
 ### Still manual
 
