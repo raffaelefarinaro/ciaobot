@@ -23,6 +23,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import request_limits, routes_api, routes_helpers
@@ -405,9 +406,15 @@ def test_agent_grants_do_not_expand_discovery(tmp_path):
     manager = _manager(config)
     chat = _chat(manager, "work")
     client = _client(manager, config)
-    first = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
-    second = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
-    assert first == second == [None, None, _canon(vault_note)]
+    # The agent FS scope is set per workspace (CiaoConfig has no scope field).
+    # Each scope must be in effect when the lookup runs, and neither may widen it.
+    for scope in AGENT_FS_SCOPES:
+        config.workspaces["work"] = WorkspaceConfig(
+            name="work", vault_root="memory-vault/work", agent_fs_scope=scope
+        )
+        assert config.workspace("work").effective_agent_fs_scope() == scope
+        result = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
+        assert result == [None, None, _canon(vault_note)], scope
 
 
 def test_line_suffix_and_file_type_size_rules(tmp_path):
@@ -706,3 +713,18 @@ def test_browser_auth_origin_and_remote_session_boundary(tmp_path):
     remote = TestClient(app, raise_server_exceptions=False, client=("203.0.113.9", 5000))
     remote.cookies.set("ciao_session", serializer.dumps({"user": "owner"}))
     assert _results(remote.post(url, json=body, headers={"origin": "http://testserver"})) == [_canon(note)]
+
+
+def test_linked_repo_containing_another_workspace_is_not_a_root(tmp_path):
+    # The repo is the parent of the install root, so it contains every workspace vault.
+    outer = _git_repo(tmp_path / "outer")
+    config = _legacy_config(outer)
+    vault_note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
+    manager = _manager(config)
+    chat = _chat(manager, "work", repo_path=str(outer))
+    asyncio.run(manager.refresh_repo_location(chat.chat_id, []))
+    client = _client(manager, config)
+    # Committed only in the repo: it must not be reachable through a repo root that contains other vaults.
+    assert _results(_post(client, chat.chat_id, ["docs/guide.md"])) == [None]
+    # The owning vault is unaffected by the rejected repo root.
+    assert _results(_post(client, chat.chat_id, ["notes/a.md"])) == [_canon(vault_note)]

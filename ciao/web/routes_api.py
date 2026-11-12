@@ -3855,9 +3855,30 @@ def _owning_mention_roots(config: CiaoConfig, name: str) -> tuple[Path, ...] | N
         return None
 
 
-def _mention_repo_root(repo_path: str, recorded: bool, repo_now: dict[str, Any]) -> Path | None:
+def _mention_protected_roots(config: CiaoConfig) -> tuple[Path, ...] | None:
+    """The install root and every registered workspace's agent root and vault.
+
+    A linked repo may not equal or contain any of them. None when one cannot be
+    resolved, which fails the repo closed.
+    """
+    try:
+        protected = [config.workspace_root.resolve(strict=True)]
+        for name in config.workspaces:
+            protected.append(config.agent_root(name).resolve(strict=True))
+            protected.append(config.workspace_vault_root(name).resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return tuple(protected)
+
+
+def _mention_repo_root(
+    repo_path: str,
+    recorded: bool,
+    repo_now: dict[str, Any],
+    protected: tuple[Path, ...] | None,
+) -> Path | None:
     """The linked repo's root for this batch, or None when it is unavailable."""
-    if not repo_path:
+    if not repo_path or protected is None:
         return None
     if recorded:
         # A recorded worktree that is gone or belongs elsewhere is unavailable.
@@ -3871,7 +3892,12 @@ def _mention_repo_root(repo_path: str, recorded: bool, repo_now: dict[str, Any])
     if not raw or not path.is_dir():
         return None
     canon = path.resolve()
-    return None if canon == Path(canon.anchor) else canon
+    if canon == Path(canon.anchor):
+        return None
+    # A repo that equals or contains another root would expose that root's files.
+    if any(item.is_relative_to(canon) for item in protected):
+        return None
+    return canon
 
 
 def _file_mention_identity(
@@ -3901,7 +3927,7 @@ def _file_mention_identity(
     owning = _owning_mention_roots(config, workspace)
     if owning is None:
         return _FileMentionContext((), (*head, "unavailable"))
-    repo = _mention_repo_root(repo_path, recorded, repo_now)
+    repo = _mention_repo_root(repo_path, recorded, repo_now, _mention_protected_roots(config))
     roots = tuple(dict.fromkeys([*owning, *([repo] if repo is not None else [])]))
     return _FileMentionContext(roots, (*head, roots))
 
@@ -3914,7 +3940,8 @@ async def _snapshot_file_mention_context(request: Request, chat_id: str) -> _Fil
     if chat is None:
         return None
     project = pcm.get_project(chat.project_id)
-    repo_path = pcm.linked_repo_for_chat(chat)
+    # The repo's is_dir/resolve are filesystem work, so they stay off the event loop.
+    repo_path = await asyncio.to_thread(pcm.linked_repo_for_chat, chat)
     location = dict(chat.repo_location or {})
     recorded = bool(location.get("path"))
     repo_now: dict[str, Any] = {}
