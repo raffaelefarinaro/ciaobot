@@ -170,8 +170,8 @@ def test_build_response_shape_and_windows() -> None:
     assert out["generated_at"] == "2026-11-09T12:00:00Z"
     assert out["totals"]["messages_sent"] == 3
     assert out["previous"]["messages_sent"] == 6
-    assert len(out["daily_messages"]) == 182
-    assert out["daily_messages"][0] == {"date": "2026-05-12", "count": 0}
+    assert len(out["daily_messages"]) == 364
+    assert out["daily_messages"][0] == {"date": "2025-11-11", "count": 0}
     assert out["daily_messages"][-1] == {"date": "2026-11-09", "count": 2}
     assert len(out["hours"]) == 24
 
@@ -186,6 +186,19 @@ def test_build_response_today_averages_use_the_30_days_before_today() -> None:
     assert today["chats_opened"] == 7
     assert today["avg_chats_opened_30d"] == 1.1
     assert today["avg_messages_sent_30d"] == 2.0
+
+
+def test_build_response_today_averages_every_row() -> None:
+    buckets = {TODAY - timedelta(days=offset): _bucket(
+        chats_archived=1, accepted=2, tasks_completed=3, project_messages={"a": 1, "b": 1},
+    ) for offset in range(1, 31)}
+    buckets[TODAY - timedelta(days=1)] = _bucket()
+    today = _build(buckets)["today"]
+    assert today["avg_chats_archived_30d"] == 1.0
+    assert today["avg_memories_saved_30d"] == 1.9
+    assert today["avg_tasks_completed_30d"] == 2.9
+    # Distinct projects per day, averaged (58/30); the month's distinct count would be 2.
+    assert today["avg_projects_worked_on_30d"] == 1.9
 
 
 def test_build_response_projects_top_eight_and_drop_unknown() -> None:
@@ -426,7 +439,7 @@ def test_stats_route_returns_the_contract(tmp_path: Path) -> None:
     assert data["totals"]["messages_sent"] == 1
     assert data["totals"]["chats_opened"] == 1
     assert data["today"]["messages_sent"] == 1
-    assert len(data["daily_messages"]) == 182 and len(data["hours"]) == 24
+    assert len(data["daily_messages"]) == 364 and len(data["hours"]) == 24
     assert client.get("/api/stats?workspace=work", cookies=cookies).json()["range_days"] == 30
 
 

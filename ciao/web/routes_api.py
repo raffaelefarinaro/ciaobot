@@ -6944,7 +6944,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             {"error": f"unknown provider '{default_provider}'"}, status_code=400
         )
 
-    from ciao.cli import detect_vault_mode, setup_workspace
+    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace
 
     # The wizard no longer asks scratch-vs-existing: when the request does
     # not pin a mode, inspect the folder — empty starts from scratch, one
@@ -6986,6 +6986,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if native_context is None:
         resolved_workspace = resolved_workspace.resolve()
     tracker = getattr(request.app.state, "startup_tracker", None)
+    vault_root_arg = str(body.get("vault_root", "")).strip() or None
+
+    if native_context is not None and getattr(
+        request.app.state, "native_finish_claimed", False
+    ):
+        return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
+    # Read-only preflight: the same selection inspection reported. An ambiguous
+    # or unusable location is refused here, before any claim, write or exit.
+    # Nothing between this call and the claim below awaits, so the claim stays
+    # single-flight.
+    try:
+        selection = select_setup_vault(
+            resolved_workspace, vault_mode=vault_mode, vault_root=vault_root_arg
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     if native_context is not None:
         # Single flight: claimed synchronously before the first await in the
@@ -6993,8 +7009,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         # after a refusal, is refused rather than racing the non-exclusive
         # workspace writes. Refusals before this line take no claim and exit
         # nothing; every path after it ends in the failure exit or an ok.
-        if getattr(request.app.state, "native_finish_claimed", False):
-            return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
         request.app.state.native_finish_claimed = True
 
     # setup_workspace only writes workspace files and the bundled-engine
@@ -7002,11 +7016,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # responsive and never reaches out to GitHub.
     setup_kwargs: dict[str, Any] = {
         "auth_token": password,
-        "vault_root": str(body.get("vault_root", "")).strip() or None,
+        "vault_root": vault_root_arg,
         "vault_mode": vault_mode,
         "workspace_name": workspace_name,
         "default_provider": default_provider,
         "port": port,
+        "_vault_selection": selection,
     }
     if native_context is None:
         setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
@@ -7061,6 +7076,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             )
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
@@ -7217,7 +7234,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     name that will be assigned to the selected folder.
     """
     from ciao import cli
-    from ciao.cli import detect_vault_mode
+    from ciao.cli import detect_vault_mode, select_setup_vault
     from ciao.setup_status import (
         cloud_sync_warning,
         detect_nested_workspaces,
@@ -7233,16 +7250,19 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     target = _resolve_setup_dir(raw)
     if target is None:
         return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
-    # Reuse the same "scratch vs existing" rule the setup/finish endpoint
-    # applies, so the wizard and the server agree before the user clicks
-    # Finish. The vault root mirrors setup_workspace's logic: an existing
-    # notes folder (no prior scaffold) is the vault itself; otherwise the
-    # vault lives under memory-vault/.
+    # The same read-only selection finish and direct setup use, so the wizard
+    # reports the location the finish will write. An ambiguous or unusable
+    # location is refused here, with the same message finish returns.
     mode = detect_vault_mode(target)
-    vault_root = target / "memory-vault"
-    if mode == "existing" and not vault_root.is_dir():
-        vault_root = target
-    nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
+    try:
+        selection = select_setup_vault(target, vault_mode=mode)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    vault_root = selection.vault_path
+    if selection.registered_vaults is not None:
+        nested = [name for name, _ in selection.registered_vaults]
+    else:
+        nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
     return JSONResponse({
         "path": str(target),
         "mode": mode,

@@ -28,13 +28,15 @@ for (const mobile of [false, true]) {
     await expect(tabs.first()).toHaveAttribute('aria-selected', 'true')
     await page.getByRole('tab', { name: /OpenCode/ }).click()
     await expect(page.locator('.mcp-connection')).toContainText('connection failed')
-    const toggle = page.getByRole('button', { name: 'Turn off notion for OpenCode' })
+    const toggle = page.getByRole('switch', { name: 'notion for OpenCode' })
+    await expect(toggle).toHaveAttribute('aria-checked', 'true')
 
     const ask = page.getByRole('button', { name: 'Ask Ciao to add one' })
     await expect(ask).toBeVisible()
     await ask.focus()
     await expect(ask).toBeFocused()
 
+    await page.locator('details.mcp-manual > summary').click()
     await page.getByLabel('Server name').fill('notion')
     await page.getByLabel('Server URL').fill('https://example.com/mcp')
     const addRow = page.locator('.mcp-commands li[data-row="add"]')
@@ -53,7 +55,8 @@ for (const mobile of [false, true]) {
     }
     await toggle.focus()
     await page.keyboard.press('Enter')
-    await expect(page.getByRole('button', { name: 'Turn on notion for OpenCode' })).toBeFocused()
+    await expect(toggle).toHaveAttribute('aria-checked', 'false')
+    await expect(toggle).toBeFocused()
     await expect(page.locator('.mcp-toggle-note')).toContainText('notion is off in /workspace/personal/opencode.json.')
     await addRow.scrollIntoViewIfNeeded()
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)

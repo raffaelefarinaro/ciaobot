@@ -652,3 +652,40 @@ def test_repair_restores_the_record_when_the_record_write_fails_late(
     assert (target / "marker").read_bytes() == marker
     assert record.read_bytes() == record_before
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_repair_refuses_a_signed_host_when_the_release_is_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2504: a Developer ID signed host is never swapped for the legacy ad-hoc
+    # one. Repair refuses with the same POLICY_REFUSED code install uses and
+    # touches nothing: the bundle, its record and the journal are unchanged.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    signed_archive, _bundle, signed_entry = _signed_fixture(tmp_path)
+    server_host_install.install_server_host(
+        signed_archive,
+        signed_entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=_SignedRunner(),
+    )
+    inode = target.stat().st_ino
+    record_before = record.read_bytes()
+    legacy_archive, _bundle, legacy_entry = _fixture(tmp_path)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            legacy_archive,
+            legacy_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+    assert not server_host_install.upgrade_journal_path().exists()

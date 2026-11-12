@@ -15,6 +15,7 @@ const props = defineProps<{
   retry: ChatRetryInfo
   provider: string
   streaming: boolean
+  chatId?: string
 }>()
 defineEmits<{ (e: 'continue'): void; (e: 'try-now'): void; (e: 'stop'): void }>()
 
@@ -52,6 +53,7 @@ const nextTry = computed(() => {
       :provider="provider"
       action-label="Try now"
       :action-disabled="streaming"
+      :chat-id="chatId"
       @action="$emit('try-now')"
     />
   </div>
