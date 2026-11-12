@@ -255,12 +255,14 @@ def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> No
     assert "do not memorize this" in role
 
 
-def test_the_core_prompt_points_at_the_same_block() -> None:
+def test_the_core_prompt_routes_categories_through_the_memory_skill() -> None:
     from ciao.core_prompt import _system_instructions
 
     core = _system_instructions()
-    assert "**Categories** section of `VOCABULARY.md`" in core
-    assert "a note that fits none is a new-category question" in core
+    assert "Before durable writes or proposal curation, read `ciao-memory`" in core
+    skill = _stock("skills/ciao-memory/SKILL.md")
+    assert "**Categories** section of `<vault>/VOCABULARY.md`" in skill
+    assert "If no category fits, queue a new-category question" in skill
 
 
 def test_unattended_policy_summary_names_the_handover_exception() -> None:
