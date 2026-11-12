@@ -989,13 +989,14 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     # S5 collapsed the prompt variants: there is one `system_prompt.md` and it
     # is the CLI wording for every surface.
     append = system_prompt_payload("")["append"]
-    assert "ciao help" in append and "ciao memory update" in append and "ciao vault search" in append
+    assert "ciao help" in append and "memory update" in append and "ciao vault search" in append
     for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "run start", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
         assert name not in append, name
     assert "`AGENTS.md`" in append
     assert "ciao chat reload" in append
-    # `/mcp` appears only inside the prohibition, never as an instruction.
-    assert append.count("/mcp") == append.count("Never tell the user to run `/mcp`") == 1
+    assert "terminal slash commands are not available here" in append
+    reference = Path(agent_cli._SKILL_PATH).read_text(encoding="utf-8")
+    assert "`/mcp`, `/reload-plugins`" in reference
 
 
 def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
@@ -1006,9 +1007,8 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     common commands, one line each with key flags, stay in
     `<ciaobot_cli_reference>`. `tests/test_cli_docs_drift.py` checks them
     against the parsers; every command must also be in the reference `ciao help`
-    prints. The cap stays at 12000, unchanged: measured as the payload length
-    the prompt is 11995 with the synopsis (#1599), so no raise was needed. A
-    raise should move a section out rather than buy more room.
+    prints. The cap stays at 12000; procedure details belong in mandatory
+    skills/help rather than another budget increase.
     """
     cli = system_prompt_payload("")["append"]
     reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
