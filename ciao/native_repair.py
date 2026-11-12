@@ -718,9 +718,17 @@ def _write_definition(target: RepairTarget, rendered: bytes) -> str:
             0o600,
         )
         created = True
-        if sys.platform != "win32":  # os.fchmod is POSIX-only; the write is darwin-only anyway
-            os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            if sys.platform != "win32":  # os.fchmod is POSIX-only; the write is darwin-only anyway
+                os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        with handle:
             handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())

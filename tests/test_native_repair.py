@@ -13,7 +13,9 @@ import os
 import plistlib
 import signal
 import stat
+import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1769,6 +1771,116 @@ def test_write_definition_failure_leaves_live_bytes_and_no_temp(
     assert caught.value.failure_code == "install_failed"
     assert definition.read_bytes() == b"<plist>live</plist>"
     assert sorted(p.name for p in definition.parent.iterdir()) == ["com.ciao.server.plist"]
+
+
+def _assert_definition_failure_probe(tmp_path: Path, failure: str) -> None:
+    script = textwrap.dedent(
+        """
+        import errno
+        import os
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        root = Path(sys.argv[1])
+        failure = sys.argv[2]
+        os.environ["CIAO_MEMORY_DIR"] = str(root / "memory")
+        os.environ["CIAO_LAUNCH_AGENTS_DIR"] = str(root / "agents")
+
+        from ciao import native_repair as repair
+        from ciao.native_installer import NativeCoordinatorError
+
+        definition = root / "LaunchAgents" / "com.ciao.server.plist"
+        definition.parent.mkdir()
+        if failure != "interrupt":
+            definition.write_bytes(b"<plist>live</plist>")
+        target = repair.RepairTarget(
+            root, 9123, "127.0.0.1", definition,
+            failure != "interrupt", "", False,
+        )
+        captured = []
+        fdopen_reached = []
+        real_fchmod = repair.os.fchmod
+
+        def fail_fchmod(fd, mode):
+            if failure == "interrupt":
+                captured.append(fd)
+                raise KeyboardInterrupt
+            if failure == "fchmod":
+                captured.append(fd)
+                raise OSError("injected fchmod failure")
+            real_fchmod(fd, mode)
+
+        def fail_fdopen(fd, *args, **kwargs):
+            captured.append(fd)
+            fdopen_reached.append(True)
+            raise OSError("injected fdopen failure")
+
+        try:
+            with patch.object(repair.os, "fchmod", fail_fchmod):
+                if failure == "fdopen":
+                    with patch.object(repair.os, "fdopen", fail_fdopen):
+                        try:
+                            repair._write_definition(target, b"<plist>new</plist>")
+                        except NativeCoordinatorError as exc:
+                            assert exc.failure_code == "install_failed"
+                        else:
+                            raise AssertionError("fdopen failure was not mapped")
+                    assert fdopen_reached
+                elif failure == "interrupt":
+                    try:
+                        repair._write_definition(target, b"<plist/>")
+                    except KeyboardInterrupt:
+                        pass
+                    else:
+                        raise AssertionError("KeyboardInterrupt was not propagated")
+                else:
+                    try:
+                        repair._write_definition(target, b"<plist>new</plist>")
+                    except NativeCoordinatorError as exc:
+                        assert exc.failure_code == "install_failed"
+                    else:
+                        raise AssertionError("fchmod failure was not mapped")
+
+            assert captured
+            try:
+                os.fstat(captured[0])
+            except OSError as exc:
+                assert exc.errno == errno.EBADF
+            else:
+                raise AssertionError("descriptor remained open")
+
+            if failure == "interrupt":
+                assert not definition.exists()
+                assert len(list(definition.parent.glob(f".{definition.name}.*.tmp"))) == 1
+            else:
+                assert definition.read_bytes() == b"<plist>live</plist>"
+                assert sorted(path.name for path in definition.parent.iterdir()) == [definition.name]
+        finally:
+            for path in definition.parent.glob(f".{definition.name}.*.tmp"):
+                path.unlink()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), failure],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"child failed:\n{result.stdout}{result.stderr}"
+
+
+def test_write_definition_fchmod_failure_closes_fd(tmp_path: Path) -> None:
+    _assert_definition_failure_probe(tmp_path, "fchmod")
+
+
+def test_write_definition_fdopen_failure_closes_fd(tmp_path: Path) -> None:
+    _assert_definition_failure_probe(tmp_path, "fdopen")
+
+
+def test_write_definition_interrupted_before_fdopen_closes_fd(tmp_path: Path) -> None:
+    _assert_definition_failure_probe(tmp_path, "interrupt")
 
 
 def test_reinstall_engine_wiring_passes_force_and_retains_private_on_cleanup_failure(
