@@ -173,8 +173,8 @@
             ></textarea>
             <div v-if="editError" class="pfp-error">{{ editError }}</div>
             <div class="pfp-edit-actions">
-              <button class="pfp-btn-sm" @click="cancelEditingText" :disabled="editSaving">Cancel</button>
-              <button class="pfp-btn-sm primary" @click="saveEdits" :disabled="editSaving">
+              <button class="btn-small" type="button" @click="cancelEditingText" :disabled="editSaving">Cancel</button>
+              <button class="btn-primary btn-small" type="button" @click="saveEdits" :disabled="editSaving">
                 {{ editSaving ? 'Saving…' : 'Save' }}
               </button>
             </div>
@@ -2267,26 +2267,6 @@ defineExpose({ isBusyAuthoring })
   justify-content: flex-end;
   gap: 6px;
 }
-.pfp-btn-sm {
-  padding: 4px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--fg);
-  cursor: pointer;
-  font-size: var(--text-sm);
-}
-.pfp-btn-sm:hover { background: var(--border); }
-.pfp-btn-sm.primary {
-  background: var(--accent, #60a5fa);
-  color: var(--on-accent);
-  border-color: transparent;
-}
-.pfp-btn-sm.primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* Edit mode */
 .pfp-edit-shell {
   display: flex;

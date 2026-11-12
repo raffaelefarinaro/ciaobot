@@ -5,9 +5,9 @@ import { mount } from '@vue/test-utils'
 import UsageBreakdown from '../UsageBreakdown.vue'
 import { normalizeUsageStats } from '../../lib/usageStats'
 
-const DAYS = Array.from({ length: 182 }, (_, i) => {
-  const d = new Date(Date.UTC(2026, 10, 9 - (181 - i)))
-  return { date: d.toISOString().slice(0, 10), count: i % 5 }
+const DAYS = Array.from({ length: 364 }, (_, i) => {
+  const d = new Date(Date.UTC(2026, 10, 9 - (363 - i)))
+  return { date: d.toISOString().slice(0, 10), count: (i + 3) % 5 }
 })
 
 const SAMPLE = {
@@ -35,11 +35,14 @@ describe('UsageBreakdown', () => {
 
     const heat = wrapper.find('.usage-heat')
     expect(heat.attributes('role')).toBe('list')
-    expect(heat.attributes('tabindex')).toBe('0')
-    expect(heat.attributes('aria-label')).toBe('Messages per day, last 26 weeks')
+    expect(heat.attributes('aria-label')).toBe('Messages per day, last 52 weeks')
+    // The scroll region, not the list, takes the keyboard so a phone can pan the year.
+    const scroll = wrapper.get('.usage-heat-scroll')
+    expect(scroll.attributes('tabindex')).toBe('0')
+    expect(scroll.attributes('style')).toContain('--usage-weeks: 53')
 
     const days = wrapper.findAll(DAY_CELLS)
-    expect(days).toHaveLength(182)
+    expect(days).toHaveLength(364)
     const last = days[days.length - 1]
     expect(last.attributes('aria-label')).toBe('Mon 9 Nov 2026: 1 message')
     expect(last.attributes('title')).toBe('Mon 9 Nov 2026: 1 message')
@@ -49,6 +52,16 @@ describe('UsageBreakdown', () => {
     expect(pads.every(p => p.attributes('aria-hidden') === 'true')).toBe(true)
 
     expect(wrapper.findAll('.usage-heat-cell').every(c => ['0', '1', '2', '3', '4'].includes(c.attributes('data-level') ?? ''))).toBe(true)
+  })
+
+  it('names the months above their week columns, hidden from assistive tech', () => {
+    const wrapper = mountBreakdown(normalizeUsageStats(SAMPLE, 30), 30)
+
+    const months = wrapper.get('.usage-heat-months')
+    expect(months.attributes('aria-hidden')).toBe('true')
+    const labels = months.findAll('span')
+    expect(labels.map(l => l.text())[1]).toBe('Dec')
+    expect((labels[1]!.element as HTMLElement).style.gridColumnStart).toBe('4')
   })
 
   it('shows a five-step legend in words', () => {
