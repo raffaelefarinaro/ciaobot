@@ -368,6 +368,7 @@
                   :retry="chat.retry"
                   :provider="chat.provider"
                   :streaming="view.isStreaming"
+                  :chat-id="chat.chat_id"
                   @continue="openRecoveryPicker(null)"
                   @try-now="tryRetryNow"
                   @stop="stopRetry"
@@ -407,6 +408,7 @@
                 :provider="chat.provider"
                 action-label="Retry"
                 :action-disabled="view.isStreaming"
+                :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
               </template>
@@ -535,6 +537,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
               @stop="stopRetry"
