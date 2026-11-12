@@ -1962,61 +1962,6 @@ async def project_files_list(request: Request) -> JSONResponse:
     return JSONResponse(files)
 
 
-async def project_files_upload(request: Request) -> JSONResponse:
-    """Upload one or more files into a project's vault folder."""
-    pcm = request.app.state.project_chat_manager
-    project_id = request.path_params["project_id"]
-    project = pcm.get_project(project_id)
-    if project is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    form = await request.form()
-    saved: list[dict] = []
-    errors: list[dict[str, str]] = []
-    upload_count = 0
-    total_bytes = 0
-    for key in form:
-        upload = form[key]
-        if not hasattr(upload, "read"):
-            continue
-        upload_count += 1
-        filename = getattr(upload, "filename", "") or ""
-        display_name = _drop_display_name(Path(filename))
-        if upload_count > _DESKTOP_DROP_MAX_FILES:
-            errors.append({"filename": "file", "error": "too many files"})
-            break
-        try:
-            data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
-            total_bytes += len(data)
-            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
-                errors.append({"filename": display_name, "error": "upload is too large"})
-                continue
-            entry = pcm.save_project_file_upload(project_id, data, filename)
-            relative_path = Path(str(entry.get("path", "")))
-            safe_path = (
-                ""
-                if relative_path.is_absolute() or ".." in relative_path.parts
-                else relative_path.as_posix()
-            )
-            saved.append(
-                {
-                    "path": safe_path,
-                    "kind": str(entry.get("kind", "binary"))[:32],
-                    "size": int(entry.get("size", 0) or 0),
-                    "mtime": str(entry.get("mtime", ""))[:64],
-                }
-            )
-        except LookupError as exc:
-            # Project has no vault folder to upload into. Same status across
-            # all uploads in this request — return 409 immediately.
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        except (OSError, ValueError) as exc:
-            errors.append({
-                "filename": display_name,
-                "error": _safe_desktop_drop_error(Path(filename), exc),
-            })
-    return JSONResponse({"saved": saved, "errors": errors})
-
 async def chat_attachments_upload(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat = pcm.get_chat(request.path_params["chat_id"])
@@ -3861,7 +3806,13 @@ def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
     Shared by the folder listing and folder pins, so the tile can never pin a
     folder the browser would refuse to list.
     """
-    workspace = pcm._workspace_for_chat(chat.chat_id)
+    return _dir_root_candidates(
+        config, pcm._workspace_for_chat(chat.chat_id), pcm.get_project(chat.project_id)
+    )
+
+
+def _dir_root_candidates(config, workspace: str, project) -> list[tuple[str, Path]]:
+    """A workspace's agent root and vault, plus the project's linked repo."""
     try:
         agent_root = config.agent_root(workspace)
     except ValueError:  # no registered workspace name
@@ -3871,30 +3822,48 @@ def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
         candidates.append(("vault", config.workspace_vault_root(workspace)))
     except ValueError:  # unresolvable vault: browse without it
         pass
-    project = pcm.get_project(chat.project_id)
     if project is not None and project.repo_path:
         candidates.append(("repo", Path(project.repo_path)))
     return candidates
 
 
 async def workspace_dir(request: Request) -> Response:
-    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`)."""
+    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`).
+
+    With a chat or project, an empty path starts in the project's vault folder
+    (where its work lives) rather than the workspace root.
+    """
     config = request.app.state.config
     chat_id = request.query_params.get("chat_id", "").strip()
+    project_id = request.query_params.get("project_id", "").strip()
+    raw = request.query_params.get("path", "")
     candidates: list[tuple[str, Path]]
-    if chat_id:
+    home: Path | None = None
+    if chat_id or project_id:
         pcm = request.app.state.project_chat_manager
+    if chat_id:
         chat = pcm.get_chat(chat_id)
         if chat is None:
             return JSONResponse({"error": "chat not found"}, status_code=404)
         candidates = _chat_dir_root_candidates(config, pcm, chat)
+        if chat.project_id:
+            home = pcm.active_project_vault_dir(chat.project_id)
+    elif project_id:
+        project = pcm.get_project(project_id)
+        if project is None:
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        workspace = project.workspace
+        if not pcm._is_known_workspace(workspace):
+            workspace = config.primary_workspace()
+        candidates = _dir_root_candidates(config, workspace, project)
+        home = pcm.active_project_vault_dir(project_id)
     else:
         allowed = _allowed_roots(config)
         candidates = [("workspace", allowed[0])] + [("vault", r) for r in allowed[1:2]]
     roots = _distinct_dir_roots(candidates)
-    result = await asyncio.to_thread(
-        _list_workspace_dir, roots, request.query_params.get("path", "")
-    )
+    if not raw.strip() and home is not None:
+        raw = home.as_posix()
+    result = await asyncio.to_thread(_list_workspace_dir, roots, raw)
     if isinstance(result, Response):
         return result
     return JSONResponse(result)
