@@ -1457,6 +1457,7 @@ import {
 import PaneHeader from './PaneHeader.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
+import { useRunInTerminal } from '../composables/useRunInTerminal'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1990,6 +1991,7 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
 
 
 const providerCommandCopy = useCommandCopy()
+const providerTerminal = useRunInTerminal()
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
@@ -1999,12 +2001,12 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   })) {
     return
   }
+  const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
   providerConnectionPending.value = provider
   providerConnectionResult.value = ''
   try {
     const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
-      const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
       providerConnectionResult.value = `Opened the ${providerName} sign-in in ${result.launched || 'a terminal'}.`
     } else if (action === 'logout') {
       providerConnectionResult.value = 'Logged out.'
@@ -2014,11 +2016,21 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     await fetchProviderKeys()
   } catch (e) {
     // Connect answers a browser that is not on the engine's computer (or a host that
-    // cannot open a terminal) with the command to run there: guidance, not an error.
+    // cannot open a terminal) with the engine-built sign-in command. Type it into the
+    // Ciao terminal, a shell on the engine's computer; copy or show it when that fails.
     const command = errorPayload(e)?.command
-    providerConnectionResult.value = typeof command === 'string' && command
-      ? errorMessage(e)
-      : `Error: ${errorMessage(e)}`
+    if (action === 'connect' && typeof command === 'string' && command) {
+      const typed = await providerTerminal.run(command)
+      if (typed === 'typed') {
+        providerConnectionResult.value = `Started the ${providerName} sign-in in the Ciao terminal. Finish it there, then press Verify.`
+      } else if (typed === 'copied') {
+        providerConnectionResult.value = `Copied the command. ${errorMessage(e)}`
+      } else {
+        providerConnectionResult.value = errorMessage(e)
+      }
+    } else {
+      providerConnectionResult.value = `Error: ${errorMessage(e)}`
+    }
   } finally {
     providerConnectionPending.value = ''
   }

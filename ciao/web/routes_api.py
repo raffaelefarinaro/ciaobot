@@ -1041,8 +1041,14 @@ def _provider_config_payload(config) -> dict:
     }
 
 
+_CONNECT_NOT_ON_HOST = "This browser cannot open a terminal window on the computer running Ciaobot."
+
+
 def _connect_hint(command: str) -> str:
-    return f"Run this in a terminal on the computer running Ciaobot: {command}"
+    return (
+        "Run this in the Ciaobot terminal (Terminal on any chat or project) or another "
+        f"shell on the computer running Ciaobot, as the account Ciaobot runs as: {command}"
+    )
 
 
 async def provider_connection_action(request: Request) -> JSONResponse:
@@ -1071,7 +1077,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                     "ok": False,
                     "reason": "not_on_host",
                     "command": command,
-                    "error": f"{host_terminal.REASON_MESSAGES['not_on_host']} {_connect_hint(command)}",
+                    "error": f"{_CONNECT_NOT_ON_HOST} {_connect_hint(command)}",
                 },
                 status_code=403,
             )
