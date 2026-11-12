@@ -1279,8 +1279,6 @@ class SetupVaultSelection:
     absolute form. ``registered_vaults`` holds the per-workspace targets when a
     registry or legacy configuration exists, otherwise ``None``. ``import_legacy``
     says the one-time ``CIAO_WORKSPACES`` import runs after validation.
-    ``established`` marks a location that is already configured; discovery never
-    overrides it.
     """
 
     root: Path
@@ -1290,7 +1288,6 @@ class SetupVaultSelection:
     registered_vaults: list[tuple[str, Path]] | None
     source: str
     import_legacy: bool
-    established: bool
 
 
 def _preview_legacy_workspaces(
@@ -1326,6 +1323,8 @@ def select_setup_vault(
     then the registry, then legacy ``CIAO_WORKSPACES``, then an explicit
     argument, then the default. An unusable registry raises ``ValueError``.
     """
+    from ciao.config import LEGACY_WORKSPACES_IMPORT_MARKER
+
     root = Path(workspace).expanduser().resolve()
     existing_env: dict[str, str] = {}
     env_path = root / ".env"
@@ -1337,6 +1336,11 @@ def select_setup_vault(
     workspaces = _read_setup_registry(registry_path) if registry_path.exists() else None
     legacy_raw = existing_env.get("CIAO_WORKSPACES", "").strip()
     legacy_configured = workspaces is None and bool(legacy_raw)
+    # A completed import wrote its marker and its entries now live in the
+    # registry or were removed on purpose: only a pending import is previewed.
+    import_pending = legacy_configured and not (
+        root / RUNTIME_DIR_NAME / LEGACY_WORKSPACES_IMPORT_MARKER
+    ).exists()
     env_root = existing_env.get("CIAO_VAULT_ROOT", "").strip()
     explicit = str(vault_root) if vault_root is not None else None
 
@@ -1378,7 +1382,7 @@ def select_setup_vault(
         registered = _resolve_setup_registry(
             workspaces, workspace_root=root, configured_vault_root=vault_path
         )
-    elif legacy_configured:
+    elif import_pending:
         previewed = _preview_legacy_workspaces(root, legacy_raw, vault_path)
         if previewed:
             registered = _resolve_setup_registry(
@@ -1391,8 +1395,7 @@ def select_setup_vault(
         vault_path=vault_path,
         registered_vaults=registered,
         source=source,
-        import_legacy=legacy_configured,
-        established=source in ("env", "registry", "legacy"),
+        import_legacy=import_pending,
     )
 
 

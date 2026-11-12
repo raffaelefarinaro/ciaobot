@@ -1064,21 +1064,17 @@ def test_setup_selection_precedence(
     if case == "env_vs_explicit":
         assert selection.vault_value == str(env_vault)
         assert selection.registered_vaults is None
-        assert selection.established is True
     if case == "registry_vs_explicit":
         # An explicit argument never replaces registered targets.
         assert selection.vault_value == str(explicit)
         assert selection.registered_vaults == [("personal", ws / "personal" / "memory-vault")]
-        assert selection.established is True
     if case == "legacy_only":
         assert selection.vault_value == "memory-vault"
         assert selection.registered_vaults == [("research", ws / "memory-vault" / "research")]
         assert selection.import_legacy is True
-        assert selection.established is True
     if case == "explicit_only":
         assert selection.vault_value == str(explicit)
         assert selection.registered_vaults is None
-        assert selection.established is False
 
 
 @pytest.mark.parametrize("failure", ["malformed", "no_valid_entries", "permission"])
@@ -1545,3 +1541,35 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
     # Generated clone-root defaults and the other notes stay byte-identical.
     assert stray_default.read_bytes() == stray_before
     assert _tree_bytes(research) == research_before
+
+
+def test_completed_legacy_import_marker_stops_preview_but_keeps_discovery_suppressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import select_setup_vault
+
+    _forbid_discovery(monkeypatch)
+    ws = (tmp_path / "workspace").resolve()
+    _two_nested_candidates(ws)
+    (ws / ".runtime").mkdir()
+    (ws / ".runtime" / "workspaces-env-imported.json").write_text(
+        json.dumps({"imported_at": "2026-01-01T00:00:00+00:00", "imported": ["research"]}),
+        encoding="utf-8",
+    )
+    (ws / ".env").write_text(
+        "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"research-notes\"}]'\n",
+        encoding="utf-8",
+    )
+
+    def no_preview(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("a completed import must not be previewed")
+
+    monkeypatch.setattr("ciao.cli._preview_legacy_workspaces", no_preview)
+
+    selection = select_setup_vault(ws, vault_mode="existing")
+
+    # Still legacy-configured, so no discovery; but nothing is pending or listed.
+    assert selection.source == "legacy"
+    assert selection.import_legacy is False
+    assert selection.registered_vaults is None
+    assert selection.vault_value == "memory-vault"

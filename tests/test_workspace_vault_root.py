@@ -416,3 +416,17 @@ def test_adopted_root_does_not_redefine_canonical_destination(tmp_path: Path) ->
     assert config.workspace_vault_root("work") == adopted
     assert config.agent_vault_root("work") == adopted
     assert config.canonical_workspace_vault_root("work") == root / "work" / "memory-vault"
+
+
+def test_per_root_registration_at_old_shared_subpath_keeps_derived_vault(
+    tmp_path: Path,
+) -> None:
+    """A registration still at the pre-rerooting ``memory-vault/<name>`` is the
+    superseded standard, not an adoption: ownership keeps the derived per-root
+    location, while the notes resolver still reports the registered subpath."""
+    root = tmp_path.resolve()
+    config = _per_root_config(root, {"work": "memory-vault/work"})
+
+    assert config.workspace_vault_root("work") == root / "memory-vault" / "work"
+    assert config.agent_vault_root("work") == root / "work" / "memory-vault"
+    assert config.canonical_workspace_vault_root("work") == root / "work" / "memory-vault"

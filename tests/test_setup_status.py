@@ -2930,3 +2930,27 @@ def test_ambiguous_parent_can_be_retried_as_selected_nested_vault(
         "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     })
     assert config.workspace_vault_root("personal") == work_vault
+
+
+def test_completed_legacy_import_inspection_does_not_list_removed_workspaces(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    ws = (tmp_path / "workspace").resolve()
+    (ws / ".runtime").mkdir(parents=True)
+    (ws / ".runtime" / "workspaces-env-imported.json").write_text(
+        json.dumps({"imported_at": "2026-01-01T00:00:00+00:00", "imported": ["research"]}),
+        encoding="utf-8",
+    )
+    (ws / ".env").write_text(
+        "CIAO_WORKSPACES='[{\"name\": \"research\", \"vault_root\": \"memory-vault/research\"}]'\n",
+        encoding="utf-8",
+    )
+    client = _setup_api_client(tmp_path)
+
+    inspect = client.get("/api/setup/inspect-folder", params={"path": str(ws)})
+
+    assert inspect.status_code == 200, inspect.text
+    assert "research" not in inspect.json()["existing_workspaces"]
