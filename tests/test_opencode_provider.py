@@ -2183,6 +2183,21 @@ def test_augment_context_pct_attaches_window_occupancy(tmp_path):
     assert provider._usage["context_pct"] == "15.0%"
 
 
+def test_augment_context_pct_is_silent_on_a_closed_client(tmp_path):
+    """A client a teardown already closed must not fail the turn."""
+    provider = _provider(tmp_path)
+    provider._usage = {"inputTokens": "100", "outputTokens": "50", "totalTokens": "150"}
+
+    async def _run():
+        client = httpx.AsyncClient(base_url="http://127.0.0.1:9")
+        await client.aclose()
+        await provider._augment_context_pct(client, ("opencode", "big-pickle"))
+
+    asyncio.run(_run())
+    assert provider._usage == {"inputTokens": "100", "outputTokens": "50", "totalTokens": "150"}
+    assert "context_pct" not in provider._usage
+
+
 def test_v2_context_uses_the_last_step_not_the_cumulative_session_snapshot(
     tmp_path,
 ):
