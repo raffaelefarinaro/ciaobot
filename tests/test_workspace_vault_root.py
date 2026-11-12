@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 
 
 def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
@@ -343,3 +343,90 @@ def test_completed_interactive_migration_repoints_a_pinned_vault(
 
     assert config.workspace_vault_root("research") == standard
     assert config.workspace("research").vault_root == "memory-vault/research"
+
+
+# -- registered per-root ownership ---------------------------------------------
+
+
+def _per_root_config(root: Path, workspaces: dict[str, str]) -> CiaoConfig:
+    """A re-rooted install whose registry holds the given vault_root values."""
+    runtime = root / ".runtime"
+    receipt = runtime / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    reset_reroot_cache()
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=root,
+        vault_root=root / "memory-vault",
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=raw)
+            for name, raw in workspaces.items()
+        },
+    )
+
+
+def test_per_root_dot_agent_vault_matches_registered_root(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    config = _per_root_config(root, {"work": "."})
+
+    assert config.workspace_vault_root("work") == root
+    assert config.agent_vault_root("work") == root
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("work/brain", ("work", "brain")),
+        ("work/memory-vault", ("work", "memory-vault")),
+        ("/external/notes", ("external", "notes")),
+    ],
+)
+def test_per_root_agent_vault_uses_explicit_adopted_root(
+    tmp_path: Path, stored: str, expected: tuple[str, str]
+) -> None:
+    base = tmp_path.resolve()
+    root = base / "install"
+    if stored.startswith("/"):
+        registered = base.joinpath(*expected)
+        registered.mkdir(parents=True, exist_ok=True)
+        stored = str(registered)
+    else:
+        registered = root.joinpath(*expected)
+    config = _per_root_config(root, {"work": stored})
+
+    assert config.workspace_vault_root("work") == registered
+    assert config.agent_vault_root("work") == registered
+
+
+def test_shared_layout_agent_vault_stays_the_aggregate_vault(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    config = _config(root, {"work": "memory-vault/work"})
+
+    assert config.agent_vault_root("work") == root / "memory-vault"
+
+
+def test_adopted_root_does_not_redefine_canonical_destination(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    adopted = root / "work" / "brain"
+    config = _per_root_config(root, {"work": "work/brain"})
+
+    assert config.workspace_vault_root("work") == adopted
+    assert config.agent_vault_root("work") == adopted
+    assert config.canonical_workspace_vault_root("work") == root / "work" / "memory-vault"
+
+
+def test_per_root_registration_at_old_shared_subpath_keeps_derived_vault(
+    tmp_path: Path,
+) -> None:
+    """A registration still at the pre-rerooting ``memory-vault/<name>`` is the
+    superseded standard, not an adoption: ownership keeps the derived per-root
+    location, while the notes resolver still reports the registered subpath."""
+    root = tmp_path.resolve()
+    config = _per_root_config(root, {"work": "memory-vault/work"})
+
+    assert config.workspace_vault_root("work") == root / "memory-vault" / "work"
+    assert config.agent_vault_root("work") == root / "work" / "memory-vault"
+    assert config.canonical_workspace_vault_root("work") == root / "work" / "memory-vault"

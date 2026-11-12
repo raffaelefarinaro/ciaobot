@@ -109,6 +109,37 @@ ciao auth opencode --print-only            # show opencode login command
 ciao auth opencode                         # run provider login helper
 ```
 
+### Existing-folder vault selection
+
+Setup decides where the vault lives by reading, and writing nothing, in this order:
+
+1. a nonblank `.env` `CIAO_VAULT_ROOT`;
+2. `.runtime/workspaces.json`, when it exists. An unreadable file, invalid JSON or no valid entry refuses the setup;
+3. a pending legacy `CIAO_WORKSPACES` (previewed here, and imported once by the existing importer, which then writes its marker);
+4. an explicit `vault_root` argument;
+5. for an existing folder only, bounded discovery.
+
+Established configuration (1 to 3) is authoritative and is never reinterpreted: a registered `"."` stays `"."`, and an explicit argument never replaces registered targets. The inspection endpoint and the finish endpoint call the same selection, so the wizard reports the location the finish will write.
+
+Discovery looks at the folder and its visible immediate children, never deeper. A real `memory-vault/` directory directly in the folder wins. Otherwise the candidates are the folder itself (when it holds `entity-types.yaml`), each child that holds its own `entity-types.yaml`, and each child's real `memory-vault/`. One candidate is adopted. No candidate adopts the folder as its own vault, as before. More than one is refused with HTTP 400, listing every candidate sorted by path, before any receipt, `.env`, registry, import, scaffold, Git or service write. Symlinks never count as evidence and a symlinked child is skipped entirely. An explicitly chosen vault, including a symlink target, is used as given.
+
+To use one candidate, set the main Ciaobot folder to that vault folder itself (for example `<clone>/work/memory-vault`), inspect it and finish there. The application data (`.env`, `.runtime/`, the agent assets) then lives inside that folder. To keep the parent as the main folder, use the recovery procedure below instead of a fresh setup. The setup wizard's location stage shows a generic inspection message on a refusal; the server's full message, with the candidates, is in the API response.
+
+### Recovering an incorrectly adopted vault
+
+Setup recorded the vault at the wrong place: for example `.env` has `CIAO_VAULT_ROOT=.` and the notes live at `work/memory-vault`, with generated defaults at the install root. Discovery does not repair an established `"."`. Repair by hand, with the install stopped, as follows. The paths below are relative to the installed operational root `<install>`, not to a source checkout.
+
+1. Finish any active work. Stop the installed engine with its normal controls: `ciao service stop` on a supported desktop service, the configured systemd unit on Linux, or by stopping the foreground process. Do not stop or restart a live engine from an agent session.
+2. Make private backups outside any indexed vault folder of `<install>/.env` and `<install>/.runtime/workspaces.json`. Keep file permissions and ownership. Do not paste secrets into an issue.
+3. In `<install>/.env`, change the one existing `CIAO_VAULT_ROOT` assignment to `CIAO_VAULT_ROOT=work/memory-vault`. Keep every unrelated line and do not add a second assignment.
+4. In `<install>/.runtime/workspaces.json`, find the affected logical workspace by its `name`, not by its position or folder basename. Change only that entry's `vault_root` to `"work/memory-vault"`. In the list shape, that is the object whose `"name"` matches. In the supported legacy mapping shape, it is that workspace's mapping value. Keep every other entry and field (provider, tools, filesystem scope, account settings). Do not replace the whole registry with a one-entry example.
+5. Only if the registry is absent and a genuine legacy `CIAO_WORKSPACES` is still pending import, correct the affected entry's `vault_root` inside that `.env` value and leave the other entries alone. Do not delete or fabricate the import marker (`.runtime/workspaces-env-imported.json`). Startup performs the existing import.
+6. Validate the edited JSON. Confirm that `work/memory-vault` contains the original notes and its custom `entity-types.yaml`. Do not run `ciao setup` over the affected install as a repair step.
+7. Start the stopped engine through its normal controls. Configuration is read at process startup, so editing the files does not hot-reload them. If the fix needs a newer engine release, deploy that release from Settings before the stop, edit and start sequence.
+8. Verify workspace health, the expected notes, the indexing target and the custom categories. Leave every previously generated root default in place: it may hold user edits.
+
+For an absolute external location, put the same absolute path in both the global assignment and the affected registry entry. Do not move, merge or delete data.
+
 ### macOS venv workarounds
 
 On recent macOS, `scripts/run-ciao.sh` and the `scripts/dev.sh` wrapper source `scripts/ensure-deps.sh`, which injects two self-healing workarounds into `.venv/bin/activate`:
@@ -849,7 +880,7 @@ What repair checks and replaces. Every check runs before the first change, and o
 | Component | Checked | Replaced when |
 | --- | --- | --- |
 | Workspace: `.env`, `.runtime/`, vault, chats | read only: `.env` for `PWA_PORT` (default 8443), the registry for "set up" | never |
-| Server host `~/Applications/Ciaobot Server.app` and its ownership record | owned and current for this release's manifest-verified host policy | absent (`create_fresh_host`), or anything else that is not the current verified host: superseded, ad-hoc when the release ships signed, unprovable, another policy, orphan record. It is replaced in one step after the staged bundle is verified (`repair_server_host`), and the old bundle and record come back if the swap fails. Replacing the host can reset macOS privacy grants such as Full Disk Access |
+| Server host `~/Applications/Ciaobot Server.app` and its ownership record | owned and current for this release's manifest-verified host policy | absent (`create_fresh_host`), or anything else that is not the current verified host: superseded, ad-hoc when the release ships signed, unprovable, signed by another Developer ID team, orphan record. It is replaced in one step after the staged bundle is verified (`repair_server_host`), and the old bundle and record come back if the swap fails. A Developer ID signed host is never replaced by a release's ad-hoc host: repair refuses `unknown_state` and touches nothing (#2504). Replacing the host can reset macOS privacy grants such as Full Disk Access |
 | uv tool environment and `~/.local/bin/ciao` | the tool python lies inside the tool env or uv's managed Python, the shim resolves into the tool env, and `import ciao, ciao.main` reports `--version` | any check fails, or the installed version is older than `--version`: `uv tool install --force --reinstall` of the verified wheel. A newer version runs its startup migrations, as any update does |
 | Persisted uv `~/.local/state/ciaobot/uv/uv` (#2484) | — | always re-copied from the verified uv |
 | Install receipt | version, executable, python, `launchd`, `com.ciao.server`, `uv` | missing, corrupt or a field differs (`installed_at` is kept) |
