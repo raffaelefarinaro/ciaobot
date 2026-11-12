@@ -305,6 +305,7 @@ describe('ChatLayout', () => {
       const wrapper = await mountHome(1200)
       const rail = wrapper.get('.home-rail')
       expect(rail.find('.home-review-summary').exists()).toBe(true)
+      expect(rail.find('.home-review-summary .home-today').exists()).toBe(true)
       expect(rail.find('.needs-you').exists()).toBe(false)
       expect(rail.find('.home-notice-reopen').exists()).toBe(false)
       expect(rail.find('.update-tasks').exists()).toBe(false)
@@ -1905,6 +1906,7 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
         { path: '/project/:projectId', component: EmptyStub },
         { path: '/settings', component: EmptyStub },
         { path: '/schedules', component: EmptyStub },
+        { path: '/schedules/:scheduleId', component: EmptyStub },
         { path: '/tasks', component: EmptyStub },
         { path: '/memory', component: EmptyStub },
       ],
@@ -2036,6 +2038,49 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     expect(closeChat).not.toHaveBeenCalled()
     await new Promise(r => setTimeout(r, 320))
     expect(closeChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  // One pull serves chats and automations; the destination is the view the pull
+  // started in, and a route switch while the pane drops away cancels it.
+  it('a chat pull cancelled by a switch to an automation neither closes the chat nor leaves the automation', async () => {
+    const { wrapper, store, router } = await mountWithSelection()
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    const panel = wrapper.findComponent({ name: 'ChatPanel' })
+    panel.vm.$emit('pull', 150)
+    panel.vm.$emit('pull-end', 150, 0.2)
+    await router.push('/schedules/s1')
+    await new Promise(r => setTimeout(r, 320))
+    await flushPromises()
+    expect(closeChat).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.fullPath).toBe('/schedules/s1')
+    expect(wrapper.find('.chat-pull-home').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('an automation pull closes to the automation list, and one cancelled by a switch to a chat does nothing', async () => {
+    const { wrapper, store, router } = await mountWithSelection('/schedules/s1')
+    const closeChat = vi.spyOn(store, 'closeChat').mockResolvedValue()
+    const schedulePanel = () => wrapper.findAllComponents(EmptyStub).find(c => 'showNew' in c.vm.$attrs || 'show-new' in c.vm.$attrs)!
+
+    schedulePanel().vm.$emit('pull', 150)
+    await nextTick()
+    expect(wrapper.find('.chat-pull-home').text()).toContain('Release for Automations')
+    schedulePanel().vm.$emit('pull-end', 150, 0.2)
+    await new Promise(r => setTimeout(r, 320))
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/schedules')
+    expect(closeChat).not.toHaveBeenCalled()
+
+    await router.push('/schedules/s1')
+    await flushPromises()
+    schedulePanel().vm.$emit('pull', 150)
+    schedulePanel().vm.$emit('pull-end', 150, 0.2)
+    await router.push('/chat/chat-1')
+    await new Promise(r => setTimeout(r, 320))
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/chat/chat-1')
+    expect(closeChat).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -2430,6 +2475,28 @@ describe('ChatLayout shared chat pin', () => {
     // remote unpin reconciles it and a user close unpins through the server.
     expect(openSharedPin).toHaveBeenCalledWith('src/pinned-file.ts', 'chat-1')
     expect(open).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('opens a narrow folder pin in the folder browser', async () => {
+    const { wrapper, store } = await mountChat(390)
+    store.applyChatPinState('chat-1', { path: '/ws/exports/', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+
+    expect(wrapper.get('.narrow-pin-btn').attributes('aria-label')).toContain('folder')
+    expect(wrapper.get('.narrow-pin-btn').attributes('aria-label')).toContain('exports')
+    expect(wrapper.get('.narrow-pin-name').text()).toBe('exports')
+    expect(wrapper.get('.narrow-pin-close').attributes('aria-label')).toBe('Unpin folder')
+
+    const viewer = useFileViewerStore()
+    const openFolder = vi.spyOn(viewer, 'openFolder').mockResolvedValue(true)
+    const openSharedPin = vi.spyOn(viewer, 'openSharedPin').mockResolvedValue(true)
+
+    await wrapper.find('.narrow-pin-btn').trigger('click')
+    await flushPromises()
+
+    expect(openFolder).toHaveBeenCalledWith('/ws/exports', 'chat-1')
+    expect(openSharedPin).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -3595,9 +3662,18 @@ describe('ChatLayout chat route without a catalog entry', () => {
         },
       })
       await flushPromises()
-      await vi.waitFor(() => {
-        expect(wrapper.find('.terminal-pane').exists()).toBe(true)
-      })
+      try {
+        // The terminal pane is a lazy chunk; a cold Windows runner can take
+        // over vitest's 1 s default to load it.
+        await vi.waitFor(() => {
+          expect(wrapper.find('.terminal-pane').exists()).toBe(true)
+        }, { timeout: 10_000 })
+      } catch (error) {
+        // Never leave a mounted layout (and its window key listeners) behind
+        // for the next test.
+        wrapper.unmount()
+        throw error
+      }
       await flushPromises()
       return wrapper
     }

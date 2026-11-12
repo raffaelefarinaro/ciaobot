@@ -54,6 +54,14 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Needs-you card paste-back field; signed session, browser-only. Replays a pasted loopback OAuth "
         "callback only to the pending flow's own 127.0.0.1 listener, once; the agent never holds the callback URL"
     ),
+    "/api/chats/{chat_id}/actions/mcp-auth": (
+        "Settings MCP Sign in; signed session, browser-only. Raises the chat's own mcp_auth card, "
+        "which the browser then starts; agents raise cards with `ciao chat needs-action`"
+    ),
+    "/api/chats/{chat_id}/actions/{action_id}/turn-off": (
+        "Needs-you sign-in card's Turn off; signed session, browser-only. Agents turn servers off "
+        "with POST /api/mcp/servers/enabled, never through a card"
+    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
@@ -91,6 +99,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
+    "/api/update/settings": (
+        "browser Settings switch/Not now for the automatic updater; signed session, "
+        "writes only the policy or the hold, never starts an update"
+    ),
 }
 
 
@@ -117,6 +129,11 @@ def test_pwa_api_documents_all_explicit_app_routes() -> None:
     repo = Path(__file__).resolve().parents[1]
     app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
     api_doc = (repo / "PWA_API.md").read_text(encoding="utf-8")
+
+    setup_status_row = next(
+        line for line in api_doc.splitlines() if "`/api/setup-status`" in line
+    )
+    assert "native_bootstrap" in setup_status_row
 
     route_paths = re.findall(r'(?:Route|WebSocketRoute)\("([^"]+)"', app_source)
     missing = [

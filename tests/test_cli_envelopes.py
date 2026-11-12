@@ -438,7 +438,7 @@ def test_prose_quoting_a_notification_advances_both_turn_counters(
 def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
     capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
     for prompt in (
-        cli_envelopes.CODE_MODE_CONTINUE_PROMPT,
+        cli_envelopes.LEGACY_CODE_MODE_CONTINUE_PROMPT,
         cli_envelopes.RELOAD_CONTINUE_PROMPT,
     ):
         assert cli_envelopes.is_hidden_continuation(prompt)
@@ -512,6 +512,32 @@ def test_native_task_run_ignores_subagents_and_monitor_events() -> None:
     assert (
         cli_envelopes.native_task_run(_native_fields("completed", 'Monitor event: "X"')) is None
     )
+
+
+def test_subagent_task_run_parses_agent_completions() -> None:
+    finished = cli_envelopes.subagent_task_run(
+        {**_native_fields("completed", 'Agent "Fix "quoted" bug" finished', "a7b9e"),
+         "result": "line one\n\n" + "\n".join(f"r{i}" for i in range(60))}
+    )
+    assert finished is not None
+    assert (finished.label, finished.run_id, finished.status) == ('Fix "quoted" bug', "a7b9e", "ok")
+    assert finished.exit_code is None
+    assert len(finished.tail) == 50 and finished.tail[-1] == "r59"
+
+    # Older CLIs carry the report after the summary's first line.
+    legacy = cli_envelopes.subagent_task_run(
+        _native_fields("failed", 'Agent "X" failed\nDone. Summary:\n- 32 names')
+    )
+    assert legacy is not None
+    assert (legacy.status, legacy.tail) == ("failed", ("Done. Summary:", "- 32 names"))
+
+    stopped = cli_envelopes.subagent_task_run(_native_fields("killed", 'Agent "X" was stopped'))
+    assert stopped is not None and stopped.status == "cancelled"
+
+    assert cli_envelopes.subagent_task_run(
+        _native_fields("completed", 'Background command "x" completed (exit code 0)')
+    ) is None
+    assert cli_envelopes.subagent_task_run(_native_fields("failed", "Hit timeout")) is None
 
 
 def test_native_task_run_keeps_an_unexplained_summary_on_one_line() -> None:

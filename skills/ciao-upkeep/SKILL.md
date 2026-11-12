@@ -85,6 +85,31 @@ one commit and re-run `cd web && npm test` on the new version.
 run the gates (`mypy ciao`, `pytest -n auto tests/`, `npm test`, `npm run
 build`), and let the release carry it later. Never blanket-upgrade majors.
 
+### Claude harness trim catalog
+
+Run on every `claude-agent-sdk` bump and on every upkeep run. A new bundled CLI
+can add a built-in tool, a bundled skill or a `disable*` setting; each one costs
+context in every chat or bypasses Ciaobot's schedules until it is classified in
+`ciao/claude_trim.py`.
+
+1. Run `.venv/bin/pytest tests/test_claude_harness_inventory.py -q`. A failure
+   names each unclassified tool or skill.
+2. Classify each one in `ciao/claude_trim.py`:
+   - It duplicates a PWA surface or bypasses Ciaobot (scheduling, notifications,
+     settings writers): a `TrimOption` with `default_trimmed=True`, plus
+     `locked=True` if it bypasses the scheduler.
+   - It is useful but costs context: a `TrimOption` with `default_trimmed=False`.
+   - It is core to how Ciaobot works: a `KEPT_CLAUDE_TOOLS` entry with a one-line reason.
+3. New `disable*` settings:
+   `strings "$(.venv/bin/python -c 'from ciao.providers.claude import get_bundled_claude_path as p; print(p())')" | grep -oE '"disable[A-Z][A-Za-z]+"' | sort -u`.
+   Compare against the setting options in the catalog plus the known-unoffered
+   `disableBundledSkills`, `disableClaudeAiConnectors` and `disableAllHooks`. For
+   any new key, decide whether to offer it, and record the decision in the UPKEEP row.
+4. Stale entries: list catalog tool and skill names absent from the init payload
+   and check the Claude Code changelog for removals. Delete removed ones (no shims).
+5. Update the `Last checked` cell of the "Claude harness trim catalog" row in
+   `docs/UPKEEP.md`.
+
 ### `gws`: never hand-edit the version
 
 The `gws-*` skills are **generated**, and so is the version. `gws

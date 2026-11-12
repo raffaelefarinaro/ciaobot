@@ -30,8 +30,11 @@ from ciao.web.routes_chat_actions import (
     chat_action_continue,
     chat_action_dismiss,
     chat_action_start,
+    chat_action_turn_off,
+    chat_mcp_auth_request,
 )
 from ciao.web.routes_mcp import (
+    mcp_server_enabled_endpoint,
     mcp_status_endpoint,
     mcp_usage_endpoint,
 )
@@ -93,7 +96,7 @@ from ciao.web.routes_api import (
     chat_subagents,
     running_subagents,
     chats_mark_all_read,
-    cli_stats,
+    usage_stats_endpoint,
     file_content,
     file_history,
     file_restore,
@@ -187,6 +190,7 @@ from ciao.web.routes_api import (
     vault_markdown_paths,
     system_prompt,
     workspace_binary,
+    workspace_dir,
     workspace_file,
     workspace_html,
     workspace_file_write,
@@ -198,6 +202,7 @@ from ciao.web.routes_node import (
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
+    update_settings_endpoint,
     update_start_endpoint,
     update_status_endpoint,
 )
@@ -487,6 +492,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/actions/{action_id}/dismiss", chat_action_dismiss, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/continue", chat_action_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/callback", chat_action_callback, methods=["POST"]),
+        Route("/api/chats/{chat_id}/actions/mcp-auth", chat_mcp_auth_request, methods=["POST"]),
+        Route("/api/chats/{chat_id}/actions/{action_id}/turn-off", chat_action_turn_off, methods=["POST"]),
         Route(
             "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
             chat_background_task_stop,
@@ -504,6 +511,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        # Read-only folder listing, confined to named roots (see workspace_dir).
+        Route("/api/workspace-dir", workspace_dir, methods=["GET"]),
         Route("/api/system-prompt", system_prompt, methods=["GET"]),
         # Preview side of the same file for artifacts: text/html under a
         # sandboxing CSP, so the panel can embed the rendered page.
@@ -674,6 +683,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # job; the card polls the status route.
         Route("/api/update/status", update_status_endpoint, methods=["GET"]),
         Route("/api/update/start", update_start_endpoint, methods=["POST"]),
+        Route("/api/update/settings", update_settings_endpoint, methods=["PATCH"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -682,9 +692,10 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/workspace-move", workspace_move_start_endpoint, methods=["POST"]),
         Route("/api/workspace-move/dirs", workspace_move_dirs_endpoint, methods=["GET"]),
         Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
-        Route("/api/stats", cli_stats, methods=["GET"]),
+        Route("/api/stats", usage_stats_endpoint, methods=["GET"]),
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
+        Route("/api/mcp/servers/enabled", mcp_server_enabled_endpoint, methods=["POST"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),

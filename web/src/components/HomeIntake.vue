@@ -10,6 +10,15 @@
     </div>
     <p v-if="shareError" role="alert" class="hint">{{ shareError }}</p>
 
+    <SlashCommandPicker
+      v-if="slash.visible.value"
+      class="home-intake-commands"
+      :commands="slash.matches.value"
+      :highlight="slash.highlight.value"
+      @pick="slash.insert($event)"
+      @highlight="slash.highlight.value = $event"
+    />
+
     <form
       class="home-intake-form"
       :class="{ 'home-intake-form--drag': dragOver }"
@@ -35,11 +44,14 @@
       <label class="sr-only" for="home-intake-prompt">Ask Ciao to do something</label>
       <textarea
         id="home-intake-prompt"
+        ref="promptEl"
         v-model="prompt"
         rows="3"
         autocomplete="off"
         placeholder="Describe a task or ask a question"
         :disabled="starting"
+        @click="slash.refresh()"
+        @input="slash.refresh()"
         @keydown="onPromptKeydown"
         @paste="onPaste"
       ></textarea>
@@ -131,7 +143,9 @@ import { providerForModelSection, sectionsFromModelsResponse, type ModelSection 
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { useSlashCommands } from '../composables/useSlashCommands'
 import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
+import SlashCommandPicker from './SlashCommandPicker.vue'
 
 // Sentinel row for "no override": ModelSelector lists models, so the
 // workspace default is offered as its own one-model section.
@@ -139,6 +153,8 @@ const DEFAULT_KEY = '__workspace-default__'
 
 const store = useProjectStore()
 const prompt = ref('')
+const promptEl = ref<HTMLTextAreaElement | undefined>()
+const slash = useSlashCommands({ draft: prompt, input: promptEl })
 const incoming = ref<SharedContent | null>(null)
 const shareError = ref('')
 const starting = ref(false)
@@ -173,11 +189,14 @@ watch(
 onBeforeUnmount(() => { homeNewChatProjectId.value = '' })
 const defaultProjectLabel = computed(() => defaultProject.value?.name || 'Choose a project')
 
+// The provider the workspace starts new chats on; empty means no filter.
+const defaultProvider = computed(() => store.workspaceOptions.find(
+  workspace => workspace.name === store.activeWorkspace,
+)?.default_provider || '')
+
 // The provider the workspace starts new chats on; names the default row.
 const providerLabel = computed(() => {
-  const provider = store.workspaceOptions.find(
-    workspace => workspace.name === store.activeWorkspace,
-  )?.default_provider
+  const provider = defaultProvider.value
   if (!provider) return ''
   return store.workspaceProviderOptions.find(option => option.value === provider)?.label || provider
 })
@@ -248,6 +267,17 @@ watch(
   { immediate: true },
 )
 watch(prompt, value => draftsByWorkspace.set(store.activeWorkspace, value))
+
+// Commands and skills follow the provider the next chat starts on and the
+// workspace whose assets they come from.
+watch(
+  () => [selectedModel.value?.provider ?? defaultProvider.value, store.activeWorkspace] as const,
+  ([provider, workspace]) => {
+    slash.dismiss()
+    void slash.load(provider, workspace)
+  },
+  { immediate: true },
+)
 // A rename or delete can invalidate the remembered project while the chip is
 // still on screen; fall back to the workspace default rather than keep naming
 // a project that no longer exists here.
@@ -425,7 +455,27 @@ function onSubmit(): void {
 }
 
 function onPromptKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229 || showModelPicker.value) return
+  if (event.isComposing || event.keyCode === 229) return
+  if (showModelPicker.value) return
+  if (slash.visible.value) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      slash.move(event.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      slash.dismiss()
+      return
+    }
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey)) {
+      event.preventDefault()
+      const cmd = slash.current()
+      if (cmd) slash.insert(cmd)
+      return
+    }
+  }
+  if (event.key !== 'Enter') return
   const modifierSend = (event.metaKey || event.ctrlKey) && !event.altKey
   const enterSend = enterSends() && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey
   if (!modifierSend && !enterSend) return
@@ -486,7 +536,10 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
     }
 
     draftsByWorkspace.delete(workspace)
-    if (store.activeWorkspace === workspace) prompt.value = ''
+    if (store.activeWorkspace === workspace) {
+      prompt.value = ''
+      slash.dismiss()
+    }
   } catch (error) {
     store.pushErrorToast(
       'Could not start the work',
@@ -521,6 +574,17 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   text-align: left;
 }
 
+.home-intake-commands {
+  margin-bottom: 6px;
+}
+
+/* The Home form's lid: the shared rule drops the bottom border so the chat
+   picker sits flush on its composer, but here the list closes above the form. */
+.home-intake-commands.commands-picker {
+  border-bottom: 1px solid var(--border);
+  border-radius: 10px;
+}
+
 /* The command surface: the prompt, then one bar holding its context
    (project, model) and the single forward action. */
 .home-intake-form {
@@ -528,7 +592,7 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 18px 50px rgb(0 0 0 / 14%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -828,5 +892,12 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   .home-intake-spinner {
     animation-duration: 2.4s;
   }
+}
+/* Touch phones: the form is rounder (--radius-composer), so the controls on
+   its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .home-intake-chip,
+  .home-intake-icon-btn,
+  .home-intake-new { border-radius: 999px; }
 }
 </style>

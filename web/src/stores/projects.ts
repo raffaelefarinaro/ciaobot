@@ -43,6 +43,7 @@ import type {
   PackageStatus,
   PendingPermission,
   RuntimeProvider,
+  ClaudeTrimOption,
   WorkspaceInfo,
   WorkspaceName,
   WorkspaceProviderOption,
@@ -148,6 +149,8 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
+  // The engine's Claude context-trim catalog (Settings > Overview card). Kept from the last response that carried it.
+  const claudeTrimOptions = ref<ClaudeTrimOption[]>([])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // App-wide read of the active workspace's delegated tasks: the sidebar's
@@ -2106,6 +2109,7 @@ export const useProjectStore = defineStore('projects', () => {
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
+      claudeTrimOptions.value = workspaceResponse.claude_trim_options ?? claudeTrimOptions.value
       projects.value = p
       bumpProjectOrderEpoch()
       // Keep an archived deep link's prefetched history through reconciliation.
@@ -2379,7 +2383,7 @@ export const useProjectStore = defineStore('projects', () => {
     return true
   }
 
-  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback'): string {
+  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback' | 'turn-off'): string {
     return `/api/chats/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(actionId)}/${verb}`
   }
 
@@ -2405,6 +2409,16 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /** Settings' MCP Sign in: put the chat's sign-in card for `server` on the chat, or get the one there. */
+  async function requestMcpAuth(chatId: string, server: string): Promise<ChatAction | null> {
+    const readStartedAt = chatReadStart()
+    const res = await api.post<{ action?: unknown }>(`/api/chats/${encodeURIComponent(chatId)}/actions/mcp-auth`, { server })
+    const raised = res?.action
+    if (!isChatAction(raised)) return null
+    upsertChatAction(chatId, raised, readStartedAt)
+    return raised
+  }
+
   async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
     const readStartedAt = chatReadStart()
     try {
@@ -2413,6 +2427,21 @@ export const useProjectStore = defineStore('projects', () => {
         chatActionsChatClock[chatId] = nextChatReadClock()
       }
       return 'dismissed'
+    } catch (e) {
+      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
+      return 'conflict'
+    }
+  }
+
+  /** Turn the card's MCP server off for this workspace and provider. A refusal (400) keeps the card and rethrows. */
+  async function turnOffChatActionServer(chatId: string, actionId: string): Promise<'turned_off' | 'conflict'> {
+    const readStartedAt = chatReadStart()
+    try {
+      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'turn-off'), {})
+      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
+        chatActionsChatClock[chatId] = nextChatReadClock()
+      }
+      return 'turned_off'
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
       return 'conflict'
@@ -2708,6 +2737,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     const names = workspaces.value.map(w => w.name)
     if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
       activeWorkspace.value = res.active || names[0] || 'personal'
@@ -2721,6 +2751,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -2754,6 +2785,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (res.renamed && activeWorkspace.value === res.renamed.from) {
       followRenamedWorkspace(res.renamed.from, res.renamed.to)
     }
@@ -2791,6 +2823,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
@@ -2827,6 +2860,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
     return res
   }
 
@@ -3048,7 +3082,6 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
-      code_mode?: boolean
     },
   ) {
     const readStart = chatReadStart()
@@ -3057,11 +3090,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
     applyChatActionsFromChatInfo(c, readStart)
-  }
-
-  /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
-  async function setChatCodeMode(chatId: string, on: boolean): Promise<void> {
-    await updateChat(chatId, { code_mode: on })
   }
 
   async function handoverChat(
@@ -5269,20 +5297,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (c) c.repo_location = msg.repo_location
         break
       }
-      case 'chat_code_mode': {
-        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
-        if (!c) break
-        c.code_mode = msg.code_mode
-        // A switch made from this client also gets the PATCH response, so this is a
-        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
-        // The event has no after_turn_index; the server's ChatInfo does. Refetch
-        // rather than guess the anchor (an optimistic user row has no turn_index yet).
-        const readStart = chatReadStart()
-        void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
-          .then((fresh) => { replaceChat(fresh, readStart) })
-          .catch(() => { /* next chats load heals it */ })
-        break
-      }
       case 'chat_pin_changed': {
         // A pin/replace/unpin happened on another device. Apply server truth and
         // nothing else: this must not select or navigate the chat, mark it read,
@@ -7278,7 +7292,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions,
@@ -7303,7 +7317,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, reorderableProjects, projectOrderEpoch, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
@@ -7315,7 +7329,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, dismissChatAction, continueChatAction, submitChatActionCallback,
+    startChatAction, requestMcpAuth, dismissChatAction, turnOffChatActionServer, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,

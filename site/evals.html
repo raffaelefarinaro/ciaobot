@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>How we measure Ciaobot · Ciaobot</title>
-  <meta name="description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 21 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
+  <meta name="description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 22 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/evals.html">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="How we measure Ciaobot · Ciaobot">
-  <meta property="og:description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 21 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
+  <meta property="og:description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 22 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/evals.html">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="How we measure Ciaobot · Ciaobot">
-  <meta name="twitter:description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 21 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
+  <meta name="twitter:description" content="How Ciaobot is tested on real tasks: an isolated engine, a synthetic vault, 22 tasks drawn from everyday use, and pass rates, tokens and cost for Claude Code and opencode models.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
@@ -28,13 +28,10 @@
     <div class="inner">
       <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
       <nav class="site-nav" aria-label="Main">
-        <a href="./">Home</a>
-        <a href="guide.html">Get started</a>
+        <a href="guide.html">Guide</a>
         <a href="features.html">Features</a>
         <a href="memory.html">Memory</a>
-        <a href="terminal.html">Terminal</a>
-        <a href="companions.html">Companions</a>
-        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
+        <a href="trust.html">Trust</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -49,13 +46,13 @@
 
     <section>
       <h2>Real tasks, run for real</h2>
-      <p>The tasks come from the kinds of requests people really make of a personal assistant: add a task, recall a fact, set up a reminder, file a note, draft an email, combine three sources into a project doc, fix a small bug. There are 21 of them in three tiers:</p>
+      <p>The tasks come from the kinds of requests people really make of a personal assistant: add a task, recall a fact, set up a reminder, file a note, draft an email, combine three sources into a project doc, fix a small bug. There are 22 of them in three tiers:</p>
       <ul>
         <li><strong>Easy:</strong> capture a task, answer from your notes, decline a question your notes cannot answer, create a schedule.</li>
         <li><strong>Medium:</strong> merge a remembered fact into the right note, create a project only if it does not exist, finish a delegated task, draft a reply without sending it, and what the end-of-chat memory pass keeps and drops.</li>
-        <li><strong>Hard:</strong> traps a careful assistant avoids: an out-of-date guest list, a superseded price, an instruction hidden in an email, two people with the same first name, an every-other-week reminder schedules cannot express, a code fix that spans two files.</li>
+        <li><strong>Hard:</strong> traps a careful assistant avoids: an out-of-date guest list, a superseded price, a current value further down a note than search shows, an instruction hidden in an email, two people with the same first name, an every-other-week reminder schedules cannot express, a code fix that spans two files.</li>
       </ul>
-      <p>Each run starts a fresh, isolated copy of Ciaobot on a made-up vault, sends one request, and then checks the result: is the task on the board with the right due date, does the note hold the fact and not the stale one, was the email drafted and not sent. No AI grades another AI. Every run also records the tokens, cost, time and tool calls it took.</p>
+      <p>Each run starts a fresh, isolated copy of Ciaobot on a made-up vault, sends one request, and then checks the result: is the task on the board with the right due date, does the note hold the fact and not the stale one, was the email drafted and not sent. In these task runs, no AI grades another AI. Every run also records the tokens, cost, time and tool calls it took.</p>
     </section>
 
     <section>
@@ -87,12 +84,45 @@
       <p>One thing every model still gets wrong is part of Ciaobot itself: the memory pass sometimes files a fact a settings file already answers, and re-suggests a fact you had already turned down. That is the next thing being fixed.</p>
     </section>
 
-    <section>
-      <h2>Read the numbers with care</h2>
+    <section id="memory-comparison">
+      <h2>How the memory compares</h2>
+      <p>In November 2026 we put Ciaobot's memory next to other memory systems that run on your own computer, on a public benchmark of long chat histories (<a href="https://github.com/xiaowu0162/LongMemEval">LongMemEval</a>). Every system got the same 60 questions and the same small model to answer (Claude Haiku). Answers were graded with the benchmark's own grading prompts, run by Claude Sonnet. We left out systems that run a language model over every conversation they store.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>System</th><th>Questions answered correctly</th><th>Time to index one history</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Ciaobot</strong>, top 5 notes from one search</td><td><strong>87%</strong></td><td>under 0.1&nbsp;s</td></tr>
+            <tr><td><strong>Ciaobot</strong>, searching up to four times and reading notes</td><td><strong>90%</strong></td><td>under 0.1&nbsp;s</td></tr>
+            <tr><td>Basic Memory</td><td>83%</td><td>8&nbsp;min</td></tr>
+            <tr><td>OpenClaw, with local embeddings</td><td>72%</td><td>49&nbsp;s</td></tr>
+            <tr><td>Cognee, local mode without a language model</td><td>48%</td><td>29&nbsp;min</td></tr>
+            <tr><td><em>Reference: the whole history in the prompt</em></td><td><em>92%</em></td><td><em>none</em></td></tr>
+            <tr><td><em>Reference: only the right conversations</em></td><td><em>93%</em></td><td><em>none</em></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Only Ciaobot got extra searches; every other system answered from one search with the question text. Index times are rough: the other systems were indexed in parallel on a shared machine and include start-up time, so read them as orders of magnitude.</p>
+      <p>Two things came out of it:</p>
       <ul>
-        <li>Three repeats per task is enough to spot a real difference, not to rank models closely matched on a single run.</li>
-        <li>A check can be unfair. When a correct answer fails, we fix the check and say so in the results file.</li>
-        <li>These are short, single-request tasks. Long projects over many turns are not measured yet.</li>
+        <li><strong>Reading the note beats reading snippets.</strong> Answering from search snippets alone scored 43%; reading the same notes in full scored 87%. A snippet can look settled while the note says further down that the value changed.</li>
+        <li><strong>Keyword search holds up.</strong> Ciaobot's plain keyword search came within a few questions of Basic Memory's hybrid search, which adds embeddings. Embeddings do find more, but on a real vault they would have changed only one or two answers, so they are on hold until keyword misses start costing answers.</li>
+      </ul>
+      <p>It also found two things to fix, both fixed since: search dropped some results when only part of a question matched, and the assistant was told to answer from snippets. It now reads the best-matching note before it answers. A lighter memory-writing prompt was tried and rejected: it let back in facts the user had already turned down.</p>
+      <p>One run, one machine, 60 questions and a synthetic benchmark: read it as a direction, not a ranking. Every number, each system's setup and its limits are in the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/evals/memory-comparison-2026-11.md">full memory comparison on GitHub</a>.</p>
+    </section>
+
+    <section id="care">
+      <h2>Read the numbers with care</h2>
+      <p>These are measurements, not a ranking. Each one carries a limit worth knowing before you compare it with anything else:</p>
+      <ul>
+        <li><strong>Single runs on one machine.</strong> Every number here comes from one macOS host (Apple silicon), with no configuration repeated. A difference of one or two questions is within noise.</li>
+        <li><strong>The sample is small.</strong> The memory comparison answered 60 questions: one question is 1.7 points overall, and up to 17 points inside a six-question type. The 470-question retrieval numbers are steadier than the answering numbers.</li>
+        <li><strong>The benchmark is synthetic.</strong> LongMemEval's chats are generated, and its questions may share more words with the answer session than a real question would — which favours keyword search. The vault probe was built to check that: 120 notes and 88 questions, still one person's vault.</li>
+        <li><strong>A model judges, and a model answers.</strong> Claude Sonnet graded with the benchmark's own prompts and can be wrong in both directions; not every verdict was checked by hand. Claude Haiku answered every system, so a larger model may close some gaps — snippets especially — and open others. Swap the model and these numbers move.</li>
+        <li><strong>Three repeats per task</strong> are enough to spot a real difference, not to rank two models that are closely matched. The 63 runs per model were 21 short, single-request tasks; long projects over many turns are not measured yet.</li>
+        <li><strong>Other systems ran in one configuration each</strong>, the best we found inside the same cost rule. Their maintainers might find a better one.</li>
+        <li><strong>A check can be unfair.</strong> When a correct answer failed, we fixed the check and said so in the results file. That repair is a judgement too.</li>
+        <li><strong>None of it measures your vault.</strong> Both suites run on a made-up or copied vault. They show which way a change moves the assistant and where it fails; they cannot tell you how it will do on your notes.</li>
       </ul>
     </section>
 
@@ -105,6 +135,7 @@
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

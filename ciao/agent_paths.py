@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 _CLAUDE_SLUG_UNSAFE = re.compile(r"[^A-Za-z0-9]")
@@ -60,3 +61,29 @@ def claude_project_slug(workspace: str | os.PathLike[str]) -> str:
 def claude_projects_dir(workspace: str | os.PathLike[str]) -> Path:
     """``~/.claude/projects/<slug>`` for ``workspace``, as Claude Code names it."""
     return Path.home() / ".claude" / "projects" / claude_project_slug(workspace)
+
+
+def claude_config_project_key(cwd: str | os.PathLike[str]) -> str:
+    """The ``projects`` key of Claude Code's global config for a CLI started in ``cwd``.
+
+    Claude Code keys the per-project entry (``disabledMcpServers``, trust, local MCP servers) by
+    the git root of its cwd (a ``.git`` directory or file), else the resolved cwd, with ``/``
+    separators on Windows. Observed 2026-11-09: an entry under ``repo`` applied to a CLI started
+    in ``repo/ws``; the ``repo/ws`` entry was ignored.
+    """
+    resolved = Path(cwd).resolve()
+    root = next((c for c in (resolved, *resolved.parents) if (c / ".git").exists()), resolved)
+    key = str(root)
+    return key.replace("\\", "/") if os.name == "nt" else key
+
+
+def claude_global_config_path(env: Mapping[str, str] | None = None) -> Path:
+    """Claude Code's global config file: ``CLAUDE_CONFIG_PATH``, then ``CLAUDE_CONFIG_DIR``, then home."""
+    src = os.environ if env is None else env
+    path = str(src.get("CLAUDE_CONFIG_PATH", "")).strip()
+    if path:
+        return Path(path).expanduser()
+    config_dir = str(src.get("CLAUDE_CONFIG_DIR", "")).strip()
+    if config_dir:
+        return Path(config_dir).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"

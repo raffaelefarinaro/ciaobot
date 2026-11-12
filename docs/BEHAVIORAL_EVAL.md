@@ -41,7 +41,9 @@ shipped scenario against the real guards:
   prompt started recommending `vault_expand`. That tool was later deleted
   (D-03 of the CLI-first migration); `fts_search.expand_note` stays as the
   library function these contracts measure, while the core prompt now tells
-  recall to widen a truncated snippet with a second, narrower search.
+  recall to read the best-matching note a search picked before answering,
+  since a truncated snippet can look settled while hiding a later change (task
+  `H11-recall-value-below-snippet` pins that shape).
 - **Recall drill-down, negation and abstention** — the same three facts for the
   other two shapes the acceptance criteria name. A *negation* fixture whose
   snippet keeps "need a work visa" and drops "no permit is required" proves the

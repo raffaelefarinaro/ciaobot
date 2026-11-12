@@ -20,31 +20,6 @@ export function chatLocationDiffers(repo: Repo, loc: Loc): boolean {
   return (loc.branch ?? '') !== repo.branch
 }
 
-export interface RepoTag { label: string; title: string; removed: boolean }
-
-/** The sidebar chat-row tag, or null when the row should carry none. */
-export function chatRepoTag(repo: Repo, loc: Loc): RepoTag | null {
-  if (!chatLocationDiffers(repo, loc) || !hasLocation(loc)) return null
-  const removed = loc.exists === false
-  return {
-    label: `⑂ ${branchLabel(loc.branch ?? '')}`,
-    title: removed ? `Worktree removed: ${loc.path}` : loc.is_worktree ? `Worktree: ${loc.path}` : loc.path,
-    removed,
-  }
-}
-
-/**
- * The sidebar branch chip. The sidebar draws it only on code-off rows: in code
- * mode the row carries the compact `code` badge, and the full branch lives in
- * that badge's tooltip and in the row's own title. A worktree the agent no
- * longer codes in is a different fact from one it does, so the chip says so.
- */
-export function sidebarBranchChip(repo: Repo, loc: Loc): RepoTag | null {
-  const tag = chatRepoTag(repo, loc)
-  if (!tag) return null
-  return { ...tag, title: `${tag.title} (code mode off)` }
-}
-
 /**
  * The tooltip and accessible name of the sidebar's `code` badge. The badge
  * itself is one short word, so the facts live here: the repository, the branch

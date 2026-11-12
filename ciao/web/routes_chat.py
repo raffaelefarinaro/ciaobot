@@ -25,6 +25,7 @@ import re
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ciao.jsonio import loads_untrusted
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import QUEUE_DELIVERIES, STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
@@ -179,10 +180,19 @@ async def ws_chat(websocket: WebSocket) -> None:
         while True:
             raw = await websocket.receive_text()
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                msg = loads_untrusted(raw)
+            except ValueError:
                 try:
                     await websocket.send_json({"type": "error", "message": "invalid json"})
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+                continue
+            if not isinstance(msg, dict):
+                # Valid JSON that is not an object (`[1]`, `"x"`, `5`, `null`)
+                # has no fields to read; answer it rather than let `.get` end
+                # the socket.
+                try:
+                    await websocket.send_json({"type": "error", "message": "invalid frame"})
                 except (WebSocketDisconnect, RuntimeError):
                     break
                 continue
@@ -358,12 +368,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                 if msg_type == "queue_take_ack":
                     pcm.queue_take_ack(chat_id, entry_id)
                     continue
-                request_id = msg.get("request_id")
-                if not isinstance(request_id, str) or not 0 < len(request_id) <= _MAX_QUEUE_ENTRY_ID_LEN:
+                take_request_id = msg.get("request_id")
+                if (
+                    not isinstance(take_request_id, str)
+                    or not 0 < len(take_request_id) <= _MAX_QUEUE_ENTRY_ID_LEN
+                ):
                     continue
                 taken = pcm.take_queue_for_edit(chat_id, entry_id)
                 await websocket.send_json({
-                    "type": "queue_take_result", "request_id": request_id,
+                    "type": "queue_take_result", "request_id": take_request_id,
                     "entry_id": entry_id, "ok": taken is not None,
                     "text": taken["text"] if taken else "",
                     "images": taken["images"] if taken else [],

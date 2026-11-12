@@ -69,6 +69,13 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    // The Usage page: a read-only look back; reached from the sidebar's Usage entry and Home's At a glance.
+    path: '/stats',
+    name: 'stats',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     // One task, open in the board's detail dialog: the address an agent links
     // to (lib/appLinks.ts) and the one the dialog keeps while it is open.
     path: '/tasks/:taskId',

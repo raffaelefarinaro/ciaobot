@@ -9,6 +9,7 @@
 
 import { apiErrorMessage, errorPayload } from './errorMessage'
 import { orderTasks } from './taskOrder'
+import type { RailMark } from './titleRail'
 import type {
   Task,
   TaskAttempt,
@@ -622,6 +623,28 @@ export function cardAgentStatus(
     default:
       return null
   }
+}
+
+/**
+ * A task's mark on the open task's title rail, from its agent band: the agent
+ * needs you, is working, or has a result ready to review (news, like an unread
+ * reply); a task with no agent state, or done, has none.
+ */
+export function taskRailMark(task: Pick<Task, 'status' | 'attempt_state'>): RailMark | null {
+  const tone = cardAgentStatus(task)?.tone
+  if (tone === 'needs') return 'needs'
+  if (tone === 'running') return 'working'
+  if (tone === 'review') return 'unread'
+  return null
+}
+
+/** The rail's accessible name: "<title>, <lane>" plus ", needs you" | ", working" | ", ready to review". */
+export function taskRailLabel(title: string, lane: string, mark: RailMark | null): string {
+  const parts = [title, lane]
+  if (mark === 'needs') parts.push('needs you')
+  else if (mark === 'working') parts.push('working')
+  else if (mark === 'unread') parts.push('ready to review')
+  return parts.join(', ')
 }
 
 /** The project filter's value for General: "filed under no project". */

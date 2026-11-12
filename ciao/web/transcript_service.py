@@ -349,15 +349,6 @@ def _classify_control_ack(text: str) -> str | None:
     return None
 
 
-# The subagent's own final message often self-reports its sign-off ("Agent
-# "X" completed", "...finished", "...done", ...) rather than a fixed CLI
-# string, so the "already shaped, pass through as-is" check has to tolerate
-# whatever terminal-status verb the model picked instead of matching only
-# "completed" — otherwise it doubles up with the generic wrapper below (e.g.
-# "Subagent completed: Agent "X" finished").
-_AGENT_SELF_STATUS_RE = re.compile(
-    r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
-)
 
 _is_cli_internal_envelope = cli_envelopes.is_cli_envelope
 
@@ -389,9 +380,6 @@ def _summarize_task_notification(content: str) -> str | None:
     summary = fields.get("summary", "")
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
-    if _AGENT_SELF_STATUS_RE.match(first_line):
-        # Already shaped like 'Agent "X" completed'; pass it through.
-        return f"{icon} {first_line}"
     if first_line:
         # Trim aggressively so the bubble stays one line; full output lives in
         # the subagent transcript fetchable via /api/chats/{id}/subagents.
@@ -403,15 +391,17 @@ def _summarize_task_notification(content: str) -> str | None:
 def _native_task_notice(content: str) -> str | None:
     """Wake-format text for provider-native shell completions, else None.
 
-    The first notification decides: a subagent completion or a ``Monitor
-    event`` falls through to the one-line status bubble. A record can
-    concatenate several completions; the consecutive native ones share one
-    notice. No log path or tail: the provider's output file is outside the
-    file sandbox and the notice carries only a summary.
+    Background shells and Task subagents both draw as the background-run
+    card, the same card an OpenCode subagent wake gets. The first
+    notification decides: a ``Monitor event`` or an unrecognised summary falls
+    through to the one-line status bubble. A record can concatenate several
+    completions; the consecutive native ones share one notice. No log path:
+    the provider's output file is outside the file sandbox. A subagent's tail
+    is its inline report.
     """
     runs: list[cli_envelopes.NativeTaskRun] = []
     for fields, _task_ids in cli_envelopes.envelope_notifications(content):
-        run = cli_envelopes.native_task_run(fields)
+        run = cli_envelopes.native_task_run(fields) or cli_envelopes.subagent_task_run(fields)
         if run is None:
             break
         runs.append(run)
@@ -425,7 +415,7 @@ def _native_task_notice(content: str) -> str | None:
             "exit_code": run.exit_code,
             "error": run.error,
             "log_path": None,
-            "last_lines": None,
+            "last_lines": list(run.tail) or None,
         }
         for run in runs
     ]
@@ -713,6 +703,31 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
+def _mark_preceding_answer(rows: list[dict]) -> None:
+    """Mark the existing answer before a hidden continuation; append nothing.
+
+    A hidden continuation prompt is skipped before it can render, so the row
+    that answered the user just before it would otherwise fold into Activity
+    like any mid-turn note. Scanning backwards keeps the absolute row list (and
+    the wire indices built from it) untouched: stop at a real user row, skip
+    system/tool rows and empty assistant text, and at the nearest nonempty
+    tool-free assistant text either leave an explicit ``commentary`` note alone
+    or tag the answer ``final_answer``.
+    """
+    for row in reversed(rows):
+        role = row.get("role")
+        if role == "user":
+            return
+        if role != "assistant" or row.get("tool_name"):
+            continue
+        if not str(row.get("content") or "").strip():
+            continue
+        if row.get("phase") == "commentary":
+            return
+        row["phase"] = "final_answer"
+        return
+
+
 def _render_opencode_thread(
     thread: dict,
     chat,
@@ -799,9 +814,11 @@ def _render_opencode_thread(
             content = _strip_injected_context(raw_prompt).strip()
             if not content:
                 continue
-            # Hidden code-mode continuation: skipped before user_idx += 1 so
+            # Hidden continuation: skipped before user_idx += 1 so
             # markers keep their turn_index.
             if cli_envelopes.is_hidden_continuation(content):
+                if metadata:
+                    _mark_preceding_answer(result)
                 continue
             entry: dict = {
                 "role": "user",
@@ -1759,10 +1776,11 @@ async def _assemble_chat_messages(
         # this exact content to keep the parent-uuid chain valid.
         if m.type == "user" and _is_no_response_sentinel(content):
             continue
-        # Our hidden continuations (cli_envelopes.CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT):
-        # hidden outright; G3's code-mode event row already shows the switch. Skip
-        # without incrementing user_idx so markers keep their turn_index.
+        # Our hidden continuations (cli_envelopes.RELOAD_CONTINUE_PROMPT and the
+        # legacy code-mode one): hidden outright. Skip without incrementing
+        # user_idx so markers keep their turn_index.
         if m.type == "user" and cli_envelopes.is_hidden_continuation(content):
+            _mark_preceding_answer(result)
             continue
         # CLI-synthesized user envelopes (subagent completions, bash output,
         # slash-command echoes). Promote <task-notification> to a clean system

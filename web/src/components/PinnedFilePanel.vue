@@ -6,9 +6,19 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
+          <button
+            v-if="returnFolder && kind !== 'folder'"
+            type="button"
+            class="btn-icon pfp-back-btn"
+            :aria-label="`Back to ${returnFolderName}`"
+            :title="`Back to ${returnFolderName}`"
+            @click="backToFolder"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
           <div class="header-breadcrumb">
-            <span class="chat-title" :title="filePath">{{ basename }}</span>
-            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(cleanPath) }}</span>
+            <span class="chat-title" :title="currentPath">{{ headerTitle }}</span>
+            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(currentPath) }}</span>
           </div>
         </div>
       </template>
@@ -39,7 +49,10 @@
                 <DropdownMenuItem as-child @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
+                <DropdownMenuItem v-if="kind !== 'folder'" as-child @select="showInFolder">
+                  <button type="button">Show in folder</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="kind !== 'folder'" as-child :disabled="loading || !!error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
@@ -53,13 +66,13 @@
           </DropdownMenuPortal>
         </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
-        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'" :disabled="closeDisabled" :aria-disabled="closeDisabled">
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :aria-label="closeLabel || (kind === 'folder' ? 'Unpin folder' : 'Unpin file')" :disabled="closeDisabled" :aria-disabled="closeDisabled">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
-      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
+      <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv, 'pfp-body-folder': kind === 'folder' }" ref="bodyEl">
         <!-- A host's own context for the file (the memory map's stale-note
              callout), above the document. -->
         <slot name="lead" />
@@ -91,6 +104,14 @@
             <span class="pfp-skeleton-line pfp-skeleton-line--short"></span>
           </div>
         </div>
+        <FolderBrowser
+          v-else-if="kind === 'folder'"
+          :key="`${folderStart}:${folderKey}`"
+          :initial-path="folderStart"
+          :chat-id="projectsStore.activeChatId || ''"
+          @navigate="browsedFolder = $event"
+          @open-file="onFolderOpenFile"
+        />
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <div v-else-if="kind === 'image' && imageError" class="pfp-error" role="alert">{{ imageError }}</div>
         <img
@@ -129,6 +150,9 @@
           @compose-comment="onArtifactCompose"
           @open-comment="onArtifactOpenComment"
           @bridge-ready="onArtifactBridgeReady"
+          @selection="artifactSelection.onSelection"
+          @selection-cleared="artifactSelection.clear"
+          @type-comment="onArtifactTypeComment"
         />
         <template v-else>
           <!-- Text Editing Mode -->
@@ -303,11 +327,11 @@
 
       <!-- Floating "Comment" button anchored near the active selection. -->
       <button
-        v-if="selectionAnchor"
+        v-if="commentTrigger"
         class="pfp-comment-trigger"
-        :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
+        :style="{ top: commentTrigger.top + 'px', left: commentTrigger.left + 'px' }"
         @mousedown.prevent
-        @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
+        @click="onCommentTriggerClick"
         type="button"
         :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
       >
@@ -334,10 +358,12 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
+import { parentFolderOf } from '../lib/folderBrowserDriver'
 import { imageLoadErrorMessage } from '../lib/fileLoadError'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useArtifactSelection } from '../composables/useArtifactSelection'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
@@ -345,12 +371,13 @@ import { handleAppLinkClick } from '../lib/appLinks'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
+import { fileViewerKindForPath, isFolderPin, isPinnableFilePath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
 import { router } from '../router'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
+const FolderBrowser = defineAsyncComponent(() => import('./FolderBrowser.vue'))
 
 const props = defineProps<{
   filePath: string
@@ -367,7 +394,7 @@ defineEmits<{ (e: 'close'): void }>()
 const projectsStore = useProjectStore()
 const fileViewer = useFileViewerStore()
 const memoryMapStore = useMemoryMapStore()
-const memoryPath = computed(() => /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
+const memoryPath = computed(() => !isFolder.value && /\.(md|markdown)$/i.test(cleanPath.value) ? cleanPath.value : '')
 
 async function openInMemoryMap(): Promise<void> {
   const target = memoryPath.value
@@ -400,9 +427,14 @@ const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
 const copyState = ref<'idle' | 'ok'>('idle')
+// The pinned path is always absolute, so it always has a folder to show.
+function showInFolder(): void {
+  void fileViewer.openFolder(parentFolderOf(cleanPath.value), projectsStore.activeChatId || '')
+}
+
 async function copyPath(): Promise<void> {
   try {
-    await navigator.clipboard.writeText(cleanPath.value)
+    await navigator.clipboard.writeText(currentPath.value)
     copyState.value = 'ok'
     setTimeout(() => { copyState.value = 'idle' }, 1500)
   } catch {
@@ -468,7 +500,44 @@ const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
 
-const cleanPath = computed(() => props.filePath.replace(/:\d+$/, ''))
+const cleanPath = computed(() => props.filePath.replace(/:\d+$/, '').replace(/[/\\]+$/, ''))
+const isFolder = computed(() => isFolderPin(props.filePath))
+// The folder the docked browser is showing (it can move away from the pin).
+const browsedFolder = ref('')
+// Where the browser (re)mounts: the pin, or the shown folder on Refresh.
+const folderStart = ref('')
+const folderKey = ref(0)
+// The folder a docked file was opened from: the tile's Back returns there.
+const returnFolder = ref('')
+let pendingReturn: { folder: string; file: string } | null = null
+const currentPath = computed(() => (isFolder.value ? browsedFolder.value || cleanPath.value : cleanPath.value))
+const headerTitle = computed(() => currentPath.value.slice(currentPath.value.lastIndexOf('/') + 1))
+const returnFolderName = computed(() => returnFolder.value.slice(returnFolder.value.lastIndexOf('/') + 1))
+watch(() => props.filePath, () => {
+  browsedFolder.value = ''
+  folderStart.value = cleanPath.value
+  returnFolder.value = !isFolder.value && pendingReturn && pendingReturn.file === cleanPath.value
+    ? pendingReturn.folder
+    : ''
+  pendingReturn = null
+}, { immediate: true })
+// A dock aimed at the folder already pinned: show that folder again.
+watch(() => fileViewer.folderRedock.seq, () => {
+  if (isFolder.value && fileViewer.folderRedock.path === props.filePath) {
+    browsedFolder.value = ''
+    folderStart.value = cleanPath.value
+    folderKey.value++
+  }
+})
+async function onFolderOpenFile(path: string): Promise<void> {
+  const from = browsedFolder.value || cleanPath.value
+  const dockable = isPinnableFilePath(path)
+  pendingReturn = dockable ? { folder: from, file: path } : null
+  await fileViewer.openFromFolder(path, dockable ? projectsStore.activeChatId || '' : '', from)
+}
+function backToFolder(): void {
+  if (returnFolder.value) void fileViewer.openFolder(returnFolder.value, projectsStore.activeChatId || '')
+}
 const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(cleanPath.value)}&t=${imageTimestamp.value}`)
 // Why the current image URL failed to load; empty while it has not failed.
 const imageError = ref('')
@@ -485,11 +554,11 @@ const basename = computed(() => {
 })
 const fileBasenameForPop = computed(() => basename.value)
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
-const isCsv = computed(() => isCsvPath(cleanPath.value))
+const isCsv = computed(() => !isFolder.value && isCsvPath(cleanPath.value))
 
 const docDir = computed(() => {
-  const idx = cleanPath.value.lastIndexOf('/')
-  return idx === -1 ? '' : cleanPath.value.slice(0, idx + 1)
+  const idx = currentPath.value.lastIndexOf('/')
+  return idx === -1 ? '' : currentPath.value.slice(0, idx + 1)
 })
 
 const metadata = computed(() => buildVaultDocumentMetadata(content.value, cleanPath.value, markdownPaths.value))
@@ -524,6 +593,13 @@ async function load(): Promise<void> {
   // Images are the panel's own case (the store has openImage for them);
   // everything else comes from the shared classifier so this stays one
   // implementation of "what kind of file is this" rather than a second copy.
+  if (isFolder.value) {
+    kind.value = 'folder'
+    loading.value = false
+    error.value = ''
+    content.value = ''
+    return
+  }
   const isImg = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(props.filePath)
   if (isImg) {
     kind.value = 'image'
@@ -658,6 +734,11 @@ async function saveEdits(): Promise<void> {
 }
 
 function refresh(): void {
+  if (kind.value === 'folder') {
+    folderStart.value = currentPath.value
+    folderKey.value++
+    return
+  }
   refreshed.value = true
   load().then(() => {
     setTimeout(() => { refreshed.value = false }, 800)
@@ -694,7 +775,7 @@ function downloadFile(): void {
 async function openExternally(): Promise<void> {
   if (loading.value || error.value || openExternalState.value === 'loading') return
   openExternalState.value = 'loading'
-  const result = await openWorkspaceFileExternally(cleanPath.value)
+  const result = await openWorkspaceFileExternally(currentPath.value)
   if (result.ok) {
     openExternalState.value = 'ok'
     setTimeout(() => { openExternalState.value = '' }, 1200)
@@ -887,11 +968,7 @@ function onMdClick(e: MouseEvent): void {
     const linkedPath = fileLink.getAttribute('data-file-path') || ''
     const lineAttr = fileLink.getAttribute('data-line')
     const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
-    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
-      void fileViewer.openImage(linkedPath)
-    } else {
-      void fileViewer.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null)
-    }
+    void fileViewer.openLink(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null)
     return
   }
 
@@ -1031,6 +1108,9 @@ function onArtifactCompose(a: {
   frameY: number
 }): void {
   if (commentDraft.value || editingCommentId.value) return
+  // Whatever selection the frame reported is spent: an Alt+Click compose
+  // supersedes it, and the selection path took it already.
+  artifactSelection.clear()
   closeCommentPopover()
   // Anchor the compose popover in viewport coordinates: CommentComposePopover
   // teleports to body as position: fixed and clamps itself. The bridge
@@ -1060,8 +1140,12 @@ function onArtifactCompose(a: {
     startOffset: a.startOffset,
     endOffset: a.endOffset,
     wholeElement: a.wholeElement,
+    draft: true,
   }
   pushArtifactHighlights()
+  // Drop the frame's native selection, whichever path composed: the draft
+  // highlight shows instead, and the frame stops reporting it.
+  artifactViewerRef.value?.clearSelection()
 }
 
 // Save path for an artifact comment: same store call as the markdown path but
@@ -1139,6 +1223,81 @@ useTypeToComment({
   },
   addImages: (files: File[]) => addDraftImages(files),
 })
+
+// ── Artifact selection → the same Comment button ─────────────────────
+// The frame reports its selections (it cannot render the page's button, and
+// a pill of its own looked and behaved differently from the Markdown one), so
+// the button below is the Markdown trigger, placed from the reported box.
+const artifactSelection = useArtifactSelection({
+  containerEl: mainEl,
+  frameEl: () => artifactViewerRef.value?.frameEl,
+})
+
+// One floating button for both: a Markdown/text/CSV selection, else an
+// artifact selection. Hidden while a draft is open, as the Markdown one is.
+const commentTrigger = computed(() =>
+  selectionAnchor.value
+    ?? (commentDraft.value || editingCommentId.value ? null : artifactSelection.trigger.value),
+)
+
+function onCommentTriggerClick(): void {
+  if (selectionAnchor.value) {
+    if (isCsv.value) openCommentForCsvCell()
+    else openCommentForSelection()
+    return
+  }
+  openArtifactCommentForSelection()
+}
+
+// The artifact counterpart of openCommentForSelection: compose on the
+// reported selection, seeded with what was typed or pasted, at the button's
+// spot.
+function openArtifactCommentForSelection(initialText = ''): void {
+  if (commentDraft.value || editingCommentId.value) return
+  const taken = artifactSelection.take()
+  if (!taken) return
+  const s = taken.selection
+  onArtifactCompose({
+    selector: s.selector,
+    quote: s.quote,
+    startOffset: s.startOffset,
+    endOffset: s.endOffset,
+    elementTag: s.elementTag,
+    frameX: s.rect.left,
+    frameY: s.rect.bottom,
+  })
+  if (!commentDraft.value) return
+  if (taken.trigger) draftAnchor.value = comments.toViewportAnchor(taken.trigger)
+  composeText.value = initialText
+  artifactDraftFromType = !!initialText
+}
+
+// Type-to-comment from inside the frame: the bridge forwards the keystroke or
+// paste, since the page-level listener above never hears keys typed there.
+// Pasted files are not forwarded (see artifactBridge.ts), so this is text only.
+//
+// A fast typist's next letters can still be forwarded after the first opened
+// the composer and before its textarea has focus; they belong to the same
+// note, so they are appended rather than dropped.
+let artifactDraftFromType = false
+function onArtifactTypeComment(p: { text: string }): void {
+  if (commentDraft.value) {
+    const focused = document.activeElement?.closest?.('.compose')
+    if (artifactDraft && artifactDraftFromType && !focused) composeText.value += p.text
+    return
+  }
+  openArtifactCommentForSelection(p.text)
+}
+
+// While a composer is open the frame takes no keys: typing in an artifact
+// with a selection must not be swallowed for a comment that cannot open.
+watch(
+  () => !!(commentDraft.value || editingCommentId.value),
+  busy => {
+    if (!busy) artifactDraftFromType = false
+    artifactViewerRef.value?.setBusy(busy)
+  },
+)
 
 // Anything the user has half-written in the panel: a text edit, a new comment,
 // or an edit of an existing one. Auto-reloads hold off while it is true, so a
@@ -1324,6 +1483,7 @@ defineExpose({ isBusyAuthoring })
   min-width: 0;
   text-align: left;
 }
+.pfp-back-btn { flex: none; margin-right: 4px; }
 
 .close-btn {
   color: var(--fg2);
@@ -1421,6 +1581,8 @@ defineExpose({ isBusyAuthoring })
 .pfp-body-csv {
   overflow: hidden !important;
 }
+/* A docked folder is full-bleed: the browser owns its own scrolling. */
+.pfp-body.pfp-body-folder { padding: 0; overflow: hidden; }
 .pfp-error {
   padding: 24px;
   text-align: center;

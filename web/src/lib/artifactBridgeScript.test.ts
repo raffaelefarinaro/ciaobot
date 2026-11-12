@@ -52,11 +52,20 @@ interface Harness {
   apply: (comments: unknown[]) => Promise<void>
   enable: () => Promise<void>
   tick: (ms?: number) => Promise<void>
+  select: (range: Range) => Promise<void>
 }
 
-function boot(): Harness {
+/** Minimal CSS Custom Highlight API: what Chromium and WebKit give the bridge. */
+class FakeHighlight {
+  ranges: Range[] = []
+  add(range: Range): void { this.ranges.push(range) }
+}
+
+const BOX = { left: 10, right: 60, top: 20, bottom: 40, width: 50, height: 20, x: 10, y: 20, toJSON: () => ({}) } as DOMRect
+
+function boot(options: { html?: string; highlightApi?: boolean } = {}): Harness {
   const posted: Posted[] = []
-  const { window } = new JSDOM(DOC, { runScripts: 'outside-only', pretendToBeVisual: true })
+  const { window } = new JSDOM(options.html ?? DOC, { runScripts: 'outside-only', pretendToBeVisual: true })
 
   // `window.parent` is a non-writable accessor in jsdom, and the bridge posts
   // through it.
@@ -65,10 +74,15 @@ function boot(): Harness {
     configurable: true,
   })
   // jsdom has no layout engine, so these do not exist at all. The bridge only
-  // uses them to place its pill, so fixed boxes are enough.
-  const box = { left: 10, right: 60, top: 20, bottom: 40, width: 50, height: 20, x: 10, y: 20, toJSON: () => ({}) } as DOMRect
-  window.Range.prototype.getBoundingClientRect = () => box
-  window.Element.prototype.getBoundingClientRect = () => box
+  // uses them to report where a selection ends and to hit-test clicks on
+  // painted ranges, so fixed boxes are enough.
+  window.Range.prototype.getBoundingClientRect = () => BOX
+  window.Range.prototype.getClientRects = (() => [BOX]) as unknown as Range['getClientRects']
+  window.Element.prototype.getBoundingClientRect = () => BOX
+  if (options.highlightApi) {
+    Object.defineProperty(window, 'CSS', { value: { highlights: new Map() }, configurable: true })
+    Object.defineProperty(window, 'Highlight', { value: FakeHighlight, configurable: true })
+  }
 
   window.eval(SCRIPT)
 
@@ -88,7 +102,19 @@ function boot(): Harness {
       window.postMessage({ frame: 'ciao-artifact', type: 'ciao:apply-comments', comments }, '*')
       await tick(20)
     },
+    // Select a range and let the 150ms selectionchange debounce settle.
+    select: async (range: Range) => {
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+      window.document.dispatchEvent(new window.Event('selectionchange'))
+      await tick(250)
+    },
   }
+}
+
+function selections(h: Harness): Posted[] {
+  return h.posted.filter((p) => p.action === 'selection')
 }
 
 describe('artifact bridge: ready handshake', () => {
@@ -107,28 +133,22 @@ describe('artifact bridge: ready handshake', () => {
 })
 
 describe('artifact bridge: compose handshake', () => {
-  it('floats no pill until a parent proves it is listening', async () => {
-    // An artifact served to something that cannot receive the anchors must not
-    // show a Comment pill: it reads as a working feature and does nothing.
+  it('reports no selection until a parent proves it is listening', async () => {
+    // An artifact served to something that cannot receive the anchors must
+    // not swallow keystrokes on behalf of a composer that does not exist.
     const h = boot()
     await h.tick()
 
-    const ps = h.doc.querySelectorAll('.card p')
     const range = h.doc.createRange()
-    range.selectNodeContents(ps[0])
-    const sel = h.window.getSelection()
-    sel?.removeAllRanges()
-    sel?.addRange(range)
-    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
-    await h.tick(250)
-
-    expect(h.doc.getElementById('ciao-comment-pill')).toBeNull()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+    expect(selections(h)).toHaveLength(0)
 
     await h.enable()
     h.doc.dispatchEvent(new h.window.Event('selectionchange'))
     await h.tick(250)
 
-    expect(h.doc.getElementById('ciao-comment-pill')).not.toBeNull()
+    expect(selections(h)).toHaveLength(1)
   })
 
   it('accepts a highlight push as proof on its own', async () => {
@@ -137,16 +157,455 @@ describe('artifact bridge: compose handshake', () => {
     await h.tick()
     await h.apply([])
 
-    const ps = h.doc.querySelectorAll('.card p')
     const range = h.doc.createRange()
-    range.selectNodeContents(ps[0])
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+
+    expect(selections(h)).toHaveLength(1)
+  })
+})
+
+describe('artifact bridge: selection reporting', () => {
+  let h: Harness
+
+  beforeEach(async () => {
+    h = boot()
+    await h.tick()
+    await h.enable()
+  })
+
+  it('draws no Comment pill of its own', async () => {
+    // The page renders the same Comment button it uses for Markdown; a second
+    // pill inside the frame looked and behaved differently.
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+
+    expect(h.doc.querySelector('button')).toBeNull()
+    expect(h.doc.getElementById('ciao-comment-pill')).toBeNull()
+  })
+
+  it('reports a selection once, with its anchor and end box, and its collapse', async () => {
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+    // The same selection again: nothing new to say.
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+
+    expect(selections(h)).toEqual([
+      expect.objectContaining({
+        frame: 'ciao-artifact',
+        type: 'ciao:artifact-comment',
+        selector: 'body > div:nth-of-type(1) > p:nth-of-type(1)',
+        quote: 'First part',
+        startOffset: 0,
+        endOffset: 10,
+        elementTag: 'p',
+        rect: { top: 20, left: 10, bottom: 40, right: 60 },
+      }),
+    ])
+
+    h.window.getSelection()?.removeAllRanges()
+    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
+    await h.tick(250)
+    expect(h.posted.filter((m) => m.action === 'selection-cleared')).toHaveLength(1)
+  })
+
+  it('re-reports the selection when the frame scrolls, so the button follows', async () => {
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+    expect(selections(h)).toHaveLength(1)
+
+    h.window.dispatchEvent(new h.window.Event('scroll'))
+    await h.tick(50)
+
+    expect(selections(h)).toHaveLength(2)
+  })
+
+  it('drops the native selection when the page asks', async () => {
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+
+    h.window.postMessage({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
+    await h.tick(250)
+
+    expect(h.window.getSelection()?.isCollapsed).toBe(true)
+    // The page asked, so it already knows: no echo.
+    expect(h.posted.filter((m) => m.action === 'selection-cleared')).toHaveLength(0)
+    // And a key no longer has a selection to comment on.
+    const key = new h.window.KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })
+    h.doc.body.dispatchEvent(key)
+    expect(key.defaultPrevented).toBe(false)
+  })
+})
+
+describe('artifact bridge: type-to-comment', () => {
+  let h: Harness
+
+  async function selectFirstParagraph(): Promise<void> {
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+  }
+
+  function press(key: string, init: KeyboardEventInit = {}, target: EventTarget = h.doc.body): KeyboardEvent {
+    const e = new h.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })
+    target.dispatchEvent(e)
+    return e
+  }
+
+  beforeEach(async () => {
+    h = boot()
+    await h.tick()
+    await h.enable()
+  })
+
+  it('forwards a printable key typed with a selection and swallows it', async () => {
+    // The page's type-to-comment listens on the page's document; keys typed
+    // with focus in the frame never reached it, so typing did nothing.
+    await selectFirstParagraph()
+    const e = press('R')
+
+    expect(e.defaultPrevented).toBe(true)
+    expect(h.posted.filter((m) => m.action === 'type')).toEqual([
+      expect.objectContaining({ frame: 'ciao-artifact', type: 'ciao:artifact-comment', text: 'R' }),
+    ])
+  })
+
+  it('leaves keys alone without a selection, with modifiers, for space and mid-IME', async () => {
+    expect(press('a').defaultPrevented).toBe(false)
+
+    await selectFirstParagraph()
+    expect(press('c', { metaKey: true }).defaultPrevented).toBe(false)
+    expect(press('c', { ctrlKey: true }).defaultPrevented).toBe(false)
+    expect(press('a', { altKey: true }).defaultPrevented).toBe(false)
+    expect(press(' ').defaultPrevented).toBe(false)
+    expect(press('ArrowDown').defaultPrevented).toBe(false)
+    expect(press('a', { isComposing: true }).defaultPrevented).toBe(false)
+    expect(h.posted.filter((m) => m.action === 'type')).toHaveLength(0)
+  })
+
+  it('never takes keys from a field inside the artifact', async () => {
+    const input = h.doc.createElement('input')
+    h.doc.body.appendChild(input)
+    await selectFirstParagraph()
+
+    expect(press('a', {}, input).defaultPrevented).toBe(false)
+    expect(h.posted.filter((m) => m.action === 'type')).toHaveLength(0)
+  })
+
+  it('stays out of the way until a parent is listening', async () => {
+    const quiet = boot()
+    await quiet.tick()
+    const range = quiet.doc.createRange()
+    range.selectNodeContents(quiet.doc.querySelectorAll('.card p')[0])
+    await quiet.select(range)
+    const e = new quiet.window.KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })
+    quiet.doc.body.dispatchEvent(e)
+
+    expect(e.defaultPrevented).toBe(false)
+    expect(quiet.posted.filter((m) => m.action === 'type')).toHaveLength(0)
+  })
+
+  it('comments on the selection the key followed, even inside the debounce', async () => {
+    await selectFirstParagraph()
+    // A new selection, and a key before the 150ms debounce reports it.
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[1])
     const sel = h.window.getSelection()
     sel?.removeAllRanges()
     sel?.addRange(range)
     h.doc.dispatchEvent(new h.window.Event('selectionchange'))
-    await h.tick(250)
+    press('x')
 
-    expect(h.doc.getElementById('ciao-comment-pill')).not.toBeNull()
+    const reported = selections(h)
+    expect(reported[reported.length - 1]?.quote).toBe('Second part')
+    // The report went out before the keystroke, so the page composes on it.
+    const lastSelectionAt = h.posted.lastIndexOf(reported[reported.length - 1])
+    const typeAt = h.posted.findIndex((m) => m.action === 'type')
+    expect(typeAt).toBeGreaterThan(lastSelectionAt)
+  })
+
+  it('forwards pasted text', async () => {
+    await selectFirstParagraph()
+    const paste = new h.window.Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', {
+      value: { getData: (kind: string) => (kind === 'text/plain' ? 'pasted note' : ''), files: [] },
+    })
+    h.doc.body.dispatchEvent(paste)
+
+    expect(paste.defaultPrevented).toBe(true)
+    expect(h.posted.filter((m) => m.action === 'type').map((m) => m.text)).toEqual(['pasted note'])
+  })
+
+  function paste(text: string, files: unknown[] = []): Event {
+    const e = new h.window.Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'clipboardData', {
+      value: { getData: (kind: string) => (kind === 'text/plain' ? text : ''), files },
+    })
+    h.doc.body.dispatchEvent(e)
+    return e
+  }
+
+  it('never forwards pasted files, and caps pasted text', async () => {
+    // The page would upload forwarded files as comment images with no user
+    // action, and a forged message could do the same.
+    await selectFirstParagraph()
+    const image = new h.window.File(['x'], 'shot.png', { type: 'image/png' })
+    expect(paste('', [image]).defaultPrevented).toBe(false)
+    expect(h.posted.filter((m) => m.action === 'type')).toHaveLength(0)
+
+    paste('y'.repeat(25_000))
+    const sent = h.posted.filter((m) => m.action === 'type')
+    expect(sent).toHaveLength(1)
+    expect((sent[0].text as string).length).toBe(10_000)
+    expect(sent[0]).not.toHaveProperty('files')
+  })
+
+  it('forwards one key per selection, then the burst until the page answers', async () => {
+    await selectFirstParagraph()
+    expect(press('a').defaultPrevented).toBe(true)
+    // The composer is opening but has no focus yet: the next letters belong
+    // to the same note.
+    expect(press('b').defaultPrevented).toBe(true)
+
+    // The page answered: the burst is over and the selection is spent.
+    h.window.postMessage({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
+    await h.tick(20)
+    expect(press('c').defaultPrevented).toBe(false)
+    expect(h.posted.filter((m) => m.action === 'type').map((m) => m.text)).toEqual(['a', 'b'])
+  })
+
+  it('spends the selection on the forwarded key', async () => {
+    // The page opened a composer, which was then cancelled; the old selection
+    // must not keep turning keystrokes into new comments.
+    await selectFirstParagraph()
+    press('a')
+    for (const busy of [true, false]) {
+      h.window.postMessage({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy }, '*')
+      await h.tick(20)
+    }
+    expect(press('b').defaultPrevented).toBe(false)
+    expect(h.posted.filter((m) => m.action === 'type').map((m) => m.text)).toEqual(['a'])
+  })
+
+  it('takes no keys or pastes while the page has a composer open', async () => {
+    h.window.postMessage({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: true }, '*')
+    await h.tick(20)
+    await selectFirstParagraph()
+    expect(press('a').defaultPrevented).toBe(false)
+    expect(paste('note').defaultPrevented).toBe(false)
+
+    h.window.postMessage({ frame: 'ciao-artifact', type: 'ciao:comments-busy', busy: false }, '*')
+    await h.tick(20)
+    expect(press('a').defaultPrevented).toBe(true)
+  })
+
+  it('treats Safari keyCode 229 as IME composition', async () => {
+    await selectFirstParagraph()
+    const e = new h.window.KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'keyCode', { value: 229 })
+    h.doc.body.dispatchEvent(e)
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('keeps a forwarded key from the artifact\'s own handlers', async () => {
+    const seen: string[] = []
+    h.window.addEventListener('keydown', (e) => seen.push(e.key), true)
+    h.doc.addEventListener('keydown', (e) => seen.push(e.key))
+    await selectFirstParagraph()
+    press('k')
+    expect(seen).toEqual([])
+  })
+})
+
+describe('artifact bridge: resize', () => {
+  it('re-reports the selection when the frame resizes, so the button follows', async () => {
+    const h = boot()
+    await h.tick()
+    await h.enable()
+    const range = h.doc.createRange()
+    range.selectNodeContents(h.doc.querySelectorAll('.card p')[0])
+    await h.select(range)
+
+    h.window.dispatchEvent(new h.window.Event('resize'))
+    await h.tick(50)
+
+    expect(selections(h)).toHaveLength(2)
+  })
+})
+
+describe('artifact bridge: tables', () => {
+  // Pretty-printed markup: the indentation between the <th>s is text nodes
+  // that are direct children of the <tr>.
+  const TABLE = `<!DOCTYPE html><html><head></head><body>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Owner</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>a</td><td>b</td><td>c</td></tr>
+    </tbody>
+  </table>
+</body></html>`
+
+  async function commentAcrossHeaders(h: Harness): Promise<HTMLTableRowElement> {
+    await h.tick()
+    await h.enable()
+    const ths = h.doc.querySelectorAll('th')
+    const range = h.doc.createRange()
+    range.setStart(ths[0].firstChild as Node, 0)
+    range.setEnd(ths[2].firstChild as Node, 6)
+    await h.select(range)
+    const s = selections(h)[0]
+    expect(s, 'a selection across header cells should be reported').toBeDefined()
+    await h.apply([{ id: 't1', selector: s.selector, quote: s.quote, startOffset: s.startOffset, endOffset: s.endOffset }])
+    return h.doc.querySelector('thead tr') as HTMLTableRowElement
+  }
+
+  it('paints across header cells without touching the row (Highlight API)', async () => {
+    const h = boot({ html: TABLE, highlightApi: true })
+    const before = h.doc.querySelector('thead tr')!.childNodes.length
+    const tr = await commentAcrossHeaders(h)
+
+    expect(tr.childNodes.length).toBe(before)
+    expect(h.doc.querySelector('mark')).toBeNull()
+    const painted = (h.window as unknown as { CSS: { highlights: Map<string, FakeHighlight> } })
+      .CSS.highlights.get('ciao-comment')
+    // One range per cell's text: the indentation between cells is left out.
+    expect(painted?.ranges.map((r) => r.toString())).toEqual(['Name', 'Owner', 'Status'])
+  })
+
+  it('never puts a <mark> in table structure (fallback)', async () => {
+    // A <mark> directly under a <tr> renders as an anonymous cell: the header
+    // row gained a phantom column and every later cell shifted.
+    const h = boot({ html: TABLE })
+    const before = h.doc.querySelector('thead tr')!.childNodes.length
+    const tr = await commentAcrossHeaders(h)
+
+    expect(tr.childNodes.length).toBe(before)
+    const marks = Array.from(h.doc.querySelectorAll('mark.ciao-comment-mark'))
+    expect(marks.map((m) => m.parentElement?.tagName)).toEqual(['TH', 'TH', 'TH'])
+    expect(marks.map((m) => m.textContent)).toEqual(['Name', 'Owner', 'Status'])
+  })
+})
+
+describe('artifact bridge: CSS Custom Highlight API', () => {
+  let h: Harness
+  const H2 = 'body > div:nth-of-type(1) > h2:nth-of-type(1)'
+
+  function highlights(): Map<string, FakeHighlight> {
+    return (h.window as unknown as { CSS: { highlights: Map<string, FakeHighlight> } }).CSS.highlights
+  }
+
+  beforeEach(async () => {
+    h = boot({ highlightApi: true })
+    await h.tick()
+  })
+
+  it('paints text comments without changing the document', async () => {
+    const before = h.doc.body.innerHTML
+    await h.apply([{ id: 'c1', selector: H2, quote: 'Revenue rose sharply' }])
+
+    expect(h.doc.body.innerHTML).toBe(before)
+    expect(highlights().get('ciao-comment')?.ranges[0].toString()).toMatch(/Revenue\s+rose sharply/)
+    // The pseudo-element is styled, or the highlight would be invisible.
+    const style = h.doc.querySelector('style[data-ciao-bridge-style]')?.textContent ?? ''
+    expect(style).toContain('::highlight(ciao-comment)')
+
+    await h.apply([])
+    expect(highlights().has('ciao-comment')).toBe(false)
+  })
+
+  it('opens the comment under a click on a painted range and consumes the click', async () => {
+    await h.apply([{ id: 'c1', selector: H2, quote: 'Revenue rose sharply' }])
+    h.posted.length = 0
+
+    const hit = new h.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 30, clientY: 30 })
+    h.doc.querySelector('h2')!.dispatchEvent(hit)
+    expect(hit.defaultPrevented).toBe(true)
+    expect(h.posted.filter((p) => p.action === 'open').map((p) => p.id)).toEqual(['c1'])
+
+    const miss = new h.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 500, clientY: 500 })
+    h.doc.querySelector('h2')!.dispatchEvent(miss)
+    expect(miss.defaultPrevented).toBe(false)
+    expect(h.posted.filter((p) => p.action === 'open')).toHaveLength(1)
+  })
+
+  it('leaves controls and bare space inside a commented span clickable', async () => {
+    // A range that contains whole elements reports their full border boxes
+    // from getClientRects, so hit-testing the comment's one big range took
+    // every click anywhere in the commented paragraphs, buttons included.
+    const multi = boot({
+      highlightApi: true,
+      html: `<!DOCTYPE html><html><head></head><body>
+        <div id="box"><p>Alpha text</p><p>Beta <button>Go</button> text</p></div>
+      </body></html>`,
+    })
+    await multi.tick()
+    const BORDER_BOX = { left: 0, right: 2000, top: 0, bottom: 2000, width: 2000, height: 2000, x: 0, y: 0, toJSON: () => ({}) }
+    multi.window.Range.prototype.getClientRects = function (this: Range) {
+      const textOnly = this.startContainer === this.endContainer && this.startContainer.nodeType === 3
+      return [textOnly ? BOX : BORDER_BOX]
+    } as unknown as Range['getClientRects']
+    const text = multi.doc.getElementById('box')!.textContent!
+    await multi.apply([{ id: 'c1', selector: '#box', quote: text.replace(/\s+/g, ' ').trim(), startOffset: 0, endOffset: text.length }])
+    multi.posted.length = 0
+
+    const button = multi.doc.querySelector('button')!
+    let pressed = 0
+    button.addEventListener('click', () => pressed++)
+    const onButton = new multi.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 500, clientY: 500 })
+    button.dispatchEvent(onButton)
+    expect(onButton.defaultPrevented).toBe(false)
+    expect(pressed).toBe(1)
+
+    // Bare space in the paragraph, away from any of its text.
+    const onSpace = new multi.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 500, clientY: 500 })
+    multi.doc.querySelectorAll('p')[1].dispatchEvent(onSpace)
+    expect(onSpace.defaultPrevented).toBe(false)
+    expect(multi.posted.filter((p) => p.action === 'open')).toHaveLength(0)
+
+    // The text itself still opens the comment.
+    const onText = new multi.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 30, clientY: 30 })
+    multi.doc.querySelectorAll('p')[0].dispatchEvent(onText)
+    expect(multi.posted.filter((p) => p.action === 'open').map((p) => p.id)).toEqual(['c1'])
+  })
+
+  it('paints the draft but never opens it on click', async () => {
+    await h.apply([{ id: '__draft__', selector: H2, quote: 'Revenue rose sharply', draft: true }])
+    expect(highlights().get('ciao-comment')?.ranges).toHaveLength(1)
+
+    const click = new h.window.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 30, clientY: 30 })
+    h.doc.querySelector('h2')!.dispatchEvent(click)
+    expect(click.defaultPrevented).toBe(false)
+    expect(h.posted.filter((p) => p.action === 'open')).toHaveLength(0)
+  })
+
+  it('shows a pointer over painted text', async () => {
+    // ::highlight cannot set a cursor, so the bridge hit-tests on mousemove.
+    await h.enable()
+    await h.apply([{ id: 'c1', selector: H2, quote: 'Revenue rose sharply' }])
+    const root = h.doc.documentElement
+    h.doc.querySelector('h2')!.dispatchEvent(new h.window.MouseEvent('mousemove', { bubbles: true, clientX: 30, clientY: 30 }))
+    await h.tick(50)
+    expect(root.classList.contains('ciao-comment-hover')).toBe(true)
+
+    h.doc.body.dispatchEvent(new h.window.MouseEvent('mousemove', { bubbles: true, clientX: 500, clientY: 500 }))
+    await h.tick(50)
+    expect(root.classList.contains('ciao-comment-hover')).toBe(false)
+  })
+
+  it('still outlines whole-element anchors', async () => {
+    await h.apply([{ id: 'c2', selector: 'body > svg:nth-of-type(1) > rect:nth-of-type(1)', quote: '', wholeElement: true }])
+    expect(h.doc.querySelector('rect')?.getAttribute('class')).toContain('ciao-comment-el')
   })
 })
 
@@ -273,20 +732,11 @@ describe('artifact bridge: selection anchoring', () => {
     const range = h.doc.createRange()
     range.setStart(ps[0].firstChild as Node, 6)
     range.setEnd(ps[1].firstChild as Node, 6)
-    const sel = h.window.getSelection()
-    sel?.removeAllRanges()
-    sel?.addRange(range)
-
     h.posted.length = 0
-    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
-    await h.tick(250)
+    await h.select(range)
 
-    const pill = h.doc.getElementById('ciao-comment-pill')
-    expect(pill, 'the Comment pill should float for a cross-element selection').not.toBeNull()
-    pill?.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }))
-
-    const payload = h.posted.find((p) => p.action === 'compose') as Record<string, string | number>
-    expect(payload).toBeDefined()
+    const payload = selections(h)[0] as Record<string, string | number>
+    expect(payload, 'a cross-element selection should be reported').toBeDefined()
     expect(payload.selector).toBe('body > div:nth-of-type(1)')
 
     // The offsets must address the quote inside the element they are stored
@@ -307,30 +757,6 @@ describe('artifact bridge: selection anchoring', () => {
       },
     ])
     expect(h.doc.querySelectorAll('mark.ciao-comment-mark')).toHaveLength(2)
-  })
-
-  it('gives the Comment pill a 44px touch box', async () => {
-    // On touch the pill is how a selection becomes a comment, and 13px text
-    // plus padding alone made it ~24px tall (AGENTS.md touch-target rule).
-    // jsdom has no layout, so this asserts the rule reaches the element
-    // rather than a measured height.
-    const h = boot()
-    await h.tick()
-    await h.enable()
-    const ps = h.doc.querySelectorAll('.card p')
-    const range = h.doc.createRange()
-    range.selectNodeContents(ps[0])
-    const sel = h.window.getSelection()
-    sel?.removeAllRanges()
-    sel?.addRange(range)
-    h.doc.dispatchEvent(new h.window.Event('selectionchange'))
-    await h.tick(250)
-
-    const pill = h.doc.getElementById('ciao-comment-pill')
-    expect(pill).not.toBeNull()
-    const style = h.window.getComputedStyle(pill as Element)
-    expect(style.minHeight).toBe('44px')
-    expect(style.minWidth).toBe('44px')
   })
 
   it('posts a whole-element anchor on Alt+Click, textless nodes included', async () => {

@@ -197,6 +197,7 @@ carried by the session.
   `/api/workspace-open`, and starting a `system_setting` needs-you card (which runs `open` on a constant System Settings URL), check the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
+- **Usage statistics are session-gated and workspace-checked.** `GET /api/stats` is an ordinary session-gated route, not loopback-only; its `workspace` query value is checked against the registry. The `usage_stats` agent operation is principal-scoped and takes no workspace argument. Both return aggregates, project names and ids only, never transcript text.
 
 - **Memory handover widens what unattended text can reach.** At `memory_handover: all`
   (operator-only, `PATCH /api/workspaces/{name}`), the nightly run may accept a
@@ -213,6 +214,8 @@ carried by the session.
   vault being written. A run that can already execute shell could end and retake
   its lease to reset the cap, as it could edit the registry; the file-tool deny
   patterns and the operator's Undo are the remaining controls.
+
+- **MCP on/off writes provider config (`POST /api/mcp/servers/enabled`).** It is gated like `PATCH /api/workspaces/{name}`: the session cookie and the same-origin check, with no agent bearer token. It takes no path from the client; the workspace root and the environment give the paths. It writes only Claude Code's `disabledMcpServers` list in the global config's project entry for the workspace folder, or the OpenCode `disabled`/`enabled` flag on one server entry. It takes Claude Code's `.claude.json.lock` without stealing it, and makes a one-time owner-only (0600) `.ciao-bak` copy before the first write.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.

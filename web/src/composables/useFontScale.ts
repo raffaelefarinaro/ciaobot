@@ -9,6 +9,10 @@ import { ref, type Ref } from 'vue'
  * back to both the CSS variable and localStorage, and clamps to a sensible
  * range so the UI stays usable at the extremes.
  *
+ * The default is the platform's 16px body, not a designed 120%: the body token
+ * is 14px, so 14 × 1.15 = 16.1px — the same size the phone composer renders.
+ * A stored scale still wins; this only sets what a fresh install starts from.
+ *
  * Settings has +/- buttons that adjust by ±0.05; the global keyboard shortcuts
  * (Cmd/Ctrl+Shift+= and Cmd/Ctrl+Shift+-) do the same. The percentage that
  * Settings displays (100% at DEFAULT) is a UI detail of Settings, not of the
@@ -23,7 +27,7 @@ import { ref, type Ref } from 'vue'
  * what actually makes the two surfaces agree.
  */
 
-export const DEFAULT_FONT_SCALE = 1.2
+export const DEFAULT_FONT_SCALE = 1.15
 export const MIN_FONT_SCALE = 0.8
 export const MAX_FONT_SCALE = 1.5
 /** Step used by Settings +/- buttons and the global zoom shortcuts. */

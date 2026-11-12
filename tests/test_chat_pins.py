@@ -10,6 +10,7 @@ agree with itself about a field the registry never persisted.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -710,6 +711,219 @@ def test_pin_patch_rejects_a_type_the_viewer_would_not_serve(tmp_path: Path) -> 
 
     assert response.status_code == 415
     assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+def test_pin_patch_pins_a_folder_named_with_a_trailing_slash(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "reports").mkdir()
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"] == (
+        (tmp_path / "reports").resolve().as_posix() + "/"
+    )
+    assert response.json()["pin_revision"] == 1
+
+    # The absolute form of the same folder is the same identity: a no-op.
+    again = client.patch(
+        f"/api/chats/{chat.chat_id}",
+        json=_pin_body((tmp_path / "reports").as_posix() + "/", 1),
+    )
+    assert again.status_code == 200
+    assert again.json()["pin_revision"] == 1
+
+
+def test_unpinning_a_folder_dismisses_it_and_repinning_clears_it(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "reports").mkdir()
+    client = _make_client(manager)
+    folder = (tmp_path / "reports").resolve().as_posix() + "/"
+    client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0))
+
+    closed = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("", 1))
+    assert closed.json()["pinned_file_path"] == ""
+    assert closed.json()["dismissed_pin_paths"] == [folder]
+
+    repinned = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 2))
+    assert repinned.json()["pinned_file_path"] == folder
+    assert repinned.json()["dismissed_pin_paths"] == []
+
+
+def test_stale_folder_pin_is_409(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "reports").mkdir()
+    client = _make_client(manager)
+    client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0))
+
+    stale = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0))
+
+    assert stale.status_code == 409
+    assert stale.json()["error"] == "pin_revision_conflict"
+
+
+def test_folder_pin_outside_the_chat_roots_is_403(
+    tmp_path: Path, tmp_path_factory
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    other = tmp_path_factory.mktemp("elsewhere")
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body(other.as_posix() + "/", 0)
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "outside_roots"}
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+def test_folder_pin_through_a_symlink_out_is_403(
+    tmp_path: Path, tmp_path_factory
+) -> None:
+    """The link sits inside the chat's root, so only resolving it can refuse the pin."""
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    other = tmp_path_factory.mktemp("elsewhere")
+    (tmp_path / "link").symlink_to(other, target_is_directory=True)
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("link/", 0))
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "outside_roots"}
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+def test_folder_pin_of_a_file_is_400(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "note.md").write_text("n", encoding="utf-8")
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("note.md/", 0))
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "not_a_directory"
+
+
+def test_folder_pin_of_a_missing_folder_is_404(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("nope/", 0))
+
+    assert response.status_code == 404
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is a separator on Windows")
+def test_trailing_backslash_is_a_filename_on_posix(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "reports").mkdir()
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports\\", 0))
+
+    assert response.status_code == 404
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+def test_folder_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> None:
+    """macOS puts U+202F in screenshot names; the browser lists such folders, so pins must take them."""
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "Shot\u202fA").mkdir()
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body("Shot\u202fA/", 0)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"].endswith("Shot\u202fA/")
+
+
+# macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
+SHOT = "Screenshot 2026-11-10 at 10.15.30\u202fAM"
+
+
+def test_file_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    target = tmp_path / f"{SHOT}.md"
+    target.write_text("n", encoding="utf-8")
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body(target.as_posix(), 0)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"] == target.resolve().as_posix()
+
+
+def test_chat_file_path_resolves_a_screenshot_name(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / f"{SHOT}.png").write_bytes(b"png")
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, workspace: root)
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": f"{SHOT}.png"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (root / f"{SHOT}.png").as_posix()}
+
+
+def test_control_character_in_a_file_pin_is_400(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    client = _make_client(manager)
+
+    response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("no\x01te.md", 0))
+
+    assert response.status_code == 400
+    assert manager.get_chat(chat.chat_id).pinned_file_path == ""
+
+
+def test_folder_pin_inside_the_linked_repo(tmp_path: Path, tmp_path_factory) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    repo = tmp_path_factory.mktemp("linked-repo")
+    manager.get_project(chat.project_id).repo_path = str(repo)
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body(repo.as_posix() + "/", 0)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"] == repo.resolve().as_posix() + "/"
+
+
+def test_control_character_in_a_folder_pin_is_400(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "reports").mkdir()
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}", json=_pin_body("re\x01ports/", 0)
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "pin.path contains characters that cannot be a path"
 
 
 def test_stale_pin_patch_returns_409_with_current_state(tmp_path: Path) -> None:

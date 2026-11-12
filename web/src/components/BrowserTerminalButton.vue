@@ -14,11 +14,12 @@
  * never an empty box; a chat with a linked repository asks which folder.
  */
 import { useTerminalStore } from '../stores/terminal'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{
   chatId?: string
   projectId?: string
-  /** `row`: a full-width rail row with the prompt glyph, for Chat details. */
+  /** `row`: the Terminal row of Chat details' Open section. */
   variant?: 'link' | 'row'
 }>()
 
@@ -36,10 +37,13 @@ async function open(): Promise<void> {
 </script>
 
 <template>
-  <button v-if="variant === 'row'" type="button" class="terminal-row" @click="open">
-    <span class="terminal-row-glyph" aria-hidden="true">›_</span>
-    <span>Open terminal</span>
-    <span class="terminal-row-arrow" aria-hidden="true">→</span>
+  <button v-if="variant === 'row'" type="button" class="cd-row cd-row--link terminal-row" aria-label="Open terminal" @click="open">
+    <AppIcon class="cd-icon" name="terminal" />
+    <span class="cd-main">
+      <span class="cd-primary">Terminal</span>
+      <span class="cd-detail">Shell on the engine's computer</span>
+    </span>
+    <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
   </button>
   <button v-else type="button" class="terminal-button" @click="open">Open in Terminal</button>
 </template>
@@ -61,31 +65,8 @@ async function open(): Promise<void> {
 }
 .terminal-button:hover { text-decoration-color: currentColor; }
 .terminal-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
-/* One bordered row that is its own label, so the rail does not say
-   "Terminal" twice. The glyph is the prompt mark background runs use. */
-.terminal-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  min-height: 36px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-.terminal-row:hover { border-color: var(--border-strong); background: var(--bg3); }
-.terminal-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.terminal-row-glyph { color: var(--fg3); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 600; }
-.terminal-row-arrow { margin-left: auto; color: var(--fg3); }
-.terminal-row:hover .terminal-row-arrow { color: var(--fg); }
 @media (pointer: coarse) {
   .terminal-button { min-height: var(--touch); min-width: var(--touch); }
-  .terminal-row { min-height: var(--touch); }
 }
 </style>
+<style scoped src="./chatDetails.css"></style>

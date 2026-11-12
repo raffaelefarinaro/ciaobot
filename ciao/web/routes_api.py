@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
@@ -38,6 +39,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.claude_trim import catalog_payload
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import host_terminal
@@ -45,6 +47,7 @@ from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_predictions
 from ciao import service_backend
+from ciao import transcripts
 from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
@@ -189,8 +192,6 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
             raise ValueError("file too large")
 
 
-_STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
-
 # Labels and example chips for the two account names that predate the account
 # registry. Nothing creates them any more — a fresh install starts with no
 # Google account — but an install that already has one keeps its wording.
@@ -279,6 +280,8 @@ def _workspaces_payload(config) -> dict:
         # What a workspace that never chose a File access scope runs under on
         # this engine. The PWA labels its "Default" option from this value.
         "default_agent_fs_scope": default_agent_fs_scope(),
+        # Catalog the Settings trim card renders; engine-owned so the PWA never restates defaults.
+        "claude_trim_options": catalog_payload(),
     }
 
 
@@ -2482,10 +2485,11 @@ def _chat_pin_request(body: dict) -> tuple[str, int]:
     raw_path = pin.get("path")
     if not isinstance(raw_path, str):
         raise ValueError("pin.path must be a string")
-    if "\x00" in raw_path or not raw_path.isprintable():
-        # Rejected here rather than left to the resolver: an empty path skips
-        # the resolver entirely, so this check has to live here for it to hold
-        # for both branches.
+    if any(unicodedata.category(c) == "Cc" for c in raw_path):
+        # Control characters only (NUL included), matching the folder listing.
+        # `str.isprintable()` would also refuse U+202F, the space macOS puts in
+        # screenshot names, so a folder the browser lists could not be pinned.
+        # The empty-path branch skips the resolver, so this check lives here.
         raise ValueError("pin.path contains characters that cannot be a path")
     revision = pin.get("expected_revision")
     # bool is an int subclass, so `True` must not be read as revision 1.
@@ -2613,9 +2617,6 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
-    code_mode = body.get("code_mode")
-    if code_mode is not None and not isinstance(code_mode, bool):
-        return JSONResponse({"error": "code_mode must be a boolean"}, status_code=400)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2626,8 +2627,6 @@ async def chat_detail(request: Request) -> Response:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
-        if chat is not None and code_mode is not None:
-            chat = pcm.set_code_mode(chat_id, code_mode, actor="user")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2642,6 +2641,7 @@ async def _chat_pin_patch(
 
     Sets or closes the chat's pinned file. Reuses the existing signed-session,
     origin-gated route: pins get no new endpoint and no auth exception.
+    A path ending in a slash pins a folder instead (see the branch below).
 
     Ordering is deliberate. Shape first (400), then existence (404) *before*
     any filesystem probing, then the resolver, and only then the write: a
@@ -2661,14 +2661,28 @@ async def _chat_pin_patch(
 
     path = ""
     if raw_path:
-        resolved = _resolve_pin_path(
-            request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
-        )
-        if isinstance(resolved, Response):
-            return resolved
-        # Store the canonical absolute POSIX identity: relative and `~` forms
-        # would not match a later surface or dismissal of the same file.
-        path = resolved.as_posix()
+        if raw_path.endswith(("/", "\\")):
+            # A trailing slash pins a folder: confined to the roots the folder
+            # browser lists (GET /api/workspace-dir?chat_id=), stored with one
+            # trailing "/" so every client can tell it from a file pin.
+            chat = pcm.get_chat(chat_id)  # non-None: checked above
+            candidates = _chat_dir_root_candidates(request.app.state.config, pcm, chat)
+            folder: tuple[Path, tuple[str, Path]] | Response = await asyncio.to_thread(
+                lambda: _resolve_dir_target(_distinct_dir_roots(candidates), raw_path)
+            )
+            if isinstance(folder, Response):
+                return folder
+            posix = folder[0].as_posix()
+            path = posix if posix.endswith("/") else f"{posix}/"
+        else:
+            resolved = _resolve_pin_path(
+                request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
+            )
+            if isinstance(resolved, Response):
+                return resolved
+            # Store the canonical absolute POSIX identity: relative and `~` forms
+            # would not match a later surface or dismissal of the same file.
+            path = resolved.as_posix()
 
     try:
         # Raises ChatPinConflictError before mutating anything when the quoted
@@ -3667,7 +3681,7 @@ def _is_same_chat_target(requested: str, found: Path) -> bool:
     return [p.lower() for p in found.parts[-count:]] == [p.lower() for p in wanted.parts]
 
 
-def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
+def _resolve_chat_file(roots: list[Path], raw: str, *, fuzzy: bool = True) -> Path | Response:
     """Resolve a chat link against the chat's own roots only.
 
     Each root is tried on its own, exact matches before fuzzy ones, so a
@@ -3682,6 +3696,8 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
         result = _resolve_workspace_path([root], raw, allow_fuzzy=False)
         if not isinstance(result, Response) or result.status_code != 404:
             return result
+    if not fuzzy:
+        return JSONResponse({"error": "not found"}, status_code=404)
     requested = _LINE_SUFFIX_RE.sub("", raw)
     fuzzy_roots = [
         root for index, root in enumerate(roots)
@@ -3697,17 +3713,19 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
-async def chat_file_path(request: Request) -> Response:
-    """Canonical file identity for a link emitted in a chat's workspace.
+async def _resolve_in_chat(
+    request: Request, chat_id: str, *, fuzzy: bool = True
+) -> Path | Response:
+    """Resolve the request's ``path`` the way *chat_id*'s file links resolve.
 
-    Resolves against the chat's agent root and its workspace vault root, and
-    nothing else. A missing file must not match a same-named file in another
-    workspace, so fuzzy matching is confined to those two roots. Absolute
-    paths retain the viewer's existing policy.
+    A relative path anchors to the chat's agent root, then its workspace vault
+    root, and fuzzy matching (when *fuzzy*) stays inside those roots. This is
+    anchoring, not confinement: an absolute or ``..`` path follows the viewers'
+    existing no-sandbox policy (``_resolve_workspace_path``). ``fuzzy=False``
+    skips the directory walk and answers 404 when no exact match exists.
     """
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
-    chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     workspace = pcm._workspace_for_chat(chat_id)
@@ -3716,15 +3734,170 @@ async def chat_file_path(request: Request) -> Response:
         config.workspace_vault_root(workspace).resolve(),
     ]))
     # The fuzzy pass walks the directory tree, so it runs off the event loop.
-    result = await asyncio.to_thread(
-        _resolve_chat_file, roots, request.query_params.get("path", "").strip()
+    return await asyncio.to_thread(
+        _resolve_chat_file, roots, request.query_params.get("path", "").strip(), fuzzy=fuzzy
     )
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
+    """
+    result = await _resolve_in_chat(request, request.path_params["chat_id"])
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
     if result.suffix.lower() not in extensions:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
     return JSONResponse({"path": result.as_posix()})
+
+
+# The folder browser's listing. Unlike the file viewers above, browsing is
+# confined to named roots: a listing route that followed any absolute path
+# would let a session walk the whole disk one folder at a time.
+_WORKSPACE_DIR_MAX_ENTRIES = 2000
+
+
+def _distinct_dir_roots(candidates: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Resolve each candidate root; drop missing ones and any nested in an earlier root."""
+    kept: list[tuple[str, Path]] = []
+    for name, raw in candidates:
+        try:
+            root = raw.expanduser().resolve()
+        except (OSError, ValueError):
+            continue
+        if not root.is_dir():
+            continue
+        if any(root == prev or root.is_relative_to(prev) for _, prev in kept):
+            continue
+        kept.append((name, root))
+    return kept
+
+
+def _resolve_dir_target(
+    roots: list[tuple[str, Path]], raw: str
+) -> tuple[Path, tuple[str, Path]] | Response:
+    """Resolve and classify a folder path against the browsable roots; shared by the listing and folder pins."""
+    if any(unicodedata.category(c) == "Cc" for c in raw):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    raw = _LINE_SUFFIX_RE.sub("", raw.strip())
+    if not roots:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        if raw == "":
+            target = roots[0][1]
+        else:
+            candidate = Path(raw).expanduser()
+            if candidate.is_absolute():
+                target = candidate.resolve()
+            else:
+                target = (roots[0][1] / candidate).resolve()
+                for _, root in roots:
+                    if (root / candidate).exists():
+                        target = (root / candidate).resolve()
+                        break
+        if target.is_file():
+            return JSONResponse(
+                {"error": "not_a_directory", "kind": "file", "path": target.as_posix()},
+                status_code=400,
+            )
+        if not target.is_dir():
+            return JSONResponse({"error": "not found"}, status_code=404)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    owner = next(((n, r) for n, r in roots if target == r or target.is_relative_to(r)), None)
+    if owner is None:
+        return JSONResponse({"error": "outside_roots"}, status_code=403)
+    return target, owner
+
+
+def _list_workspace_dir(roots: list[tuple[str, Path]], raw: str) -> dict[str, Any] | Response:
+    """Resolve ``raw`` against the roots and list it, or return the error response."""
+    resolved = _resolve_dir_target(roots, raw)
+    if isinstance(resolved, Response):
+        return resolved
+    target, owner = resolved
+    entries: list[dict[str, Any]] = []
+    try:
+        with os.scandir(target) as scanned:
+            children = list(scanned)
+    except OSError:
+        return JSONResponse({"error": "unreadable"}, status_code=403)
+    for entry in children:
+        if entry.name.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir()
+            st = entry.stat()
+        except OSError:  # broken symlink or vanished entry
+            continue
+        entries.append({
+            "name": entry.name,
+            "path": (target / entry.name).as_posix(),
+            "type": "dir" if is_dir else "file",
+            "size": None if is_dir else st.st_size,
+            "mtime": int(st.st_mtime),
+            "ext": "" if is_dir else Path(entry.name).suffix.lower().lstrip("."),
+        })
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].casefold(), e["name"]))
+    limit = _WORKSPACE_DIR_MAX_ENTRIES
+    return {
+        "path": target.as_posix(),
+        "root": {"name": owner[0], "path": owner[1].as_posix()},
+        "roots": [{"name": n, "path": r.as_posix()} for n, r in roots],
+        "parent": None if target == owner[1] else target.parent.as_posix(),
+        "entries": entries[:limit],
+        "truncated": len(entries) > limit,
+    }
+
+
+def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
+    """The chat's browsable roots: its agent root, workspace vault and linked repo.
+
+    Shared by the folder listing and folder pins, so the tile can never pin a
+    folder the browser would refuse to list.
+    """
+    workspace = pcm._workspace_for_chat(chat.chat_id)
+    try:
+        agent_root = config.agent_root(workspace)
+    except ValueError:  # no registered workspace name
+        agent_root = config.workspace_root
+    candidates: list[tuple[str, Path]] = [("workspace", agent_root)]
+    try:
+        candidates.append(("vault", config.workspace_vault_root(workspace)))
+    except ValueError:  # unresolvable vault: browse without it
+        pass
+    project = pcm.get_project(chat.project_id)
+    if project is not None and project.repo_path:
+        candidates.append(("repo", Path(project.repo_path)))
+    return candidates
+
+
+async def workspace_dir(request: Request) -> Response:
+    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`)."""
+    config = request.app.state.config
+    chat_id = request.query_params.get("chat_id", "").strip()
+    candidates: list[tuple[str, Path]]
+    if chat_id:
+        pcm = request.app.state.project_chat_manager
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "chat not found"}, status_code=404)
+        candidates = _chat_dir_root_candidates(config, pcm, chat)
+    else:
+        allowed = _allowed_roots(config)
+        candidates = [("workspace", allowed[0])] + [("vault", r) for r in allowed[1:2]]
+    roots = _distinct_dir_roots(candidates)
+    result = await asyncio.to_thread(
+        _list_workspace_dir, roots, request.query_params.get("path", "")
+    )
+    if isinstance(result, Response):
+        return result
+    return JSONResponse(result)
 
 
 async def system_prompt(request: Request) -> Response:
@@ -5200,11 +5373,23 @@ async def workspace_image(request: Request) -> Response:
 
     Used by the markdown viewer to resolve relative image references (e.g.
     ``![alt](images/foo.png)`` inside a vault doc) against the doc's folder.
+
+    With ``chat_id`` a relative path anchors to that chat's agent and vault
+    roots (``_resolve_in_chat``) instead of ``workspace_root``, exactly, with
+    no fuzzy walk: a chat message's embedded image
+    (``![shot](memory-vault/x.png)``) is served this way, and a message full of
+    made-up image paths must not trigger directory walks. This anchors; it
+    does not confine: absolute and ``..`` paths follow the same no-sandbox
+    policy as without ``chat_id``.
     """
-    config = request.app.state.config
-    raw = request.query_params.get("path", "").strip()
-    roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    chat_id = request.query_params.get("chat_id", "").strip()
+    result: Path | Response
+    if chat_id:
+        result = await _resolve_in_chat(request, chat_id, fuzzy=False)
+    else:
+        roots = _allowed_roots(request.app.state.config)
+        raw = request.query_params.get("path", "").strip()
+        result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
     if isinstance(result, Response):
         return result
     resolved = result
@@ -6435,7 +6620,11 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
-    return JSONResponse(await asyncio.to_thread(setup_status, request.app.state.config))
+    payload = await asyncio.to_thread(setup_status, request.app.state.config)
+    payload["native_bootstrap"] = (
+        getattr(request.app.state, "native_bootstrap", None) is not None
+    )
+    return JSONResponse(payload)
 
 
 
@@ -7539,6 +7728,23 @@ def _forbidden_host(request: Request) -> JSONResponse | None:
     return JSONResponse({"error": "forbidden host"}, status_code=403)
 
 
+async def _drain_owner(request: Request) -> str | None:
+    """The ``owner`` an update's drain carries, or None for a manual caller.
+
+    The body is optional and has always been empty, so a missing, empty or
+    malformed document is "no owner" rather than a refusal: an older updater
+    must keep working exactly as it did.
+    """
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    owner = body.get("owner")
+    return owner if isinstance(owner, str) and owner else None
+
+
 async def admin_drain(request: Request) -> JSONResponse:
     """Close admission for new turns (update drain); loopback-only, no session.
 
@@ -7547,6 +7753,10 @@ async def admin_drain(request: Request) -> JSONResponse:
     began cannot extend the downtime it is waiting out. The active chat IDs
     come back in the same response the engine already publishes, so the caller
     does not have to make a second request to find out what it is waiting for.
+
+    An optional ``{"owner": "<operation id>"}`` body names the operation the
+    drain belongs to, which is what lets only that owner cancel it. Without one
+    the drain is the manual drain it has always been.
 
     Refused while a Settings restart is already draining: that restart owns the
     same flag, and taking it over would let the update's cancel reopen
@@ -7559,10 +7769,11 @@ async def admin_drain(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    owner = await _drain_owner(request)
     if pcm.restart_draining and not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"error": "a restart is already draining"}, status_code=409)
     request.app.state.update_drain_active = True
-    pcm.begin_restart_drain()
+    pcm.begin_restart_drain(owner or "")
     return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
 
 
@@ -7574,6 +7785,10 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     meant to enable. Only an update's own drain is cancelled: one that is not
     the engine's to cancel is left exactly as it is and reported as such, so a
     caller cannot reopen admission under a pending Settings restart.
+
+    A body naming a different ``owner`` is refused with 409 and changes
+    nothing: the drain belongs to that operation, and reopening it here would
+    let a stale or unrelated caller drop a claim newer work is counting on.
     """
     refusal = _forbidden_host(request)
     if refusal is not None:
@@ -7581,10 +7796,22 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    owner = await _drain_owner(request)
     if not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"draining": pcm.restart_draining})
+    # An owned claim is not reopened by an ownerless caller: a bodyless cancel
+    # is how the manual path cancels its own drain, and during a claimed update
+    # it is exactly the steal the owner token exists to refuse.
+    claimed_owner = str(getattr(pcm, "drain_owner", "") or "")
+    if claimed_owner and owner != claimed_owner:
+        return JSONResponse(
+            {"error": "drain owned by another operation"}, status_code=409
+        )
+    if not pcm.cancel_restart_drain(owner):
+        return JSONResponse(
+            {"error": "drain owned by another operation"}, status_code=409
+        )
     request.app.state.update_drain_active = False
-    pcm.cancel_restart_drain()
     return JSONResponse({"draining": False})
 
 
@@ -8372,14 +8599,29 @@ async def debug_issues(request: Request) -> JSONResponse:
     return JSONResponse(report)
 
 
-async def cli_stats(request: Request) -> JSONResponse:
-    """Return Claude Code CLI stats from ~/.claude/stats-cache.json."""
-    if not _STATS_CACHE_PATH.exists():
-        return JSONResponse({"error": "stats-cache.json not found"}, status_code=404)
+async def usage_stats_endpoint(request: Request) -> JSONResponse:
+    """Usage statistics for one workspace: ``?workspace=<name>&range=7|30|90|365``.
+
+    Computed by :mod:`ciao.usage_stats` from the stores that already exist.
+    The registry facts are copied here on the event loop; the file reads run in
+    a worker thread. Completed days are cached in memory, today is live.
+    """
+    from ciao import usage_stats
+
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse(
+            {"error": "workspace must name a registered workspace"}, status_code=400
+        )
     try:
-        data = json.loads(_STATS_CACHE_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return JSONResponse({"error": "failed to read stats"}, status_code=500)
+        range_days = usage_stats.parse_range(request.query_params.get("range"))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    sources = usage_stats.snapshot_sources(
+        config, request.app.state.project_chat_manager, workspace
+    )
+    data = await asyncio.to_thread(usage_stats.compute_usage_stats, sources, range_days)
     return JSONResponse(data)
 
 
@@ -8495,7 +8737,47 @@ def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
         "undoable": is_undoable(receipt),
         "changed": bool(receipt.get("changed", True)),
         "ts": str(receipt.get("ts", "")),
+        # The turns this write cited, when the fact was extracted from a
+        # transcript. The receipt records them verbatim under ``provenance``
+        # (see ``_provenance_row``); History uses the first one to open the
+        # archive where the fact starts. A receipt with no citation — an
+        # operator edit, an import from another agent — carries an empty list,
+        # which is how the row can say the source is not pointed at a turn
+        # rather than pointing at turn 1.
+        "source_turns": _cited_turns(receipt),
     }
+
+
+def _cited_turns(receipt: dict[str, Any]) -> list[int]:
+    """The transcript turns a receipt's evidence names, in order.
+
+    Two shapes carry one: a region write records ``provenance.source_message_ids``
+    (:class:`ciao.fact_candidates.FactCandidate`), and a learning records the
+    ``sources``/``observations`` it was filed from. Both are read so a row can
+    point at a turn whichever write produced it.
+
+    Only positive integers are kept. ``source_message_ids`` is typed as
+    ``tuple[int, ...]``, and a malformed value must not become a line number in
+    the viewer — a link to the wrong line asserts the wrong evidence.
+    """
+    turns: list[int] = []
+
+    def take(values: Any) -> None:
+        for value in values if isinstance(values, (list, tuple)) else ():
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                turns.append(value)
+
+    provenance = receipt.get("provenance")
+    if isinstance(provenance, dict):
+        take(provenance.get("source_message_ids"))
+    for key in ("sources", "observations"):
+        rows = receipt.get(key)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                take([row.get("turn")])
+    return turns
 
 
 #: A retirement is reversible, but not by an undo: the note went to the review
@@ -8753,6 +9035,49 @@ def _source_index(config: Any) -> dict[str, str]:
     return index
 
 
+def _first_cited_turn(row: dict[str, Any]) -> int:
+    """The turn this decision's write cited, or ``0`` when it cited none."""
+    change = row.get("change")
+    if not isinstance(change, dict):
+        return 0
+    turns = change.get("source_turns")
+    if not isinstance(turns, list) or not turns:
+        return 0
+    first = turns[0]
+    return first if isinstance(first, int) and first > 0 else 0
+
+
+def _attach_source_line(
+    row: dict[str, Any], path: str, turn: int, archives: dict[str, str]
+) -> None:
+    """Point the row at the line where its cited turn starts.
+
+    ``source_turn``/``source_line`` are ABSENT — not zero — when the archive
+    cannot be read or no longer parses a turn with that number, which is what
+    lets History fall back to opening the file at the top and say nothing it
+    cannot back up. A transcript an operator edited by hand is exactly the case
+    where a wrong line would be worse than no line.
+
+    Runs off the event loop (:func:`asyncio.to_thread`), and reads each archive
+    at most once per request.
+    """
+    if not path.lower().endswith(".md"):
+        return
+    text = archives.get(path)
+    if text is None:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        archives[path] = text
+    if not text:
+        return
+    line = transcripts.archive_turn_line(text, turn)
+    if line:
+        row["source_turn"] = turn
+        row["source_line"] = line
+
+
 async def proposals_history(request: Request) -> JSONResponse:
     """Every recorded proposal decision across workspaces, newest first.
 
@@ -8846,10 +9171,18 @@ async def proposals_history(request: Request) -> JSONResponse:
     # resolved, and only once per request. Off the event loop: it lists a
     # directory tree.
     index = await asyncio.to_thread(_source_index, config)
+    # One read per archive per request: two facts from the same chat are the
+    # common case, and a transcript can be a few hundred kilobytes.
+    archives: dict[str, str] = {}
     for row in served:
         path = index.get(str(row.get("source", "")))
         if path:
             row["source_path"] = path
+            turn = _first_cited_turn(row)
+            if turn:
+                await asyncio.to_thread(
+                    _attach_source_line, row, path, turn, archives
+                )
         hint = _restore_hint(row)
         if hint:
             row["reversible_by"] = hint

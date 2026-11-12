@@ -73,6 +73,20 @@ test.describe('the needs-you card', () => {
     await card.getByRole('button', { name: 'Not now', exact: true }).click()
     await expect(page.locator('.needs-you-card')).toHaveCount(0)
   })
+
+  test('Turn off takes the card away', async ({ page }, testInfo) => {
+    await isolate(page, `needs-you-turn-off-${testInfo.workerIndex}`)
+    await raiseSignIn(page)
+    await boot(page, CHAT_PATH, COMPOSER)
+
+    const card = page.locator('.needs-you-card')
+    await expect(card).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Turn off linear' })).toBeVisible()
+    await expect(card.locator('.needs-you-turn-off-scope')).toContainText('OpenCode config file')
+
+    await card.getByRole('button', { name: 'Turn off linear' }).click()
+    await expect(page.locator('.needs-you-card')).toHaveCount(0)
+  })
 })
 
 test.describe('the needs-you card on a phone', () => {

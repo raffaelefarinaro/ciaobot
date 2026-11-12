@@ -146,6 +146,102 @@ describe('LoginView setup wizard tests', () => {
     expect(tourItems.length).toBe(6)
     expect(tourItems[5].text()).toContain('Files, with history.')
     expect(tourItems[5].text()).toContain('Create, preview, edit, and restore workspace files right from the UI.')
+    expect(wrapper.text()).toContain('// tour + local setup')
+    expect(wrapper.text()).toContain('First launch from Terminal')
+  })
+
+  it('hides terminal-only setup content for native bootstrap', async () => {
+    mockApiGet.mockResolvedValue({ configured: false, bootstrap: true, native_bootstrap: true, mode: 'bootstrap', suggested_workspace: null, providers: { claude: { name: 'claude', ok: false, auth: 'missing', command: 'claude auth login', detail: 'Run OAuth' } } })
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
+    expect(wrapper.find('.setup-run-note').exists()).toBe(false)
+    expect(wrapper.find('.setup-tour').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('// tour + local setup')
+    expect(wrapper.find('#setup-password').exists()).toBe(true)
+    expect(wrapper.find('#setup-workspace').element).toHaveProperty('value', '~/Ciaobot')
+    expect(wrapper.text()).toContain('claude auth login')
+  })
+
+  it('latches native mode when a poll first reports it', async () => {
+    let status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: false, suggested_workspace: null as string | null, providers: {} }
+    mockApiGet.mockImplementation(() => Promise.resolve(status))
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const wrapper = await mountLoginView()
+    try {
+      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/ciaobot')
+      status = { ...status, native_bootstrap: true }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
+      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/Ciaobot')
+      status = { ...status, native_bootstrap: false }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
+      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/Ciaobot')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
+  it('keeps native restart copy after an in-flight poll', async () => {
+    const status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: true, suggested_workspace: null, providers: {} }
+    let resolvePoll!: (value: unknown) => void
+    let calls = 0
+    mockApiGet.mockImplementation((path: string) => {
+      if (path !== '/api/setup-status') return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
+      if (++calls === 1) return Promise.resolve(status)
+      return new Promise(resolve => { resolvePoll = resolve })
+    })
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const wrapper = await mountLoginView()
+    try {
+      await wrapper.get('#setup-password').setValue('hunter2')
+      await wrapper.get('#setup-password-confirm').setValue('hunter2')
+      await vi.advanceTimersByTimeAsync(2000)
+      mockApiPost.mockResolvedValue({ ok: true })
+      await wrapper.get('form').trigger('submit.prevent')
+      await nextTick()
+      resolvePoll({ ...status, native_bootstrap: false })
+      await Promise.resolve(); await nextTick()
+      expect(wrapper.text()).toContain('Setup saved. Ciaobot is starting on this Mac.')
+      expect(wrapper.text()).not.toContain('Keep the terminal')
+      expect(wrapper.text()).not.toContain('restarting')
+      expect(wrapper.text()).not.toContain('// ciaobot is loading config ...')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
+  it('uses status suggestions until the user edits the folder', async () => {
+    let status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: true, suggested_workspace: '/first' as string | null, providers: {} }
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/list-dirs')) return Promise.resolve({ path: '/chosen', display_path: '/chosen', parent: '/', dirs: [] })
+      if (path.startsWith('/api/setup/inspect-folder')) return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
+      return Promise.resolve(status)
+    })
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const wrapper = await mountLoginView()
+    const value = () => (wrapper.get('#setup-workspace').element as HTMLInputElement).value
+    try {
+      expect(value()).toBe('/first')
+      status = { ...status, suggested_workspace: '/second' }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(value()).toBe('/second')
+      status = { ...status, suggested_workspace: null }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(value()).toBe('~/Ciaobot')
+      await wrapper.get('#setup-workspace').setValue('/typed')
+      status = { ...status, suggested_workspace: '/third' }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(value()).toBe('/typed')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const pickerWrapper = await mountLoginView()
+    try {
+      await pickerWrapper.get('#setup-workspace-browse').trigger('click')
+      await Promise.resolve(); await nextTick()
+      await pickerWrapper.get('.picker-select').trigger('click')
+      expect((pickerWrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('/chosen')
+      status = { ...status, suggested_workspace: '/fourth' }
+      await vi.advanceTimersByTimeAsync(2000)
+      expect((pickerWrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('/chosen')
+    } finally { pickerWrapper.unmount(); vi.useRealTimers() }
   })
 
   it('hides port and python inputs behind the Advanced toggle', async () => {
@@ -608,6 +704,8 @@ describe('LoginView setup wizard tests', () => {
     const payload = mockApiPost.mock.calls[0][1]
     expect(payload).not.toHaveProperty('push_contact')
     expect(wrapper.text()).toContain('restarting')
+    expect(wrapper.text()).toContain('// ciaobot is loading config ...')
+    expect(wrapper.text()).toContain('Keep the terminal that started it open until it says setup is complete')
   })
 
   it('explains memory during setup without fetching categories or history', async () => {

@@ -39,7 +39,7 @@ function makeNeedsYouByQuestion(store: ReturnType<typeof useProjectStore>, id: s
 }
 
 function ids(rail: ReturnType<typeof useChatRail>): string[] {
-  return rail.items.value.map(i => i.chatId)
+  return rail.items.value.map(i => i.id)
 }
 
 describe('useChatRail', () => {
@@ -74,7 +74,7 @@ describe('useChatRail', () => {
 
     const rail = useChatRail(() => 'gen-1')
     expect(ids(rail)).toEqual(['gen-1', 'early-new', 'early-old', 'late-1'])
-    expect(rail.items.value.find(i => i.chatId === 'late-1')!.tier).toBe('needsYou')
+    expect(rail.items.value.find(i => i.id === 'late-1')!.mark).toBe('needs')
   })
 
   it('keeps the order fixed after a chat moves in the sidebar', () => {

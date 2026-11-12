@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from ciao import agent_paths
 from ciao.web.mcp_inventory import _jsonc_to_json, _shell_prefix, provider_inventory
+
+_key = agent_paths.claude_config_project_key
+
+
+class _NoRuntime:
+    async def provider_mcp_runtime_connections(self, _workspace, _names):
+        return {"claude": {}, "opencode": {}}
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +147,7 @@ async def test_claude_project_local_config_overrides_project_scope(
         '{"mcpServers":{"shared":{"command":"project-command"}}}', encoding="utf-8"
     )
     (home / ".claude.json").write_text(
-        json.dumps({"projects": {str(root): {"mcpServers": {"shared": {"type": "http", "url": "https://local.invalid"}}}}}),
+        json.dumps({"projects": {_key(root): {"mcpServers": {"shared": {"type": "http", "url": "https://local.invalid"}}}}}),
         encoding="utf-8",
     )
 
@@ -189,3 +197,143 @@ async def test_payload_carries_shell_prefix_and_no_example_commands(
         }
     for provider in payload["providers"]:
         assert "setup" not in provider
+
+
+@pytest.mark.asyncio
+async def test_claude_rows_read_disabled_servers_from_the_project_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_PATH", raising=False)
+    home = tmp_path / "home2"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    root = repo / "ws"
+    root.mkdir()
+    (root / ".mcp.json").write_text(
+        '{"mcpServers":{"notion":{"command":"x"},"linear":{"command":"x"}}}', encoding="utf-8"
+    )
+    (home / ".claude.json").write_text(
+        json.dumps({
+            "disabledMcpServers": ["top"],
+            "projects": {_key(repo): {"disabledMcpServers": ["notion", "claude.ai Gmail", "plugin:tg:tg"]}},
+        }),
+        encoding="utf-8",
+    )
+
+    payload = await provider_inventory(
+        workspace="work", agent_root=root,
+        explicitly_denied=set(), manager=_NoRuntime(), claude_available=True,
+        opencode_available=True,
+    )
+    by_name = {row["name"]: row for row in payload["providers"][0]["servers"]}
+    assert by_name["notion"]["enabled"] is False
+    assert by_name["notion"]["applies_to"] == _key(repo)
+    assert by_name["linear"]["enabled"] is True
+    assert by_name["claude.ai Gmail"] == {
+        "name": "claude.ai Gmail", "scope": "claudeai", "source": "provider", "kind": "remote",
+        "enabled": False, "allowed": None, "applies_to": _key(repo), "connections": [],
+    }
+    assert by_name["plugin:tg:tg"]["scope"] == "account"
+    assert by_name["top"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_claude_local_servers_resolve_for_a_subfolder_after_rekeying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_PATH", raising=False)
+    home = tmp_path / "home2"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    root = repo / "ws"
+    root.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps({"projects": {_key(repo): {"mcpServers": {"local1": {"command": "x"}}}}}),
+        encoding="utf-8",
+    )
+
+    payload = await provider_inventory(
+        workspace="work", agent_root=root,
+        explicitly_denied=set(), manager=_NoRuntime(), claude_available=True,
+        opencode_available=True,
+    )
+    by_name = {row["name"]: row for row in payload["providers"][0]["servers"]}
+    assert by_name["local1"]["scope"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_opencode_v2_enabled_key_is_ignored_and_rows_carry_their_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "opencode.json").write_text(
+        json.dumps({"mcp": {"servers": {
+            "a": {"type": "local", "command": ["x"], "enabled": False},
+            "b": {"type": "local", "command": ["x"], "disabled": True},
+        }}}),
+        encoding="utf-8",
+    )
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "opencode.json").write_text(
+        json.dumps({"mcp": {"c": {"type": "local", "command": ["x"], "enabled": False}}}),
+        encoding="utf-8",
+    )
+
+    payload = await provider_inventory(
+        workspace="work", agent_root=root,
+        explicitly_denied=set(), manager=_NoRuntime(), claude_available=False,
+        opencode_available=True,
+    )
+    by_name = {row["name"]: row for row in payload["providers"][1]["servers"]}
+    assert by_name["a"]["enabled"] is True
+    assert by_name["b"]["enabled"] is False
+    assert by_name["a"]["applies_to"] == str(root / "opencode.json")
+    assert by_name["b"]["applies_to"] == str(root / "opencode.json")
+
+    payload = await provider_inventory(
+        workspace="legacy", agent_root=legacy,
+        explicitly_denied=set(), manager=_NoRuntime(), claude_available=False,
+        opencode_available=True,
+    )
+    by_name = {row["name"]: row for row in payload["providers"][1]["servers"]}
+    assert by_name["c"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_managed_claude_row_has_no_applies_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_PATH", raising=False)
+    from ciao.web import mcp_inventory
+
+    real_candidates = mcp_inventory._candidate_paths
+    managed = tmp_path / "managed.json"
+    managed.write_text('{"mcpServers":{"corp":{"command":"x"}}}', encoding="utf-8")
+
+    def with_managed(agent_root: Path, provider: str):
+        found = real_candidates(agent_root, provider)
+        if provider == "claude":
+            found.append((managed, "managed", "managed", False))
+        return found
+
+    monkeypatch.setattr("ciao.web.mcp_inventory._candidate_paths", with_managed)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    payload = await provider_inventory(
+        workspace="work", agent_root=root,
+        explicitly_denied=set(), manager=_NoRuntime(), claude_available=True,
+        opencode_available=False,
+    )
+    by_name = {row["name"]: row for row in payload["providers"][0]["servers"]}
+    assert by_name["corp"]["applies_to"] is None

@@ -262,8 +262,9 @@ def propose_observation(
     workspace: str,
     observation_id: str,
     today: date | None = None,
+    drop: bool = False,
 ) -> dict[str, Any]:
-    """Queue the proposal for one due observation and move it to Resolved."""
+    """Queue the proposal for one due observation (or, with *drop*, none) and move it to Resolved."""
     path = observations_path(vault_root)
     with queue_lock(path):
         text = _read(path, "")
@@ -274,21 +275,24 @@ def propose_observation(
                 f"chat(s); {OBSERVATION_PROPOSE_CHATS} are needed"
             )
         kind, payload = obs.destination
-        proposal = MemoryProposal(
-            target=kind,
-            payload=payload,
-            text=obs.statement,
-            source_section="observations " + ", ".join(obs.chats),
-        )
-        queued_path = memory_proposals.append_proposals([proposal], vault_root)
-        dismissed = queued_path is None and memory_proposals.was_dismissed(
-            vault_root, obs.statement
-        )
-        promoted = (
-            queued_path is None
-            and not dismissed
-            and memory_proposals.was_promoted(vault_root, obs.statement)
-        )
+        queued_path: Path | None = None
+        dismissed = promoted = False
+        if not drop:
+            proposal = MemoryProposal(
+                target=kind,
+                payload=payload,
+                text=obs.statement,
+                source_section="observations " + ", ".join(obs.chats),
+            )
+            queued_path = memory_proposals.append_proposals([proposal], vault_root)
+            dismissed = queued_path is None and memory_proposals.was_dismissed(
+                vault_root, obs.statement
+            )
+            promoted = (
+                queued_path is None
+                and not dismissed
+                and memory_proposals.was_promoted(vault_root, obs.statement)
+            )
         without = _splice(text, [(entry, None)])
         write_queue_atomically(
             path, _file_under_promoted(without, entry.source_text)
@@ -300,6 +304,7 @@ def propose_observation(
         "queued": queued_path is not None,
         "dismissed_before": dismissed,
         "promoted_before": promoted,
+        "dropped": drop,
     }
 
 

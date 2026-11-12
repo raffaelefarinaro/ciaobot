@@ -90,6 +90,76 @@
     <template v-else-if="name === 'check'">
       <polyline points="4 12 10 18 20 6" />
     </template>
+
+    <!-- Terminal: a window with a prompt chevron and a cursor line. -->
+    <template v-else-if="name === 'terminal'">
+      <rect x="3" y="4" width="18" height="16" />
+      <polyline points="7 9 10 12 7 15" />
+      <line x1="12" y1="15" x2="17" y2="15" />
+    </template>
+
+    <!-- Arrow: navigation to another surface. -->
+    <template v-else-if="name === 'arrow'">
+      <line x1="4" y1="12" x2="19" y2="12" />
+      <polyline points="13 6 19 12 13 18" />
+    </template>
+
+    <!-- Chevron: a disclosure, pointing right when closed. -->
+    <template v-else-if="name === 'chevron'">
+      <polyline points="9 6 15 12 9 18" />
+    </template>
+
+    <!-- Skill: a five-point star. -->
+    <template v-else-if="name === 'skill'">
+      <path d="M12 3l2.6 5.9 6.4.6-4.8 4.3 1.4 6.3L12 16.8l-5.6 3.3 1.4-6.3L3 9.5l6.4-.6z" />
+    </template>
+
+    <!-- Plug: an MCP server. -->
+    <template v-else-if="name === 'plug'">
+      <line x1="9" y1="3" x2="9" y2="7" />
+      <line x1="15" y1="3" x2="15" y2="7" />
+      <path d="M6 7h12v4a6 6 0 0 1-12 0z" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </template>
+
+    <!-- Folder: a linked repository or project. -->
+    <template v-else-if="name === 'folder'">
+      <path d="M3 5h6l2 3h10v11H3z" />
+    </template>
+
+    <!-- Branch: a git branch. -->
+    <template v-else-if="name === 'branch'">
+      <rect x="4" y="3" width="4" height="4" />
+      <rect x="4" y="17" width="4" height="4" />
+      <rect x="16" y="5" width="4" height="4" />
+      <line x1="6" y1="7" x2="6" y2="17" />
+      <path d="M18 9v2c0 3-4 3-10 6" />
+    </template>
+
+    <!-- Code: angle brackets, for code mode and repository instructions. -->
+    <template v-else-if="name === 'code'">
+      <polyline points="8 7 3 12 8 17" />
+      <polyline points="16 7 21 12 16 17" />
+    </template>
+
+    <!-- Copy: two overlapping sheets. -->
+    <template v-else-if="name === 'copy'">
+      <rect x="9" y="9" width="12" height="12" />
+      <path d="M15 9V3H3v12h6" />
+    </template>
+
+    <!-- Warning: a triangle with a mark. -->
+    <template v-else-if="name === 'warning'">
+      <path d="M12 3l10 18H2z" />
+      <line x1="12" y1="10" x2="12" y2="14" />
+      <rect x="11" y="16.5" width="2" height="2" fill="currentColor" stroke="none" />
+    </template>
+
+    <!-- Task: a checked box, the board task. -->
+    <template v-else-if="name === 'task'">
+      <rect x="3" y="3" width="18" height="18" />
+      <polyline points="8 12 11 15 16 9" />
+    </template>
   </svg>
 </template>
 
@@ -117,6 +187,17 @@ export type AppIconName =
   | 'shield'
   | 'spark'
   | 'check'
+  | 'terminal'
+  | 'arrow'
+  | 'chevron'
+  | 'skill'
+  | 'plug'
+  | 'folder'
+  | 'branch'
+  | 'code'
+  | 'copy'
+  | 'warning'
+  | 'task'
 
 withDefaults(defineProps<{
   name: AppIconName

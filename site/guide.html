@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Getting Started · Ciaobot</title>
-  <meta name="description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <meta name="description" content="Install Ciaobot on macOS, Windows or Linux, connect an agent, and finish your first archived chat.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/guide.html">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="Getting Started · Ciaobot">
-  <meta property="og:description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <meta property="og:description" content="Install Ciaobot on macOS, Windows or Linux, connect an agent, and finish your first archived chat.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/guide.html">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Getting Started · Ciaobot">
-  <meta name="twitter:description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <meta name="twitter:description" content="Install Ciaobot on macOS, Windows or Linux, connect an agent, and finish your first archived chat.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
@@ -28,217 +28,162 @@
     <div class="inner">
       <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
       <nav class="site-nav" aria-label="Main">
-        <a href="./">Home</a>
-        <a href="guide.html" aria-current="page">Get started</a>
+        <a href="guide.html" aria-current="page">Guide</a>
         <a href="features.html">Features</a>
         <a href="memory.html">Memory</a>
-        <a href="terminal.html">Terminal</a>
-        <a href="companions.html">Companions</a>
-        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
+        <a href="trust.html">Trust</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
   </header>
 
-  <main class="narrow">
-    <section>
-      <p class="eyebrow">Getting started</p>
-      <h1>From install to your first archived chat</h1>
-      <p class="lead">About 15 minutes. You don't need to be technical, but you'll paste a command into the Terminal app.</p>
+  <main class="narrow guide-page">
+    <section class="guide-intro">
+      <h1>Get Ciaobot running</h1>
+      <p class="lead">Connect an agent, install Ciaobot, and finish one task. About 15 minutes.</p>
     </section>
 
-    <section id="before-you-start">
-      <h2>Before you start</h2>
-      <p>Four things that trip people up:</p>
-      <ul>
-        <li><strong>"~/.local/bin is not in your PATH."</strong> Claude Code's installer may print this. Ciaobot finds Claude Code anyway; only your Terminal can't. To run <code>claude auth login</code>, first run the command the installer printed and open a new Terminal window, or type the full path instead: <code>~/.local/bin/claude auth login</code>.</li>
-        <li><strong>Hidden files.</strong> On a Mac, files whose name starts with a dot, such as <code>.env</code>, are hidden. In Finder, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> to show them, and again to hide them.</li>
-        <li><strong>Ciaobot keeps a history of your folder.</strong> It uses Git, the tool programmers use to track changes, so earlier versions of your notes can be brought back and the folder can be <a href="memory.html#backup">backed up</a> to a private GitHub repository. You never need to use Git yourself. If the folder is already inside a Git repository (a code project, for example), Ciaobot uses that repository instead of making a new one, so its history and backup cover the whole repository: give Ciaobot a folder of its own. Git repositories inside your folder keep their own history, and Ciaobot's history and backup do not include their files.</li>
-        <li><strong>Keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive.</strong> Ciaobot writes to its files all the time, and sync apps can then make "conflicted copies", bring back an older version of a file or break the Git history. Ciaobot shows a warning if you pick a folder inside one of them. For a copy somewhere else, use the backup instead. On a Mac you can use a folder in <em>Desktop</em>, <em>Documents</em> or <em>Downloads</em>: the first time Ciaobot starts there, macOS asks to let <em>Ciaobot Server</em> access it. Choose <em>Allow</em>. If you chose <em>Don't Allow</em>, turn it on in System Settings → Privacy &amp; Security → Files and Folders. If iCloud syncs your Desktop and Documents, pick another folder.</li>
-      </ul>
-    </section>
-
-    <section>
-      <h2>Set up</h2>
+    <section aria-label="Quickstart">
       <ol class="steps">
         <li id="ai-tool">
-          <h3>Have Claude Code or opencode signed in</h3>
-          <p>Ciaobot doesn't have its own AI account or API key. It drives an AI tool you already use, so you need <strong>one of these two</strong> installed and signed in on the computer that runs Ciaobot:</p>
-          <div class="grid">
-            <div class="card">
-              <h3>Claude Code</h3>
-              <p>Use your Claude subscription.</p>
+          <h2>Connect an agent</h2>
+          <p>Ciaobot uses an AI tool you already have. Install and sign in to <strong>Claude Code</strong> or <strong>OpenCode</strong> on the computer that will run Ciaobot.</p>
+          <details class="guide-details">
+            <summary>Claude Code setup</summary>
+            <div class="details-body">
+              <p>On macOS or Linux:</p>
               <pre><code>curl -fsSL https://claude.ai/install.sh | bash
 claude auth login</code></pre>
-              <p>On Windows, in PowerShell: <code>irm https://claude.ai/install.ps1 | iex</code>, then <code>claude auth login</code>.</p>
-              <p>If it says <code>~/.local/bin</code> is not in your PATH, see <a href="#before-you-start">Before you start</a>.</p>
-              <p><a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code docs →</a></p>
+              <p>On Windows, run <code>irm https://claude.ai/install.ps1 | iex</code> in PowerShell, then <code>claude auth login</code>.</p>
+              <p>If your terminal cannot find <code>claude</code>, open a new terminal or use <code>~/.local/bin/claude auth login</code>. Ciaobot can find the installed CLI either way. <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code documentation →</a></p>
             </div>
-            <div class="card">
-              <h3>opencode</h3>
-              <p>Use OpenAI, OpenRouter, Z.ai, Ollama Cloud, a local Ollama and many more.</p>
+          </details>
+          <details class="guide-details">
+            <summary>OpenCode setup</summary>
+            <div class="details-body">
+              <p>On macOS or Linux:</p>
               <pre><code>curl -fsSL https://opencode.ai/v2/install | bash
 opencode auth login</code></pre>
-              <p>On Windows: <code>npm install -g @opencode/cli</code>, then <code>opencode auth login</code>.</p>
-              <p><a href="https://opencode.ai/docs/providers/">opencode providers →</a></p>
+              <p>On Windows, run <code>npm install -g @opencode/cli</code>, then <code>opencode auth login</code>. <a href="https://opencode.ai/docs/providers/">OpenCode providers →</a></p>
             </div>
-          </div>
-          <p>You can set up both and switch per workspace or per chat. <a href="models.html">How the two work with Ciaobot →</a></p>
+          </details>
         </li>
-        <li>
-          <h3>Install Ciaobot</h3>
+
+        <li id="install">
+          <h2>Install Ciaobot</h2>
           <div class="install" data-install>
+            <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot-mac/releases">Download Ciaobot for Mac</a>
+            <p class="install-note install-client-note" data-mac-client-note>Apple silicon, macOS 13+. The native app can install a local engine or connect to an existing server.</p>
             <div class="install-head">
-              <p class="install-label" data-install-label>On a Mac with Apple Silicon (M1 or newer, macOS 13 or later), open the <strong>Terminal</strong> app and paste:</p>
+              <p class="install-label" data-install-label>Or install only the engine on macOS in Terminal:</p>
+            </div>
+            <div class="install-row">
               <label class="install-os" hidden>
                 <span class="visually-hidden">Platform</span>
                 <select data-install-os>
-                  <option value="mac" data-label="On a Mac with Apple Silicon (M1 or newer, macOS 13 or later), open the Terminal app and paste:" data-cmd="curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh">macOS</option>
-                  <option value="windows" data-label="On Windows 11 (x64 or ARM64), open PowerShell and paste. No administrator rights are needed:" data-cmd="irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex">Windows (preview)</option>
+                  <option value="mac" data-label="Or install only the engine on macOS in Terminal:" data-cmd="curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh">macOS</option>
+                  <option value="windows" data-label="Install on Windows 11 in PowerShell. No administrator rights needed:" data-cmd="irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex">Windows</option>
+                  <option value="linux" data-label="Install on Ubuntu 24.04 with the dedicated administrator guide:" data-url="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux</option>
                 </select>
               </label>
+              <div class="install-box" data-install-command>
+                <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
+                <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
+              </div>
+              <a class="btn btn-primary install-guide" data-install-guide hidden href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Open Linux install guide</a>
             </div>
-            <div class="install-box">
-              <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
-              <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
-            </div>
-            <p class="install-note" data-install-note hidden>Windows is a preview: no administrator rights needed, and the engine starts when you sign in. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide →</a></p>
-            <noscript><p class="install-note">On Windows 11, in PowerShell: <code>irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex</code> (preview, <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide</a>)</p></noscript>
+            <p class="install-note" data-install-note hidden>No administrator rights needed, and the engine starts when you sign in. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide →</a></p>
+            <noscript><p class="install-note">On Windows 11, use PowerShell: <code>irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex</code> (<a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide</a>). For Ubuntu 24.04, use the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux guide</a>.</p></noscript>
           </div>
-          <p>This installs the Ciaobot engine and starts it in the background. Hosting it on a Linux server instead? See <a href="remote.html#vps">Run it on a server</a>.</p>
-          <p>Your notes go in a folder called <code>Ciaobot</code> in your home folder. To use a different folder, for example a notes folder you already have, add <code>--workspace</code> when you install: <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes</code>. On Windows, see <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md#install">install options</a>.</p>
+          <details class="guide-details" id="before-you-start">
+            <summary>Custom folders and important warnings</summary>
+            <div class="details-body">
+              <p>By default your notes live in <code>~/Ciaobot</code> (<code>%USERPROFILE%\Ciaobot</code> on Windows). To use an existing notes folder on macOS, pass <code>--workspace</code>:</p>
+              <pre><code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes</code></pre>
+              <p><strong>Keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive.</strong> Sync conflicts can damage its files and Git history. Use Ciaobot's <a href="memory.html#backup">private Git backup</a> instead.</p>
+              <p>Ciaobot uses Git for local history. A dedicated folder is recommended: if it sits inside an existing repository, that repository's history covers it too. Nested Git repositories keep their own history. On macOS, allow Ciaobot Server to access your chosen folder when the system asks.</p>
+            </div>
+          </details>
         </li>
+
         <li id="first-run">
-          <h3>Open Ciaobot</h3>
-          <p>When the install finishes, Ciaobot opens in your browser and you are already signed in. The Terminal also shows a one-time sign-in link: it works once, so don't share it. Later, open <a href="http://localhost:8443">http://localhost:8443</a> on this computer.</p>
-          <p>The installer chose three things for you, so there is nothing to fill in:</p>
-          <ul>
-            <li><strong>Your folder</strong>: <code>~/Ciaobot</code> (<code>%USERPROFILE%\Ciaobot</code> on Windows), unless you picked another one. Your notes and memory live there as plain files.</li>
-            <li><strong>Your password</strong>, made up for you. You need it to open Ciaobot on your phone or another computer.</li>
-            <li><strong>Your AI tool</strong>: Claude Code.</li>
-          </ul>
-          <p>The installer does not print the password. It tells you the password is shown in the app: the first time you open Ciaobot, a card called <strong>Your Ciaobot</strong> on Home shows your folder (with a button to show it in Finder or Explorer), your password (<strong>Show</strong> and <strong>Copy</strong>) and your AI tool. Save the password in your password manager: you need it to sign in from other devices. Close the card when you are done. It then disappears on every device, and on other devices it only says that the password is shown on the computer running Ciaobot. The password is also kept in the file <code>.env</code> in your folder (see <a href="#password">I forgot my password</a>).</p>
-          <p>To use Ciaobot on your phone, open <strong>Settings → Access &amp; devices → Other devices</strong>. On the computer running Ciaobot, the <strong>Set up this device</strong> card on Home also has a <strong>Use on your phone</strong> row that links there, until you close the card or install the app.</p>
-          <p>You can change these later: the AI tool in the workspace's settings, the password in <strong>Settings → Access &amp; devices → PWA password</strong>, and the folder in <strong>Settings → General → Main workspace</strong>.</p>
-          <p>Ciaobot then opens a welcome chat and can give you a tour. Just say yes.</p>
-          <p>A setup wizard that asks for the folder, a password and the AI tool appears only if you start Ciaobot by hand with <code>ciao run</code> before it has been set up, for example from a copy of the source code. The installers never show it.</p>
+          <h2>Open Ciaobot and save your password</h2>
+          <p>The installer or Mac app opens Ciaobot, already signed in. Later, open <a href="http://localhost:8443">http://localhost:8443</a> on the host computer.</p>
+          <p>On Home, the <strong>Your Ciaobot</strong> card shows your folder and generated password. Save the password in your password manager; you need it on other devices. You can change it later in <strong>Settings → Access &amp; devices</strong>.</p>
+          <p>For a phone or another computer, open <strong>Settings → Access &amp; devices → Other devices</strong> on the host.</p>
         </li>
-      </ol>
-    </section>
 
-    <section>
-      <h2>Find your way around</h2>
-      <figure>
-        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot Home page, with a box to start a task, chats that need attention, and projects in the sidebar" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>Home. The workspace picker sits at the top of the sidebar, projects and their chats below; the middle has a box to start a task and lists what needs you.</figcaption>
-      </figure>
-      <p>Press the number keys <kbd>1</kbd>, <kbd>2</kbd>, … to jump between workspaces in the order they appear in the sidebar.</p>
-      <p>To limit what a workspace's agent can read on your computer, open that workspace's settings and set <strong>File access</strong>. <a href="features.html#file-access">More about file access →</a></p>
-    </section>
-
-    <section>
-      <h2>Your first project</h2>
-      <p>Think of something you'll keep coming back to, like a trip you're planning, a language you're learning or a project at work. The easiest way to create a project is to ask:</p>
-      <div class="prompt">Create a project called Learning Spanish in my personal workspace. I'm a beginner, I practise 20 minutes a day, and I want to hold a simple conversation by next summer.</div>
-      <p>Ciaobot creates the project and saves that description. From now on it's sent with every chat in <em>Learning Spanish</em>, so you never repeat it. You can also use <strong>New</strong> next to <em>Projects</em> in the sidebar.</p>
-      <figure>
-        <a href="assets/img/project.webp"><img src="assets/img/project.webp" alt="A project page: the project context box, its active chats, files and archived chats, and a Complete button" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>A project page: the description Ciaobot reads, the active and archived chats, and <strong>Complete</strong> for when the project is done.</figcaption>
-      </figure>
-      <div class="note">Not sure whether something needs a project? If you'd want Ciaobot to remember it next week, make one. Quick one-off tasks can go in <strong>General</strong>.</div>
-    </section>
-
-    <section>
-      <h2>The everyday habit</h2>
-      <ol class="steps">
-        <li>
-          <h3>Start a new chat in the right project</h3>
-          <p>Use <strong>New chat</strong> at the top of the sidebar and pick the project, or press <kbd>⌥</kbd>+<kbd>N</kbd> (<kbd>Alt</kbd>+<kbd>N</kbd> on Windows and Linux). For a quick task, type it into the box on Home.</p>
-        </li>
-        <li>
-          <h3>Do one task</h3>
-          <p>Talk to it as you would to an assistant: "Add a dentist appointment next Tuesday at 3pm", "Give me five phrases for ordering at a restaurant".</p>
-        </li>
-        <li>
-          <h3>Archive it as soon as the task is done</h3>
-          <p>Use the archive button in the chat header, press <kbd>⌥</kbd>+<kbd>⌫</kbd>, or just type "archive this chat".</p>
-          <figure>
-            <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="Sending a follow-up, reading the answer, then archiving the chat"></video>
-            <figcaption>Archiving a finished chat. A <em>memory insights</em> row on Home shows Ciaobot reading it back and filing what's worth keeping.</figcaption>
+        <li id="first-task">
+          <h2>Finish one task, then archive it</h2>
+          <p>Type a self-contained request into the box on Home. For example:</p>
+          <div class="prompt">Give me five Italian phrases for ordering dinner, with a short pronunciation hint for each.</div>
+          <p>Read the answer, then choose <strong>Archive</strong>. Ciaobot files useful details into your Markdown memory; anything uncertain waits for your review in <strong>Memory → To decide</strong>.</p>
+          <figure class="guide-shot">
+            <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="Ciaobot Home with the task composer and chats in the Personal workspace" loading="lazy" width="1600" height="1000"></a>
+            <figcaption>Start on Home. Archive the chat when the task is done.</figcaption>
           </figure>
-        </li>
-        <li>
-          <h3>Glance at suggestions now and then</h3>
-          <p>Anything Ciaobot isn't sure about waits for your OK. <a href="memory.html#control">More on memory →</a></p>
+          <details class="example">
+            <summary>Why start a new chat for each task?</summary>
+            <div class="example-body"><p>Short chats are easier to resume and keep the model focused on the current task. Archiving gives Ciaobot a clear point at which to extract what is worth remembering. To continue an archived topic, open the chat and choose <strong>Continue in new chat</strong>.</p></div>
+          </details>
         </li>
       </ol>
-      <details class="example">
-        <summary>Why not keep one chat going?</summary>
-        <div class="example-body"><p>AI models get measurably worse as a conversation grows: details from the start get missed and unrelated topics bleed into each other. Researchers call this <a href="https://research.trychroma.com/context-rot">context rot</a>, and Anthropic's guide to <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">context engineering</a> explains why a short, focused context works better. A long chat is also slower and more expensive, and Ciaobot only learns from it once you archive it. Short chats keep your assistant sharp and up to date.</p></div>
-      </details>
-      <p>Need to pick up an archived chat later? Open it and choose <strong>Continue in new chat</strong>.</p>
     </section>
 
-    <section id="tasks">
-      <h2>Keep track of the next steps</h2>
-      <p>For work you want to come back to, open <strong>Tasks</strong> in the sidebar and choose <strong>New task</strong>. Try <em>Compare three Spanish conversation classes</em>, with a description of your budget, availability and what a useful comparison should include. Choose your <em>Learning Spanish</em> project to keep it with the right context.</p>
-      <p>Open the task and choose <strong>Delegate to agent</strong>. Review the prompt, then start the work. Ciaobot opens a chat where you can follow along and answer questions. When the agent reports it finished, check the result and choose <strong>Approve Done</strong>.</p>
-      <p>You can also do tasks yourself and move them through <strong>To do</strong>, <strong>In progress</strong>, <strong>In review</strong> and <strong>Done</strong>. <a href="features.html#tasks">More on Tasks →</a></p>
+    <section id="next">
+      <h2>What next?</h2>
+      <p>Learn one thing when you need it:</p>
+      <ul class="next-links">
+        <li><a href="features.html#organise">Organise ongoing work into projects</a></li>
+        <li><a href="features.html#tasks">Delegate and review tasks</a></li>
+        <li><a href="features.html#code">Work on a code repository</a></li>
+        <li><a href="features.html#automations">Schedule recurring work</a></li>
+        <li><a href="memory.html">Understand and correct memory</a></li>
+        <li><a href="trust.html">See what runs without asking</a></li>
+        <li><a href="remote.html">Use Ciaobot from other devices</a></li>
+      </ul>
     </section>
-
-    <section id="code">
-      <h2>Work on a code project</h2>
-      <p>If a project is about code that lives in a git repository on your computer, link the two: open the project, choose <strong>Repository → Link</strong> and pick the repository from the list, or type its path.</p>
-      <p>Chats in that project start as normal chats. When you want to work on the code, just say so, for example <em>Let's work on the code</em>. The agent switches the chat to <strong>code mode</strong>, reads the repository's <code>AGENTS.md</code> and continues. A small <strong>code</strong> badge appears next to the chat title, and <strong>Chat details</strong> has the switch if you want to turn it on or off yourself.</p>
-      <p>Code knowledge goes into the repository's <code>AGENTS.md</code>; your notes, plans and decisions stay in the project as usual. <a href="features.html#code">More on code projects →</a></p>
-    </section>
-
-    <section>
-      <h2>Let it work on a schedule</h2>
-      <div class="note"><strong>Ask yourself:</strong> is this a task I do more than once? If it is, make it a schedule instead of typing the same request again next week.</div>
-      <p>Ask for anything that should happen regularly:</p>
-      <div class="prompt">Every weekday at 8am, look at my calendar and tell me what's coming up today.</div>
-      <div class="prompt">Every Sunday evening, give me ten new Spanish words based on what I practised this week.</div>
-      <p>Ciaobot shows you a draft (when it runs, and in which project) and asks before creating it. Each run leaves its result in a chat. You can see and pause everything on the <strong>Automations</strong> page, which also lists your <strong>Webhook triggers</strong> (runs started by another tool).</p>
-      <p>That's the whole routine. For everything else, <a href="features.html">see what it can do →</a> or just ask it "what can you do?"</p>
-      <figure>
-        <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="The Automations page listing custom and system routines with their next runs" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>The Automations page lists every recurring task with its next run, including the nightly memory tidy-up.</figcaption>
-      </figure>
-    </section>
-
 
     <section id="faq">
-      <h2>Questions</h2>
-      <h3>What does it cost?</h3>
-      <p>Ciaobot is free and open source. You pay only for the AI you already use: a Claude subscription, an API key, or nothing at all with a local model.</p>
-      <h3>What leaves my computer?</h3>
-      <p>The messages you send, plus the context each chat needs, go to the AI provider you chose. Your notes, memory and chat history stay in your folder. With a local model through opencode, nothing leaves at all.</p>
-      <h3>Does it work offline?</h3>
-      <p>With a local model (for example <a href="https://ollama.com">Ollama</a>) through opencode, yes. Google, web search and cloud models need a connection, of course.</p>
-      <h3>Something's wrong. Where do I look?</h3>
-      <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. It can also <a href="./#together">report the bug on GitHub</a> for you.</p>
-      <h3 id="password">I forgot my Ciaobot password. How do I get back in?</h3>
-      <p>The installer picks a random password for you, so you may never have typed one. To get back in:</p>
-      <ul>
-        <li><strong>On the computer running Ciaobot (the host):</strong> open the login page at <code>http://localhost:8443</code> and choose <strong>Sign in on this computer</strong>. Ciaobot opens a signed-in tab in your default browser. Then set a password you will remember in <strong>Settings → Access &amp; devices → PWA password</strong>; on the host you don't need the old one.</li>
-        <li><strong>Read it from the file:</strong> the password is the text after <code>PWA_AUTH_TOKEN=</code> in the file <code>.env</code> inside your Ciaobot folder (by default <code>~/Ciaobot</code>, so <code>~/Ciaobot/.env</code>). It is a hidden file. On a Mac, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> in Finder to show it, or run <code>grep PWA_AUTH_TOKEN ~/Ciaobot/.env</code> in the Terminal. On Windows, open <code>%USERPROFILE%\Ciaobot\.env</code> in Notepad.</li>
-        <li><strong>Or use a one-time link:</strong> on the host, run <code>ciao setup-url --workspace ~/Ciaobot</code> in the Terminal (use your folder if you picked another one). It prints a link that signs you in when opened in a browser on that same computer.</li>
-      </ul>
-      <p>On a phone or another computer you need the password itself; get it on the host first. Keep it to yourself: anyone with the password can use your Ciaobot.</p>
-      <h3>How do I update or uninstall?</h3>
-      <p>To update, run the one-line install command again, or use the update control in <strong>Settings → General</strong>, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
+      <h2>Help and recovery</h2>
+      <details class="guide-details">
+        <summary>Cost, privacy and offline use</summary>
+        <div class="details-body">
+          <p>Ciaobot is free and open source. You pay only for the AI provider you choose; a local model through OpenCode can be free and work offline.</p>
+          <p>Your notes, memory and chat history stay in your folder. Messages and the context a chat needs go to the selected AI provider. Google, web search and cloud models need an internet connection.</p>
+        </div>
+      </details>
+      <details class="guide-details" id="password">
+        <summary>I cannot sign in or forgot my password</summary>
+        <div class="details-body">
+          <p>On the host, open <code>http://localhost:8443</code> and choose <strong>Sign in on this computer</strong>. Then set a new password in <strong>Settings → Access &amp; devices → PWA password</strong>.</p>
+          <p>You can also read <code>PWA_AUTH_TOKEN=</code> in the workspace's <code>.env</code> file (by default <code>~/Ciaobot/.env</code>, or <code>%USERPROFILE%\Ciaobot\.env</code> on Windows). On macOS, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> in Finder to show hidden files.</p>
+          <p>Or run <code>ciao setup-url --workspace ~/Ciaobot</code> on the host for a one-time sign-in link. Keep the password private.</p>
+        </div>
+      </details>
+      <details class="guide-details">
+        <summary>Something is not working</summary>
+        <div class="details-body"><p>Ask Ciaobot what happened; it can inspect its own logs and explain most failures. If the problem persists, <a href="https://github.com/raffaelefarinaro/ciaobot/issues">report an issue on GitHub</a> with the error and your platform.</p></div>
+      </details>
+      <details class="guide-details">
+        <summary>Update, stop or uninstall</summary>
+        <div class="details-body">
+          <p>Update in <strong>Settings → General</strong>, or run the engine install command again. Stop the engine with <code>ciao service stop</code>; your notes stay untouched.</p>
+          <p>Windows uninstall instructions are in the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md#uninstall">Windows guide</a>. To move from the retired macOS app, rerun the engine installer with <code>--migrate</code>; it keeps your workspace and removes the old app.</p>
+        </div>
+      </details>
     </section>
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="./">← Home</a>
-      <a class="btn btn-primary" href="features.html">Features →</a>
+      <a class="btn btn-primary" href="features.html">Explore features →</a>
     </nav>
   </main>
 
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
+      <span>Last updated 11 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

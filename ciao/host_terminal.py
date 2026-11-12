@@ -329,7 +329,8 @@ def folder_choices(
     """The folders a terminal for this target may open in, from server state only.
 
     ``workspace`` is the workspace's agent root; ``repo`` is the linked
-    repository, or the chat's code-mode worktree when it has one. Only folders
+    repository, or the chat's code-mode worktree when it has one (a chat is in
+    code mode when its project's linked repository exists). Only folders
     that exist are listed, repo first: the first entry is the default.
     """
     from ciao import workspaces
@@ -343,7 +344,7 @@ def folder_choices(
         if chat is None:
             raise LookupError("chat not found")
         project = pcm.get_project(chat.project_id)
-        if chat.code_mode and project and project.repo_path:
+        if pcm.linked_repo_for_chat(chat):
             loc = chat.repo_location or {}
             path = loc.get("path")
             if path and loc.get("exists", True) and Path(path).is_dir():

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
 from ciao.models import ResultEvent
-from tests.test_code_mode_continuation import _switch_on
 from tests.test_project_chats_queue import _make_manager
 
 
@@ -109,16 +108,6 @@ async def test_reload_skipped_while_background_agents_run(tmp_path: Path) -> Non
     pcm, _, provider, turn_calls, _, _ = await _run(tmp_path, first)
     assert turn_calls == ["initial"]
     assert provider.disconnected is False
-
-
-async def test_code_mode_and_reload_together_run_one_hidden_turn(tmp_path: Path) -> None:
-    def first(pcm, cid):
-        _switch_on(pcm, cid)
-        _arm(pcm, cid)
-
-    _, _, _, turn_calls, _, _ = await _run(tmp_path, first)
-    assert len(turn_calls) == 2
-    assert RELOAD_CONTINUE_PROMPT not in turn_calls
 
 
 async def test_a_stop_during_the_reload_runs_no_hidden_turn(tmp_path: Path) -> None:

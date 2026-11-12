@@ -8,12 +8,12 @@ routes do.
 from __future__ import annotations
 
 import importlib.metadata
-import json
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.agent_surface import AgentDispatcher
+from ciao.jsonio import loads_untrusted
 from ciao.web.auth import is_loopback_client
 
 #: Upper bound on one agent request body. ``chat_handover``/``chat_fork`` with
@@ -96,7 +96,7 @@ async def agent_dispatch_endpoint(request: Request) -> JSONResponse:
     body = b"".join(chunks)
     if body.strip():
         try:
-            arguments = json.loads(body)
+            arguments = loads_untrusted(body)
         except ValueError:
             return JSONResponse(
                 {"ok": False, "error": {"code": "invalid_request", "message": "Body must be a JSON object.", "retryable": False}},

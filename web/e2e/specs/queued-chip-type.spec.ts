@@ -8,11 +8,11 @@ import { boot, COMPOSER, isolate, quiesce } from '../support/app'
  * a real engine under touch emulation can hold this.
  *
  * The chip follows `--text-base` rather than the textarea's own computed size:
- * at phone width the composer input is deliberately floored at 16px, scaled
- * (`max(16px, 16px * --font-scale)` in ChatPanel's `(max-width: 700px)` block),
- * so iOS does not zoom the field on focus. The chip's contract is the token
- * the composer declares for its body text, which is what the Appearance
- * setting multiplies.
+ * at phone width the composer input is deliberately floored at 16px and scaled
+ * off the body token (`max(16px, var(--text-base))` in ChatPanel's
+ * `(pointer: coarse)` block), so iOS does not zoom the field on focus. The
+ * chip's contract is the token the composer declares for its body text, which
+ * is what the Appearance setting multiplies.
  */
 const CHAT_ID = 'alpha-chat-1'
 

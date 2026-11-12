@@ -6,7 +6,6 @@ import type {
   Schedule,
   StatusResponse,
   ModelsResponse,
-  CliStats,
   ScheduleArchivePolicy,
 } from '../lib/types'
 
@@ -44,7 +43,6 @@ export const useTaskStore = defineStore('tasks', () => {
   const schedules = ref<Schedule[]>([])
   const status = ref<StatusResponse | null>(null)
   const models = ref<ModelsResponse | null>(null)
-  const stats = ref<CliStats | null>(null)
   const loading = ref(false)
   const scheduleLoading = ref(false)
   const scheduleLoadError = ref('')
@@ -96,18 +94,10 @@ export const useTaskStore = defineStore('tasks', () => {
     models.value = await api.get<ModelsResponse>('/api/models')
   }
 
-  async function fetchStats() {
-    try {
-      stats.value = await api.get<CliStats>('/api/stats')
-    } catch {
-      stats.value = null
-    }
-  }
-
   async function fetchAll() {
     loading.value = true
     try {
-      await Promise.all([fetchSchedules(), fetchStatus(), fetchModels(), fetchStats()])
+      await Promise.all([fetchSchedules(), fetchStatus(), fetchModels()])
     } finally {
       loading.value = false
     }
@@ -193,9 +183,9 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, schedulesByChat, status, models, stats, loading,
+    schedules, schedulesByChat, status, models, loading,
     scheduleLoading, scheduleLoadError, schedulesLoaded,
-    fetchSchedules, fetchStatus, fetchModels, fetchStats, fetchAll,
+    fetchSchedules, fetchStatus, fetchModels, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,
   }
 })

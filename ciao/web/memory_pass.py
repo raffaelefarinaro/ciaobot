@@ -107,7 +107,21 @@ MEMORY_PASS_PROMPT = (
     "remove the superseded line rather than annotating it. When the two "
     "sources genuinely conflict and the correct answer is not clear, show "
     "both to the note's owner and let them decide instead of picking "
-    "silently. Type every "
+    "silently. "
+    "A single chat's passing remark, or an inference from a search that "
+    "found nothing, is never the later correction of a decision a note "
+    "records: keep both and show the conflict instead. "
+    "Also check every note you touch against the transcript: correct a "
+    "stored fact the transcript plainly contradicts, citing it (a recorded "
+    "decision follows the rule above instead), and "
+    "downgrade a claim stated as settled when the transcript shows it was "
+    "uncertain. Write present-tense facts, not a story of the session "
+    "(\"Integration tests need FOO=1\", not \"the agent then tried...\"): "
+    "drop first-person narration and dead-end guesses, but keep what was "
+    "tried and why it failed as a fact. Never copy a secret, API key, token "
+    "or password into memory, even when the transcript shows one: name the "
+    "credential (\"the deploy token\") instead of its value. "
+    "Type every "
     "note you create from the **Categories** section of the vault's "
     "`VOCABULARY.md` — the `type:` it lists, in the folder it names for that "
     "category — and when a note fits none of them, queue a new-category "
@@ -116,6 +130,8 @@ MEMORY_PASS_PROMPT = (
     "recorded. Do not do anything outside memory and the vault: no "
     "messages, emails, commits, pushes or external calls. "
     "Every item you queue with `ciao memory-proposal-add` (repository facts included) must carry `--decide nightly|you` and `--decide-reason-file FILE` (one line). Use `nightly` when more context would settle it: other chats, existing notes, a duplicate check. Use `you` only for a judgement about the operator's identity or preferences. "
+    "Work in few turns: read the transcript once, find related notes with "
+    "one search, and batch independent reads and edits into one turn. "
     "Finish with a short "
     "list of what you changed."
 )
@@ -160,12 +176,18 @@ REPO_SECTION_PROMPT = (
 OBSERVATION_PROMPT = (
     "\n\nSeparately from durable facts: when this conversation shows a "
     "**behavioural pattern or preference** of the user or of a person they deal "
-    "with that you would not file as a fact on one sighting (how they like "
-    "answers shaped, what they tend to push back on, a habit), record it as an "
-    "observation: write one plain sentence about it to a scratch file and run "
+    "with that you would not file as a fact on one sighting, record it as an "
+    "observation only if knowing it would change what an agent does next time "
+    "(how to shape answers, what to avoid, what to do without asking). Write it "
+    "to a scratch file as one instruction-shaped sentence — \"When <situation>, "
+    "<what to do>\" — and run "
     "`ciao observation-add --about user --source {chat_id} --text-file FILE` "
     "(or `--about \"<Person Name>\"`; use `--about-file` when the name has "
-    "quotes). Run `ciao observations` first and reuse the exact wording of an "
+    "quotes). Do not record a description of how the user phrases or bundles "
+    "requests or invokes a tool, ordinary instruction-following (doing every "
+    "step a message asks for), or anything the guide's memory or profile "
+    "entries already say. "
+    "Run `ciao observations` first and reuse the exact wording of an "
     "existing observation that says the same thing, so this chat counts as "
     "another sighting rather than a new entry. Record at most three per "
     "conversation, never a fact you already filed, never anything from "
@@ -800,6 +822,12 @@ class MemoryPassCoordinator:
     def pump(self, workspace: str) -> None:
         """Start the oldest queued pass in *workspace*, if nothing is running."""
         host = self._host
+        if host.restart_draining:
+            # An update claim holds admission closed. Leave every pass in the
+            # state it is already in — a queued one stays queued, so it starts
+            # once the claim is released — rather than starting a turn the
+            # restart would interrupt.
+            return
         passes = self._passes_in(workspace)
         queued: list[ChatInfo] = []
         for chat in passes:
@@ -832,6 +860,36 @@ class MemoryPassCoordinator:
                 chat.chat_id,
             )
             self.pump(workspace)
+
+    def update_idle_reasons(self) -> list[str]:
+        """Why the memory-pass queue is not idle, empty when it is.
+
+        Read by an update claim's idle snapshot: a queued pass still waiting for
+        its turn and a pass whose turn is streaming are both work a restart
+        would interrupt. A record that cannot be read is reported as a reason
+        rather than raised — unknown is busy, so the claim defers instead of
+        closing admission over a pass it could not see.
+        """
+        reasons: list[str] = []
+        for chat in list(self._host._chats.values()):
+            if chat.archived:
+                continue
+            try:
+                helper = self._helper(chat)
+            except Exception:  # noqa: BLE001 — unknown is busy, not idle
+                reasons.append(f"unreadable memory pass in chat {chat.chat_id}")
+                continue
+            if helper.get("kind") != MEMORY_PASS_KIND:
+                raw = chat.helper
+                if isinstance(raw, dict) and raw.get("kind") == MEMORY_PASS_KIND:
+                    # A pass-shaped helper the normalizer refused: the queue
+                    # cannot tell what it is doing, so it counts as busy.
+                    reasons.append(f"unreadable memory pass in chat {chat.chat_id}")
+                continue
+            state = helper.get("state")
+            if state in {"queued", "running"}:
+                reasons.append(f"memory pass {state} in chat {chat.chat_id}")
+        return reasons
 
     def on_turn_started(self, chat: ChatInfo) -> None:
         """Reclaim the workspace slot when the owner continues a stopped pass.
@@ -1027,9 +1085,9 @@ class MemoryPassCoordinator:
         )
 
     def _repo_section(self, helper: dict) -> str:
-        """The linked-repository section, or nothing unless the source chat was in code mode."""
+        """The linked-repository section, or nothing unless the source chat is in code mode."""
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
-        if chat is None or not chat.code_mode:
+        if chat is None or not self._host.linked_repo_for_chat(chat):
             return ""
         project = self._host._projects.get(chat.project_id)
         repo_path = str(getattr(project, "repo_path", "") or "")

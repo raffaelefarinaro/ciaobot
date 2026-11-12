@@ -24,6 +24,7 @@ import { defineComponent, h } from 'vue'
 import { enableAutoUnmount, flushPromises, mount, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import { terminalPanelWanted } from '../../lib/terminalPanel'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useTerminalStore } from '../../stores/terminal'
@@ -258,7 +259,9 @@ describe('the ways into the browser terminal', () => {
     // One row that is its own label: no separate "Terminal" heading above it.
     expect(section.find('.rail-label').exists()).toBe(false)
     const button = section.get('button')
-    expect(button.get('span:nth-child(2)').text()).toBe('Open terminal')
+    expect(button.attributes('aria-label')).toBe('Open terminal')
+    expect(button.get('.cd-primary').text()).toBe('Terminal')
+    expect(wrapper.get('.chat-rail-open .cd-heading').text()).toBe('Open')
     await button.trigger('click')
     await flushPromises()
 
@@ -268,6 +271,22 @@ describe('the ways into the browser terminal', () => {
     expect(terminalPanelWanted.value).toBe(true)
     // A chat with no shell gets one: the person asked for a terminal.
     expect(post).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1' })
+  })
+
+  it('opens the folder browser from the Open section', async () => {
+    const { wrapper } = await mountChat(makeProject())
+    const viewer = useFileViewerStore(pinia)
+    const openFolder = vi.spyOn(viewer, 'openFolder').mockResolvedValue(true)
+
+    const row = wrapper.get('.chat-rail-open .chat-rail-browse')
+    expect(row.attributes('aria-label')).toBe('Browse files')
+    expect(row.get('.cd-primary').text()).toBe('Browse files')
+    await row.trigger('click')
+    await flushPromises()
+
+    // An empty path lists the chat's first root: its workspace folder.
+    expect(openFolder).toHaveBeenCalledWith('', 'chat-1')
+    expect(wrapper.find('.chat-rail-open .chat-rail-terminal').exists()).toBe(true)
   })
 
   it('gives a chat with a repository exactly one terminal entry', async () => {
@@ -375,5 +394,17 @@ describe('the ways into the browser terminal', () => {
     await vi.waitFor(() => {
       expect(remounted.find('.terminal-pane').exists()).toBe(true)
     }, { timeout: 3000, interval: 20 })
+  })
+
+  it('routes a clicked folder link through openLink', async () => {
+    const { wrapper } = await mountChat(makeProject())
+    const openLink = vi.spyOn(useFileViewerStore(pinia), 'openLink').mockResolvedValue(true)
+    const link = document.createElement('a')
+    link.className = 'file-link'
+    link.setAttribute('href', '#')
+    link.setAttribute('data-file-path', 'exports/sloth-v5')
+    wrapper.element.appendChild(link)
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(openLink).toHaveBeenCalledWith('exports/sloth-v5', null, 'chat-1')
   })
 })

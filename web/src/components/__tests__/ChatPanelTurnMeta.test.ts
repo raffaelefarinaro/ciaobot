@@ -5,9 +5,12 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
-import type { ChatInfo, ProjectInfo } from '../../lib/types'
+import { toChatMessage, type ServerRow } from '../../lib/chatHistory'
+import { formatTime } from '../../lib/time'
+import type { ChatInfo, ChatMessage, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import ChatTurnActivity from '../ChatTurnActivity.vue'
 import ChatPanel from '../ChatPanel.vue'
 
 const PaneHeaderStub = defineComponent({
@@ -256,4 +259,80 @@ describe('ChatPanel turn footer placement', () => {
     expect(bubble.find('.message.user .message-meta').exists()).toBe(false)
     expect(bubble.find('.message-actions .message-meta').exists()).toBe(true)
   })
+
+  it.each([
+    { label: 'absent', phase: undefined },
+    { label: 'present', phase: 'final_answer' as const },
+  ])(
+    'shows settled continuation replies in order with one closing footer and Outputs (second phase $label)',
+    async ({ phase }) => {
+      const { wrapper, store } = await mountPanel()
+      const first = "I've built it, and you can look at it now."
+      const second = 'Nothing in the code changed since my last message.'
+      const rows: ServerRow[] = [
+        { role: 'user', content: 'Build the invented preview.', turn_index: 0 },
+        {
+          role: 'assistant',
+          content: first,
+          phase: 'final_answer',
+          effective_model: 'claude-opus-5',
+          usage: { input_tokens: '10007', output_tokens: '92' },
+        },
+        { role: 'assistant', content: 'Now let me finish the housekeeping.' },
+        { role: 'system', content: '$ Bash git status', tool_name: '_activity' },
+        {
+          role: 'system',
+          content: 'Workspace/preview.html',
+          tool_name: '_filecard',
+          file_path: 'Workspace/preview.html',
+          action: 'created',
+        },
+        {
+          role: 'assistant',
+          content: second,
+          sent_at: '2026-11-09T13:31:41Z',
+          duration_ms: 23000,
+          ...(phase ? { phase } : {}),
+        },
+      ]
+      store.messages['chat-1'] = rows.map(toChatMessage)
+      await flushPromises()
+
+      // Both completed replies are bubbles, in order; the closing one keeps
+      // the completion time the server mapped.
+      const bubbles = wrapper.findAll('.message-wrap.assistant')
+      expect(bubbles.length).toBe(2)
+      expect(bubbles[0].text()).toContain(first)
+      expect(bubbles[1].text()).toContain(second)
+      expect(store.messages['chat-1'][5].timestamp).toBe('2026-11-09T13:31:41Z')
+
+      // One footer, on the bubble that closes the turn: model and usage from
+      // the earlier reply, completion time and duration from the closing one.
+      expect(bubbles[0].find('.message-meta').exists()).toBe(false)
+      const footer = bubbles[1].find('.message-meta')
+      expect(footer.exists()).toBe(true)
+      expect(footer.text()).toContain('claude-opus-5')
+      expect(footer.text()).toContain('23s')
+      expect(footer.text()).toContain(formatTime('2026-11-09T13:31:41Z'))
+      expect(footer.html()).toContain('10,007')
+
+      // One Outputs disclosure, only on the closing bubble, one file once.
+      const outputs = wrapper.findAll('.outputs-summary')
+      expect(outputs.length).toBe(1)
+      expect(bubbles[0].find('.outputs-summary').exists()).toBe(false)
+      expect(bubbles[1].find('.outputs-summary').exists()).toBe(true)
+      await outputs[0].trigger('click')
+      const listed = wrapper.findAll('.outputs-row .outputs-name')
+      expect(listed.map(n => n.text())).toEqual(['preview.html'])
+
+      // Neither reply sits in the Activity trace.
+      const traces = wrapper.findAllComponents(ChatTurnActivity)
+      expect(traces.length).toBeGreaterThan(0)
+      const steps = traces.flatMap(t => (t.props('steps') ?? []) as ChatMessage[])
+      const contents = steps.map(s => s.content)
+      expect(contents).not.toContain(first)
+      expect(contents).not.toContain(second)
+      expect(contents).toContain('$ Bash git status')
+    },
+  )
 })

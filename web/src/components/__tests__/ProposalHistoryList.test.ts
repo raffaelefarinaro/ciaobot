@@ -582,7 +582,31 @@ describe('ProposalHistoryList changes and undo', () => {
     const viewer = useFileViewerStore()
     const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
     await link.trigger('click')
-    expect(open).toHaveBeenCalledWith('/logs/Chats/chat-42/claude/chat-42-2026-09-01.md')
+    expect(open).toHaveBeenCalledWith('/logs/Chats/chat-42/claude/chat-42-2026-09-01.md', null)
+    wrapper.unmount()
+  })
+
+  it('opens the archive where the cited turn starts, not at its first line', async () => {
+    // The receipt recorded turn 3 of a 200-turn transcript. Opening the file at
+    // the top shows the reader a source without showing them the source.
+    mockHistory([historyRow({
+      source: 'chat-42-2026-09-01',
+      source_path: '/logs/Chats/chat-42/claude/chat-42-2026-09-01.md',
+      source_turn: 3,
+      source_line: 412,
+    })])
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const link = wrapper.find('.ph-source-link')
+    expect(link.text()).toContain('turn 3')
+    expect(link.attributes('title')).toContain('turn 3')
+    expect(link.attributes('aria-label')).toContain('at turn 3')
+
+    const viewer = useFileViewerStore()
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
+    await link.trigger('click')
+    expect(open).toHaveBeenCalledWith('/logs/Chats/chat-42/claude/chat-42-2026-09-01.md', 412)
     wrapper.unmount()
   })
 

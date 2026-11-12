@@ -34,7 +34,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame, usageStats } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -81,6 +81,15 @@ const TASK = {
   attempt_detail: '',
   live_attempt_id: '',
 }
+/**
+ * A 1×1 PNG, the smallest real image. `/api/images/<ref>` answers it for a
+ * transcript whose message carries an image, so the viewer has bytes to load.
+ */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 const TASK_LINK_TRANSCRIPT = [
   { role: 'user', content: 'What is left from yesterday?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
   {
@@ -99,7 +108,7 @@ const TASK_LINK_TRANSCRIPT = [
  * select a message and see the action footer a real transcript renders.
  */
 const TRANSCRIPT = [
-  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0, images: ['upload-sample.png'] },
   {
     role: 'assistant',
     content: 'First answer.',
@@ -368,10 +377,10 @@ function setChatActionList(state, chatId, list) {
 const MCP_AUTH_FIXTURE_URL = 'https://auth.example.invalid/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A56446%2Fcallback&state=fixture'
 
 /**
- * A needs-you action's start, dismiss or continue. An unknown id is a 409 with
+ * A needs-you action's start, dismiss, continue or turn-off. An unknown id is a 409 with
  * the chat's list, as the engine answers a stale card. A start moves the action
  * on: `typed` runs it, `ran` finishes it, an `mcp_auth` waits on its sign-in
- * page, and any other kind is done. Dismiss and continue remove it.
+ * page, and any other kind is done. Dismiss and continue remove it; turn-off removes it like dismiss.
  */
 function chatActionRoute(state, chatId, actionId, verb, body) {
   if (!CHATS.some(c => c.chat_id === chatId)) return { status: 404, body: { error: 'not found' } }
@@ -389,6 +398,7 @@ function chatActionRoute(state, chatId, actionId, verb, body) {
   }
   const remaining = list.filter(a => a.id !== actionId)
   setChatActionList(state, chatId, remaining)
+  if (verb === 'turn-off') return { status: 200, body: { actions: remaining, reload: { reloaded: [], pending: [] } } }
   if (verb === 'continue') return { status: 200, body: { actions: remaining, delivery: 'started' } }
   return { status: 200, body: { actions: remaining } }
 }
@@ -660,7 +670,7 @@ const GET_ROUTES = {
     },
   }),
   '/api/status': () => ({ active_model: 'synthetic-model', mode: 'auto', cost: 0 }),
-  '/api/stats': () => ({}),
+  '/api/stats': (req, url) => usageStats(Number(url.searchParams.get('range'))),
   '/api/package/status': () => ({
     current_version: '0.0.0-e2e',
     latest_version: '0.0.0-e2e',
@@ -1043,6 +1053,18 @@ const server = http.createServer(async (req, res) => {
     return terminalApi(req, res, pathname, url, sessionOf(req))
   }
 
+  // A message image is served by the engine at `/api/images/<ref>`; the
+  // fixture answers the one ref its transcript carries.
+  if (pathname === '/api/images/upload-sample.png') {
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'cache-control': 'no-store',
+      'content-length': PNG_1X1.length,
+    })
+    res.end(PNG_1X1)
+    return
+  }
+
   if (pathname.startsWith('/api/')) {
     if (req.method === 'GET') {
       const handler = GET_ROUTES[pathname]
@@ -1063,9 +1085,9 @@ const server = http.createServer(async (req, res) => {
       for (const socket of writer.sockets) socket.send({ type: 'chat_read', chat_id: chatId, last_read_at: lastReadAt })
       return sendJson(res, { ok: true })
     }
-    // A needs-you action's start, dismiss or continue.
+    // A needs-you action's start, dismiss, continue or turn-off.
     const actionRoute = req.method === 'POST'
-      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue)$/.exec(pathname)
+      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue|turn-off)$/.exec(pathname)
       : null
     if (actionRoute) {
       const answer = chatActionRoute(

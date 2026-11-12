@@ -374,6 +374,99 @@ describe('chat markdown file links', () => {
     expect(renderMarkdown('[build](Makefile)')).toContain('data-file-path="Makefile"')
     expect(renderMarkdown('[ignore](.gitignore)')).toContain('data-file-path=".gitignore"')
   })
+
+  it('opens an extensionless workspace folder in the app instead of a new window', () => {
+    const html = renderMarkdown('[sloth-v5](exports/sloth-v5)')
+
+    expect(html).toContain('class="file-link"')
+    expect(html).toContain('data-file-path="exports/sloth-v5"')
+    expect(html).not.toContain('target="_blank"')
+    expect(html).not.toContain('href="exports/sloth-v5"')
+  })
+
+  it('drops a trailing slash from a folder link', () => {
+    expect(renderMarkdown('[out](exports/)')).toContain('data-file-path="exports"')
+  })
+
+  it('leaves a bare word and a dot path as they were', () => {
+    expect(renderMarkdown('[tasks](tasks)')).not.toContain('file-link')
+    expect(renderMarkdown('[here](./)')).toContain('data-file-path="./"')
+  })
+
+  it('keeps a known extensionless file name a plain file link', () => {
+    expect(renderMarkdown('[build](docs/Makefile)')).toContain('data-file-path="docs/Makefile"')
+  })
+
+  it('routes folder links in a typed message the same way', () => {
+    expect(renderUserMarkdown('[out](exports/sloth-v5)')).toContain('data-file-path="exports/sloth-v5"')
+  })
+})
+
+describe('chat markdown images', () => {
+  function img(text: string, chatId?: string): HTMLImageElement | null {
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown(text, [], undefined, { chatId })
+    return host.querySelector('img')
+  }
+
+  it('serves a workspace-relative image through the chat-scoped image route', () => {
+    // A bare relative src resolved against the /chat/... route and loaded the
+    // app shell, so the image rendered as a broken box.
+    const el = img('![Chat details](memory-vault/projects/active/shot%20v2.png)', 'chat-1')
+
+    expect(el?.getAttribute('src')).toBe(
+      '/api/workspace-image?path=memory-vault%2Fprojects%2Factive%2Fshot%20v2.png&chat_id=chat-1',
+    )
+    expect(el?.getAttribute('alt')).toBe('Chat details')
+  })
+
+  it('leaves web images, root URLs and non-image paths as written', () => {
+    expect(img('![a](https://example.com/a.png)', 'chat-1')?.getAttribute('src')).toBe('https://example.com/a.png')
+    expect(img('![a](/api/images/upload.png)', 'chat-1')?.getAttribute('src')).toBe('/api/images/upload.png')
+    expect(img('![a](notes/plan.md)', 'chat-1')?.getAttribute('src')).toBe('notes/plan.md')
+  })
+
+  it('never turns a javascript: or data: image into an API request', () => {
+    for (const href of ['javascript:alert(1)//x.png', 'data:image/png;base64,iVBORw0KGgo=']) {
+      const html = renderMarkdown(`![a](${href})`, [], undefined, { chatId: 'chat-1' })
+      expect(html).not.toContain('/api/workspace-image')
+      expect(html).not.toContain('javascript:')
+    }
+  })
+})
+
+describe('file markdown folder links', () => {
+  it("resolves a note's folder link against the note's folder", () => {
+    const up = renderFileMarkdown('[out](../exports/sloth-v5)', {
+      resolveImageSrc: h => h,
+      filePath: '/ws/notes/plan.md',
+    })
+    expect(up).toContain('data-file-path="/ws/exports/sloth-v5"')
+
+    const beside = renderFileMarkdown('[x](exports/a)', {
+      resolveImageSrc: h => h,
+      filePath: 'notes/plan.md',
+    })
+    expect(beside).toContain('data-file-path="notes/exports/a"')
+  })
+
+  it('renders a folder link that collapses above the workspace as inert text', () => {
+    const html = renderFileMarkdown('[up](../x/..)', {
+      resolveImageSrc: h => h,
+      filePath: 'a/plan.md',
+    })
+    expect(html).toContain('<span class="markdown-dead-link">up</span>')
+    expect(html).not.toContain('<a ')
+    expect(html).not.toContain('target="_blank"')
+  })
+
+  it('does not name a folder above the note it cannot reach', () => {
+    const html = renderFileMarkdown('[up](../x/..)', {
+      resolveImageSrc: h => h,
+      filePath: 'a/plan.md',
+    })
+    expect(html).not.toContain('file-link')
+  })
 })
 
 // Issue #1768: a message that names another conversation links to it, under

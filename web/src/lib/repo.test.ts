@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { branchLabel, findRepoInstructions, joinRepoPath, repoName } from './repo'
+import { branchLabel, findRepoInstructions, inCodeMode, joinRepoPath, repoName } from './repo'
 
 function fakeFetch(...statuses: number[]) {
   const fn = vi.fn()
@@ -41,5 +41,22 @@ describe('repo helpers', () => {
 
   it('throws on a non-404 failure', async () => {
     await expect(findRepoInstructions('/r/app', fakeFetch(500))).rejects.toThrow('HTTP 500')
+  })
+})
+
+describe('inCodeMode', () => {
+  const repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+
+  it('is on for a project linked to a repository that exists', () => {
+    expect(inCodeMode(repo)).toBe(true)
+  })
+
+  it('is off without a linked repository', () => {
+    expect(inCodeMode(null)).toBe(false)
+    expect(inCodeMode(undefined)).toBe(false)
+  })
+
+  it('is off when the linked folder is missing', () => {
+    expect(inCodeMode({ ...repo, missing: true })).toBe(false)
   })
 })

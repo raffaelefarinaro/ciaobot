@@ -17,7 +17,7 @@
           <div class="fv-modal" :class="{ 'fv-modal--doc': isProse }" tabindex="-1">
             <header :ref="setModalEl" class="fv-header">
               <div class="fv-titles">
-                <DialogTitle as="div" class="fv-title" :title="store.path">{{ basename }}</DialogTitle>
+                <DialogTitle as="div" class="fv-title" :title="store.path">{{ titleText }}</DialogTitle>
                 <!-- The folder, shortened as the pinned tile shows it; the
                      full path stays in the description for screen readers. -->
                 <DialogDescription as="div" class="fv-subtitle" :title="store.path">
@@ -47,7 +47,7 @@
             @click="store.startEditing"
           >Edit</button>
           <button
-            v-if="store.path"
+            v-if="store.path && !store.imageUrl && store.kind !== 'folder'"
             type="button"
             class="fv-text-btn fv-discuss-btn"
             title="Discuss in chat"
@@ -73,19 +73,22 @@
             <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
               <div class="fv-actions-menu">
                 <!-- On a phone Discuss moves here, so the filename keeps the bar. -->
-                <DropdownMenuItem v-if="store.path" as-child class="fv-menu-discuss" @select="discussInChat">
+                <DropdownMenuItem v-if="store.path && !store.imageUrl && store.kind !== 'folder'" as-child class="fv-menu-discuss" @select="discussInChat">
                   <button type="button">Discuss in chat</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child @select.prevent="copyPath">
+                <DropdownMenuItem v-if="!!store.path" as-child :disabled="!!store.imageUrl" @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
+                <DropdownMenuItem v-if="canShowInFolder" as-child @select="showInFolder">
+                  <button type="button">Show in folder</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="store.kind !== 'folder'" as-child :disabled="store.loading || !!store.error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="canShareFile" as-child :disabled="store.loading || !!store.error" @select="shareFile">
+                <DropdownMenuItem v-if="canShareFile && store.kind !== 'folder'" as-child :disabled="store.loading || !!store.error" @select="shareFile">
                   <button type="button">Share file…</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
+                <DropdownMenuItem v-if="canOpenExternally && !!store.path" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="memoryPath" as-child @select="openInMemoryMap">
@@ -101,7 +104,7 @@
       </header>
 
       <div class="fv-main" ref="mainEl">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html' }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html', 'fv-body-folder': store.kind === 'folder' }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <div v-else-if="store.kind === 'image' && imageError" class="fv-error" role="alert">{{ imageError }}</div>
@@ -111,6 +114,14 @@
             :src="imageSrc"
             :alt="basename"
             @error="onImageError"
+          />
+          <FolderBrowser
+            v-else-if="store.kind === 'folder'"
+            :key="store.loadToken"
+            :initial-path="store.path"
+            :chat-id="store.chatId"
+            @navigate="store.setFolderPath"
+            @open-file="onFolderOpenFile"
           />
           <!-- Edit mode: replaces the preview body with a textarea + actions.
                No history/diff while editing — finish or cancel first. -->
@@ -172,6 +183,9 @@
               @compose-comment="onArtifactCompose"
               @open-comment="onArtifactOpenComment"
               @bridge-ready="onArtifactBridgeReady"
+              @selection="artifactSelection.onSelection"
+              @selection-cleared="artifactSelection.clear"
+              @type-comment="onArtifactTypeComment"
             />
             <template v-else>
             <!-- Document properties from YAML frontmatter: a quiet header in
@@ -270,11 +284,11 @@
 
         <!-- Floating "Comment" button anchored near the active selection. -->
         <button
-          v-if="selectionAnchor"
+          v-if="commentTrigger"
           class="fv-comment-trigger"
-          :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
+          :style="{ top: commentTrigger.top + 'px', left: commentTrigger.left + 'px' }"
           @mousedown.prevent
-          @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
+          @click="onCommentTriggerClick"
           type="button"
           :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
         >
@@ -351,8 +365,10 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
+import { parentFolderOf } from '../lib/folderBrowserDriver'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useArtifactSelection } from '../composables/useArtifactSelection'
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -363,10 +379,11 @@ import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+const FolderBrowser = defineAsyncComponent(() => import('./FolderBrowser.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
-useOverlayBackEntry(() => store.isOpen, () => store.close())
+useOverlayBackEntry(() => store.isOpen, () => store.backOrClose())
 const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
 const opener = ref<HTMLElement | null>(props.opener)
 watch(() => store.isOpen, (open, wasOpen) => {
@@ -418,11 +435,13 @@ function onEscapeKeyDown(event: KeyboardEvent) {
 function onPointerDownOutside(event: PointerDownOutsideEvent) {
   event.preventDefault()
   const original = event.detail.originalEvent
+  if (original.target instanceof Element && original.target.closest('.vuefinder__themer')) return // VueFinder's teleported dropdowns
   if (original.button !== 0 || original.ctrlKey) return
   void requestClose()
 }
 
 const memoryPath = computed(() => {
+  if (store.kind === 'folder') return ''
   const path = store.path.replace(/:\d+$/, '')
   return /\.(md|markdown)$/i.test(path) ? path : ''
 })
@@ -708,11 +727,7 @@ function onMdClick(e: MouseEvent): void {
     const lineAttr = fileLink.getAttribute('data-line')
     const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
     const cid = store.chatId || ''
-    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
-      void store.openImage(linkedPath, cid)
-    } else {
-      void store.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
-    }
+    void store.openLink(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
     return
   }
 
@@ -782,13 +797,17 @@ const copyState = ref<'' | 'ok'>('')
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 // The file opens on the engine's machine, so only offer it there: from a phone
 // or another Mac it would open on a screen nobody is looking at.
-const canOpenExternally = isLoopbackPage()
+const canOpenExternally = computed(() => isLoopbackPage() && !store.imageUrl)
 
 // The chat on screen whose split view can take the file; '' where there is
 // none (a phone, a project page, Home, Settings, the memory map). Pinning
 // anywhere else would put the file beside a chat that is not shown.
 const activePinKey = computed(() => store.dockTarget)
-const canPin = computed(() => !!activePinKey.value)
+// A served image has no workspace path to pin, copy, or open elsewhere.
+const canPin = computed(() => !!activePinKey.value && !store.imageUrl && store.kind !== 'folder')
+// A bare relative name ('today.md', no chat to resolve it) has no folder to show.
+const canShowInFolder = computed(() => !!store.path && !store.imageUrl && store.kind !== 'folder'
+  && parentFolderOf(store.path) !== '')
 const isPinned = computed(() => {
   if (!activePinKey.value) return false
   return projectsStore.pinnedFileFor(activePinKey.value) === cleanPath(store.path)
@@ -918,6 +937,9 @@ function onArtifactCompose(a: {
   frameY: number
 }): void {
   if (commentDraft.value || editingCommentId.value) return
+  // Whatever selection the frame reported is spent: an Alt+Click compose
+  // supersedes it, and the selection path took it already.
+  artifactSelection.clear()
   // Close any read popover first, as the pinned panel already does: without
   // this, clicking an existing highlight and then selecting other text in the
   // frame floated the read and compose popovers over it at the same time.
@@ -948,8 +970,12 @@ function onArtifactCompose(a: {
     startOffset: a.startOffset,
     endOffset: a.endOffset,
     wholeElement: a.wholeElement,
+    draft: true,
   }
   pushArtifactHighlights()
+  // Drop the frame's native selection, whichever path composed: the draft
+  // highlight shows instead, and the frame stops reporting it.
+  artifactViewerRef.value?.clearSelection()
 }
 
 // The shared cancel knows nothing about the artifact draft; without this the
@@ -1016,7 +1042,82 @@ useTypeToComment({
   addImages: (files: File[]) => addDraftImages(files),
 })
 
-const imageSrc = computed(() => `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
+// ── Artifact selection → the same Comment button ─────────────────────
+// The frame reports its selections (it cannot render the page's button, and
+// a pill of its own looked and behaved differently from the Markdown one), so
+// the button below is the Markdown trigger, placed from the reported box.
+const artifactSelection = useArtifactSelection({
+  containerEl: modalEl,
+  frameEl: () => artifactViewerRef.value?.frameEl,
+})
+
+// One floating button for both: a Markdown/text/CSV selection, else an
+// artifact selection. Hidden while a draft is open, as the Markdown one is.
+const commentTrigger = computed(() =>
+  selectionAnchor.value
+    ?? (commentDraft.value || editingCommentId.value ? null : artifactSelection.trigger.value),
+)
+
+function onCommentTriggerClick(): void {
+  if (selectionAnchor.value) {
+    if (isCsv.value) openCommentForCsvCell()
+    else openCommentForSelection()
+    return
+  }
+  openArtifactCommentForSelection()
+}
+
+// The artifact counterpart of openCommentForSelection: compose on the
+// reported selection, seeded with what was typed or pasted, at the button's
+// spot.
+function openArtifactCommentForSelection(initialText = ''): void {
+  if (commentDraft.value || editingCommentId.value) return
+  const taken = artifactSelection.take()
+  if (!taken) return
+  const s = taken.selection
+  onArtifactCompose({
+    selector: s.selector,
+    quote: s.quote,
+    startOffset: s.startOffset,
+    endOffset: s.endOffset,
+    elementTag: s.elementTag,
+    frameX: s.rect.left,
+    frameY: s.rect.bottom,
+  })
+  if (!commentDraft.value) return
+  if (taken.trigger) draftAnchor.value = comments.toViewportAnchor(taken.trigger)
+  composeText.value = initialText
+  artifactDraftFromType = !!initialText
+}
+
+// Type-to-comment from inside the frame: the bridge forwards the keystroke or
+// paste, since the page-level listener above never hears keys typed there.
+// Pasted files are not forwarded (see artifactBridge.ts), so this is text only.
+//
+// A fast typist's next letters can still be forwarded after the first opened
+// the composer and before its textarea has focus; they belong to the same
+// note, so they are appended rather than dropped.
+let artifactDraftFromType = false
+function onArtifactTypeComment(p: { text: string }): void {
+  if (commentDraft.value) {
+    const focused = document.activeElement?.closest?.('.compose')
+    if (artifactDraft && artifactDraftFromType && !focused) composeText.value += p.text
+    return
+  }
+  openArtifactCommentForSelection(p.text)
+}
+
+// While a composer is open the frame takes no keys: typing in an artifact
+// with a selection must not be swallowed for a comment that cannot open.
+watch(
+  () => !!(commentDraft.value || editingCommentId.value),
+  busy => {
+    if (!busy) artifactDraftFromType = false
+    artifactViewerRef.value?.setBusy(busy)
+  },
+)
+
+const imageSrc = computed(() => store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`)
 // Why the current image URL failed to load; empty while it has not failed.
 const imageError = ref('')
 async function onImageError(): Promise<void> {
@@ -1033,7 +1134,8 @@ const basename = computed(() => {
 })
 
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
-const isCsv = computed(() => isCsvPath(store.path))
+const titleText = computed(() => (store.kind === 'folder' ? basename.value || 'Files' : basename.value))
+const isCsv = computed(() => store.kind !== 'folder' && isCsvPath(store.path))
 // A text document reads at its measure, so the window is sized to it rather
 // than leaving the prose on the left of a 1200px box. Images, PDFs, artifacts
 // and CSV tables keep the wide window.
@@ -1155,6 +1257,14 @@ watch(
   { immediate: true },
 )
 
+function showInFolder(): void {
+  void store.openFolder(parentFolderOf(store.path), store.chatId)
+}
+
+function onFolderOpenFile(path: string): void {
+  void store.openFromFolder(path, store.chatId)
+}
+
 async function copyPath(): Promise<void> {
   const copied = await writeClipboard(store.path)
   if (!copied) return
@@ -1177,7 +1287,7 @@ async function openExternally(): Promise<void> {
 
 async function discussInChat(): Promise<void> {
   const path = store.path
-  if (!path) return
+  if (!path || store.imageUrl) return
   // Comments pending on this file are appended by startFileDiscussion; the
   // "help me understand" nudge only fits the case where there are none.
   const seed = projectsStore.fileComments[path]?.length
@@ -1200,7 +1310,7 @@ function downloadFile(): void {
   const a = document.createElement('a')
   a.download = name || 'download'
   if (store.kind === 'image') {
-    a.href = `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
+    a.href = store.imageUrl || `/api/workspace-image?path=${encodeURIComponent(cleaned)}`
   } else if (store.kind === 'pdf') {
     a.href = `/api/workspace-binary?path=${encodeURIComponent(cleaned)}&raw=1`
   } else if (store.kind === 'html') {
@@ -1228,7 +1338,9 @@ async function shareFile(): Promise<void> {
     if (store.kind === 'image' || store.kind === 'pdf' || store.kind === 'html') {
       const endpoint = store.kind === 'image' ? '/api/workspace-image'
         : store.kind === 'pdf' ? '/api/workspace-binary' : '/api/workspace-file'
-      const url = `${endpoint}?path=${encodeURIComponent(cleaned)}${store.kind === 'pdf' ? '&raw=1' : ''}`
+      const url = store.kind === 'image' && store.imageUrl
+        ? store.imageUrl
+        : `${endpoint}?path=${encodeURIComponent(cleaned)}${store.kind === 'pdf' ? '&raw=1' : ''}`
       const response = await fetch(url, { credentials: 'same-origin' })
       if (!response.ok) throw new Error('Could not load the file to share.')
       const blob = await response.blob()
@@ -1248,7 +1360,10 @@ watch(
   () => [store.isOpen, store.path, store.chatId, projectsStore.streaming[store.chatId]] as const,
   ([isOpen, path, chatId, isStreaming], oldValues) => {
     const wasStreaming = oldValues ? oldValues[3] : false
-    if (isOpen && path && chatId && wasStreaming && !isStreaming) {
+    // A served image has no workspace path: re-opening it as one on stream end
+    // would replace the picture with a file-not-found error.
+    // A folder is not a file to reload either: it would replace the listing with a file-not-found error.
+    if (isOpen && path && chatId && !store.imageUrl && store.kind !== 'folder' && wasStreaming && !isStreaming) {
       store.open(path, store.line, chatId)
     }
   }
@@ -1466,6 +1581,14 @@ watch(
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* The folder browser fills the body; the doubled class beats the ≤640px padding. */
+.fv-body.fv-body-folder {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  min-height: min(70vh, 640px);
 }
 .fv-img {
   max-width: 100%;
@@ -1996,9 +2119,9 @@ watch(
   .fv-backdrop { padding: 0; }
   .fv-modal {
     border-radius: 0;
-    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
-    height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
-    margin-top: var(--safe-top);
+    max-height: calc(100dvh - var(--chrome-top) - var(--safe-bottom));
+    height: calc(100dvh - var(--chrome-top) - var(--safe-bottom));
+    margin-top: var(--chrome-top);
     margin-bottom: var(--safe-bottom);
     width: 100vw;
   }

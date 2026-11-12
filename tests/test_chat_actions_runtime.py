@@ -723,6 +723,100 @@ async def test_continue_before_done_is_an_invalid_state(tmp_path: Path) -> None:
     assert info.value.reason == "invalid_state"
 
 
+# ── Sign-in requested from Settings ────────────────────────────────────────
+
+
+def test_request_mcp_auth_raises_an_open_card_for_the_chat_provider(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+
+    payload = runtime.request_mcp_auth(chat.chat_id, "linear")
+
+    assert payload["kind"] == "mcp_auth"
+    assert payload["state"] == "open"
+    assert payload["origin"] == "engine"
+    assert payload["params"] == {"server": "linear", "provider": "opencode"}
+    assert manager.chat_action_payloads(chat.chat_id) == [payload]
+
+
+def test_request_mcp_auth_returns_the_card_already_there(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+    action_id = raise_sign_in(manager, chat)
+
+    payload = runtime.request_mcp_auth(chat.chat_id, "linear")
+
+    assert payload["id"] == action_id
+    assert len(manager.chat_action_payloads(chat.chat_id)) == 1
+
+
+def test_request_mcp_auth_replaces_a_done_card(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+    old = raise_sign_in(manager, chat)
+    manager.update_action(chat.chat_id, old, state="done")
+
+    payload = runtime.request_mcp_auth(chat.chat_id, "linear")
+
+    assert payload["id"] != old
+    assert payload["state"] == "open"
+    assert [a["id"] for a in manager.chat_action_payloads(chat.chat_id)] == [payload["id"]]
+    assert "mcp_auth:linear" not in chat.dismissed_action_keys
+
+
+def test_request_mcp_auth_strips_the_server_name(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+
+    payload = runtime.request_mcp_auth(chat.chat_id, "  linear ")
+
+    assert payload["params"] == {"server": "linear", "provider": "opencode"}
+
+
+def test_request_mcp_auth_lifts_an_earlier_not_now(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+    decline = manager.mcp_auth_decline_key(chat, "mcp_auth:linear")
+    chat.dismissed_action_keys.add("mcp_auth:linear")
+    manager.declined_mcp_auth.add(decline)
+
+    payload = runtime.request_mcp_auth(chat.chat_id, "linear")
+
+    assert payload["state"] == "open"
+    assert "mcp_auth:linear" not in chat.dismissed_action_keys
+    assert decline not in manager.declined_mcp_auth
+
+
+def test_request_mcp_auth_refuses_an_archived_chat(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    chat = opencode_chat(manager, live_opencode(tmp_path, FakeClient(sign_in_routes())))
+    runtime = make_runtime(manager)
+    chat.archived = True
+
+    with pytest.raises(ChatActionError) as info:
+        runtime.request_mcp_auth(chat.chat_id, "linear")
+
+    assert info.value.reason == "invalid_state"
+    assert manager.chat_action_payloads(chat.chat_id) == []
+
+
+def test_request_mcp_auth_refuses_a_claudeai_connector(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    project = manager.create_project("Claude", workspace="work")
+    chat = manager.create_chat(project.project_id, title="c", provider="claude")
+    runtime = make_runtime(manager)
+
+    with pytest.raises(ChatActionError) as info:
+        runtime.request_mcp_auth(chat.chat_id, "claude.ai Slack")
+
+    assert info.value.reason == "invalid_param"
+
+
 # ── Turn-end detection ─────────────────────────────────────────────────────
 
 

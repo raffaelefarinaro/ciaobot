@@ -80,6 +80,15 @@ describe('useTypeToComment', () => {
     expect(harness.opened).toEqual([])
   })
 
+  it('ignores Safari\'s keyCode 229 composition keystroke', () => {
+    // Safari starts IME composition with keyCode 229 and isComposing unset.
+    const e = new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'keyCode', { value: 229 })
+    document.body.dispatchEvent(e)
+    expect(e.defaultPrevented).toBe(false)
+    expect(harness.opened).toEqual([])
+  })
+
   it('does not steal typing aimed at a field', () => {
     const input = document.createElement('textarea')
     document.body.appendChild(input)

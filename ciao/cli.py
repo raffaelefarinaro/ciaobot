@@ -2410,13 +2410,20 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     if "skipped" in summary:
         return _print_link_migration_skip(summary)
 
-    verb = "Rewrote" if args.apply else "Would rewrite"
+    verb = "Planned" if args.apply and summary["failed"] else ("Rewrote" if args.apply else "Would rewrite")
     rewrites = summary["rewrites"]
     if rewrites:
-        print(
-            f"{verb} {len(rewrites)} link(s) in {summary['files_rewritten']} "
-            f"of {summary['files_scanned']} note(s):"
-        )
+        planned_notes = len({change["path"] for change in rewrites})
+        displayed_notes = planned_notes if args.apply and summary["failed"] else summary["files_rewritten"]
+        if args.apply and (summary["failed"] or summary.get("resumed_files")):
+            print(f"{verb} {len(rewrites)} link(s) in {displayed_notes} note(s):")
+        else:
+            print(
+                f"{verb} {len(rewrites)} link(s) in {displayed_notes} "
+                f"of {summary['files_scanned']} note(s):"
+            )
+        if args.apply and summary["failed"]:
+            print(f"Rewrote {summary['files_rewritten']} of {planned_notes} planned note(s).")
         for change in rewrites:
             print(
                 f"  {change['path']}:{change['line']}  "
@@ -2428,8 +2435,7 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         # to stderr just below. A retry hit exactly this and told the operator
         # the vault was clean.
         print(
-            f"Rewrote nothing: every note with wikilinks failed to write "
-            f"({summary['files_scanned']} scanned)."
+            f"Migration did not complete ({summary['files_scanned']} scanned)."
         )
     else:
         print(f"No wikilinks found in {summary['files_scanned']} note(s).")
@@ -2440,17 +2446,25 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         # root this run was given*, which is also what a perfectly good link
         # looks like when the root is too narrow. Asserting pre-existing rot let
         # the tool label its own broken output as damage it had found.
-        print(
-            f"\nConverted but resolving to nothing — no note under `{vault_root}` "
-            "matches these refs, so they now report as broken markdown links. "
-            "A link that works in Obsidian and appears here means the root is "
-            "too narrow, not that the link was dead:"
-        )
+        if summary["failed"] or not args.apply:
+            print("\nPlanned unresolved links resolving to nothing — no note under "
+                  f"`{vault_root}` matches these refs; conversion may produce broken links. "
+                  "A working link may appear here if the root is too narrow:")
+        else:
+            print(
+                f"\nConverted but resolving to nothing — no note under `{vault_root}` "
+                "matches these refs, so they now report as broken markdown links. "
+                "A link that works in Obsidian and appears here means the root is "
+                "too narrow, not that the link was dead:"
+            )
         for item in summary["unresolved"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}]]")
 
     if summary["anchors_dropped"]:
-        print("\nHeading anchors dropped (recorded in the receipt):")
+        if summary["failed"] or not args.apply:
+            print("\nPlanned heading anchors to drop:")
+        else:
+            print("\nHeading anchors dropped (recorded in the receipt):")
         for item in summary["anchors_dropped"]:
             print(f"  {item['path']}:{item['line']}  [[{item['ref']}#{item['anchor']}]]")
 
@@ -2459,16 +2473,15 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
         for item in summary["failed"]:
             print(f"  {item['path']}: {item['error']}", file=sys.stderr)
 
-    if args.apply and rewrites:
+    if args.apply and rewrites and summary.get("receipt_path"):
         print(f"\nReceipt: {summary.get('receipt_path', '')}")
         print("Reverse it exactly with `ciao vault-unmigrate-links --apply`.")
         if not summary.get("complete", True):
             # The receipt is real and the undo works, but the migration is not
             # done. Printing only the success trailer read as "finished".
             print(
-                "This run did NOT finish: the notes listed under Failed still "
-                "use wikilinks. Fix the cause and re-run — the reverse map "
-                "carries forward, so nothing already converted is lost."
+                "This run did NOT finish. Review the failures and retry, or "
+                "use the retained receipt to undo the changes."
             )
     elif not args.apply and rewrites:
         print("\nRe-run with --apply to write these changes.")
@@ -5058,13 +5071,15 @@ def _observation_propose_command(args: argparse.Namespace) -> int:
     vault_root, workspace = context
     try:
         result = propose_observation(
-            vault_root, workspace=workspace, observation_id=args.id
+            vault_root, workspace=workspace, observation_id=args.id, drop=args.drop
         )
     except ValueError as exc:
         print(f"ciao observation-propose: {exc}", file=sys.stderr)
         return 2
     if args.json:
         _emit_json(result)
+    elif result["dropped"]:
+        print(f"Dropped {result['id']} without a proposal; it is now resolved.")
     elif result["queued"]:
         print(f"Queued a [{result['destination']}] proposal for {result['id']}.")
     else:
@@ -5732,9 +5747,22 @@ def _eval_tasks_command(args: argparse.Namespace) -> int:
             print(task_eval.render_summary(summary))
         return 0
     if action == "compare":
-        comparison = task_eval.compare(
-            task_eval.read_jsonl([args.baseline]), task_eval.read_jsonl([args.candidate])
-        )
+        allow_mixed = bool(getattr(args, "allow_mixed", False))
+        try:
+            comparison = task_eval.compare(
+                task_eval.read_jsonl([args.baseline]),
+                task_eval.read_jsonl([args.candidate]),
+                allow_mixed=allow_mixed,
+            )
+        except task_eval.MixedRunsError as exc:
+            raise SystemExit(f"error: {exc}") from exc
+        mixed = task_eval.mixed_runs(comparison)
+        if mixed:
+            print(
+                "warning: --allow-mixed pooled runs of different providers or models:\n  "
+                + "\n  ".join(mixed),
+                file=sys.stderr,
+            )
         if args.json:
             print(json.dumps(comparison, indent=2, ensure_ascii=False))
         else:
@@ -9069,6 +9097,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Queue a proposal for an observation seen in three chats.",
     )
     observation_propose_parser.add_argument("id", help="The observation id.")
+    observation_propose_parser.add_argument(
+        "--drop",
+        action="store_true",
+        help="Resolve the observation without queuing a proposal (it would not change agent behaviour, or memory already says it).",
+    )
     _observation_options(observation_propose_parser)
     observation_propose_parser.set_defaults(func=_observation_propose_command)
 
@@ -9936,6 +9969,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tasks_compare.add_argument("--baseline", type=Path, required=True)
     tasks_compare.add_argument("--candidate", type=Path, required=True)
+    tasks_compare.add_argument(
+        "--allow-mixed",
+        action="store_true",
+        help="Pool a task's runs even when one side mixes providers or models (warns on stderr).",
+    )
     tasks_compare.add_argument(
         "--json", action="store_true", help="Emit the comparison as JSON."
     )

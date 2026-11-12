@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import McpAuthBody from '../McpAuthBody.vue'
+import { mcpTurnOffErrorText, mcpTurnOffScopeText } from '../../../lib/chatActions'
 import type { ChatAction } from '../../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -170,5 +171,63 @@ describe('McpAuthBody paste-back field', () => {
     w.get('form').trigger('submit')
     await flushPromises()
     expect(w.emitted('notice')?.at(-1)).toEqual(['Address sent. This card updates when the sign-in finishes.'])
+  })
+})
+
+describe('McpAuthBody Turn off', () => {
+  function turnOffButton(w: VueWrapper) {
+    return w.get('button[aria-label="Turn off notion"]')
+  }
+
+  it('offers Turn off with its scope and posts it', async () => {
+    apiPost.mockResolvedValueOnce({ actions: [], reload: { reloaded: [], pending: [] } })
+    const w = mountBody(action({ state: 'open', params: { server: 'notion', provider: 'opencode' } }))
+    const button = turnOffButton(w)
+    const scope = w.get('.needs-you-turn-off-scope')
+    expect(button.classes()).toContain('needs-you-btn--quiet')
+    expect(button.attributes('aria-describedby')).toBe(scope.attributes('id'))
+    expect(scope.text()).toBe(mcpTurnOffScopeText('opencode'))
+
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/turn-off', {})
+  })
+
+  it('shows the Claude scope line', () => {
+    const w = mountBody(action({ state: 'open', params: { server: 'notion', provider: 'claude' } }))
+    expect(w.get('.needs-you-turn-off-scope').text()).toContain('git repository')
+  })
+
+  it('shows the refusal in words and keeps the card', async () => {
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
+      status: 400,
+      payload: { error: 'config_has_comments', action: action({ state: 'open', params: { server: 'notion', provider: 'opencode' } }) },
+    }))
+    const w = mountBody(action({ state: 'open', params: { server: 'notion', provider: 'opencode' } }))
+
+    await turnOffButton(w).trigger('click')
+    await flushPromises()
+
+    expect(w.emitted('error')?.at(-1)).toEqual([mcpTurnOffErrorText('config_has_comments', 'notion')])
+  })
+
+  it('does not start the sign-in while a Turn off is pending', async () => {
+    apiPost.mockReturnValueOnce(new Promise(() => {}))
+    const w = mountBody(action({ state: 'open', params: { server: 'notion', provider: 'opencode' } }))
+
+    await turnOffButton(w).trigger('click')
+    await nextTick()
+    expect(turnOffButton(w).attributes('aria-busy')).toBe('true')
+    await w.get('button.needs-you-btn--primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).not.toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/start', expect.anything())
+  })
+
+  it('hides Turn off on a done card', () => {
+    const w = mountBody(action({ state: 'done', params: { server: 'notion', provider: 'opencode' } }))
+    expect(w.findAll('button').some(b => b.text() === 'Turn off')).toBe(false)
+    expect(w.find('.needs-you-turn-off-scope').exists()).toBe(false)
   })
 })

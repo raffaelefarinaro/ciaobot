@@ -9,6 +9,19 @@ import { pendingConfirm } from '../../lib/confirm'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 
+vi.mock('../FolderBrowser.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    __esModule: true,
+    default: defineComponent({
+      name: 'FolderBrowserStub',
+      props: ['initialPath', 'chatId'],
+      emits: ['navigate', 'open-file'],
+      setup: () => () => h('div', { class: 'folder-browser-stub' }),
+    }),
+  }
+})
+
 let wrapper: ReturnType<typeof mount> | null = null
 
 async function settle() {
@@ -36,6 +49,33 @@ function openViewer(options: { dirty?: boolean } = {}) {
   store.isOpen = true
   store.loadToken++
   return store
+}
+
+function openFolderViewer(path = '/ws/exports') {
+  const store = useFileViewerStore()
+  store.setDockTarget('chat-1')
+  store.kind = 'folder'
+  store.path = path
+  store.line = null
+  store.content = ''
+  store.loading = false
+  store.error = ''
+  store.chatId = 'chat-1'
+  wrapper = mount(FileViewerModal, {
+    attachTo: document.body,
+  })
+  store.isOpen = true
+  store.loadToken++
+  return store
+}
+
+async function openMoreMenu() {
+  await wrapper!.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+}
+
+function menuItems(): string[] {
+  return Array.from(document.querySelectorAll('.fv-actions-menu button')).map(b => b.textContent?.trim() ?? '')
 }
 
 function press(target: Element, key: string, init: KeyboardEventInit = {}) {
@@ -95,6 +135,48 @@ describe('FileViewerModal', () => {
     await settle()
 
     expect(wrapper!.get('.fv-body').classes()).toContain('fv-body-html')
+  })
+
+  it('gives an artifact selection the Markdown Comment button and type-to-comment', async () => {
+    // The bridge used to draw its own orange pill inside the frame, and keys
+    // typed into the frame never reached the page's type-to-comment listener.
+    const store = openViewer()
+    store.kind = 'html'
+    store.path = 'Workspace/dashboard.html'
+    store.htmlView = 'preview'
+    await settle()
+    const { default: HtmlArtifactViewer } = await import('../HtmlArtifactViewer.vue')
+    for (let i = 0; i < 4; i++) await settle()
+    const viewer = wrapper!.findComponent(HtmlArtifactViewer)
+    expect(viewer.exists()).toBe(true)
+    const frame = viewer.get('iframe').element
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+    frame.getBoundingClientRect = () => ({ top: 100, left: 50, bottom: 700, right: 650, width: 600, height: 600, x: 50, y: 100, toJSON: () => ({}) }) as DOMRect
+
+    viewer.vm.$emit('selection', {
+      selector: 'body > h2:nth-of-type(1)',
+      quote: 'Revenue rose',
+      startOffset: 0,
+      endOffset: 12,
+      elementTag: 'h2',
+      rect: { top: 20, left: 30, bottom: 40, right: 120 },
+    })
+    await nextTick()
+    const trigger = wrapper!.get('.fv-comment-trigger')
+    expect(trigger.text()).toBe('Comment')
+
+    viewer.vm.$emit('type-comment', { text: 'W' })
+    await settle()
+
+    expect(wrapper!.find('.fv-comment-trigger').exists()).toBe(false)
+    const textarea = document.querySelector('.compose textarea') as HTMLTextAreaElement
+    expect(textarea?.value).toBe('W')
+    expect(postMessage).toHaveBeenCalledWith({ frame: 'ciao-artifact', type: 'ciao:clear-selection' }, '*')
+    const pushes = postMessage.mock.calls.filter(c => c[0]?.type === 'ciao:apply-comments')
+    expect(pushes[pushes.length - 1][0].comments).toEqual([
+      expect.objectContaining({ selector: 'body > h2:nth-of-type(1)', quote: 'Revenue rose' }),
+    ])
   })
 
   it('renders shared vault metadata and resolves related notes in the viewer', async () => {
@@ -226,6 +308,34 @@ describe('FileViewerModal', () => {
     trigger.remove()
   })
 
+  it('keeps a folder open for a press inside a VueFinder teleported menu, and still closes for an outside press', async () => {
+    // VueFinder teleports its breadcrumb overflow and context menus to <body>; a press on them is not a dismissal.
+    const themer = document.createElement('div')
+    themer.className = 'vuefinder__themer'
+    const menuItem = document.createElement('button')
+    themer.appendChild(menuItem)
+    document.body.appendChild(themer)
+
+    const store = openFolderViewer()
+    const dismiss = vi.spyOn(store, 'dismissSharedPin')
+    await settle()
+    menuItem.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
+    await flushPromises()
+    await settle()
+    expect(dismiss).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+
+    wrapper!.get<HTMLElement>('.fv-backdrop').element.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    }))
+    await flushPromises()
+    await settle()
+    expect(dismiss).toHaveBeenCalledTimes(1)
+    themer.remove()
+  })
+
   it('restores focus to the opener for each open while the modal stays mounted', async () => {
     const firstTrigger = document.createElement('button')
     const secondTrigger = document.createElement('button')
@@ -301,6 +411,16 @@ describe('FileViewerModal', () => {
     await settle()
     expect(store.isOpen).toBe(false)
     expect(confirm).toHaveBeenCalledTimes(2)
+  })
+
+  it('opens a folder link inside a note through openLink', async () => {
+    const store = openViewer()
+    store.path = '/ws/notes/today.md'
+    store.content = '[out](../exports/x)'
+    await settle()
+    const openLink = vi.spyOn(store, 'openLink').mockResolvedValue(true)
+    await wrapper!.get<HTMLAnchorElement>('.fv-md a.file-link').trigger('click')
+    expect(openLink).toHaveBeenCalledWith('/ws/exports/x', null, 'chat-1')
   })
 
   it('keeps the nested comment composer focusable and Escape-local', async () => {
@@ -419,6 +539,106 @@ describe('FileViewerModal', () => {
     await flushPromises()
 
     expect(close).not.toHaveBeenCalled()
+  })
+
+  it('renders the folder browser for a folder and hides file-only actions', async () => {
+    openFolderViewer()
+    await settle()
+    await flushPromises()
+
+    const stub = wrapper!.findComponent({ name: 'FolderBrowserStub' })
+    expect(stub.exists()).toBe(true)
+    expect(stub.props('initialPath')).toBe('/ws/exports')
+    expect(wrapper!.get('.fv-title').text()).toBe('exports')
+    expect(wrapper!.get('.fv-body').classes()).toContain('fv-body-folder')
+    expect(wrapper!.get('.fv-body').classes()).not.toContain('fv-body-csv')
+    const labels = wrapper!.findAll('.fv-header button').map(b => b.attributes('aria-label') || b.text())
+    expect(labels).not.toContain('Discuss')
+    expect(labels).not.toContain('Pin to sidebar')
+  })
+
+  it('offers Pin to sidebar for a file on the same chat (control for the folder case)', async () => {
+    useFileViewerStore().setDockTarget('chat-1')
+    openViewer()
+    await settle()
+    const labels = wrapper!.findAll('.fv-header button').map(b => b.attributes('aria-label') || b.text())
+    expect(labels).toContain('Pin to sidebar')
+  })
+
+  it('a folder with a file-like name is still a folder', async () => {
+    openFolderViewer('/ws/data.csv')
+    await settle()
+    await flushPromises()
+    expect(wrapper!.get('.fv-body').classes()).not.toContain('fv-body-csv')
+    expect(wrapper!.findComponent({ name: 'FolderBrowserStub' }).exists()).toBe(true)
+
+    wrapper!.unmount()
+    openFolderViewer('/ws/notes.md')
+    await settle()
+    await flushPromises()
+    await openMoreMenu()
+    expect(menuItems()).not.toContain('Open in memory map')
+  })
+
+  it('opens a file picked in the folder browser', async () => {
+    const store = openFolderViewer()
+    await settle()
+    await flushPromises()
+    const openFromFolder = vi.spyOn(store, 'openFromFolder').mockResolvedValue(true)
+    wrapper!.findComponent({ name: 'FolderBrowserStub' }).vm.$emit('open-file', '/ws/exports/a.md')
+    expect(openFromFolder).toHaveBeenCalledWith('/ws/exports/a.md', 'chat-1')
+  })
+
+  it('a stream ending does not reload a folder as a file', async () => {
+    const store = openFolderViewer()
+    await settle()
+    const open = vi.spyOn(store, 'open')
+    const projects = useProjectStore()
+    projects.streaming['chat-1'] = true
+    await settle()
+    projects.streaming['chat-1'] = false
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(store.kind).toBe('folder')
+  })
+
+  it('Show in folder opens the file\'s folder', async () => {
+    const store = openViewer()
+    store.path = '/ws/notes/today.md'
+    const openFolder = vi.spyOn(store, 'openFolder').mockResolvedValue(true)
+    await settle()
+    await openMoreMenu()
+    const item = Array.from(document.querySelectorAll<HTMLElement>('.fv-actions-menu button'))
+      .find(b => b.textContent?.trim() === 'Show in folder')!
+    item.click()
+    await flushPromises()
+    expect(openFolder).toHaveBeenCalledWith('/ws/notes', 'chat-1')
+  })
+
+  it('a bare relative name offers no Show in folder', async () => {
+    const store = openViewer()
+    store.path = 'today.md'
+    await settle()
+    await openMoreMenu()
+    expect(menuItems()).not.toContain('Show in folder')
+  })
+
+  it('a folder menu has Copy path and Open in default app but no Show in folder, Download or Share', async () => {
+    openFolderViewer()
+    await settle()
+    await openMoreMenu()
+    const items = menuItems()
+    expect(items).toContain('Copy path')
+    expect(items).not.toContain('Show in folder')
+    expect(items).not.toContain('Download')
+    expect(items).not.toContain('Share file…')
+  })
+
+  it('a folder with no path has no Copy path', async () => {
+    openFolderViewer('')
+    await settle()
+    await openMoreMenu()
+    expect(menuItems()).not.toContain('Copy path')
   })
 
   it('keeps two text actions visible and puts the file utilities in one menu', async () => {

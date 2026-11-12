@@ -800,6 +800,11 @@ def search(
 ) -> list[dict[str, str]]:
     """Search FTS5 table with Porter stemmer query. Returns ranked results with snippets.
 
+    A multi-word query returns the notes holding every word first, in BM25
+    order; when those are fewer than ``limit``, notes holding any of the words
+    fill the rest, also in BM25 order. Results therefore need not contain
+    every word, and ``rank`` is comparable only within each of the two runs.
+
     ``path_prefix`` restricts results to one subtree of the stored keys. It is
     how a workspace-scoped search stays inside its own agent root now that the
     prune no longer deletes every other root's rows on each pass.
@@ -810,7 +815,7 @@ def search(
         raise ValueError("pass path_prefix or path_prefixes, not both")
     # Sanitize search term. If query is a simple string, escape double quotes
     # and wrap words. SQLite FTS5 MATCH syntax is powerful.
-    # To support basic multi-word queries gracefully, we join words with AND.
+    # Multi-word queries try AND first, then OR fills any remaining slots.
     words = re.findall(r"\w+", query)
     if not words:
         return []
@@ -836,13 +841,26 @@ def search(
     try:
         cursor = conn.execute(sql, (match_query, *scope_args, limit))
         rows = cursor.fetchall()
-        if not rows and len(words) > 1:
-            # AND-of-all-words returns nothing for paraphrase queries ("how
-            # much do I charge per hour" — no note holds every word). Degrade
-            # to OR and let BM25 rank the notes matching the distinctive
-            # terms; a weaker match beats an empty answer for recall.
-            cursor = conn.execute(sql, (" OR ".join(words), *scope_args, limit))
-            rows = cursor.fetchall()
+        if len(rows) < limit and len(words) > 1:
+            # AND-of-all-words is precise but brittle: a paraphrase ("how much
+            # do I charge per hour") matches no note at all, and a knowledge
+            # update usually matches only one side of it, because the note
+            # holding the old value and the note holding the new one rarely
+            # share every query word. So whenever AND leaves the page short,
+            # top it up with the OR query's BM25 order, skipping notes AND
+            # already returned. AND hits keep the lead; zero AND hits is just
+            # the case where the whole page comes from OR.
+            seen = {row[0] for row in rows}
+            try:
+                or_rows = conn.execute(sql, (" OR ".join(words), *scope_args, limit + len(rows))).fetchall()
+            except sqlite3.OperationalError:
+                # A top-up must never cost the AND hits already found: keep
+                # them and skip the backfill (only zero AND hits falls through
+                # to the literal match below).
+                if not rows:
+                    raise
+                or_rows = []
+            rows += [row for row in or_rows if row[0] not in seen][: limit - len(rows)]
     except sqlite3.OperationalError:
         # Fall back to literal match if complex match expression syntax is invalid
         sql = f"""
@@ -912,15 +930,17 @@ def search_logs(
 # ── Scoped evidence drill-down ─────────────────────────────────────────────
 #
 # `search` answers with `_public_snippet`: the FTS-highlighted lines only,
-# inside SQLite's 32-token budget. That narrowness is a privacy property, not
-# an accident — it is what keeps an unrelated private line out of a recall
-# answer. It is also narrow enough to cut away the half of a sentence that
-# decides the answer: a qualification ("…only for work logged before the
-# amendment"), a negation, or the paragraph naming the current value. Recall is
-# then told to answer from snippets alone, so it answers confidently from a
-# fragment whose meaning is the opposite of the note's.
+# inside SQLite's 32-token budget, narrow enough to cut away the half of a
+# sentence that decides the answer: a qualification ("…only for work logged
+# before the amendment"), a negation, or the paragraph naming the current value.
+# Recall that answered from snippets alone answered confidently from a fragment
+# whose meaning is the opposite of the note's, so the core prompt now has it
+# read the best-matching full note before answering; its privacy guard is the
+# answer-level "private working evidence" rule, not the snippet's narrowness.
 #
-# `expand_note` is the bounded repair. It is deliberately NOT a note reader:
+# `expand_note` is now only the library function the behavioural-eval recall
+# contracts measure; no agent path calls it. It is deliberately NOT a note
+# reader:
 #
 # * Scoped — the only admissible argument is a stored key the index currently
 #   holds *in `vault_fts`* and under the caller's own `path_prefix`. Another
@@ -935,8 +955,8 @@ def search_logs(
 #   section of the same note is still not returned, which is exactly the
 #   property `_public_snippet` was protecting; credential-shaped assignments
 #   that do land inside a window have their value redacted as well.
-# * Explicit — nothing calls this automatically. Recall asks for it, by the
-#   path a search already returned, when the snippet cannot support the answer.
+# * Explicit — nothing calls this automatically; it takes the path a search
+#   already returned.
 #
 # There is no opaque, expiring result token: the stored key IS the reference,
 # and it is re-validated against the live index and re-read from disk on every

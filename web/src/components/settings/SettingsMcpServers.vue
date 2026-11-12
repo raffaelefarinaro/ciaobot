@@ -5,7 +5,7 @@
         <h2 class="section-title">MCP servers</h2>
         <p class="hint">Connections belong to Claude Code or OpenCode. This list shows their configuration for the <strong>{{ status?.workspace || 'selected' }}</strong> workspace and connection status from open chats.</p>
       </div>
-      <button class="btn-small" type="button" :disabled="loading" @click="fetchStatus">{{ loading ? 'Checking…' : 'Refresh' }}</button>
+      <button class="btn-small" type="button" :disabled="loading || toggling !== null" @click="fetchStatus">{{ loading ? 'Checking…' : 'Refresh' }}</button>
     </div>
     <p v-if="error" class="action-result --error" role="alert">{{ error }}</p>
     <p v-if="loading" class="hint" role="status">Reading CLI configuration and open chat connections…</p>
@@ -38,15 +38,29 @@
             <span class="skill-name">{{ server.name }}</span>
             <span class="badge badge--muted">{{ scopeLabel(server.scope) }}</span>
             <span v-if="server.allowed === false" class="badge badge--warn">blocked in workspace</span>
+            <span v-if="!isOn(server)" class="badge badge--muted">off</span>
           </div>
           <p v-if="server.allowed === false" class="hint">This workspace’s tool restrictions prevent access to this server.</p>
+          <div v-if="server.applies_to" class="mcp-toggle-row">
+            <button
+              type="button"
+              class="btn-small mcp-toggle"
+              :aria-label="`${isOn(server) ? 'Turn off' : 'Turn on'} ${server.name} for ${providerLabel(current.provider)}`"
+              :aria-busy="toggling === moreKey(server) || undefined"
+              @click="toggleServer(current.provider, server)"
+            >{{ toggling === moreKey(server) ? 'Saving…' : (isOn(server) ? 'Turn off' : 'Turn on') }}</button>
+            <span class="hint mcp-applies-to">Applies to: <code>{{ server.applies_to }}</code></span>
+          </div>
+          <p v-else-if="server.scope === 'managed'" class="hint">Managed by your organization; it can’t be turned off here.</p>
           <div v-for="group in groupMcpConnections(server.connections)" :key="group.state" class="mcp-connection">
-            <span class="badge" :class="stateClass(group.state, server)">{{ stateLabel(group.state, server) }}</span>
+            <span class="badge" :class="isOn(server) ? stateClass(group.state, server) : 'badge--muted'">{{ stateLabel(group.state, server) }}</span>
             <span v-if="group.chatIds.length > 1" class="mcp-connection-count">in {{ group.chatIds.length }} chats</span>
             <a :href="`/chat/${encodeURIComponent(group.chatIds[0]!)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${group.chatIds[0]}`">Open chat</a>
             <p v-if="group.error && !claudeAiNotConnected(group.state, server)" class="hint">{{ group.error }}</p>
           </div>
-          <p v-if="!server.connections.length" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
+          <p v-if="!isOn(server) && server.connections.length" class="hint">Running chats keep this connection until they reload.</p>
+          <p v-if="!server.connections.length && isOn(server)" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
+          <p v-if="!isOn(server)" class="hint">Off: new {{ providerLabel(current.provider) }} chats here don’t connect to it.</p>
           <p v-if="isClaudeAi(server)" class="hint">
             A claude.ai connector: connect, reconnect or disconnect it on
             <a href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer">claude.ai, Settings, Connectors</a>.
@@ -56,10 +70,16 @@
           <template v-else>
             <div class="mcp-actions">
               <button
-                v-if="showSignIn(server)"
+                v-if="needsAuth(server)"
                 type="button"
-                class="mcp-signin"
-                :class="needsAuth(server) ? 'btn-primary' : 'btn-small'"
+                class="mcp-signin btn-primary"
+                :aria-disabled="signingIn !== null ? 'true' : undefined"
+                @click="signInInChat(current.provider, server.name, signInChat(server)!)"
+              >{{ signingIn === moreKey(server) ? 'Starting…' : 'Sign in' }}</button>
+              <button
+                v-else-if="showSignIn(server)"
+                type="button"
+                class="mcp-signin btn-small"
                 @click="runCommand(serverCommand(current.provider, 'login', server.name))"
               >Sign in in terminal</button>
               <div class="mcp-more" @keydown.esc.stop="closeMenu(true)" @focusout="onFocusOut">
@@ -73,15 +93,18 @@
                   @click="toggleMenu(moreKey(server))"
                 >···</button>
                 <div v-if="openMenu === moreKey(server)" class="mcp-menu" role="menu" :aria-label="`Actions for ${server.name}`">
-                  <button type="button" role="menuitem" class="mcp-menuitem" @click="signInFromMenu(current.provider, server.name)">Sign in in terminal</button>
+                  <button v-if="isOn(server)" type="button" role="menuitem" class="mcp-menuitem" @click="signInFromMenu(current.provider, server.name)">Sign in in terminal</button>
                   <button type="button" role="menuitem" class="mcp-menuitem" @click="copyServerCommand(current.provider, server.name)">{{ current.provider === 'claude' ? 'Copy remove command' : 'Copy sign-out command' }}</button>
                 </div>
               </div>
               <span v-if="menuCopied === moreKey(server)" class="hint" role="status">Copied</span>
             </div>
-            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+            <p v-if="signInError === moreKey(server)" class="action-result --error" role="alert">{{ SIGN_IN_ERROR }}</p>
+            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required. Sign in finishes in the open chat, which connects as soon as you complete it; a sign-in in the terminal only reaches chats started after it.' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
           </template>
         </div>
+        <p v-if="toggleNote && toggleFor === current.provider" class="hint mcp-toggle-note" role="status">{{ toggleNote }}</p>
+        <p v-if="toggleError && toggleFor === current.provider" class="action-result --error" role="alert">{{ toggleError }}</p>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
 
         <h4>Or do it yourself</h4>
@@ -121,10 +144,13 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import TabBar from '../TabBar.vue'
 import type { McpServersController } from '../../composables/useMcpServers'
 import { useRunInTerminal } from '../../composables/useRunInTerminal'
+import { safeExternalUrl } from '../../lib/chatActions'
 import { writeClipboard } from '../../lib/codeCopy'
+import { errorMessage } from '../../lib/errorMessage'
 import { groupMcpConnections } from '../../lib/mcpConnections'
 import { mcpCommand, serverUrlError, validServerName, type McpAction } from '../../lib/shellQuote'
-import type { McpConnection, McpNativeServer, McpProviderInventory } from '../../lib/types'
+import type { McpConnection, McpNativeServer, McpProviderInventory, McpToggleResult } from '../../lib/types'
+import { useProjectStore } from '../../stores/projects'
 
 type Provider = McpProviderInventory['provider']
 
@@ -132,6 +158,7 @@ const props = defineProps<{ mcp: McpServersController; defaultProvider?: string 
 const emit = defineEmits<{ (e: 'ask-ciao'): void }>()
 const { status, loading, error, fetchStatus } = props.mcp
 const terminal = useRunInTerminal()
+const projectStore = useProjectStore()
 
 const providers = computed<McpProviderInventory[]>(() => {
   const all = status.value?.providers ?? []
@@ -201,6 +228,39 @@ async function copyCommand(cmd: string | null): Promise<void> {
   if (cmd && await writeClipboard(cmd)) flashNote('Copied')
 }
 
+/** The open chat to sign in through: the first one that reports this server needs a sign-in. */
+function signInChat(server: McpNativeServer): string | null {
+  return server.connections.find(c => c.state === 'needs_auth')?.chat_id ?? null
+}
+const signingIn = ref<string | null>(null)
+const signInError = ref<string | null>(null)
+const SIGN_IN_ERROR = 'The sign-in could not be started. Open the chat and try again.'
+/** Sign in through the chat's own live session, using its needs-you card, then go to that card. */
+async function signInInChat(provider: Provider, serverName: string, chatId: string): Promise<void> {
+  if (signingIn.value) return
+  const key = menuKey(provider, serverName)
+  signingIn.value = key
+  signInError.value = null
+  try {
+    let action = await projectStore.requestMcpAuth(chatId, serverName)
+    if (action && (action.state === 'open' || action.state === 'failed')) {
+      try {
+        action = await projectStore.startChatAction(chatId, action.id)
+      } catch {
+        // The card in the chat shows why it failed.
+      }
+    }
+    const target = action?.state === 'waiting' ? safeExternalUrl(action.params.url) : null
+    if (target) window.open(target, '_blank', 'noopener,noreferrer')
+    const { router } = await import('../../router')
+    await router.push(`/chat/${encodeURIComponent(chatId)}`)
+  } catch {
+    signInError.value = key
+  } finally {
+    signingIn.value = null
+  }
+}
+
 const openMenu = ref<string | null>(null)
 const menuCopied = ref<string | null>(null)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
@@ -252,6 +312,37 @@ onBeforeUnmount(() => {
   clearTimeout(copiedTimer)
 })
 
+const toggling = ref<string | null>(null)
+const toggleNote = ref('')
+const toggleError = ref('')
+/** The provider the note or error belongs to, so a result that lands after a tab switch stays on its own tab. */
+const toggleFor = ref<Provider | null>(null)
+function isOn(server: McpNativeServer): boolean { return server.enabled !== false }
+function toggleSummary(provider: Provider, result: McpToggleResult): string {
+  const where = provider === 'claude' ? `for Claude Code chats in ${result.applies_to}` : `in ${result.applies_to}`
+  const pending = result.reload.pending.length
+  const running = pending === 0 ? '' : pending === 1
+    ? ' A running chat keeps its current connection until reloaded.'
+    : ` ${pending} running chats keep their current connection until reloaded.`
+  const warning = result.warning ? ` ${result.warning}` : ''
+  return `${result.server} is ${result.enabled ? 'on' : 'off'} ${where}.${running}${warning} ${providerLabel(provider)} sessions running outside Ciaobot keep their current state until they restart.`
+}
+async function toggleServer(provider: Provider, server: McpNativeServer): Promise<void> {
+  if (toggling.value) return
+  const next = !isOn(server)
+  toggling.value = menuKey(provider, server.name)
+  toggleFor.value = provider
+  toggleNote.value = ''
+  toggleError.value = ''
+  try {
+    toggleNote.value = toggleSummary(provider, await props.mcp.setEnabled(provider, server.name, next))
+  } catch (e) {
+    toggleError.value = errorMessage(e, `${server.name} could not be turned ${next ? 'on' : 'off'}.`)
+  } finally {
+    toggling.value = null
+  }
+}
+
 function manageable(server: McpNativeServer): boolean {
   return validServerName(server.name)
 }
@@ -267,11 +358,11 @@ function claudeAiNotConnected(state: McpConnection['state'], server: McpNativeSe
 }
 
 function showSignIn(server: McpNativeServer): boolean {
-  return !server.connections.length || server.connections.some(c => c.state === 'needs_auth' || c.state === 'failed')
+  return isOn(server) && (!server.connections.length || server.connections.some(c => c.state === 'needs_auth' || c.state === 'failed'))
 }
 
 function needsAuth(server: McpNativeServer): boolean {
-  return server.connections.some(c => c.state === 'needs_auth')
+  return isOn(server) && server.connections.some(c => c.state === 'needs_auth')
 }
 
 function providerLabel(provider: Provider): string {
@@ -312,6 +403,8 @@ function stateClass(state: McpConnection['state'], server: McpNativeServer): str
 .mcp-connection-count { color: var(--fg2); font-size: var(--text-sm); }
 .mcp-connection a, .mcp-doc-link { color: var(--accent); font-size: var(--text-sm); }
 .mcp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
+.mcp-toggle-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+.mcp-applies-to code { overflow-wrap: anywhere; }
 .mcp-more { position: relative; }
 .mcp-menu { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 12rem; margin-top: var(--space-1); padding: var(--space-1); background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .mcp-menuitem { display: block; width: 100%; padding: var(--space-2) var(--space-3); border: 0; background: transparent; color: var(--fg); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; border-radius: var(--radius-sm); }
@@ -326,11 +419,11 @@ function stateClass(state: McpConnection['state'], server: McpNativeServer): str
 .mcp-command-label { flex-basis: 100%; font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
 .mcp-commands code { flex: 1 1 18rem; min-width: 0; padding: var(--space-2) var(--space-3); background: var(--bg); border-radius: var(--radius-sm); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
 .mcp-command-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.mcp-more-button, .mcp-signin, .mcp-ask-button, .mcp-menuitem, .mcp-command-buttons button { cursor: pointer; }
-.mcp-field input:focus-visible, .mcp-more-button:focus-visible, .mcp-signin:focus-visible, .mcp-ask-button:focus-visible, .mcp-menuitem:focus-visible, .mcp-command-buttons button:focus-visible, .mcp-doc-link:focus-visible, .mcp-connection a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mcp-more-button, .mcp-signin, .mcp-toggle, .mcp-ask-button, .mcp-menuitem, .mcp-command-buttons button { cursor: pointer; }
+.mcp-field input:focus-visible, .mcp-toggle:focus-visible, .mcp-more-button:focus-visible, .mcp-signin:focus-visible, .mcp-ask-button:focus-visible, .mcp-menuitem:focus-visible, .mcp-command-buttons button:focus-visible, .mcp-doc-link:focus-visible, .mcp-connection a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (pointer: coarse) {
   .mcp-connection a, .mcp-doc-link { min-height: var(--touch); display: inline-flex; align-items: center; }
-  .mcp-more-button, .mcp-signin, .mcp-ask-button, .mcp-menuitem, .mcp-field input, .mcp-command-buttons button { min-height: var(--touch); }
-  .mcp-more-button { min-width: var(--touch); }
+  .mcp-more-button, .mcp-signin, .mcp-toggle, .mcp-ask-button, .mcp-menuitem, .mcp-field input, .mcp-command-buttons button { min-height: var(--touch); }
+  .mcp-more-button, .mcp-toggle { min-width: var(--touch); }
 }
 </style>

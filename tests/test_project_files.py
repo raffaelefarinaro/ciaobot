@@ -310,12 +310,72 @@ def test_upload_rejects_hidden_filename(tmp_path: Path) -> None:
         pcm.save_project_file_upload(proj.project_id, b"x", ".env")
 
 
-def test_upload_rejects_unsupported_extension(tmp_path: Path) -> None:
+# macOS names screenshots with U+202F (narrow no-break space) before AM (#2787).
+SHOT = "Screenshot 2026-11-10 at 10.15.30\u202fAM"
+
+
+def test_upload_accepts_a_macos_screenshot_name(tmp_path: Path) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"png", f"{SHOT}.png")
+
+    assert entry["path"] == f"{SHOT}.png"
+    assert (folder / f"{SHOT}.png").read_bytes() == b"png"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("bad\x01name.md", id="c0-control"),
+        pytest.param("bad\x00name.md", id="nul"),
+        pytest.param("inv\u202egnp.png", id="bidi-rlo-spoof"),
+        pytest.param("a\u2066b.png", id="bidi-isolate"),
+        pytest.param("a\u200bb.png", id="zero-width-space"),
+        pytest.param("a\ufeffb.png", id="byte-order-mark"),
+        pytest.param("a\u2028b.png", id="line-separator"),
+        pytest.param("a\u2029b.png", id="paragraph-separator"),
+        pytest.param("a\u200eb.png", id="lrm"),
+    ],
+)
+def test_upload_rejects_control_characters(tmp_path: Path, name: str) -> None:
     _make_work_project(tmp_path, "2026-q2-foo")
     pcm = _make_manager(tmp_path)
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
-    with pytest.raises(ValueError):
-        pcm.save_project_file_upload(proj.project_id, b"x", "trojan.exe")
+    with pytest.raises(ValueError, match="invalid filename"):
+        pcm.save_project_file_upload(proj.project_id, b"x", name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a\u202fb.png", id="narrow-no-break-space"),
+        pytest.param("\U0001f468\u200d\U0001f469.png", id="zwj-emoji"),
+    ],
+)
+def test_upload_accepts_space_and_emoji_joiner_names(tmp_path: Path, name: str) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"png", name)
+
+    assert entry["path"] == name
+    assert (folder / name).read_bytes() == b"png"
+
+
+@pytest.mark.parametrize("name", ["clip.mp4", "archive.tar.gz", "Makefile"])
+def test_upload_accepts_any_file_type(tmp_path: Path, name: str) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(proj.project_id, b"x", name)
+
+    assert entry["path"] == name
+    assert entry["kind"] == "binary"
+    assert (folder / name).read_bytes() == b"x"
 
 
 def test_upload_rejects_oversized(tmp_path: Path) -> None:
@@ -403,15 +463,17 @@ def test_upload_route_round_trip(tmp_path: Path) -> None:
         f"/api/projects/{proj.project_id}/files",
         files={
             "file1": ("a.md", b"alpha", "text/markdown"),
-            "file2": ("b.exe", b"bad", "application/octet-stream"),
+            "file2": ("b.mp4", b"video", "video/mp4"),
+            "file3": (".hidden", b"bad", "application/octet-stream"),
         },
     )
     assert resp.status_code == 200
     body = resp.json()
     saved_paths = {e["path"] for e in body["saved"]}
-    assert "a.md" in saved_paths
+    assert {"a.md", "b.mp4"} <= saved_paths
     assert "absolute_path" not in resp.text
-    assert any(e["filename"] == "b.exe" for e in body["errors"])
+    assert len(body["errors"]) == 1
+    assert (folder / "b.mp4").read_bytes() == b"video"
     assert (folder / "a.md").read_bytes() == b"alpha"
 
 

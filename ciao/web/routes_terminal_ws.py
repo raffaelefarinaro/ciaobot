@@ -66,12 +66,12 @@ import asyncio
 import base64
 import binascii
 import contextlib
-import json
 import secrets
 from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ciao.jsonio import loads_untrusted
 from ciao.terminal_replay import TERMINAL_REPLAY_CHUNK_BYTES
 from ciao.terminal_sessions import (
     TERMINAL_MAX_PENDING_WRITE_BYTES,
@@ -194,7 +194,7 @@ async def _first_frame(websocket: WebSocket) -> dict[str, Any] | None:
     if len(raw) > MAX_FRAME_BYTES:
         return None
     try:
-        frame = json.loads(raw)
+        frame = loads_untrusted(raw)
     except ValueError:
         return None
     if not isinstance(frame, dict) or set(frame) != {"type", "offset", "takeover"}:
@@ -225,7 +225,7 @@ def _client_payload(raw: str) -> dict[str, Any] | None:
     if len(raw) > MAX_FRAME_BYTES:
         return None
     try:
-        frame = json.loads(raw)
+        frame = loads_untrusted(raw)
     except ValueError:
         return None
     if not isinstance(frame, dict):

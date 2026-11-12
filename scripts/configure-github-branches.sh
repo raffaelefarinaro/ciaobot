@@ -6,14 +6,15 @@ set -euo pipefail
 repo="${1:-raffaelefarinaro/ciaobot}"
 
 # develop: the checks a develop PR runs (the macOS `test` job does not run
-# there). Admins stay exempt so release-on-main.yml can merge its
+# there). `linux-e2e` is skipped for PRs whose diff does not change `web/`.
+# Admins stay exempt so release-on-main.yml can merge its
 # sync-develop PR with `gh pr merge --admin`.
 develop_json() {
   cat <<'JSON'
 {
   "required_status_checks": {
     "strict": false,
-    "contexts": ["linux-server", "linux-web", "windows"]
+    "contexts": ["linux-server", "linux-web", "linux-e2e", "windows"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": null,

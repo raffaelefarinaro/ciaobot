@@ -1,0 +1,106 @@
+/*
+ * Chat details' one section and row grammar (DESIGN.md, Chat details).
+ * Shared by ChatPanel's rail and the section components it renders; each
+ * pulls it in with `<style scoped src="./chatDetails.css"></style>`, so the
+ * rules compile per component and reach nothing outside Chat details.
+ * The `cd-` prefix is used nowhere else in web/src or web/e2e.
+ */
+.cd-section { min-width: 0; }
+.cd-head { display: flex; align-items: center; gap: var(--space-2); min-height: 24px; margin-bottom: var(--space-1); }
+.cd-heading {
+  margin: 0;
+  color: var(--fg3);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.cd-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.cd-head-action { margin-left: auto; }
+.cd-rows { display: flex; flex-direction: column; min-width: 0; }
+.cd-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: center;
+  box-sizing: border-box;
+  width: calc(100% + 16px);
+  min-height: 40px;
+  margin: 0 -8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+.cd-row--link { cursor: pointer; }
+.cd-row--link:hover { background: var(--bg3); }
+.cd-row--link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cd-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: start;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--fg3);
+}
+.cd-main { display: flex; flex-direction: column; min-width: 0; }
+.cd-primary {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--text-base);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cd-primary--wrap { white-space: normal; overflow-wrap: anywhere; }
+.cd-detail {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cd-detail--wrap { white-space: normal; overflow-wrap: anywhere; }
+.cd-detail--error { color: var(--error); white-space: normal; overflow-wrap: anywhere; }
+.cd-mono { font-family: var(--font-mono); }
+.cd-trail { display: flex; align-items: center; gap: var(--space-1); color: var(--fg3); font-size: var(--text-sm); }
+.cd-row--link:hover .cd-trail { color: var(--fg); }
+.cd-value { color: var(--fg3); font-family: var(--font-mono); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cd-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cd-action:hover:not(:disabled):not([aria-disabled='true']) { background: var(--bg3); color: var(--fg); }
+.cd-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cd-action:disabled,
+.cd-action[aria-disabled='true'] { color: var(--fg3); cursor: default; }
+.cd-action--icon { width: 32px; padding: 0; }
+.cd-more { margin: 2px 0 0 -8px; }
+.cd-empty { margin: 2px 0 0; color: var(--fg3); font-size: var(--text-sm); }
+.cd-nested { padding-left: 26px; }
+@media (pointer: coarse) {
+  .cd-row { min-height: var(--touch); }
+  .cd-action { min-height: var(--touch); min-width: var(--touch); }
+  .cd-action--icon { width: var(--touch); }
+}

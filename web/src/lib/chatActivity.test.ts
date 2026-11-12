@@ -256,6 +256,100 @@ describe('findFinalAnswerIndex', () => {
     ]
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
+
+  it('keeps a stamped non-progress reply followed by bookkeeping', () => {
+    // A delivered reply that does not read as progress stays the closing
+    // bubble even when a bookkeeping tool runs after it.
+    const buffer = [
+      text('Working on it.'),
+      activity('Edit a.vue'),
+      text('Done. The answer is here.', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(2)
+  })
+
+  it('keeps an earlier completed reply when stamped progress text is followed by bookkeeping', () => {
+    // The final rule: stamped progress-shaped text followed by a tool is
+    // ongoing narration even when an earlier explicit completion exists, so it
+    // stays in Activity and the completed answer closes the turn. This corrects
+    // the earlier contract that let "Good — updated both files." win here.
+    const buffer = [
+      text("I've built it, and you can look at it now.", { phase: 'final_answer' }),
+      text('Now let me finish the housekeeping.'),
+      activity('$ Bash git status'),
+      text('Good — updated both files.', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('TodoWrite'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2], buffer[3], buffer[4]] },
+    ])
+  })
+
+  it('keeps an earlier answer when stamped narration is followed by bookkeeping', () => {
+    // The server can stamp trailing progress narration too, so a timestamp
+    // alone does not make the last text the answer. Without an earlier
+    // explicit completion, a stamped "Now run tests:" followed by tool
+    // bookkeeping still belongs in the trace.
+    const buffer = [
+      text('Done. The answer is here.'),
+      text('Now run tests:', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
+
+  it('keeps an earlier completed answer when stamped colon narration is followed by bookkeeping', () => {
+    // A stamped row whose first nonblank line ends with a colon ("Now run
+    // tests:") is ongoing narration even when an earlier explicit completion
+    // exists: it belongs in Activity, and the completed answer closes the turn.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Now run tests:', { timestamp: '2026-11-09T13:31:41Z' }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
+
+  it('keeps an earlier completed answer when stamped planning narration is followed by bookkeeping', () => {
+    // Planning/action language ("Now let me…") is ongoing narration even
+    // without a trailing colon, so it stays in Activity after an earlier
+    // explicit completion rather than closing the turn.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Now let me typecheck and run the tests.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
+
+  it('keeps an earlier completed answer when stamped "Okay" narration is followed by bookkeeping', () => {
+    // Any progress-shaped opener ("Okay, let me…") is ongoing narration after a
+    // bookkeeping tool, with no phrase list and no earlier-final exception.
+    const buffer = [
+      text('Done. The answer is here.', { phase: 'final_answer' }),
+      text('Okay, let me typecheck and run the tests.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+      activity('Bash'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+    expect(buildTurnParts(buffer, 0)).toEqual([
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+  })
 })
 
 describe('findFinalAnswerIndex with a reasoning tail', () => {
@@ -373,7 +467,7 @@ describe('buildTurnParts', () => {
     ])
   })
 
-  it('never returns an assistant part', () => {
+  it('keeps unmarked mid-turn text in Activity', () => {
     const buffer = [
       text('first update that is long enough to once have been a bubble. '.repeat(5)),
       thinking('hmm'), activity('Read a'), text('second'), activity('Edit b'),
@@ -384,6 +478,90 @@ describe('buildTurnParts', () => {
     const steps = parts.flatMap(p => (p.kind === 'trace' ? p.steps : []))
     expect(steps).not.toContain(buffer[5])
     expect(steps).toHaveLength(5)
+  })
+
+  it('preserves an explicit completed reply before continuation work', () => {
+    const buffer = [
+      text("I've built it, and you can look at it now.", {
+        phase: 'final_answer',
+        timestamp: '2026-11-09T13:21:00Z',
+      }),
+      text('Now let me finish the housekeeping.'),
+      activity('$ Bash git status'),
+      text('Nothing in the code changed since my last message.', {
+        timestamp: '2026-11-09T13:31:41Z',
+      }),
+    ]
+    const finalIdx = findFinalAnswerIndex(buffer)
+    expect(finalIdx).toBe(3)
+    const parts = buildTurnParts(buffer, finalIdx)
+    expect(parts).toEqual([
+      { kind: 'assistant', msg: buffer[0] },
+      { kind: 'trace', steps: [buffer[1], buffer[2]] },
+    ])
+    const steps = parts.flatMap(p => (p.kind === 'trace' ? p.steps : []))
+    expect(steps).not.toContain(buffer[0])
+    expect(steps).not.toContain(buffer[3])
+  })
+
+  it('preserves consecutive explicit completed boundaries in order', () => {
+    const buffer = [
+      activity('Read a'), text('A.', { phase: 'final_answer' }),
+      activity('Read b'), text('B.', { phase: 'final_answer' }), activity('Read c'),
+      text('All done. Final reply.'),
+    ]
+    expect(buildTurnParts(buffer, 5)).toEqual([
+      { kind: 'trace', steps: [buffer[0]] },
+      { kind: 'assistant', msg: buffer[1] },
+      { kind: 'trace', steps: [buffer[2]] },
+      { kind: 'assistant', msg: buffer[3] },
+      { kind: 'trace', steps: [buffer[4]] },
+    ])
+    // Adjacent completions emit adjacent assistant parts, no empty trace.
+    const adjacent = [
+      text('A.', { phase: 'final_answer' }),
+      text('B.', { phase: 'final_answer' }),
+      activity('Read c'),
+      text('All done. Final reply.'),
+    ]
+    expect(buildTurnParts(adjacent, 3)).toEqual([
+      { kind: 'assistant', msg: adjacent[0] },
+      { kind: 'assistant', msg: adjacent[1] },
+      { kind: 'trace', steps: [adjacent[2]] },
+    ])
+  })
+
+  it('keeps unmarked substantive text folded beside an explicit completion', () => {
+    const note = 'A substantive mid-turn note. '.repeat(10)
+    const blocker = "The classifier is blocking edits. I'll continue with the rest."
+    const buffer = [
+      text(note), text(blocker), text('A.', { phase: 'final_answer' }),
+      thinking('hmm'), activity('Read a'),
+      text('Tool-backed note', { tool_name: '_activity', phase: 'final_answer' }),
+      text('All done. Final reply.'),
+    ]
+    const parts = buildTurnParts(buffer, 6)
+    expect(parts).toEqual([
+      { kind: 'trace', steps: [buffer[0], buffer[1]] },
+      { kind: 'assistant', msg: buffer[2] },
+      { kind: 'trace', steps: [buffer[3], buffer[4], buffer[5]] },
+    ])
+  })
+
+  it('keeps all steps in trace without a selected closing answer', () => {
+    const buffer = [text('A.', { phase: 'final_answer' }), activity('Read a')]
+    expect(buildTurnParts(buffer, -1)).toEqual([
+      { kind: 'trace', steps: buffer },
+    ])
+    expect(buildTurnParts([], -1)).toEqual([])
+  })
+
+  it('keeps a timestamped second reply selected after an explicit first completion', () => {
+    const buffer = [
+      text('A.', { phase: 'final_answer' }),
+      text('Good — updated both files.', { timestamp: '2026-11-09T13:31:41Z' }),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(1)
   })
 })
 

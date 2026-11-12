@@ -16,9 +16,8 @@ What is pinned, and why each is a trap rather than a detail:
   that is not there. That is the single fact the document's ordering advice
   ("run the vault migrations before Step 1") rests on.
 * **The link migration's receipt is per install, not per vault.**
-  `vault_migrate_links.read_receipt` takes a runtime root and nothing else, so
-  the first converted root marks the whole install converted and the second is
-  refused. A document that told an operator to convert each workspace's vault
+  `vault_migrate_links.read_receipt` binds that receipt to one canonical vault,
+  so the second root is refused as foreign evidence. A document that told an operator to convert each workspace's vault
   would be wrong on the second one.
 * **`vault-rehome` plans `<vault>/<workspace>/People`, and nothing else.** It
   is the one remedy here with no per-root form, because a per-root vault has no
@@ -123,15 +122,13 @@ def test_the_link_migration_receipt_is_per_install_not_per_vault(
 ) -> None:
     """One conversion marks the install converted; the second root is refused.
 
-    `read_receipt(runtime_root)` has no vault parameter at all, so there is
-    nowhere for a second vault to be recorded. A document promising a
-    per-workspace loop here would be promising a second refused run.
+    The one active receipt is bound to its recorded vault, so a second vault
+    cannot use it as authority.
     """
     install = _re_rooted_install(tmp_path)
     runtime = install / ".runtime"
-    assert read_links_receipt(runtime) is None
-
     first = install / "personal" / "memory-vault"
+    assert read_links_receipt(runtime, vault_root=first) is None
     _note(first / "projects" / "a" / "note.md", "See [[Mo]] for the person.")
     assert has_unmigrated_links(first), "the fixture must actually hold a wikilink"
 
@@ -147,7 +144,7 @@ def test_the_link_migration_receipt_is_per_install_not_per_vault(
     capsys.readouterr()
     assert exit_code == 0
 
-    receipt = read_links_receipt(runtime)
+    receipt = read_links_receipt(runtime, vault_root=first)
     assert receipt is not None, "an applied conversion must leave a receipt"
     assert receipt.get("status") == "migrated"
 
@@ -166,11 +163,11 @@ def test_the_link_migration_receipt_is_per_install_not_per_vault(
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 1, "a second per-root conversion must be refused"
-    assert "already migrated" in payload.get("skipped", "")
+    assert "another vault" in payload["failed"][0]["error"]
     assert has_unmigrated_links(second), (
         "the refused run must not have rewritten the second root's notes"
     )
-    assert read_links_receipt(runtime) == receipt, (
+    assert read_links_receipt(runtime, vault_root=first) == receipt, (
         "the refusal must leave the first run's reverse map exactly as it was"
     )
 
@@ -257,7 +254,7 @@ def test_force_overrides_the_nesting_rail_and_the_inverse_ignores_it(
     ) == 0
     undone = json.loads(capsys.readouterr().out)
     assert undone.get("receipt_removed") is True
-    assert read_links_receipt(install / ".runtime") is None
+    assert read_links_receipt(install / ".runtime", vault_root=narrow) is None
 
 
 def test_vault_migrate_applies_without_writing_the_vocabulary_receipt(

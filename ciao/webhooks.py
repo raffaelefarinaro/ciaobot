@@ -79,6 +79,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ciao.async_reads import keyed_lock
+from ciao.jsonio import loads_untrusted
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.links import is_link
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -1733,7 +1734,7 @@ def _event_text(body: bytes) -> str:
     means anything but the event.
     """
     try:
-        document = json.loads(body.decode("utf-8"))
+        document = loads_untrusted(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise WebhookReceiverError(
             "the request body must be a JSON object", code=INVALID_EVENT

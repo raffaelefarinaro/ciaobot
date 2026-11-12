@@ -606,7 +606,59 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     resp = TestClient(app).get("/api/setup-status")
 
     assert resp.status_code == 200
-    assert resp.json()["checks"][0]["id"] == "workspace"
+    payload = resp.json()
+    assert payload["native_bootstrap"] is False
+    assert {
+        "configured",
+        "bootstrap",
+        "mode",
+        "workspace_root",
+        "vault_root",
+        "suggested_workspace",
+        "checks",
+        "providers",
+        "provider_ready",
+    } <= payload.keys()
+    assert payload["checks"][0]["id"] == "workspace"
+
+
+def test_setup_status_route_reports_native_bootstrap_context(tmp_path) -> None:
+    config = _config(tmp_path)
+    config.suggested_workspace = tmp_path / "suggested-workspace"
+    (tmp_path / "memory-vault").mkdir()
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup-status", setup_status_endpoint, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
+    app.state.native_bootstrap = {
+        "run_id": "native-run-id-sentinel-76-a91f",
+        "workspace": "/private/native-bootstrap-workspace-sentinel-76-a91f",
+    }
+    app.state.serializer = serializer
+
+    resp = TestClient(app).get("/api/setup-status")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["native_bootstrap"] is True
+    assert {
+        "configured",
+        "bootstrap",
+        "mode",
+        "workspace_root",
+        "vault_root",
+        "suggested_workspace",
+        "checks",
+        "providers",
+        "provider_ready",
+    } <= payload.keys()
+    assert payload["suggested_workspace"] == str(config.suggested_workspace)
+    assert "native-run-id-sentinel-76-a91f" not in resp.text
+    assert "/private/native-bootstrap-workspace-sentinel-76-a91f" not in resp.text
 
 
 

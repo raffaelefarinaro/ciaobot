@@ -23,61 +23,6 @@ def cap_schedule_mode(saved: str, default: str) -> str:
         return default
     return saved if MODE_RANK[saved] <= MODE_RANK[default] else default
 
-# ── Bundled harness skills Ciaobot replaces ──────────────────────────────
-# The CLI ships a bundle of skills and workflows. Some expose surfaces that
-# bypass Ciaobot entirely (cloud routines, harness cron loops, design-system
-# sync, etc.) or duplicate a Ciaobot-managed surface (settings, permissions,
-# diagnostics, project-specific run skills). Hiding them keeps the model from
-# reaching for the wrong surface, and saves the per-turn context cost of their
-# descriptions. Full rationale is in:
-#   memory-vault/personal/Workspace/bundled-skills-evaluation.md
-#
-# Two independent levers, both applied:
-#   * `skillOverrides` (CLI settings layer, via ``harness_skill_overrides``)
-#     removes them from the model's context — verified against the bundled CLI:
-#     they drop out of the init payload's `skills` and `slash_commands` lists
-#     while every workspace skill and agent still resolves.
-#   * `Skill(<name>)` deny rules (see ``_DEFAULT_HARNESS_DISALLOWED_TOOLS`` in
-#     ciao/config.py, built from this tuple) block execution if one is somehow
-#     re-enabled downstream. Deny alone was not enough: a denied skill still
-#     shows up in the listing, so the model burns a turn on an approval card
-#     for a tool it can't run.
-HARNESS_DISABLED_SKILLS: tuple[str, ...] = (
-    # Bundled surfaces that bypass Ciaobot's scheduler / UI.
-    "schedule",  # claude.ai cloud routines (CronCreate, CronDelete, CronList)
-    "loop",      # harness-local interval loop (ScheduleWakeup)
-    # Bundled surfaces whose backend tool is already denied.
-    "design-sync",  # DesignSync tool is in _DEFAULT_HARNESS_DISALLOWED_TOOLS.
-    # Bundled surfaces that manage settings / permissions / diagnostics the
-    # PWA already owns through a different path.
-    "update-config",           # writes to settings.json; PWA Settings is the surface
-    "fewer-permission-prompts",  # same, plus it derives from local transcripts
-    "doctor",                  # duplicates PWA diagnostics; also survives kill switch
-    # Bundled project-run surfaces. Ciaobot uses per-project .claude/skills/
-    # equivalents, and these bundled stubs route the model away from them.
-    "run",                  # no-op in most Ciaobot projects
-    "run-skill-generator",  # creates per-project run skills we don't need here
-    # Bundled dataviz guidance is for Claude Artifacts, while Ciaobot already
-    # has its own .claude/skills/dataviz/ skill.
-    "dataviz",
-)
-
-# Plugin skills (e.g. skill-creator@claude-plugins-official) are NOT affected by
-# skillOverrides — both `disableBundledSkills` and per-skill overrides leave them
-# in the skills listing. If one competes with a Ciao skill, the fix is either to
-# uninstall the plugin or to shadow it with a same-named workspace skill.
-
-
-def harness_skill_overrides() -> dict[str, str]:
-    """``skillOverrides`` map hiding the skills Ciaobot supersedes.
-
-    ``"off"`` removes a skill from both the model's listing and the user's
-    slash-command picker. The CLI also accepts ``"user-invocable-only"``
-    (hidden from the model, still typable by hand) — not used here, because a
-    routine created that way is invisible to Ciaobot either way.
-    """
-    return {name: "off" for name in HARNESS_DISABLED_SKILLS}
-
 
 # ── Ciaobot control-plane approval policy ────────────────────────────────
 # Since S6 every Ciaobot operation runs as `ciao <noun> <verb>` through the
@@ -242,9 +187,9 @@ OPENCODE_CREDENTIAL_DENY_PERMISSIONS: tuple[str, ...] = (
 def credential_path_deny_rules(runtime_root: object = None) -> tuple[str, ...]:
     """``Tool(pattern)`` deny rules for Claude's ``disallowed_tools``.
 
-    Unconditional: unlike the harness denylist these are NOT part of the
-    per-workspace ``disallowed_tools`` default, so neither an operator's custom
-    "Extra disallowed tools" list nor the literal ``none`` opt-out clears them.
+    Unconditional: these are not part of the trim catalog or the workspace
+    extras, so neither an operator's custom "Extra disallowed tools" list nor
+    the literal ``none`` opt-out clears them.
     A denylist escape hatch that also unlocks ``PWA_AUTH_TOKEN`` is not an
     escape hatch anyone asked for.
 

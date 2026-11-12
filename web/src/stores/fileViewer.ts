@@ -3,6 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { fileLoadErrorMessage } from '../lib/fileLoadError'
+import { isImageFilePath } from '../lib/chatActivity'
+import { looksLikeFolderPath } from '../lib/filePaths'
+import { fetchWorkspaceDir, folderErrorMessage } from '../lib/folderBrowserDriver'
 import { useProjectStore } from './projects'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -12,7 +15,7 @@ import { useProjectStore } from './projects'
 // The viewer has one reading surface: the current on-disk preview (which also
 // becomes the editing surface when editing is available).
 
-export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html'
+export type FileViewerKind = 'text' | 'image' | 'pdf' | 'html' | 'folder'
 // Artifacts render by default and show their source on demand. Code view is
 // also the only place they can be edited, since editing needs the source.
 export type HtmlArtifactView = 'preview' | 'code'
@@ -24,11 +27,31 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
   return 'text'
 }
 
+/** A folder pin is stored with one trailing slash (PATCH /api/chats/{id} pin contract, D1). */
+export function isFolderPin(path: string): boolean {
+  return /[/\\]$/.test(path)
+}
+
+// Mirrors `_WORKSPACE_FILE_EXTS` in ciao/web/routes_api.py: the only files the
+// server accepts as a pin. Anything else would 415 and toast, so the tile
+// opens it in the viewer instead of trying to dock it.
+const PINNABLE_FILE_EXTS = new Set([
+  'md', 'markdown', 'txt', 'py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'css', 'html', 'htm', 'json',
+  'yaml', 'yml', 'toml', 'sh', 'rs', 'go', 'java', 'xml', 'sql', 'cfg', 'ini', 'log', 'csv',
+])
+export function isPinnableFilePath(path: string): boolean {
+  const m = /\.([^./\\]+)$/.exec(path.replace(/:\d+$/, ''))
+  return !!m && PINNABLE_FILE_EXTS.has(m[1].toLowerCase())
+}
+
 export const useFileViewerStore = defineStore('fileViewer', () => {
   const projectStore = useProjectStore()
   const isOpen = ref(false)
   const kind = ref<FileViewerKind>('text')
   const path = ref('')
+  // '' = a workspace-path image (the existing `<path>` mode); a served chat
+  // attachment opens by URL, which `/api/workspace-image` cannot resolve.
+  const imageUrl = ref('')
   const line = ref<number | null>(null)
   const content = ref('')
   const loading = ref(false)
@@ -51,11 +74,18 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // unpins through the server, whereas an ordinary dismiss stays local.
   const sharedPinChatId = ref('')
 
+  // The folder a file was opened from in the folder browser; Back returns
+  // there. Deliberately NOT cleared by _reset(): a link followed inside that
+  // file keeps it. close() and openFolder() clear it.
+  const returnFolder = ref('')
+
   // Where a file opens docked instead of in this viewer: the pin key of the
   // chat on screen, set by ChatLayout while its split view is available (a
   // wide pane on a chat route), '' everywhere else. Owned by the layout so the
   // viewer never pins to a chat that is not shown.
   const dockTarget = ref('')
+  // Bumped when a dock targets the folder already pinned: the tile resets its browser to it.
+  const folderRedock = ref({ path: '', seq: 0 })
   // Generation of the latest open: a dock whose path resolution lands after a
   // newer open must not pin over the file the user opened since.
   let dockSeq = 0
@@ -96,6 +126,33 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     if (seq !== dockSeq) return true
     if (dockTarget.value !== key) return false
     if (projectStore.pinnedFileFor(key) === target) return true
+    return projectStore.pinFile(key, target)
+  }
+
+  /**
+   * Dock a folder beside the chat that owns the tile, like dockInstead does
+   * for files: same gate, same stale-open guard. '' (Browse files) is the
+   * chat's first root, resolved to its absolute path before pinning. A folder
+   * that is already pinned may be showing a subfolder, so it is reset, not
+   * skipped.
+   */
+  async function dockFolderInstead(dirPath: string, chat: string): Promise<boolean> {
+    const seq = ++dockSeq
+    const key = dockTarget.value
+    if (!key || !chat || chat !== key || isOpen.value) return false
+    let target = dirPath
+    if (!target) {
+      const probe = await fetchWorkspaceDir('', chat)
+      if (!probe.ok) return false
+      target = probe.listing.path
+    }
+    target = `${target.replace(/[/\\]+$/, '')}/`
+    if (seq !== dockSeq) return true
+    if (dockTarget.value !== key) return false
+    if (projectStore.pinnedFileFor(key) === target) {
+      folderRedock.value = { path: target, seq: folderRedock.value.seq + 1 }
+      return true
+    }
     return projectStore.pinFile(key, target)
   }
 
@@ -142,6 +199,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   function _reset(): void {
     kind.value = 'text'
+    imageUrl.value = ''
     htmlView.value = 'preview'
     sourceLoading.value = false
     sourceError.value = ''
@@ -262,9 +320,13 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
    * Open a file as the chat's shared-pin surface (the narrow opener, or the
    * split panel). Marks the open so a remote unpin/replacement can reconcile it,
    * and so a user close can unpin through the server instead of staying local.
+   * An image pin takes the image path: `open()` reads through the text-only
+   * `/api/workspace-file`, which refuses an image with 415.
    */
   async function openSharedPin(filePath: string, chat: string): Promise<boolean> {
-    const ok = await open(filePath, null, chat)
+    const ok = isImageFilePath(filePath.replace(/:\d+$/, ''))
+      ? await openImage(filePath, chat)
+      : await open(filePath, null, chat)
     if (ok) sharedPinChatId.value = chat
     else sharedPinChatId.value = ''
     return ok
@@ -336,6 +398,19 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     if (view === 'code') await loadSource()
   }
 
+  // A served image (a chat message attachment) has no workspace path: render
+  // its URL directly and make no request until the `<img>` loads it.
+  function openImageUrl(url: string, name: string, chat = ''): void {
+    if (!url) return
+    _reset()
+    isOpen.value = true
+    kind.value = 'image'
+    path.value = name || 'image'
+    imageUrl.value = url
+    chatId.value = chat
+    loadToken.value++
+  }
+
   async function openImage(filePath: string, chat: string = ''): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
     if (await dockInstead(filePath, chat)) return true
@@ -363,6 +438,79 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
+  /** Show a folder in the viewer. '' lists the first browsable root. */
+  async function openFolder(dirPath: string, chat: string = ''): Promise<boolean> {
+    if (!await canReplaceOpenFile(dirPath)) return false
+    if (await dockFolderInstead(dirPath, chat)) return true
+    _reset()
+    returnFolder.value = ''
+    fetchSeq++ // a file fetch still in flight must not repaint the folder
+    isOpen.value = true
+    kind.value = 'folder'
+    path.value = dirPath
+    chatId.value = chat
+    loadToken.value++
+    return true
+  }
+
+  /** The browser moved to another folder: keep the header and Copy path on it. */
+  function setFolderPath(dirPath: string): void {
+    if (kind.value === 'folder') path.value = dirPath
+  }
+
+  /** Open a file chosen in the folder browser, remembering the folder for Back. */
+  async function openFromFolder(filePath: string, chat: string = '', fromFolder: string = ''): Promise<boolean> {
+    const folder = fromFolder || (kind.value === 'folder' ? path.value : '')
+    // Recorded before the load so Back pressed while the file loads still
+    // returns to the folder (backOrClose ignores it while a folder is shown).
+    if (folder && isOpen.value) returnFolder.value = folder
+    const ok = isImageFilePath(filePath) ? await openImage(filePath, chat) : await open(filePath, null, chat)
+    if (ok && folder && isOpen.value && kind.value !== 'folder') returnFolder.value = folder
+    return ok
+  }
+
+  /** Back: return to the folder a file was opened from (and stay open), else close. */
+  async function backOrClose(): Promise<boolean> {
+    const folder = returnFolder.value
+    if (folder && kind.value !== 'folder') {
+      await openFolder(folder, chatId.value)
+      return false
+    }
+    return close()
+  }
+
+  /**
+   * Open what a link names. Anything that is not folder-shaped (a dotted
+   * extension, a known extensionless name like README) opens exactly as it
+   * always has, with no extra request. A folder-shaped one asks
+   * /api/workspace-dir once: a folder opens in the browser; anything else,
+   * a file included, takes the same open() it always took.
+   */
+  // Generation of the latest link click: a folder probe that answers after a
+  // newer click must not repaint the viewer with the folder it named.
+  let linkSeq = 0
+  async function openLink(linkPath: string, lineNumber: number | null = null, chat: string = ''): Promise<boolean> {
+    const mySeq = ++linkSeq
+    const clean = linkPath.replace(/:\d+$/, '')
+    if (isImageFilePath(clean)) return openImage(linkPath, chat)
+    if (!looksLikeFolderPath(clean)) return open(linkPath, lineNumber, chat)
+    const probe = await fetchWorkspaceDir(clean, chat)
+    if (mySeq !== linkSeq) return false
+    if (probe.ok) return openFolder(probe.listing.path, chat)
+    // A folder the browser may not show is named as such, not as an unsupported file.
+    if (probe.status === 403) {
+      if (!await canReplaceOpenFile(linkPath)) return false
+      _reset()
+      fetchSeq++ // a file fetch still in flight must not repaint the message
+      isOpen.value = true
+      path.value = linkPath
+      chatId.value = chat
+      error.value = folderErrorMessage(probe.status, probe.error)
+      return true
+    }
+    return open(linkPath, lineNumber, chat)
+  }
+
   async function close(force = false): Promise<boolean> {
     if (!force && isDirty.value) {
       if (!await askConfirm('You have unsaved file changes. Are you sure you want to close?', {
@@ -377,6 +525,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     fetchSeq++
     path.value = ''
     chatId.value = ''
+    returnFolder.value = ''
     _reset()
     return true
   }
@@ -456,6 +605,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     isOpen,
     kind,
     path,
+    imageUrl,
     line,
     content,
     loading,
@@ -463,7 +613,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     loadToken,
     chatId,
     sharedPinChatId,
+    returnFolder,
     dockTarget,
+    folderRedock,
     editing,
     isDirty,
     editBuffer,
@@ -479,6 +631,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     // actions
     open,
     openImage,
+    openImageUrl,
+    openLink,
+    openFolder,
+    setFolderPath,
+    openFromFolder,
+    backOrClose,
     openSharedPin,
     setDockTarget,
     loadSource,

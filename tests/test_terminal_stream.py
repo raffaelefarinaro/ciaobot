@@ -169,11 +169,17 @@ class FakePcm:
     def get_project(self, project_id: str) -> Any:
         return self._projects.get(project_id)
 
+    def linked_repo_for_chat(self, chat: Any) -> str:
+        """The engine's code-mode rule: the project's linked repo, when it exists."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        return raw if raw and Path(raw).is_dir() else ""
+
 
 def _pcm(root: Path) -> FakePcm:
     """One chat in one project, and that project's folder is ``root``."""
     project = SimpleNamespace(id="p1", repo_path=str(root), workspace="")
-    chat = SimpleNamespace(id="c1", project_id="p1", code_mode=False, repo_location={})
+    chat = SimpleNamespace(id="c1", project_id="p1", repo_location={})
     return FakePcm({"c1": chat}, {"p1": project})
 
 
@@ -461,6 +467,33 @@ def test_a_first_frame_that_is_not_json_is_refused(tmp_path: Path) -> None:
         ) as ws:
             ws.send_text("{nope")
             assert _close_code(ws) == CLOSE_POLICY
+
+
+def test_a_deeply_nested_first_frame_is_refused(tmp_path: Path) -> None:
+    """A deep frame is refused like any other non-attach frame, not a crash."""
+    app = _app(tmp_path)
+    with _client(app) as client:
+        session_id = _create_session(client)
+        with client.websocket_connect(
+            f"{WS_BASE}{STREAM}/{session_id}", headers=_origin()
+        ) as ws:
+            ws.send_text("[" * 20000 + "]" * 20000)
+            assert _close_code(ws) == CLOSE_POLICY
+
+
+def test_a_deeply_nested_client_frame_is_a_bad_frame(tmp_path: Path) -> None:
+    """After the attach, a deep frame is a bad frame, answered and closed."""
+    app = _app(tmp_path)
+    with _client(app) as client:
+        session_id = _create_session(client)
+        with client.websocket_connect(
+            f"{WS_BASE}{STREAM}/{session_id}", headers=_origin()
+        ) as ws:
+            _attach(ws)
+            _replay(ws)
+            ws.send_text('{"type":' * 20000 + "0" + "}" * 20000)
+            assert ws.receive_json() == {"type": "error", "reason": "bad_frame"}
+            assert _close_code(ws) == CLOSE_BAD_FRAME
 
 
 @pytest.mark.parametrize(

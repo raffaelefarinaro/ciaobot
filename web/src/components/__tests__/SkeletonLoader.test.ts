@@ -20,4 +20,13 @@ describe('SkeletonLoader', () => {
     expect(board.findAll('.skeleton-column')).toHaveLength(4)
     expect(board.findAll('.skeleton-card').length).toBeGreaterThan(4)
   })
+
+  it('draws nodes and links for the Memory Map, hidden behind the one status', () => {
+    const graph = mount(SkeletonLoader, { props: { label: 'Loading vault graph', variant: 'graph' } })
+    expect(graph.get('.skeleton').attributes('aria-label')).toBe('Loading vault graph')
+    const drawing = graph.get('.skeleton-graph-wrap')
+    expect(drawing.attributes('aria-hidden')).toBe('true')
+    expect(drawing.findAll('circle.skeleton-node').length).toBeGreaterThan(5)
+    expect(drawing.findAll('line.skeleton-edge').length).toBeGreaterThan(5)
+  })
 })

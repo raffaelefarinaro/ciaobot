@@ -246,6 +246,27 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
+          <!-- Usage: the read-only look back at runs, tokens and time. Also
+               reached from Home's At a glance. -->
+          <router-link
+            to="/stats"
+            class="nav-item"
+            :class="{ 'nav-item--active': mode === 'stats' }"
+            title="usage"
+            aria-label="usage"
+          >
+            <!-- Three bars on a baseline, in the rail's rectilinear stroke. -->
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="3" y1="21" x2="21" y2="21" />
+                <rect x="5" y="12" width="3" height="6" />
+                <rect x="10.5" y="6" width="3" height="12" />
+                <rect x="16" y="9" width="3" height="9" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">Usage</span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -311,35 +332,23 @@
          Projects label in the chat sidebar. -->
     <template v-if="!collapsed && (mode === 'schedules')">
       <div ref="schedulesListEl" class="schedules-list">
-        <template v-if="taskStore.loading">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading automations…</span>
-          </div>
-          <div aria-hidden="true" class="mm-skeleton-block">
-            <span class="mm-shimmer-line" style="width: 100%; height: 36px; margin-bottom: 8px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 36px; margin-bottom: 8px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 36px;"></span>
-          </div>
-        </template>
+        <SidebarListSkeleton v-if="!taskStore.schedulesLoaded && !taskStore.scheduleLoadError" label="Loading automations" :rows="3" />
         <template v-else>
-
-          <template v-if="oneOffSchedules.length">
+          <template v-if="scheduleGroups.oneOffs.length">
           <div class="schedule-group schedule-group--once">
             <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
             <div class="schedule-group-items">
-              <router-link
-                v-for="s in oneOffSchedules"
+              <SidebarRow
+                v-for="s in scheduleGroups.oneOffs"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                class="schedule-item"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
           </div>
         </template>
@@ -357,47 +366,47 @@
                 @click="emit('new-schedule')"
               ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
             </div>
-            <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
+            <p v-if="!scheduleGroups.routines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
             <div v-else class="schedule-group-items">
-              <router-link
-                v-for="s in userRoutines"
+              <SidebarRow
+                v-for="s in scheduleGroups.routines"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
+                  class="schedule-mark"
                   title="This automation is working"
                 ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
         </div>
 
-        <template v-if="systemAutomations.length">
+        <template v-if="scheduleGroups.system.length">
           <div class="schedule-group schedule-group--system">
             <h2 class="schedule-group-header">System</h2>
             <div class="schedule-group-items">
-              <router-link
-                v-for="s in systemAutomations"
+              <SidebarRow
+                v-for="s in scheduleGroups.system"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--disabled': !s.enabled }"
-                active-class="active"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :muted="!s.enabled"
               >
-                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
+                  class="schedule-mark"
                   title="This automation is working"
                 ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </router-link>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
             </div>
           </div>
         </template>
@@ -405,6 +414,61 @@
         </template>
       </div>
 
+    </template>
+
+    <!-- Tasks lists the board's lanes the way Automations lists its groups:
+         SidebarRows under each lane's label, the create action on To do's
+         label. Rows open the task as a page, the same as its card. -->
+    <template v-if="!collapsed && mode === 'tasks'">
+      <div ref="tasksListEl" class="schedules-list task-sidebar-list">
+        <SidebarListSkeleton v-if="!tasksLoaded && !taskBoard.loadError" label="Loading tasks" :groups="2" :rows="2" />
+        <!-- The first read failed: the server's sentence and a Retry, never an
+             empty list that reads as "no tasks". -->
+        <div v-else-if="!tasksLoaded" class="task-sidebar-error" role="alert">
+          <p class="sidebar-empty-note">{{ taskBoard.loadError }}</p>
+          <button type="button" class="sidebar-label-link" @click="retryTasks">Retry</button>
+        </div>
+        <template v-else>
+          <div
+            v-for="lane in sidebarTaskLanes"
+            :key="lane.status"
+            class="schedule-group"
+            role="group"
+            :aria-labelledby="`task-lane-heading-${lane.status}`"
+          >
+            <div v-if="lane.status === 'backlog'" class="sidebar-label-row">
+              <h2 :id="`task-lane-heading-${lane.status}`" class="schedule-group-header">{{ lane.label }}</h2>
+              <button
+                type="button"
+                class="sidebar-label-link"
+                aria-label="New task"
+                title="New task"
+                @click="emit('new-task')"
+              ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
+            </div>
+            <h2 v-else :id="`task-lane-heading-${lane.status}`" class="schedule-group-header">{{ lane.label }}</h2>
+            <p v-if="!lane.tasks.length" class="sidebar-empty-note">Nothing to do yet.</p>
+            <div v-else class="schedule-group-items">
+              <SidebarRow
+                v-for="task in lane.tasks"
+                :key="task.id"
+                :to="`/tasks/${task.id}`"
+                class="task-sidebar-item"
+                :text="task.title"
+                :meta="formatCardDue(task.due)"
+                :muted="lane.status === 'done'"
+                :active="routeTaskId === task.id"
+                :aria-current="routeTaskId === task.id ? 'page' : undefined"
+              >
+                <!-- The rail's marks (taskRailMark), so the two always agree. -->
+                <span v-if="taskRailMark(task) === 'working'" class="schedule-mark" title="The agent is working on this task"><ActivityGlyph kind="working" /></span>
+                <span v-else-if="taskRailMark(task) === 'needs'" class="schedule-mark" title="The agent needs you"><ActivityGlyph kind="alert" /></span>
+                <span v-else-if="taskRailMark(task) === 'unread'" class="schedule-mark task-review-mark" title="Ready to review"><span class="task-review-dot" aria-hidden="true" /><span class="sr-only">Ready to review</span></span>
+              </SidebarRow>
+            </div>
+          </div>
+        </template>
+      </div>
     </template>
 
     <template v-if="!collapsed && mode === 'settings'">
@@ -427,14 +491,15 @@
               <span class="settings-nav-heading-name">{{ workspaceLabel(store.activeWorkspace) || 'Workspace' }}</span>
             </template>
           </h2>
-          <router-link
+          <SidebarRow
             v-for="item in group.items"
             :key="item.to"
             :to="item.to"
             class="settings-nav-item"
-            :class="{ active: route.path === item.to }"
+            :text="item.label"
+            :active="route.path === item.to"
             :aria-current="route.path === item.to ? 'page' : undefined"
-          >{{ item.label }}</router-link>
+          />
         </div>
       </nav>
     </template>
@@ -447,41 +512,32 @@
       <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
         <template v-for="(group, gi) in MEMORY_NAV" :key="gi">
           <h2 v-if="group.label" class="sidebar-list-label">{{ group.label }}</h2>
-          <router-link
+          <SidebarRow
             v-for="item in group.items"
             :key="item.section"
             :to="memorySectionPath(item.section)"
             class="settings-nav-item memory-nav-item"
-            :class="{ active: mm.section === item.section }"
+            :text="item.label"
+            :active="mm.section === item.section"
             :aria-current="mm.section === item.section ? 'page' : undefined"
             :aria-label="memoryNavLabel(item)"
           >
-            <span class="memory-nav-label">{{ item.label }}</span>
             <span
               v-if="memoryNavCount(item.section) !== null"
               class="memory-nav-count"
               :class="{ 'memory-nav-count--due': item.due && (memoryNavCount(item.section) ?? 0) > 0 }"
               aria-hidden="true"
             >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
-          </router-link>
+          </SidebarRow>
         </template>
       </nav>
 
       <div v-if="mm.section === 'map'" class="mm-sidebar-scroll">
         <template v-if="mm.loading">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading vault graph…</span>
-          </div>
           <div class="mm-search">
             <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
           </div>
-          <div class="mm-skeleton-block" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
-          </div>
+          <SidebarListSkeleton class="mm-sidebar-skeleton" label="Loading vault graph" :rows="4" />
         </template>
         <template v-else>
           <div class="mm-search">
@@ -521,15 +577,7 @@
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <template v-if="!store.bootstrapped && store.projects.length === 0">
-          <div class="project-list" role="status" aria-live="polite" aria-label="Loading chats">
-            <div v-for="i in 3" :key="i" class="project-group">
-              <div class="project-header"><span class="mm-shimmer-line" style="width: 46%; height: 11px;"></span></div>
-              <div class="chat-list">
-                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 68%; height: 10px;"></span></div>
-                <div class="chat-item" style="pointer-events: none;"><span class="mm-shimmer-line" style="width: 58%; height: 10px;"></span></div>
-              </div>
-            </div>
-          </div>
+          <SidebarListSkeleton label="Loading chats" :groups="3" :rows="2" nested />
         </template>
         <template v-else>
           <!-- Recent chats (max 5) -->
@@ -769,10 +817,13 @@
                   :modal="false"
                   @update:open="onChatMenuOpenChange(chat.chat_id, $event)"
                 >
-                  <div
+                  <SidebarRow
                     class="chat-item"
+                    :text="chat.title"
+                    :active="chat.chat_id === store.activeChatId"
+                    :unread="store.chatUnread(chat.chat_id) > 0"
+                    :pending="chat.title_status === 'pending'"
                     :class="{
-                      active: chat.chat_id === store.activeChatId,
                       remote: chat.local === false,
                       dragging: dragChatId === chat.chat_id,
                     }"
@@ -789,22 +840,6 @@
                     :title="chatRowTitle(chat, project.repo)"
                   >
                     <span
-                      v-if="chat.title_status === 'pending'"
-                      class="title-shimmer"
-                      aria-hidden="true"
-                      title="Naming conversation"
-                    />
-                    <span
-                      v-else
-                      class="chat-title"
-                      :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                    >{{ chat.title }}</span>
-                    <!-- A bare span is role=generic, which cannot be named: the
-                         bar is hidden from assistive tech and the name travels
-                         as text beside it. The row is not a live region; only
-                         the chat header announces the naming. -->
-                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
-                    <span
                       v-if="taskSignals.isTaskChat(chat)"
                       class="chat-task-tag"
                       :title="taskBadgeTitle(chat)"
@@ -814,18 +849,12 @@
                          pointer, a hidden line for a screen reader. -->
                     <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
                     <span
-                      v-if="isChatCodeModeOn(chat, project.repo)"
+                      v-if="inCodeMode(project.repo)"
                       class="chat-code-tag"
                       role="img"
                       :title="codeBadgeTitle(chat, project.repo)"
                       :aria-label="codeBadgeTitle(chat, project.repo)"
                     >›_</span>
-                    <span
-                      v-if="branchChip(chat, project.repo)"
-                      class="chat-repo-tag chat-repo-tag--code-off"
-                      :class="{ 'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed }"
-                      :title="branchChip(chat, project.repo)!.title"
-                    >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -850,7 +879,7 @@
                         @focus="useChatActionAnchor"
                       >&middot;&middot;&middot;</button>
                     </DropdownMenuTrigger>
-                  </div>
+                  </SidebarRow>
 
                   <DropdownMenuPortal>
                     <DropdownMenuContent
@@ -998,6 +1027,8 @@ import { useProjectStore } from '../stores/projects'
 import { useHistoryNav } from '../composables/useHistoryNav'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
+import { useTaskBoardStore } from '../stores/taskBoard'
+import { formatCardDue, readableTasks, taskLanes, taskRailMark } from '../lib/taskBoard'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
@@ -1009,14 +1040,18 @@ import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
-import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
-import { isChatCodeModeOn } from '../lib/codeMode'
+import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
+import { inCodeMode } from '../lib/repo'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
-import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
+import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
+import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
+import SidebarRow from './SidebarRow.vue'
+import SidebarListSkeleton from './SidebarListSkeleton.vue'
+import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV_GROUPS } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
@@ -1030,11 +1065,11 @@ import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{
   collapsed: boolean
-  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'
+  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'
   /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
   canOpenBeside?: boolean
 }>()
-const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'open-beside': [chatId: string] }>()
+const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': []; 'new-task': []; 'open-beside': [chatId: string] }>()
 
 /** "Open beside" is offered only where the layout can show it, and never for the chat already on screen. */
 function canOpenChatBeside(chat: { chat_id: string; local?: boolean }): boolean {
@@ -1149,11 +1184,6 @@ function historyChordHint(key: '[' | ']'): string {
   return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
 }
 
-function promptTitle(prompt: string): string {
-  const first = prompt.split('\n')[0].trim()
-  return first.length > 36 ? first.slice(0, 33) + '...' : first
-}
-
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
 // The scope menu opens even with one workspace: it is also where a new
@@ -1209,18 +1239,11 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
-// The branch tag for a chat row. In code mode the row carries the compact
-// `code` badge instead, so the branch tag marks a code-off row only.
-function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
-  if (isChatCodeModeOn(chat, repo)) return null
-  return sidebarBranchChip(repo, chat.repo_location)
-}
-
 // The `code` badge's facts: the repository, the branch the chat works on and
-// the folder it works in. Undefined without a linked repository, which is also
-// when the badge does not render.
+// the folder it works in. Undefined outside code mode, which is also when the
+// badge does not render.
 function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
-  if (!repo || !isChatCodeModeOn(chat, repo)) return undefined
+  if (!inCodeMode(repo)) return undefined
   return sidebarCodeBadgeTitle(repo, chat.repo_location)
 }
 
@@ -1317,93 +1340,43 @@ function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
 }
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
-const workspaceSchedules = computed(() =>
-  taskStore.schedules.filter(s => scheduleInWorkspace(
-    s,
-    store.activeWorkspace,
-    store.chats,
-    store.projects,
-  )),
-)
+const workspaceSchedules = useWorkspaceSchedules()
 
-/**
- * The badge in a row's time slot: paused, cadence, or fire time.
- *
- * An interval entry has no time of day, so showing `daily_time_utc` left the
- * slot blank and the row unreadable. Its cadence goes there instead.
- */
-function cadenceBadge(s: Schedule): string {
-  if (!s.enabled) return 'off'
-  if (s.frequency === 'interval') return `${s.interval_minutes}m`
-  if (s.frequency === 'manual') return '·'
-  return scheduleClock(s)
-}
+// The sidebar's automation groups, in the order the open automation's title rail walks.
+const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))
 
-const oneOffSchedules = computed(() => {
-  return workspaceSchedules.value
-    .filter(s => s.frequency === 'once')
-    .slice()
-    .sort((a, b) => {
-      return oneOffSortKey(a).localeCompare(oneOffSortKey(b))
-    })
+// ── Tasks: the board's lanes, read from the board's own store ────────────
+const taskBoard = useTaskBoardStore()
+const tasksLoaded = computed(() => taskBoard.loadedWorkspace === store.activeWorkspace)
+// To do always shows (its label carries New); the other lanes only when they
+// hold something. Done keeps the board's rule: today's completions only.
+const sidebarTaskLanes = computed(() => {
+  if (!tasksLoaded.value) return []
+  return taskLanes(readableTasks(taskBoard.rows), { status: 'all', order: taskBoard.order })
+    .filter(lane => lane.status === 'backlog' || lane.tasks.length > 0)
 })
-const userRoutines = computed(() =>
-  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
-)
-const systemAutomations = computed(() =>
-  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope === 'system'),
-)
+const routeTaskId = computed(() => (typeof route.params.taskId === 'string' ? route.params.taskId : ''))
+const tasksListEl = ref<HTMLElement | null>(null)
+function retryTasks(): void {
+  void taskBoard.reload(store.activeWorkspace)
+}
 
-// ── Keyboard navigation for the schedules list (mirrors HomeRecentChats) ──────
+// ── Keyboard navigation for the schedules list: one flat list, the same
+// roaming as Home's chats and the Automations overview (lib/listRoaming.ts). ──
 const schedulesListEl = ref<HTMLElement | null>(null)
-
-function focusableSchedules(): HTMLElement[] {
-  const root = schedulesListEl.value
-  if (!root) return []
-  return Array.from(root.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])'))
-}
-
-function focusScheduleElement(element: HTMLElement) {
-  element.focus()
-  element.scrollIntoView({ block: 'nearest' })
-}
-
-function clamp(value: number, lower: number, upper: number): number {
-  return Math.min(upper, Math.max(lower, value))
-}
 
 function onArrow(key: string): boolean {
   if (props.collapsed) return false
-  const items = focusableSchedules()
-  if (!items.length) return false
-  const active = document.activeElement as HTMLElement | null
-  let index = items.indexOf(active as HTMLElement)
-  if (index < 0) {
-    // Start from the active route, or the first item. This mirrors the
-    // homepage's anchorLane logic but for a flat list.
-    const activeLink = rootActiveScheduleElement(items)
-    if (activeLink) {
-      index = items.indexOf(activeLink)
-    } else {
-      items[0]?.focus()
-      items[0]?.scrollIntoView({ block: 'nearest' })
-      return true
-    }
+  if (props.mode === 'tasks') {
+    // The task lanes read top to bottom as one list, like the automation groups.
+    const tasksRows = Array.from(tasksListEl.value?.querySelectorAll<HTMLElement>('.task-sidebar-item') ?? [])
+    const open = tasksListEl.value?.querySelector<HTMLElement>('.task-sidebar-item.active')
+    return roamFocus([tasksRows], key, 'list', () => listAnchor(tasksRows, open))
   }
-  const delta = key === 'ArrowDown' || key === 'ArrowRight' ? 1 : key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 0
-  if (!delta) return false
-  const nextIndex = clamp(index + delta, 0, items.length - 1)
-  if (nextIndex === index) return true
-  focusScheduleElement(items[nextIndex])
-  return true
-}
-
-function rootActiveScheduleElement(items: HTMLElement[]): HTMLElement | null {
-  // The router-link for the current /schedules/:id carries .active (or
-  // .router-link-active). Prefer it so arrows start where the user is.
-  const active = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
-  if (active && items.includes(active)) return active
-  return null
+  const rows = Array.from(schedulesListEl.value?.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])') ?? [])
+  // Arrows start where the user is: the row for the open automation.
+  const current = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
+  return roamFocus([rows], key, 'list', () => listAnchor(rows, current))
 }
 
 defineExpose({ onArrow })
@@ -1427,7 +1400,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
+import type { ChatInfo, ProjectInfo } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1993,7 +1966,7 @@ async function confirmDeleteChat(chatId: string) {
      sidebar prevents double-scroll and keeps the footer fixed. */
   overflow: hidden;
   transition: transform 0.22s var(--ease);
-  padding-top: var(--safe-top);
+  padding-top: var(--chrome-top);
   padding-left: var(--safe-left);
   padding-bottom: var(--safe-bottom);
 }
@@ -2723,21 +2696,12 @@ async function confirmDeleteChat(chatId: string) {
 .project-actions-btn:hover { color: var(--fg); background: var(--bg3); }
 @media (hover: none) { .project-actions-btn { opacity: 0.6; } }
 
-.chat-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: var(--touch);
-  padding: 0 4px 0 22px;
+/* A chat row is a SidebarRow (which owns the row's look) indented under its
+   project's guide line; the loading skeleton takes the same box. */
+.chat-list .chat-item {
+  padding-left: 22px;
   margin-left: 4px;
-  border-radius: 7px;
-  cursor: pointer;
-  font-size: var(--text-base);
-  color: var(--fg2);
-  overflow: hidden;
-  white-space: nowrap;
 }
-
 /* Interval-automation marker on a chat row. Accent while the cadence is live,
    muted when it is paused, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
@@ -2760,11 +2724,6 @@ async function confirmDeleteChat(chatId: string) {
   vertical-align: middle;
 }
 
-.chat-item:hover {
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-
 /* Chat rows can be dragged onto any project header to move them. The context
    menu remains available for keyboard and touch users. */
 .chat-item[draggable="true"] {
@@ -2773,15 +2732,6 @@ async function confirmDeleteChat(chatId: string) {
 .chat-item.dragging {
   opacity: 0.4;
   cursor: grabbing;
-}
-
-/* The selected row is the fill and the brighter label. It used to also carry a
-   2px accent bar down its left edge, which said the same thing twice: next to a
-   filled row the bar read as decoration, and it was the only place in the rail
-   where the workspace accent bled into a list it did not belong to. */
-.chat-item.active {
-  background: var(--bg3);
-  color: var(--fg);
 }
 
 .chat-title {
@@ -2806,32 +2756,6 @@ async function confirmDeleteChat(chatId: string) {
 .chat-code-tag {
   font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
   letter-spacing: -0.04em;
-}
-
-/* A squared tag that can truncate (branch names run long). */
-.chat-repo-tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 9em;
-  height: 16px;
-  padding: 0 4px;
-  box-sizing: border-box;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font: 600 calc(10px * var(--font-scale))/14px var(--font-mono);
-}
-.chat-repo-tag--removed {
-  text-decoration: line-through;
-  opacity: 0.6;
-}
-/* A worktree the chat is no longer coding in: still named, visibly inactive. */
-.chat-repo-tag--code-off {
-  border-style: dashed;
-  opacity: 0.55;
 }
 
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
@@ -3077,9 +3001,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }
@@ -3318,9 +3242,8 @@ async function confirmDeleteChat(chatId: string) {
   gap: 12px;
 }
 
-/* Grouped schedule sections: a sentence-case label over plain 36px rows,
-   the same list language as the Projects tree - title on the left, the muted
-   time or cadence on the right. */
+/* Grouped schedule sections: a sentence-case label over the sidebar's chat
+   rows (SidebarRow) - title on the left, the muted time or cadence on the right. */
 .schedule-group {
   display: flex;
   flex-direction: column;
@@ -3339,55 +3262,23 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   gap: 2px;
 }
-.schedule-item {
+/* Automation rows are SidebarRows, the same row as a chat's; only their marks
+   need a rule here. */
+.task-review-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.task-sidebar-error {
   display: flex;
-  width: 100%;
-  min-width: 0;
-  min-height: 36px;
-  box-sizing: border-box;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-base);
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
 }
-@media (pointer: coarse) {
-  .schedule-item { min-height: var(--touch); }
-}
-.schedule-item:hover { background: var(--bg-elev); color: var(--fg); }
-.schedule-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-/* Same row language as a selected chat: fill and label, no accent bar. */
-.schedule-item.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-.schedule-item .schedule-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.schedule-item .schedule-time {
-  flex-shrink: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-.schedule-item--disabled .schedule-label { color: var(--fg3); }
-.schedule-item .missed-dot {
+.schedule-mark {
   display: inline-flex;
   flex-shrink: 0;
 }
@@ -3421,42 +3312,12 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-nav-item {
-  display: flex;
-  align-items: center;
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: 7px;
-  text-decoration: none;
-  color: var(--fg2);
-  font-size: var(--text-base);
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-}
-.settings-nav-item:hover {
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-.settings-nav-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.settings-nav-item.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-@media (pointer: coarse) {
-  .settings-nav-item { min-height: var(--touch); }
-}
-
-/* Memory's sections: Settings' list with a count at the row's end. */
+/* Memory's sections: Settings' rows (SidebarRow) with a count at the row's end.
+   The fill alone marks the open section, as for chats. */
 .memory-nav-list .sidebar-list-label { margin-top: 8px; }
 .memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
-.memory-nav-item { gap: 8px; }
-.memory-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-nav-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.memory-nav-count { flex: none; padding-right: 6px; color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .memory-nav-count--due { color: var(--accent); font-weight: 650; }
-.memory-nav-item.active { font-weight: 600; }
 
 /* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {
@@ -3492,57 +3353,10 @@ async function confirmDeleteChat(chatId: string) {
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
 .mm-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-.mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
-.mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
-.mm-stat { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
-.mm-stat .n { font-size: var(--text-lg); font-weight: 600; }
-.mm-stat .l { font-size: var(--text-xs); color: var(--fg3); }
-.mm-stat--skeleton { display: flex; flex-direction: column; justify-content: center; gap: 0; min-height: 52px; }
 
-.mm-loading-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  margin-bottom: var(--space-3);
-}
-.mm-shimmer-line {
-  display: block;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
-  background-size: 200% 100%;
-  /* The skeleton line keeps a sweep of its own. The naming placeholder's
-     keyframes live in components/titleShimmer.css, and a scoped style block
-     cannot name the @keyframes another block declares: Vue renames them per
-     block, so the name here would never resolve. */
-  animation: mm-shimmer-sweep 1.4s ease-in-out infinite;
-}
-@keyframes mm-shimmer-sweep {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-.mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
-.mm-shimmer-line--l { width: 78%; height: 8px; }
-.mm-skeleton-block { margin-top: var(--space-3); }
-@media (prefers-reduced-motion: reduce) {
-  .mm-shimmer-line { animation: none; }
-}
-.history-loading-spinner {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: history-loading-spin 0.8s linear infinite;
-}
-@keyframes history-loading-spin {
-  to { transform: rotate(360deg); }
-}
 
 .mm-search { margin-top: var(--space-3); }
+.mm-sidebar-skeleton { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
 
 .mm-chip-row { display: flex; flex-direction: column; gap: 2px; }

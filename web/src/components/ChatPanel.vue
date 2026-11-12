@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -21,22 +21,16 @@
       <template #title>
         <div class="header-left">
           <div class="header-breadcrumb">
-            <div class="chat-title-row" :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }">
-              <!-- Same 18px stroke icon in the same 30px box as the trailing header
-                   actions, so the close control reads as one of them. It used to be
-                   a `&times;` character at 20px, which is a different size from
-                   every icon around it and sits on the text baseline rather than in
-                   a box - visibly out of line beside the breadcrumb. It sits in the
-                   title row so it shares the title's vertical centre: with the
-                   project on a second line under the title, a close button outside
-                   the row centred itself against both lines and drifted below the
-                   title it belongs to. -->
-              <button class="btn-icon close-btn" @click="$emit('close')" :title="beside ? 'Close side chat' : 'Close chat'" :aria-label="beside ? 'Close side chat' : 'Close chat'">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
+            <!-- The shared title row of an open item: close, then the rail or
+                 the title. The close sits in the row so it shares the title's
+                 vertical centre. -->
+            <ItemTitleRow
+              class="chat-title-row"
+              :class="{ 'chat-title-row--rail': titleRailOn && !editingTitle }"
+              :rail="titleRailOn && !editingTitle"
+              :close-label="beside ? 'Close side chat' : 'Close chat'"
+              @close="$emit('close')"
+            >
               <input
                 v-if="editingTitle"
                 class="title-input"
@@ -47,11 +41,12 @@
                 @click.stop
                 autofocus
               />
-              <ChatTitleRail
+              <TitleRail
                 v-else-if="titleRailOn"
                 ref="titleRailRef"
                 class="title-rail"
                 :items="titleRail.items.value"
+                group-label="Chats in this workspace"
                 :current-id="chat.chat_id"
                 @select="titleRail.select"
                 @rename="startEditTitle"
@@ -79,7 +74,7 @@
                 @click.stop
               >{{ chat.title }}</span>
               <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
-            </div>
+            </ItemTitleRow>
           </div>
         </div>
       </template>
@@ -150,10 +145,12 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
     <div
+      ref="chatColumnEl"
       class="chat-column"
-      :class="{ 'chat-column--leaning': railLean !== 0, [`chat-column--arrive-${railArrival > 0 ? 'next' : 'prev'}`]: railArrival !== 0 }"
-      :style="railLean !== 0 ? { transform: `translateX(${-railLean * 25}%)`, opacity: String(1 - Math.min(1, Math.abs(railLean)) * 0.5) } : undefined"
-      @animationend="railArrival = 0"
+      data-rail-lean
+      :class="railMotionClass(railLean, railArrival)"
+      :style="railLeanStyle(railLean)"
+      @animationend="e => { if (e.target === e.currentTarget) railArrival = 0 }"
     >
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
@@ -171,7 +168,7 @@
       <!-- Selecting a message (click or Enter) outlines it and shows its
          actions, leaving the rest of the transcript readable; clicking the
          message again or pressing Esc puts it back. -->
-      <div class="messages-content">
+      <div class="messages-content" data-rail-column>
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
              right-aligned user bubble, the left-aligned assistant bubbles with
@@ -290,16 +287,16 @@
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
-                  <a
+                  <button
                     v-for="img in item.msg.images"
                     :key="img"
-                    :href="img.startsWith('data:') ? img : `/api/images/${img}`"
-                    target="_blank"
-                    rel="noopener"
+                    type="button"
                     class="message-image-link"
+                    :aria-label="`Open image ${img}`"
+                    @click="openMessageImage(img)"
                   >
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
-                  </a>
+                  </button>
                 </div>
                 <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
                   <li v-for="(f, fi) in userAttachments(item.msg.content)" :key="fi" class="message-file" :title="f.path || f.name">
@@ -743,12 +740,13 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="questionCardVisible" class="question-card">
+    <div v-if="questionCardVisible" ref="questionCardEl" class="question-card question-form-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
+      <div class="question-form-body" role="region" aria-label="Question details" tabindex="0">
       <p v-if="activeQuestions[0]?.stale" class="question-card-note">The engine restarted. Your answer will be sent as a message.</p>
       <template v-for="(q, qi) in activeQuestions" :key="qi">
         <div v-if="isQuestionActive(qi, q)" class="question-block">
@@ -810,6 +808,7 @@
         </div>
       </template>
       <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
+      </div>
       <div class="question-card-actions">
         <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
         <button class="btn-sm primary" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
@@ -1053,27 +1052,16 @@
 
     <!-- Slash-command picker. Skills can be picked from any slash token;
          Ciao-owned commands remain start-of-message only. -->
-    <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
-      <div
-        v-for="(cmd, i) in filteredCommands"
-        :key="cmd.name"
-        class="commands-picker-row"
-        :class="{ active: i === commandHighlightIdx }"
-        role="option"
-        :aria-selected="i === commandHighlightIdx"
-        @mousedown.prevent="applyCommand(cmd)"
-        @mouseenter="commandHighlightIdx = i"
-      >
-        <div class="commands-picker-head">
-          <span v-if="cmd.source === 'skill'" class="commands-picker-kind">skill</span>
-          <span class="commands-picker-name">/{{ cmd.name }}</span>
-          <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
-        </div>
-        <div v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</div>
-      </div>
-    </div>
+    <SlashCommandPicker
+      v-if="slash.visible.value"
+      class="commands-picker"
+      :commands="slash.matches.value"
+      :highlight="slash.highlight.value"
+      @pick="slash.insert($event, autoResize)"
+      @highlight="slash.highlight.value = $event"
+    />
 
-    <div class="input-bar" :class="{ disabled: chat.archived }">
+    <div class="input-bar">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <div class="archived-notice-row">
@@ -1097,7 +1085,7 @@
         <!-- The command surface: staged attachments, the prompt, then one bar
              with the model, attach and the forward action. Same
              shape as Home's composer so the two read as one control. -->
-        <div class="composer-surface">
+        <div class="composer-surface" :class="{ 'composer-surface--question': questionCardVisible }">
           <!-- Staged attachments. Images, chat comments and file comments share one
                lifecycle (staged here, sent with the next message, cleared on send),
                so they share one row above the input. A chip is a summary; clicking a
@@ -1107,10 +1095,16 @@
             v-if="view.pendingImages.length || view.pendingFiles.length || view.pendingChatComments.length || view.pendingComments.length"
             class="pending-attachments"
           >
-            <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="image-preview">
-              <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
-              <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
-              <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
+            <span v-for="(ref, i) in view.pendingImages" :key="`img-${ref}`" class="comment-chip image-preview">
+              <img :src="`/api/images/${ref}`" alt="" aria-hidden="true" class="image-preview-thumb" @click="openMessageImage(ref)" />
+              <button
+                type="button"
+                class="comment-chip-body image-ref-chip"
+                @click.stop.prevent="openMessageImage(ref)"
+                :aria-label="`Open image ${i + 1}`"
+                title="Open image"
+              ><span class="comment-chip-note">Image {{ i + 1 }}</span></button>
+              <button type="button" class="comment-chip-remove image-preview-remove" :aria-label="`Remove image ${i + 1}`" title="Remove" @click="removePendingImage(i)">&times;</button>
             </span>
             <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip" :title="f.name">
               <AppIcon class="comment-chip-icon" name="doc" :size="14" />
@@ -1315,44 +1309,70 @@
           @click="closeDetails"
         ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
-      <!-- Where this chat came from, above everything else: one line naming the
-           automation that runs here, the board task a delegated chat works on,
-           and — for the one app-owned chat — the conversation its memory pass
-           is distilling. Its cadence and controls live on the automation's own
-           page. -->
-      <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
-        <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
-        <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
-      </p>
-      <TaskOriginNote :chat="chat" @marked-done="archiveAfterTaskDone" />
-      <p v-if="memoryPassOrigin" class="chat-rail-origin">
-        <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
-        <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
-      </p>
-      <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
-      <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo" tabindex="-1">
+      <!-- Where this chat came from, above everything else: the automation that
+           runs here, the board task a delegated chat works on (and tasks it is
+           linked to), and, for the one app-owned chat, the conversation its
+           memory pass is distilling. Cadence and controls live on the
+           automation's own page. -->
+      <section v-if="originShown" class="cd-section cd-block chat-rail-origin" :aria-labelledby="domId('chat-rail-origin')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-origin')" class="cd-heading">Origin</h3></div>
+        <div class="cd-rows">
+          <router-link
+            v-for="s in chatSchedules"
+            :key="`rail-sched-${s.schedule_id}`"
+            :to="`/schedules/${s.schedule_id}`"
+            class="cd-row cd-row--link chat-rail-origin-row"
+          >
+            <AppIcon class="cd-icon" name="clock" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ s.title || 'Automation' }}</span>
+              <span class="cd-detail">Automation</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </router-link>
+          <TaskOriginNote :chat="chat" @marked-done="archiveAfterTaskDone" />
+          <button v-if="memoryPassOrigin" type="button" class="cd-row cd-row--link chat-rail-memory" @click="openMemoryPassSource">
+            <AppIcon class="cd-icon" name="spark" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ memoryPassOrigin.title }}</span>
+              <span class="cd-detail">Memory insight</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </button>
+        </div>
+      </section>
+      <!-- Actions that leave the panel for another surface. Every chat has
+           them, repository or not: Terminal, and Browse files (the folder
+           browser at the chat's workspace folder). -->
+      <section class="cd-section cd-block chat-rail-open" :aria-labelledby="domId('chat-rail-open')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-open')" class="cd-heading">Open</h3></div>
+        <div class="cd-rows">
+          <div class="chat-rail-terminal">
+            <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
+          </div>
+          <button type="button" class="cd-row cd-row--link chat-rail-browse" aria-label="Browse files" @click="openWorkspaceFolder">
+            <AppIcon class="cd-icon" name="folder" />
+            <span class="cd-main">
+              <span class="cd-primary">Browse files</span>
+              <span class="cd-detail">Folders in this workspace</span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </button>
+        </div>
+      </section>
+      <!-- The linked repository; the header's `code` badge opens here. -->
+      <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
           :repo="project.repo"
           :location="chat.repo_location ?? null"
           :chat-id="chat.chat_id"
-          :code-mode="codeModeOn"
-          :code-mode-locked="codeModeLocked"
-          :archived="!!chat.archived"
         />
-      </div>
-      <!-- The terminal is not a repository feature. A chat with no linked
-           folder still needs a shell — a provider sign-in, an install, an MCP
-           server that stopped answering — so every chat has a terminal row,
-           outside the repository's block; the row is its own label. -->
-      <div class="chat-rail-terminal">
-        <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
       </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
-      <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
+      <div ref="railContextEl" class="chat-rail-agent-context cd-block" tabindex="-1">
         <AgentContextSection
           :project="project"
-          :code-mode="codeModeOn"
           :context-pct="contextPct"
           :compacted="contextUsage.compacted"
           :compacting="compacting"
@@ -1365,31 +1385,31 @@
       <section
         v-if="runningRows.length"
         ref="railRunningEl"
-        class="rail-section chat-rail-running"
+        class="cd-section cd-block chat-rail-running"
         :aria-labelledby="domId('chat-rail-running')"
         tabindex="-1"
       >
-        <p :id="domId('chat-rail-running')" class="rail-label">Running</p>
-        <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
-        <template v-if="runningSubagents.length">
-          <p class="chat-rail-subhead">Agents</p>
-          <div class="rail-list">
-            <router-link
-              v-for="sub in runningSubagents"
-              :key="sub.agent_id"
-              :to="subagentPath(chat.chat_id, sub.agent_id)"
-              class="rail-item chat-rail-agent"
-            >
-              <ActivityGlyph kind="working" />
-              <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
-              <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
-              <span class="chat-rail-agent-arrow" aria-hidden="true">→</span>
-            </router-link>
-          </div>
-        </template>
-        <template v-if="runningShells.length">
-          <p class="chat-rail-subhead">Processes</p>
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-running')" class="cd-heading">Running</h3>
+          <span class="cd-count">{{ runningRows.length }}</span>
+        </div>
+        <!-- One list, agents first: an agent has a transcript to open, a shell only a Stop. -->
+        <div class="cd-rows">
+          <router-link
+            v-for="sub in runningSubagents"
+            :key="sub.agent_id"
+            :to="subagentPath(chat.chat_id, sub.agent_id)"
+            class="cd-row cd-row--link chat-rail-agent"
+          >
+            <span class="cd-icon"><ActivityGlyph kind="working" /></span>
+            <span class="cd-main">
+              <span class="cd-primary">{{ subagentLabel(sub) }}</span>
+              <span class="cd-detail">Agent<template v-if="sub.subagent_type"> · {{ sub.subagent_type }}</template></span>
+            </span>
+            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
+          </router-link>
           <ShellRows
+            v-if="runningShells.length"
             variant="rail"
             :rows="runningShells"
             :now="nowTs"
@@ -1397,70 +1417,60 @@
             :stopping="store.stoppingTasks[chat.chat_id]"
             :errors="store.stopTaskErrors[chat.chat_id]"
           />
-        </template>
+        </div>
       </section>
-      <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" :aria-labelledby="domId('chat-rail-tools')">
-        <p :id="domId('chat-rail-tools')" class="rail-label">Skills and MCP used</p>
-        <div class="rail-kvs">
-          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="rail-kv">
-            <span class="chat-rail-tool" :title="tool.tools?.join(', ')"><small>{{ tool.kind === 'skill' ? 'Skill' : 'MCP' }}</small> {{ tool.name }}</span>
-            <strong v-if="tool.count > 1" :title="`${tool.count} calls`">×{{ tool.count }}</strong>
+      <section v-if="railTools.length" class="cd-section cd-block chat-rail-tools" :aria-labelledby="domId('chat-rail-tools')">
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-tools')" class="cd-heading">Skills and MCP</h3>
+          <span class="cd-count">{{ railTools.length }}</span>
+        </div>
+        <div class="cd-rows">
+          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="cd-row chat-rail-tool" :title="tool.tools?.join(', ')">
+            <AppIcon class="cd-icon" :name="tool.kind === 'skill' ? 'skill' : 'plug'" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ tool.name }}</span>
+              <span class="cd-detail">{{ tool.kind === 'skill' ? 'Skill' : 'MCP server' }}</span>
+            </span>
+            <span v-if="tool.count > 1" class="cd-trail cd-value" :title="`${tool.count} calls`">×{{ tool.count }}</span>
           </div>
         </div>
         <button
           v-if="railTools.length > RAIL_LIST_MAX"
           type="button"
-          class="chat-rail-more"
+          class="cd-action cd-more"
           :aria-expanded="railShowAll.tools"
           @click="railShowAll.tools = !railShowAll.tools"
         >{{ railShowAll.tools ? 'Show fewer' : `Show all ${railTools.length}` }}</button>
       </section>
-      <section class="rail-section" :aria-labelledby="domId('chat-rail-files')">
-        <p :id="domId('chat-rail-files')" class="rail-label">Files</p>
-        <div v-if="inspectorOutputs.length" class="rail-list">
+      <section class="cd-section cd-block chat-rail-files" :aria-labelledby="domId('chat-rail-files')">
+        <div class="cd-head">
+          <h3 :id="domId('chat-rail-files')" class="cd-heading">Files</h3>
+          <span v-if="railFiles.length" class="cd-count">{{ railFiles.length }}</span>
+        </div>
+        <div v-if="railFiles.length" class="cd-rows">
           <button
-            v-for="output in shownOutputs"
-            :key="`${output.action}:${output.file_path}`"
+            v-for="file in shownFiles"
+            :key="file.key"
             type="button"
-            class="rail-item chat-rail-file"
-            :title="output.file_path"
-            @click="openFileCard(output.file_path)"
+            class="cd-row cd-row--link chat-rail-file"
+            :title="file.path"
+            @click="openFileCard(file.path)"
           >
-            <span>{{ fileCardBasename(output.file_path) }}</span>
-            <small>{{ outputActionTag(output.action) }}<template v-if="shortDirname(output.file_path)"> · {{ shortDirname(output.file_path) }}</template></small>
+            <AppIcon class="cd-icon" name="file" />
+            <span class="cd-main">
+              <span class="cd-primary">{{ fileCardBasename(file.path) }}</span>
+              <span class="cd-detail">{{ file.detail }}</span>
+            </span>
           </button>
         </div>
         <button
-          v-if="inspectorOutputs.length > RAIL_LIST_MAX"
+          v-if="railFiles.length > RAIL_LIST_MAX"
           type="button"
-          class="chat-rail-more"
+          class="cd-action cd-more"
           :aria-expanded="railShowAll.files"
           @click="railShowAll.files = !railShowAll.files"
-        >{{ railShowAll.files ? 'Show fewer' : `Show all ${inspectorOutputs.length}` }}</button>
-        <p v-if="!inspectorOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
-        <template v-if="mentionedFiles.length">
-          <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
-          <div class="rail-list">
-            <button
-              v-for="path in shownMentioned"
-              :key="`mentioned-${path}`"
-              type="button"
-              class="rail-item chat-rail-file"
-              :title="path"
-              @click="openFileCard(path)"
-            >
-              <span>{{ fileCardBasename(path) }}</span>
-              <small>{{ shortDirname(path) || 'workspace' }}</small>
-            </button>
-          </div>
-          <button
-            v-if="railMentioned.length > RAIL_LIST_MAX"
-            type="button"
-            class="chat-rail-more"
-            :aria-expanded="railShowAll.mentioned"
-            @click="railShowAll.mentioned = !railShowAll.mentioned"
-          >{{ railShowAll.mentioned ? 'Show fewer' : `Show all ${railMentioned.length}` }}</button>
-        </template>
+        >{{ railShowAll.files ? 'Show fewer' : `Show all ${railFiles.length}` }}</button>
+        <p v-else-if="!railFiles.length" class="cd-empty">None yet.</p>
       </section>
     </aside>
     </div>
@@ -1490,13 +1500,15 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
-import ChatTitleRail from './ChatTitleRail.vue'
+import TitleRail from './TitleRail.vue'
+import ItemTitleRow from './ItemTitleRow.vue'
+import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
-import { markRailArrival, takeRailArrival, useChatRail } from '../composables/useChatRail'
+import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import ChatSignals from './ChatSignals.vue'
@@ -1525,7 +1537,6 @@ import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
@@ -1565,18 +1576,19 @@ import {
 } from '../lib/commentHighlight'
 import { questionAnswerError, questionAnswerIsValid, questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import {
-  useMentionPicker,
+import { useMentionPicker,
   type MentionAgent,
   type MentionChat,
   type MentionFile,
   type MentionProject,
 } from '../composables/useMentionPicker'
+import { useSlashCommands } from '../composables/useSlashCommands'
 import { useThinkingPreference } from '../composables/useThinkingPreference'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
+import SlashCommandPicker from './SlashCommandPicker.vue'
 import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
@@ -1704,7 +1716,6 @@ const {
   handleNativeFileDrop,
   handlePaste,
   handlePromptHistoryKey,
-  insertImageRef,
   removePendingImage,
   removePendingFile,
 } = composer
@@ -1785,118 +1796,23 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands.
-const slashCommands = ref<SlashCommand[]>([])
-const commandHighlightIdx = ref(0)
-
-interface SlashCommandTrigger {
-  start: number
-  end: number
-  query: string
-}
-
-/** Find a slash token immediately before the textarea caret. */
-function findSlashCommandTrigger(text: string, cursor: number): SlashCommandTrigger | null {
-  const end = Math.max(0, Math.min(cursor, text.length))
-  const beforeCaret = text.slice(0, end)
-  const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/)
-  if (!match) return null
-
-  const start = end - match[0].length + match[0].lastIndexOf('/')
-  return { start, end, query: match[1] || '' }
-}
-
-const slashCommandTrigger = ref<SlashCommandTrigger | null>(null)
-
-function dismissSlashCommandPicker(): void {
-  slashCommandTrigger.value = null
-  commandHighlightIdx.value = 0
-}
-
-function refreshSlashCommandPicker(): void {
-  const el = inputEl.value
-  if (!el || el.selectionStart !== el.selectionEnd) {
-    dismissSlashCommandPicker()
-    return
-  }
-  slashCommandTrigger.value = findSlashCommandTrigger(inputText.value, el.selectionStart)
-  commandHighlightIdx.value = 0
-}
-
-async function loadSlashCommands(): Promise<void> {
-  try {
-    const provider = encodeURIComponent(chat.value.provider || '')
-    const workspace = encodeURIComponent(project.value?.workspace || store.activeWorkspace || '')
-    const response = await api.get<CommandsResponse>(`/api/commands?provider=${provider}&workspace=${workspace}`)
-    slashCommands.value = [
-      ...(response.commands || []),
-      ...(response.skills || []),
-    ]
-  } catch {
-    // Asset discovery is offline: leave the picker empty rather than stale.
-    slashCommands.value = []
-  }
-}
-
-const filteredCommands = computed<SlashCommand[]>(() => {
-  const active = slashCommandTrigger.value
-  if (!active) return []
-  const needle = active.query.toLowerCase()
-  return slashCommands.value.filter(command =>
-    command.name.toLowerCase().startsWith(needle),
-  )
-})
-
-const showCommandsPicker = computed(() => filteredCommands.value.length > 0)
-
-watch(filteredCommands, (list) => {
-  if (commandHighlightIdx.value >= list.length) commandHighlightIdx.value = 0
-})
-
-function applyCommand(cmd: SlashCommand) {
-  const active = slashCommandTrigger.value
-  if (!active) return
-
-  const before = inputText.value.slice(0, active.start)
-  const after = inputText.value.slice(active.end)
-  const token = `/${cmd.name}`
-  // Keep the existing separator when this replaces a token in the middle of
-  // a draft; otherwise leave room for command arguments as before.
-  const suffix = cmd.argument_hint && !(after && /^\s/.test(after)) ? ' ' : ''
-  inputText.value = before + token + suffix + after
-  const cursor = before.length + token.length + suffix.length
-  dismissSlashCommandPicker()
-  nextTick(() => {
-    const input = inputEl.value
-    if (!input) return
-    input.setSelectionRange(cursor, cursor)
-    input.focus()
-    autoResize()
-  })
-}
-
-watch(inputText, () => {
-  if (!slashCommandTrigger.value) return
-  const el = inputEl.value
-  const current = el && el.selectionStart === el.selectionEnd
-    ? findSlashCommandTrigger(inputText.value, el.selectionStart)
-    : null
-  if (current) slashCommandTrigger.value = current
-  else dismissSlashCommandPicker()
-})
+// Slash-command picker: the composable owns the trigger, matches and text
+// surgery; commands load from /api/commands on mount and when the provider
+// changes.
+const slash = useSlashCommands({ draft: inputText, input: inputEl })
 const messagesEl = ref<HTMLElement>()
 const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => chat.value.chat_id)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
 const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeRailArrival())
-const titleRailRef = ref<InstanceType<typeof ChatTitleRail> | null>(null)
+const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
   if (!titleRailOn.value) return false
@@ -1989,8 +1905,12 @@ function openMemoryPassSource(): void {
   const archivePath = chat.value.memory_source?.archive_path
   if (archivePath) void fileViewer.open(archivePath)
 }
+/** Chat details › Open › Browse files: the folder browser at the chat's workspace folder. */
+function openWorkspaceFolder(): void {
+  void fileViewer.openFolder('', chat.value?.chat_id || '')
+}
 watch(() => chat.value.provider, () => {
-  void loadSlashCommands()
+  void slash.load(chat.value.provider || '', project.value?.workspace || store.activeWorkspace || '')
 })
 
 const queueEditNotice = ref('')
@@ -2186,12 +2106,6 @@ onMounted(() => {
 })
 
 const project = computed(() => view.project)
-const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
-// The chat payload's turn count only refreshes on refetch, so a user row in the
-// loaded transcript locks the switch as soon as the first message is sent.
-const codeModeLocked = computed(() =>
-  isCodeModeLocked(chat.value)
-  || (codeModeOn.value && view.activeMessages.some(m => m.role === 'user')))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -2281,15 +2195,32 @@ const mentionedFiles = computed<string[]>(() => {
 // The rail's lists show the five most recent entries; the rest are one click
 // away. Turns are kept in order, so newest-first is the order reversed.
 const RAIL_LIST_MAX = 5
-const railShowAll = ref({ files: false, mentioned: false, tools: false })
-watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
+const railShowAll = ref({ files: false, tools: false })
+watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, tools: false } })
 const railMentioned = computed(() => [...mentionedFiles.value].reverse())
+/** Chat details' one Files list: what the chat touched, newest first, then
+ *  what its replies only mention (no turn recorded the write). */
+const railFiles = computed<{ key: string; path: string; detail: string }[]>(() => [
+  ...inspectorOutputs.value.map(output => {
+    const tag = outputActionTag(output.action)
+    const dir = shortDirname(output.file_path)
+    return {
+      key: `${output.action}:${output.file_path}`,
+      path: output.file_path,
+      detail: `${tag.charAt(0).toUpperCase()}${tag.slice(1)}${dir ? ` · ${dir}` : ''}`,
+    }
+  }),
+  ...railMentioned.value.map(path => ({
+    key: `mentioned-${path}`,
+    path,
+    detail: `Mentioned · ${shortDirname(path) || 'workspace'}`,
+  })),
+])
+const shownFiles = computed(() => railShowAll.value.files ? railFiles.value : railFiles.value.slice(0, RAIL_LIST_MAX))
 const railTools = computed(() => [
   ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
   ...toolUsage.value.mcp.map(server => ({ ...server, kind: 'mcp' as const })),
 ])
-const shownOutputs = computed(() => railShowAll.value.files ? inspectorOutputs.value : inspectorOutputs.value.slice(0, RAIL_LIST_MAX))
-const shownMentioned = computed(() => railShowAll.value.mentioned ? railMentioned.value : railMentioned.value.slice(0, RAIL_LIST_MAX))
 const shownTools = computed(() => railShowAll.value.tools ? railTools.value : railTools.value.slice(0, RAIL_LIST_MAX))
 
 // How full the model's context window was at the end of the latest turn, from
@@ -2345,6 +2276,8 @@ const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, 
 // a drawer. Measured on the panel rather than the window, because the sidebar
 // and a pinned file both take width from this pane.
 const panelEl = ref<HTMLElement | null>(null)
+const chatColumnEl = ref<HTMLElement | null>(null)
+const questionCardEl = ref<HTMLElement | null>(null)
 const railEl = ref<HTMLElement | null>(null)
 const railContextEl = ref<HTMLElement | null>(null)
 const railRepoEl = ref<HTMLElement | null>(null)
@@ -2361,10 +2294,17 @@ const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
+  let lastWidth = -1
   panelObserver = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width ?? 0
     isWidePane.value = width > 940
     if (isWidePane.value) inspectorOpen.value = false
+    // The prompt's height is sized to its wrapped text; a new width (rotation,
+    // a pinned pane) rewraps it, so re-fit or it keeps the old line count.
+    if (width !== lastWidth) {
+      lastWidth = width
+      void nextTick(autoResize)
+    }
   })
   panelObserver.observe(panelEl.value)
 })
@@ -2597,7 +2537,7 @@ const showMentionPicker = mentionPicker.showPicker
 
 function refreshComposerPickers(): void {
   mentionPicker.refresh()
-  refreshSlashCommandPicker()
+  slash.refresh()
 }
 
 async function loadProjectFiles() {
@@ -4020,7 +3960,7 @@ onMounted(async () => {
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
   await loadModels()
-  await loadSlashCommands()
+  await slash.load(chat.value.provider || '', project.value?.workspace || store.activeWorkspace || '')
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
@@ -4129,7 +4069,7 @@ function renderMarkdown(text: string): string {
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true, chatId: props.chatId })
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
@@ -4212,11 +4152,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   const lineAttr = a.getAttribute('data-line')
   const line = lineAttr ? parseInt(lineAttr, 10) : null
   const cid = chat.value?.chat_id || ''
-  if (isImageFilePath(path)) {
-    fileViewer.openImage(path, cid)
-  } else {
-    fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
-  }
+  void fileViewer.openLink(path, Number.isFinite(line as number) ? line : null, cid)
 }
 
 // One delegated listener at the panel root serves every clickable thing the
@@ -4305,6 +4241,17 @@ function openFileCard(filePath: string): void {
   } else {
     fileViewer.open(filePath, null, cid)
   }
+}
+
+/** A message attachment is served at `/api/images/<ref>`, outside the
+ *  workspace sandbox, so the viewer opens the URL rather than a path. */
+function openMessageImage(ref: string): void {
+  const data = ref.startsWith('data:')
+  fileViewer.openImageUrl(
+    data ? ref : `/api/images/${ref}`,
+    data ? 'image' : ref,
+    chat.value?.chat_id || '',
+  )
 }
 
 /** Fold a turn's footer facts into one record.
@@ -4437,9 +4384,12 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Non-final text lives in the one trace; only the final reply is a bubble.
+    // Earlier explicitly completed replies are bubbles of their own; the rest
+    // is Activity. Only the final reply owns the turn footer and Outputs.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
-      withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
+      part.kind === 'assistant'
+        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
+        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents and (when there's no answer bubble) file outputs
     // belong to the one Activity trace that sits right before the reply. Reuse
@@ -4721,16 +4671,15 @@ function handleKeydown(e: KeyboardEvent) {
   if (mentionPicker.handleKeydown(e)) return
 
   // Slash-command picker navigation takes precedence over send/newline.
-  if (showCommandsPicker.value) {
+  if (slash.visible.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      commandHighlightIdx.value = (commandHighlightIdx.value + 1) % filteredCommands.value.length
+      slash.move(1)
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      const n = filteredCommands.value.length
-      commandHighlightIdx.value = (commandHighlightIdx.value - 1 + n) % n
+      slash.move(-1)
       return
     }
     if (e.key === 'Escape') {
@@ -4742,13 +4691,13 @@ function handleKeydown(e: KeyboardEvent) {
       // now, so the picker opens mid-message ("…and then run /rev"): clearing
       // inputText here wiped the whole message, and the draft-sync watcher
       // persisted the empty string, so it could not be recovered.
-      dismissSlashCommandPicker()
+      slash.dismiss()
       return
     }
     if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
       e.preventDefault()
-      const cmd = filteredCommands.value[commandHighlightIdx.value]
-      if (cmd) applyCommand(cmd)
+      const cmd = slash.current()
+      if (cmd) slash.insert(cmd, autoResize)
       return
     }
   }
@@ -5035,11 +4984,22 @@ async function saveTitle() {
   }
   editingTitle.value = false
 }
+// A picker already open when the fold hides its chip closes with it.
+watch(() => questionCardVisible.value, visible => { if (visible && modelChipFolded()) showModelPicker.value = false })
+
+/** The short-pane fold (#2774) hides the composer's model chip while a
+ *  question card is open; the picker would open with no visible trigger. */
+const SHORT_PANE_QUERY = '(max-height: 500px)'
+function modelChipFolded(): boolean {
+  return questionCardVisible.value && typeof window.matchMedia === 'function' && window.matchMedia(SHORT_PANE_QUERY).matches
+}
+
 function toggleModelPicker() {
   if (showModelPicker.value) {
     showModelPicker.value = false
     return
   }
+  if (modelChipFolded()) return
   // The composer's chip is selection-only: a pick there changes the model
   // and never retries.
   pickerMode.value = 'normal'
@@ -5306,9 +5266,9 @@ async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
   const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
-  if (next) markRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
+  if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
-    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markRailArrival(0); return }
+    if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.
@@ -5319,6 +5279,15 @@ async function doArchive() {
 }
 
 const taskSignals = useTaskSignalsStore()
+
+/** Chat details shows its Origin section only when one of its rows would
+ *  render: an automation, a task (as TaskOriginNote decides), or a memory pass. */
+const originShown = computed(() => {
+  const current = chat.value
+  if (chatSchedules.value.length || memoryPassOrigin.value) return true
+  const delegated = current.helper?.kind === 'task_delegation' && !!current.helper.task_id
+  return delegated || !!taskSignals.taskForChat(current) || taskSignals.linkedTasksForChat(current).length > 0
+})
 
 /**
  * The task this archived chat's attempt still holds, settled because the chat
@@ -5370,6 +5339,97 @@ function archiveActiveChat() {
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
 defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut, selectAdjacentChat, focusComposer })
+
+// Keep the focused draft or question field visible after layout changes.
+let composerFrame = 0
+function keepFocusedComposerVisible() { scheduleFocusedVisibility(false) }
+function keepFocusedFieldVisible() { scheduleFocusedVisibility(true) }
+function scheduleFocusedVisibility(includeQuestionField: boolean) {
+  cancelAnimationFrame(composerFrame)
+  composerFrame = requestAnimationFrame(() => {
+    const column = chatColumnEl.value, active = document.activeElement
+    if (!column?.isConnected || !(active instanceof HTMLElement) || !active.isConnected) return
+    const isComposer = active === inputEl.value
+    const body = includeQuestionField && !isComposer && active.matches('.question-other') ? active.closest<HTMLElement>('.question-form-body') : null
+    if (!isComposer && !body) return
+    const viewport = window.visualViewport
+    const bounds = column.getBoundingClientRect()
+    const top = Math.max(bounds.top, viewport?.offsetTop ?? 0)
+    const bottom = Math.min(bounds.bottom, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight))
+    if (body) {
+      const visible = body.getBoundingClientRect(), rect = active.getBoundingClientRect()
+      const bodyTop = Math.max(visible.top, top), bodyBottom = Math.min(visible.bottom, bottom)
+      const delta = rect.bottom > bodyBottom ? rect.bottom - bodyBottom : rect.top < bodyTop ? rect.top - bodyTop : 0
+      if (Math.abs(delta) > 1) body.scrollTop += delta
+    }
+    const rect = active.getBoundingClientRect()
+    const delta = rect.bottom > bottom ? rect.bottom - bottom : rect.top < top ? rect.top - top : 0
+    if (Math.abs(delta) > 1) column.scrollTop += delta
+  })
+}
+
+onMounted(() => {
+  const inputObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(keepFocusedComposerVisible)
+  const geometryObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(keepFocusedFieldVisible)
+  if (panelEl.value) geometryObserver?.observe(panelEl.value)
+  watch(inputEl, (input, previous) => {
+    if (previous) { inputObserver?.unobserve(previous); previous.removeEventListener('focus', keepFocusedComposerVisible) }
+    if (input) { inputObserver?.observe(input); input.addEventListener('focus', keepFocusedComposerVisible) }
+  }, { immediate: true, flush: 'post' })
+  watch(() => [questionCardVisible.value, visibleApprovals.value, needsYouActions.value, activeCapabilityQuestions.value, view.currentQueued, dockExpanded.value, slash.visible.value, slash.matches.value.length, showMentionPicker.value, filteredMentions.value.length], keepFocusedComposerVisible, { flush: 'post' })
+  const viewport = window.visualViewport
+  viewport?.addEventListener('resize', keepFocusedFieldVisible)
+  viewport?.addEventListener('scroll', keepFocusedFieldVisible)
+  onBeforeUnmount(() => {
+    cancelAnimationFrame(composerFrame)
+    inputEl.value?.removeEventListener('focus', keepFocusedComposerVisible)
+    inputObserver?.disconnect()
+    geometryObserver?.disconnect()
+    viewport?.removeEventListener('resize', keepFocusedFieldVisible)
+    viewport?.removeEventListener('scroll', keepFocusedFieldVisible)
+  })
+})
+
+// Keyboard selection must remain visible without scrolling the surrounding pane.
+function revealHighlightedPickerRow(selector: string) {
+  const picker = chatColumnEl.value?.querySelector<HTMLElement>(selector)
+  const row = picker?.querySelector<HTMLElement>('[aria-selected="true"]')
+  if (!picker || !row) return
+  const bounds = picker.getBoundingClientRect(), item = row.getBoundingClientRect()
+  const top = bounds.top + picker.clientTop, bottom = top + picker.clientHeight
+  const delta = item.bottom > bottom ? item.bottom - bottom : item.top < top ? item.top - top : 0
+  if (Math.abs(delta) > 1) picker.scrollTop += delta
+}
+watch(() => [slash.visible.value, slash.highlight.value, slash.matches.value.length], () => {
+  if (slash.visible.value) revealHighlightedPickerRow('.commands-picker:not(.mention-picker)')
+}, { flush: 'post' })
+watch(() => [showMentionPicker.value, mentionHighlightIdx.value, filteredMentions.value.length], () => {
+  if (showMentionPicker.value) revealHighlightedPickerRow('.mention-picker')
+}, { flush: 'post' })
+
+onMounted(() => {
+  let observer: ResizeObserver | null = null
+  watch(questionCardEl, card => {
+    observer?.disconnect()
+    if (!card || typeof ResizeObserver === 'undefined') return
+    const header = card.querySelector<HTMLElement>('.question-card-header')!
+    const actions = card.querySelector<HTMLElement>('.question-card-actions')!
+    const measure = () => {
+      const css = getComputedStyle(card)
+      const chrome = header.getBoundingClientRect().height + actions.getBoundingClientRect().height
+      const extra = parseFloat(css.paddingTop) + parseFloat(css.paddingBottom) + parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth) + 2 * parseFloat(css.rowGap)
+      const value = `${chrome + extra + 44}px`
+      if (card.style.getPropertyValue('--question-min') !== value) card.style.setProperty('--question-min', value)
+    }
+    observer = new ResizeObserver(measure)
+    observer.observe(card, { box: 'border-box' })
+    observer.observe(header, { box: 'border-box' })
+    observer.observe(actions, { box: 'border-box' })
+    measure()
+  }, { immediate: true, flush: 'post' })
+  onBeforeUnmount(() => observer?.disconnect())
+})
+
 </script>
 
 <style scoped>
@@ -5502,7 +5562,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
+.chat-column > .commands-picker { flex-shrink: 0; max-height: min(240px, 50%); box-sizing: border-box; }
 
 .chat-rail {
   flex: 0 0 var(--chat-rail-w);
@@ -5530,27 +5592,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 
-.chat-rail-origin {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg2);
-  line-height: 1.45;
-}
-.chat-rail-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
-.chat-rail-origin a {
-  color: var(--fg);
-  font-weight: 650;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-}
-.chat-rail-origin a:hover { text-decoration-color: currentColor; }
+/* Chat details' sections: each direct child section is a block with the
+   same padding, and one hairline rule separates two blocks (none above the
+   first). Rows and headings come from chatDetails.css. */
+.chat-rail > .cd-block { padding: 14px 0 12px; }
+.chat-rail > .cd-block + .cd-block { border-top: 1px solid var(--border); }
+.chat-rail-head + .cd-block { padding-top: 2px; }
 
 /* The same origin sentence for a chat whose Chat details rail is hidden, above
    the transcript. Flat, and sharing the rail's link treatment: one sentence in
@@ -5594,44 +5641,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   border-radius: var(--radius-xs);
 }
 
-.chat-rail-tool {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg);
-}
-.chat-rail-tool small {
-  margin-right: 4px;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-.chat-rail-sublabel { margin-top: var(--space-3); }
-/* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
-   (the focus target for "See what Ciao knows") sits between two of them. */
-.chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
-/* The terminal row closes the repository block, a little tighter than the
-   gap between sections; with no repository it starts the rail. */
-.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-3); }
-.chat-rail-terminal + .chat-rail-agent-context { margin-top: var(--space-5); }
-.chat-rail-more {
-  margin-top: var(--space-1);
-  padding: 4px 0;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-xs);
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.chat-rail-more:hover { color: var(--fg); text-decoration-color: currentColor; }
-.chat-rail-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-@media (pointer: coarse) {
-  .chat-rail-more { min-height: var(--touch); }
-}
 .chat-rail-repo:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -5642,37 +5651,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   outline-offset: 4px;
   border-radius: var(--radius-xs);
 }
-.chat-rail-subagent {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-rail-subhead {
-  margin: var(--space-3) 0 var(--space-1);
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.chat-rail-running .rail-label + .chat-rail-subhead { margin-top: var(--space-1); }
-
-.chat-rail-file { min-width: 0; max-width: 100%; }
-.chat-rail-file > span,
-.chat-rail-file > small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* .rail-item stacks its children; an agent row reads as one line. */
-.chat-rail-agent {
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-start;
-  gap: var(--space-2);
-}
-.chat-rail-agent small { flex-shrink: 0; font-family: var(--font-mono); }
-.chat-rail-agent-arrow { flex-shrink: 0; margin-left: auto; color: var(--fg3); }
 
 
 .drop-overlay {
@@ -5744,13 +5722,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   text-align: left;
 }
 
-/* Sizing, hover fill and touch padding all come from PaneHeader's shared
-   .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
-   as the trailing actions, since closing the chat is not the errand you came
-   here for. `flex: none` keeps the box its own size inside the title row. */
-.close-btn { color: var(--fg3); flex: none; }
-.close-btn:hover { color: var(--fg); }
-
 /* The title header names the conversation only; project context lives in
    Chat details and the sidebar rather than competing with the title. */
 .header-breadcrumb {
@@ -5764,14 +5735,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .header-breadcrumb .chat-title {
   flex: 0 1 auto;
-}
-.header-breadcrumb .chat-title-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 100%;
 }
 /* A long title wraps to at most two lines instead of pushing the code badge
    out of the header. PaneHeader's shared .pane-title rules are `nowrap` with
@@ -5797,16 +5760,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Rail mode: close and the title block share one vertical centre, and the row is
    the reading column's width (it starts where the column starts), so the rail can
    centre its title on the chat rather than on the whole header. */
-.chat-column--leaning { will-change: transform, opacity; }
-.chat-column:not(.chat-column--leaning) { transition: transform 280ms var(--ease), opacity 280ms var(--ease); }
-.chat-column--arrive-next { animation: chat-arrive 260ms var(--ease) both; --arrive-from: 12%; }
-.chat-column--arrive-prev { animation: chat-arrive 260ms var(--ease) both; --arrive-from: -12%; }
-@keyframes chat-arrive { from { transform: translateX(var(--arrive-from)); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) {
-  .chat-column:not(.chat-column--leaning) { transition: none; }
-  .chat-column--arrive-next, .chat-column--arrive-prev { animation: none; }
-}
-.header-breadcrumb .chat-title-row--rail { flex: 1 1 auto; width: 100%; max-width: var(--chat-measure); align-items: center; }
+/* ItemTitleRow's rail row, capped at the chat's reading measure. */
+.header-breadcrumb .chat-title-row--rail { max-width: var(--chat-measure); }
 
 .chat-title {
   cursor: pointer;
@@ -6147,7 +6102,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   padding: 0;
   background: transparent;
   border: 0;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
 /* A message's actions and the turn's facts. The row is always laid out, so it
@@ -6525,9 +6480,9 @@ details[open] > .activity-summary::before {
   line-height: 1.35;
   font-weight: 700;
 }
-.message-content :deep(h1) { font-size: 1.5em; }
-.message-content :deep(h2) { font-size: 1.25em; }
-.message-content :deep(h3) { font-size: 1.1em; }
+.message-content :deep(h1) { font-size: 1.35em; }
+.message-content :deep(h2) { font-size: 1.18em; }
+.message-content :deep(h3) { font-size: 1.08em; }
 
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
@@ -6750,7 +6705,7 @@ details[open] > .activity-summary::before {
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.message-image-link { display: inline-block; line-height: 0; text-decoration: none; }
+.message-image-link { display: inline-block; line-height: 0; text-decoration: none; border: 0; padding: 0; background: none; cursor: zoom-in; }
 .message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
 .message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
 .message-file-icon { flex: none; color: var(--accent2); }
@@ -6782,56 +6737,19 @@ details[open] > .activity-summary::before {
   overflow-y: auto;
 }
 
-.image-preview {
-  position: relative;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
+/* An image is a chip like the others: a small thumbnail where the icon goes,
+   its "Image N" reference (inserted into the prompt on upload; click opens
+   the image in the viewer), then remove. */
+.image-preview { padding-left: 3px; }
+.image-preview-thumb, .image-ref-chip { cursor: zoom-in; }
 .image-preview-thumb {
-  height: 56px;
-  width: 56px;
+  flex: none;
+  width: 24px;
+  height: 24px;
   object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  border-radius: 5px;
   background: var(--bg);
 }
-
-.image-preview-remove {
-  position: absolute;
-  top: -12px;
-  right: -12px;
-  box-sizing: content-box;
-  width: 18px;
-  height: 18px;
-  padding: 13px;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: 14px;
-  line-height: 16px;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-
-.image-ref-chip {
-  min-height: var(--touch);
-  padding: 2px 6px;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--fg2);
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-  line-height: 1;
-}
-.image-ref-chip:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-.image-ref-chip:active { background: var(--accent2); }
 
 .comment-chip {
   display: inline-flex;
@@ -6839,7 +6757,8 @@ details[open] > .activity-summary::before {
   gap: var(--space-2);
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
+  /* Half the row less half the gap: at least two chips always share a row. */
+  max-width: calc(50% - var(--space-2) / 2);
   min-height: 32px;
   padding: 0 var(--space-1) 0 var(--space-2);
   border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--border));
@@ -6873,8 +6792,9 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-body > * { min-width: 0; }
 .comment-chip-file {
-  flex: 0 1 auto;
-  max-width: 180px;
+  /* Yields width before the note: the note is what the user wrote. */
+  flex: 0 4 auto;
+  max-width: 60%;
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -6882,8 +6802,9 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-line { color: var(--fg2); font-weight: 400; }
 .comment-chip-quote {
-  flex: 0 1 auto;
-  max-width: 180px;
+  /* Yields width before the note: the note is what the user wrote. */
+  flex: 0 4 auto;
+  max-width: 60%;
   color: var(--fg2);
   white-space: nowrap;
   overflow: hidden;
@@ -6891,13 +6812,14 @@ details[open] > .activity-summary::before {
 }
 .comment-chip-note {
   flex: 0 1 auto;
-  max-width: 160px;
+  /* A short note stays whole; the quote gives way first. */
+  min-width: min(6ch, 100%);
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-chip-name { flex: 0 1 auto; min-width: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.file-chip-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .comment-chip-remove {
   position: relative;
   flex-shrink: 0;
@@ -6913,6 +6835,8 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .comment-chip-remove:hover { background: var(--bg3); color: var(--fg); }
+.image-ref-chip:hover .comment-chip-note { color: var(--accent2); }
+.comment-chip-body:focus-visible, .comment-chip-remove:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; border-radius: 4px; }
 @media (pointer: coarse) {
   .comment-chip-remove::after { content: ''; position: absolute; inset: -10px; }
   .comment-chip { min-height: var(--touch); }
@@ -6998,66 +6922,8 @@ details[open] > .activity-summary::before {
 }
 
 
-/* Slash-command picker */
-.commands-picker {
-  max-height: 240px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 4px 0;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
-  background: var(--bg);
-  font-size: 0.9rem;
-}
-.commands-picker-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-.commands-picker-row.active {
-  background: var(--bg3);
-}
-.commands-picker-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.commands-picker-name {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.commands-picker-kind {
-  color: var(--accent2);
-  font-size: 0.72em;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-.commands-picker-hint {
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: 0.85em;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.commands-picker-desc {
-  color: var(--fg3);
-  font-size: 0.85em;
-  line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
+/* Slash-command picker styles are shared with SlashCommandPicker.vue through
+   slashCommands.css; the @-mention picker below reuses the same classes. */
 
 .mention-picker-row {
   min-height: var(--touch);
@@ -7121,6 +6987,14 @@ details[open] > .activity-summary::before {
   line-height: 1.45;
 }
 
+/* iOS auto-zoom floor at every width. The composer follows the body token
+   (so typed and sent text agree) and must still never drop under 16px, which
+   is the size Safari zooms below on focus. A wide touch device (an iPhone in
+   landscape, an iPad) has no phone rule to fall back on. */
+@media (pointer: coarse) {
+  .chat-input { font-size: max(16px, var(--text-base)); }
+}
+
 /* The command surface (same shape as Home's HomeIntake): attachments,
    the prompt, then one bar of controls under a hairline. */
 .composer-surface {
@@ -7130,7 +7004,7 @@ details[open] > .activity-summary::before {
   flex-direction: column;
   padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 15px;
+  border-radius: var(--radius-composer);
   background: var(--bg2);
   box-shadow: 0 12px 40px rgb(0 0 0 / 12%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
@@ -7250,7 +7124,6 @@ details[open] > .activity-summary::before {
 }
 
 @media (max-width: 700px) {
-  .chat-input { font-size: max(16px, calc(16px * var(--font-scale))); }
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
   .composer-move-bg-long { display: none; }
@@ -7542,6 +7415,57 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
   max-height: 50vh;
   overflow-y: auto;
+}
+.question-form-card {
+  overflow: hidden;
+  height: max-content;
+  flex-shrink: 1;
+  min-height: var(--question-min, 0px);
+  max-height: 60dvh;
+}
+.question-form-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 44px;
+  overflow-y: auto;
+}
+.question-form-body > * { flex-shrink: 0; }
+.question-form-body:focus-visible,
+.question-form-body:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.question-form-card .question-card-actions .btn-sm:focus-visible,
+.question-form-card .question-card-actions .btn-sm:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.question-form-card > .question-card-header,
+.question-form-card > .question-card-actions { flex-shrink: 0; }
+:global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
+/* A short pane (a phone in landscape) cannot hold an open question card and
+   the two-row composer (#2774). While the question waits, the composer folds
+   to one row: the prompt and the send/stop action. The model picker, attach,
+   hints and Move to background come back when the card closes (answer or
+   cancel the question first). Keep the media query in sync with
+   SHORT_PANE_QUERY in the script. */
+@media (max-height: 500px) {
+  .composer-surface--question {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 4px;
+  }
+  .composer-surface--question > .pending-attachments,
+  .composer-surface--question > .composer-uploads { flex: 1 0 100%; }
+  .composer-surface--question > .chat-input { flex: 1 1 0; width: auto; min-width: 0; }
+  .composer-surface--question > .composer-bar { flex: none; padding: 0; border-top: 0; }
+  .composer-surface--question .composer-model,
+  .composer-surface--question .image-btn,
+  .composer-surface--question .composer-kbd,
+  .composer-surface--question .composer-move-bg { display: none; }
 }
 .question-card-header {
   display: flex;
@@ -8078,13 +8002,6 @@ details[open] > .activity-summary::before {
   .message { padding: 8px 10px; }
 }
 
-/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
-   the menu already leave the chat, so the close control is not lost. Hidden, not
-   removed, so desktop keeps it. */
-@media (max-width: 767px) {
-  .close-btn { display: none; }
-}
-
 @media (max-width: 768px) {
   /* Keep the title header compact while preserving safe tap targets. */
   :deep(.pane-header) {
@@ -8136,15 +8053,21 @@ details[open] > .activity-summary::before {
   .message-wrap { width: 96%; max-width: 96%; }
   .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 10px 14px; }
-  /* Keep input and placeholder at the same size so the text doesn't jump
-     when the user starts typing. 16px is the iOS auto-zoom floor: any
-     smaller and Safari zooms the page on focus, which is worse than a
-     slightly truncated placeholder. */
-  .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
-  .chat-input::placeholder { font-size: 16px; }
-  /* Keep every composer action at the shared touch-target minimum.
-     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop. */
-  .input-bar { min-height: 61px; padding-top: 8px; padding-bottom: 8px; }
+  /* The field keeps the coarse-pointer floor and size from the shared rules;
+     a phone only tightens its padding and leading. The placeholder inherits
+     the field's size, so typing never moves the text. */
+  .chat-input { padding: 12px 12px; line-height: 1.25; }
+  /* Keep every composer action at the shared touch-target minimum. The footer
+     lock is the 61px minimum; the bottom padding carries the platform's safe
+     inset so the surface sits 8px above the usable edge. */
+  .input-bar {
+    min-height: 61px;
+    padding-top: 8px;
+    padding-bottom: calc(8px + var(--safe-bottom));
+  }
+  /* The last transcript row sits 16px above the composer surface: this 8px
+     plus the bar's 8px top padding. */
+  .messages { padding-bottom: 8px; }
   .chat-input { height: var(--touch); min-height: var(--touch); }
   .input-actions .send-btn {
     min-width: var(--touch);
@@ -8154,6 +8077,13 @@ details[open] > .activity-summary::before {
     padding: 0;
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
+}
+/* Touch phones: the surface is rounder (--radius-composer), so the controls
+   on its bottom edge become pills and circles to stay concentric with it. */
+@media (max-width: 768px) and (pointer: coarse) {
+  .composer-surface .composer-chip,
+  .composer-surface .image-btn,
+  .composer-surface .send-btn { border-radius: 999px; }
 }
 
 /* Chat comment selection trigger + composer */
@@ -8322,6 +8252,10 @@ details[open] > .activity-summary::before {
 
 <style scoped src="./chatTrace.css"></style>
 
+<!-- The slash-command picker: the chat and Home's composer render the same
+     listbox, and the @-mention picker shares its classes. -->
+<style scoped src="./slashCommands.css"></style>
+
 <!-- The openable dead link: a `file:` path rendered as a button the engine
      can act on. Shared with the file viewer and the pinned-file panel. -->
 <style scoped src="./markdownDeadLink.css"></style>
@@ -8329,3 +8263,5 @@ details[open] > .activity-summary::before {
 <!-- The shared naming placeholder: the same bar the sidebar shows while the
      engine names a chat. -->
 <style scoped src="./titleShimmer.css"></style>
+<style scoped src="./railMotion.css"></style>
+<style scoped src="./chatDetails.css"></style>

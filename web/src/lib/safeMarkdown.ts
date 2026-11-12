@@ -2,13 +2,14 @@ import DOMPurify from 'dompurify'
 import { Marked, Renderer, type Tokens } from 'marked'
 
 import { isAppRouteHref } from './appLinks'
+import { isImageFilePath } from './chatActivity'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { linkifyChatIds } from './chatLinks'
 import { COMMENT_TAGS } from './commentContext'
-import { hasKnownFileExtension, isPlausibleFilePath, linkifyHtml } from './filePaths'
+import { hasKnownFileExtension, isFolderLinkPath, isPlausibleFilePath, linkifyHtml } from './filePaths'
 import { isLoopbackPage } from './loopback'
 import { DEAD_LINK_OPENABLE_CLASS, DEAD_LINK_PATH_ATTR } from './openWorkspaceFile'
-import { buildMarkdownIndex, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
+import { buildMarkdownIndex, joinRelative, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
 
 type FileMarkdownOptions = {
   resolveImageSrc: (href: string) => string
@@ -17,9 +18,12 @@ type FileMarkdownOptions = {
   openLocal?: boolean
 }
 
-/** Per-render opt-in: may a refused `file:` link become an openable button? */
+/** Per-render options for a transcript render. */
 type RenderOptions = {
+  /** May a refused `file:` link become an openable button? */
   openLocal?: boolean
+  /** The chat the message belongs to: its workspace resolves relative image paths. */
+  chatId?: string
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
@@ -40,6 +44,13 @@ const DEAD_LINK_CLASS = 'markdown-dead-link'
  * another one's opt-in.
  */
 let openLocalFiles = false
+
+/**
+ * The chat whose message is being rendered, for the duration of one render
+ * (same lifetime and reasoning as `openLocalFiles`). '' when the caller named
+ * none.
+ */
+let renderChatId = ''
 
 /**
  * Whether a link target can be followed. The sanitizer's own URI policy
@@ -150,7 +161,8 @@ chatMarkdownRenderer.code = function code(token: Tokens.Code): string {
  *
  * Both halves have to look like a file: the href so `../notes.md` and
  * `Workspace/notes.md` qualify, and its basename so a relative *web* link
- * ("example.com/page") is left alone.
+ * ("example.com/page") is left alone. A folder (`exports/sloth-v5`, `exports/`)
+ * is a workspace link too; the click asks the engine whether it is one.
  */
 function chatFileHref(href: string): string {
   const raw = (href || '').trim()
@@ -167,6 +179,9 @@ function chatFileHref(href: string): string {
   } catch {
     decoded = path
   }
+  // Left to the default renderer a folder became a relative anchor that
+  // withExternalLinkAttrs opened in a new window on the PWA's own URL.
+  if (isFolderLinkPath(decoded)) return decoded.replace(/[/\\]+$/, '')
   const base = decoded.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || ''
   if (!isPlausibleFilePath(decoded) || !isPlausibleFilePath(base)) return ''
   // `[docs](anthropic.com)` is a schemeless site link, not a file: one segment
@@ -178,6 +193,29 @@ function chatFileHref(href: string): string {
   const dotted = base.includes('.') && !base.startsWith('.')
   if (dotted && !/[/\\]/.test(decoded) && !hasKnownFileExtension(base)) return ''
   return decoded
+}
+
+/**
+ * A note's folder link, resolved against the note's own folder. null when the
+ * link is not a folder; '' when it is a folder that cannot be named from here.
+ */
+function folderLinkTarget(href: string, notePath: string): string | null {
+  const raw = (href || '').trim().split('#')[0].split('?')[0]
+  let decoded = raw
+  try {
+    decoded = decodeURIComponent(raw)
+  } catch {
+    decoded = raw
+  }
+  if (!isFolderLinkPath(decoded)) return null
+  const rel = decoded.replace(/[/\\]+$/, '')
+  const note = notePath.replace(/:\d+$/, '')
+  const slash = note.lastIndexOf('/')
+  if (slash < 0) return rel
+  const joined = joinRelative(note.slice(0, slash + 1), rel)
+  // `../..` out of a shallow note collapses to '': not a folder we can name.
+  if (!joined) return ''
+  return note.startsWith('/') ? `/${joined}` : joined
 }
 
 // Emit the same `a.file-link` shape the path linkifier and the note viewer
@@ -226,6 +264,18 @@ chatMarkdownRenderer.codespan = function codespan(this: Renderer, token: Tokens.
   const url = token.text.trim()
   if (!CODE_SPAN_URL.test(url) || !isUsableHref(url)) return code
   return `<a href="${escapeAttr(url)}">${code}</a>`
+}
+
+// A workspace-relative image (`![shot](memory-vault/x.png)`) left as written
+// is a src relative to the /chat/... route: the browser loads the app shell
+// and shows a broken image. The chat's own workspace resolves it, the same
+// way a file link in the message resolves on click (/api/chats/{id}/file-path).
+chatMarkdownRenderer.image = function image(this: Renderer, token: Tokens.Image): string {
+  const target = renderChatId ? chatFileHref(token.href) : ''
+  if (!target || !isImageFilePath(target)) return Renderer.prototype.image.call(this, token)
+  const src = `/api/workspace-image?path=${encodeURIComponent(target)}&chat_id=${encodeURIComponent(renderChatId)}`
+  const title = token.title ? ` title="${escapeAttr(token.title)}"` : ''
+  return `<img src="${escapeAttr(src)}" alt="${escapeAttr(token.text)}"${title} loading="lazy">`
 }
 
 const chatMarkdownParser = new Marked({
@@ -411,6 +461,7 @@ export function renderMarkdown(
   opts: RenderOptions = {},
 ): string {
   openLocalFiles = !!opts.openLocal
+  renderChatId = opts.chatId || ''
   try {
     const lifted = liftCommentReferences(text)
     const html = lifted.restore(chatMarkdownParser.parse(lifted.text) as string)
@@ -422,6 +473,7 @@ export function renderMarkdown(
     return neutralizeDeadAnchors(sanitizeHtml(text))
   } finally {
     openLocalFiles = false
+    renderChatId = ''
   }
 }
 
@@ -495,6 +547,16 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
     link(this: Renderer, token: Tokens.Link): string {
       // A target the sanitizer drops is inert text, not a link.
       if (!isUsableHref(token.href)) return deadLinkHtml(this, token)
+      // A folder opens in the folder browser, not in a new window (fileViewer.openLink).
+      const folder = folderLinkTarget(token.href, filePath)
+      if (folder === '') {
+        // Nothing to open, and a plain anchor would open a new window on the PWA's own URL.
+        return `<span class="${DEAD_LINK_CLASS}">${this.parser.parseInline(token.tokens)}</span>`
+      }
+      if (folder) {
+        const label = this.parser.parseInline(token.tokens)
+        return `<a class="file-link" href="#" data-file-path="${escapeAttr(folder)}">${label}</a>`
+      }
       if (!linkIndex || !linkPathSet) return Renderer.prototype.link.call(this, token)
       const ref = vaultNoteRefFromHref(token.href)
       // External URLs, absolute paths, in-page anchors and non-note targets

@@ -10,6 +10,7 @@ import {
   type WorkspaceColorId,
 } from '../lib/workspaceColors'
 import { normalizeOverrides } from '../lib/workspaceOverrides'
+import { normalizeClaudeTrim, type ClaudeTrimOverrides } from '../lib/claudeTrim'
 import type { ArchivedWorkspace, ProviderOverrides, WorkspaceInfo, WorkspaceProvider } from '../lib/types'
 
 // The per-workspace admin state behind Settings: the workspace registry as
@@ -32,6 +33,9 @@ export type WorkspaceForm = {
   // Sparse per-provider overrides of the engine defaults; always built with
   // normalizeOverrides/setOverride so JSON.stringify(form) stays a stable dirty check.
   provider_overrides: ProviderOverrides
+  // Sparse Claude context-trim overrides (option key -> trimmed); always built with
+  // normalizeClaudeTrim/setTrimmed so JSON.stringify(form) stays a stable dirty check.
+  claude_trim: ClaudeTrimOverrides
 }
 
 export type FsScopeChoice = 'workspace' | 'machine' | ''
@@ -97,6 +101,7 @@ export function useWorkspaceAdmin(deps: {
       color: DEFAULT_WORKSPACE_COLOR,
       agent_fs_scope: '',
       provider_overrides: {},
+      claude_trim: {},
     }
   }
 
@@ -126,6 +131,7 @@ export function useWorkspaceAdmin(deps: {
       color: normalizeWorkspaceColor(ws.color),
       agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
       provider_overrides: normalizeOverrides(ws.provider_overrides),
+      claude_trim: normalizeClaudeTrim(ws.claude_trim),
     }
   }
 
@@ -266,6 +272,12 @@ export function useWorkspaceAdmin(deps: {
           projectStore.workspaces.find(w => w.name === name)?.provider_overrides,
         ))
           ? { provider_overrides: form.provider_overrides }
+          : {}),
+        // Sent whole only when changed; Reset to defaults goes as {} and clears.
+        ...(JSON.stringify(form.claude_trim) !== JSON.stringify(normalizeClaudeTrim(
+          projectStore.workspaces.find(w => w.name === name)?.claude_trim,
+        ))
+          ? { claude_trim: form.claude_trim }
           : {}),
       })
       notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')

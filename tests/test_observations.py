@@ -137,6 +137,7 @@ def test_propose_user_observation_queues_profile_and_resolves(tmp_path: Path) ->
     obs_id = _x3(vault)
     result = ob.propose_observation(vault, workspace=WORKSPACE, observation_id=obs_id)
     assert result["queued"] is True and result["destination"] == "profile"
+    assert result["dropped"] is False
     queue = _queue(vault)
     bullet = next(line for line in queue.splitlines() if line.startswith("- [profile]"))
     assert f"] {TEXT}  _(from: observations chat-a, chat-b, chat-c)_" in bullet
@@ -161,6 +162,30 @@ def test_propose_refuses_below_threshold(tmp_path: Path) -> None:
     obs_id = _entries(vault)[0].record.learning_id
     with pytest.raises(ValueError):
         ob.propose_observation(vault, workspace=WORKSPACE, observation_id=obs_id)
+    assert _queue(vault) == ""
+
+
+def test_propose_drop_resolves_without_queuing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    obs_id = _x3(vault)
+    result = ob.propose_observation(
+        vault, workspace=WORKSPACE, observation_id=obs_id, drop=True
+    )
+    assert result["queued"] is False and result["dropped"] is True
+    assert _queue(vault) == ""
+    (entry,) = _entries(vault)
+    assert entry.section == SECTION_PROMOTED
+
+
+def test_propose_drop_refuses_below_threshold(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    _add(vault, "chat-a")
+    _add(vault, "chat-b")
+    obs_id = _entries(vault)[0].record.learning_id
+    with pytest.raises(ValueError):
+        ob.propose_observation(
+            vault, workspace=WORKSPACE, observation_id=obs_id, drop=True
+        )
     assert _queue(vault) == ""
 
 

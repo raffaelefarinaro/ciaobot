@@ -2898,6 +2898,21 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
   })
 
+  test('requestMcpAuth posts the server and adopts the returned card', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ action: action('a1', { params: { server: 'notion', provider: 'opencode' } }) })
+    const result = await store.requestMcpAuth('c-1', 'notion')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/mcp-auth', { server: 'notion' })
+    expect(result?.id).toBe('a1')
+    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
+  })
+
+  test('requestMcpAuth rethrows a refusal', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
+    await expect(store.requestMcpAuth('c-1', 'notion')).rejects.toThrow('invalid_state')
+  })
+
   test('dismissChatAction applies the remaining list', async () => {
     const store = useProjectStore()
     const sock = events(store)
@@ -2918,6 +2933,28 @@ describe('needs-you chat actions', () => {
     }))
     await expect(store.dismissChatAction('c-1', 'a1')).resolves.toBe('conflict')
     expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
+  })
+
+  test('turnOffChatActionServer applies the remaining list', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
+    apiPost.mockResolvedValueOnce({ actions: [action('a2')], reload: { reloaded: [], pending: [] } })
+    await expect(store.turnOffChatActionServer('c-1', 'a1')).resolves.toBe('turned_off')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/turn-off', {})
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
+  })
+
+  test('a turn-off refusal keeps the card and rethrows', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { state: 'open' })])))
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
+      status: 400,
+      payload: { error: 'config_has_comments', action: action('a1', { state: 'open' }) },
+    }))
+    await expect(store.turnOffChatActionServer('c-1', 'a1')).rejects.toThrow('config_has_comments')
+    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
   })
 
   test('continueChatAction posts to the continue route', async () => {
@@ -4525,6 +4562,34 @@ describe('provider-neutral input state', () => {
     expect(store.questionSubmissions[chatId]?.pending).toBe(true)
   })
 
+  test('does not send a second native question response while acknowledgement is pending', () => {
+    const store = useProjectStore()
+    const chatId = 'duplicate-question-response'
+    store.chats = [{
+      chat_id: chatId, project_id: 'p1', title: 'Question response', model: 'gpt-test',
+      provider: 'opencode', mode: 'normal', session_id: 'session-1', created_at: '', archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'tool_use', tool_name: 'AskUserQuestion', request_id: 'form-1', session_id: 'session-1',
+      tool_input: JSON.stringify({ questions: [{ id: 'choice', question: 'Choose?' }] }),
+    }) })
+
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply', 'session-1')).toBe(true)
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply', 'session-1')).toBe(true)
+
+    expect(store.questionSubmissions[chatId]?.pending).toBe(true)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(socket.send.mock.calls.map(([raw]) => JSON.parse(raw)).filter((frame: { type?: string }) => frame.type === 'question_response')).toEqual([{
+      type: 'question_response', request_id: 'form-1', session_id: 'session-1', action: 'reply', answers: { choice: ['yes'] },
+    }])
+
+    socket.onmessage?.({ data: JSON.stringify({ type: 'question_response_result', request_id: 'form-1', session_id: 'session-1', ok: true }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.questionSubmissions[chatId]).toBeUndefined()
+  })
+
   test('ignores stale success frames when a provider reuses a request id in a new session', () => {
     const store = useProjectStore()
     const chatId = 'reused-request-session'
@@ -5675,40 +5740,6 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
       }),
     })
     expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
-  })
-
-  it('chat_code_mode flips the flag and refetches the chat', async () => {
-    const at = '2026-01-01T09:01:00Z'
-    apiGet.mockImplementation(async (url: string) => (
-      url === '/api/chats/c-loc'
-        ? { chat_id: 'c-loc', project_id: 'p1', title: 'T', code_mode: true, user_turn_count: 2 }
-        : []
-    ))
-    const store = useProjectStore()
-    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'chat_code_mode', chat_id: 'c-loc', project_id: 'p1', code_mode: true, actor: 'agent', at,
-      }),
-    })
-    expect(store.chats[0].code_mode).toBe(true)
-    expect(apiGet).toHaveBeenCalledWith('/api/chats/c-loc')
-    await new Promise((r) => setTimeout(r, 0))
-    expect(store.chats[0].user_turn_count).toBe(2)
-  })
-
-  it('setChatCodeMode PATCHes code_mode', async () => {
-    const store = useProjectStore()
-    store.chats = [{ chat_id: 'c1', project_id: 'p1', title: 'T' } as never]
-    apiPatch.mockResolvedValueOnce({ chat_id: 'c1', project_id: 'p1', title: 'T', code_mode: true })
-    await store.setChatCodeMode('c1', true)
-    expect(apiPatch).toHaveBeenCalledWith('/api/chats/c1', { code_mode: true })
-    expect(store.chats[0].code_mode).toBe(true)
-
-    apiPatch.mockRejectedValueOnce(new Error('Link a repository first'))
-    await expect(store.setChatCodeMode('c1', false)).rejects.toThrow('Link a repository first')
   })
 
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {

@@ -39,9 +39,12 @@ from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
         "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
-        "workspace", "repo", "webhook", "context", "help",
+        "workspace", "repo", "webhook", "context", "stats", "help",
     }
 )
+#: Days `ciao stats --range` accepts; must equal `ciao.usage_stats.RANGES`
+#: (not imported: this module stays import-light).
+STATS_RANGES: tuple[int, ...] = (7, 30, 90, 365)
 _REPO_HELP = "Absolute path (or one relative to this shell) of a local git checkout's top level; \"\" unlinks."
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
     "gws": frozenset({"status"}),
@@ -207,6 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
     logs = context.add_parser("logs", help="Return Ciaobot's version and recent workspace-scoped failed job runs.")
     logs.add_argument("--lines", type=int, default=200, help="Retained compatibility count, 1-1000; no log tail is read.")
 
+    stats = nouns.add_parser("stats", help="Usage statistics for the active workspace.")
+    stats.add_argument(
+        "--range", dest="range_days", type=int, choices=STATS_RANGES, default=30,
+        help="Days covered: 7, 30, 90 or 365 (default 30).",
+    )
+
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")
     update = memory.add_parser("update", help="Add, replace or remove one entry.")
@@ -294,12 +303,6 @@ def build_parser() -> argparse.ArgumentParser:
         elif verb == "update":
             for flag, _param in _CHAT_UPDATE_FLAGS:
                 sub.add_argument(flag, default=None)
-            sub.add_argument(
-                "--code",
-                choices=("on", "off"),
-                default=None,
-                help="Code mode for a chat in a project linked to a repository.",
-            )
         elif verb == "handover":
             sub.add_argument("--provider", default="")
             sub.add_argument("--model", default="")
@@ -679,6 +682,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     noun, verb = args.noun, getattr(args, "verb", None)
     if noun == "help":
         return None
+    if noun == "stats":
+        return "usage_stats", {"range_days": args.range_days}
     if noun == "context":
         if verb == "logs":
             return "context_logs", {"lines": args.lines}
@@ -761,8 +766,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
                 if value is not None:
                     arguments[param] = value
-            if args.code is not None:
-                arguments["code_mode"] = args.code == "on"
             return "chat_update", arguments
         if verb == "reload":
             return "chat_reload", {"chat_id": args.chat}

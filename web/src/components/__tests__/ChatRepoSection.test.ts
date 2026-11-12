@@ -4,27 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatRepoSection from '../ChatRepoSection.vue'
-import { useProjectStore } from '../../stores/projects'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
 const worktree: RepoLocation = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
 
-function mountSection(
-  r: ProjectRepo,
-  location: Partial<RepoLocation> | null,
-  opts: { codeMode?: boolean; codeModeLocked?: boolean; archived?: boolean } = {},
-) {
+function mountSection(r: ProjectRepo, location: Partial<RepoLocation> | null) {
   return mount(ChatRepoSection, {
     attachTo: document.body,
-    props: {
-      repo: r,
-      location,
-      chatId: 'c1',
-      codeMode: opts.codeMode ?? false,
-      codeModeLocked: opts.codeModeLocked ?? false,
-      archived: opts.archived ?? false,
-    },
+    props: { repo: r, location, chatId: 'c1' },
   })
 }
 
@@ -34,11 +22,11 @@ describe('ChatRepoSection', () => {
 
   it('shows name, branch and clean state for the main checkout', () => {
     const wrapper = mountSection(repo, {})
-    const heading = wrapper.get('.chat-repo-heading')
-    expect(heading.get('.rail-label').text()).toBe('Repository')
-    expect(heading.get('.chat-repo-name').text()).toBe('app')
+    expect(wrapper.get('.cd-heading').text()).toBe('Repository')
+    expect(wrapper.get('section').attributes('aria-labelledby')).toBe(wrapper.get('.cd-heading').attributes('id'))
     expect(wrapper.get('.chat-repo-name').text()).toBe('app')
-    expect(wrapper.get('.chat-repo-name').attributes('title')).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-path').attributes('title')).toBe('/r/app')
     // The summary carries the branch, not the folder; the folder is in the body.
     expect(wrapper.get('.chat-repo-branch').text()).not.toContain('/r/app')
     expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
@@ -47,54 +35,34 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('keeps a full branch behind a closed disclosure', async () => {
+  it('has no branch disclosure: the branch row holds no control', () => {
     const wrapper = mountSection(repo, {})
-    const toggle = wrapper.get('button.chat-repo-branch')
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
-    expect(body.isVisible()).toBe(false)
-    expect(toggle.text()).toContain('main')
-    // The whole branch and the folder the chat works in are one click away.
-    await toggle.trigger('click')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(body.isVisible()).toBe(true)
-    expect(body.get('.chat-repo-branch-value').text()).toBe('main')
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    expect(wrapper.find('button.chat-repo-branch').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-branch-body').exists()).toBe(false)
+    expect(wrapper.get('.chat-repo-branch-row').findAll('button, a, summary, [tabindex]')).toHaveLength(0)
+    expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
     wrapper.unmount()
   })
 
-  it('keeps the whole branch text in the body when the summary has to cut it', () => {
+  it("keeps the whole branch in the row's text", () => {
     const branch = 'feature/a-very-long-branch-name-for-the-rail'
     const wrapper = mountSection({ ...repo, branch }, {})
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(body.get('.chat-repo-branch-value').text()).toBe(branch)
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-branch').text()).toContain(branch)
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app')
     wrapper.unmount()
   })
 
   it('shows the actual location when the chat works away from the checkout', () => {
     const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
-    const body = wrapper.get('.chat-repo-branch-body')
-    expect(body.get('.chat-repo-branch-value').text()).toBe('feat-x')
-    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app-wt')
+    expect(wrapper.get('.chat-repo-branch').text()).toContain('feat-x')
+    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app-wt')
     wrapper.unmount()
   })
 
-  it('opens the branch details under the line, with the facts staying on it', () => {
+  it("puts the worktree fact in the branch row's detail line", () => {
     const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
-    const line = wrapper.get('.chat-repo-branch-line')
-    const body = wrapper.get('.chat-repo-branch-body')
-    // The body is a sibling below the line, not inside it, so it takes the
-    // section's full width instead of a column beside the facts.
-    expect(line.element.nextElementSibling).toBe(body.element)
-    expect(body.text()).toContain('feat-x')
-    expect(body.find('.chat-repo-kind').exists()).toBe(false)
-    expect(line.get('.chat-repo-kind').text()).toBe('worktree')
-    // Exactly one focusable control in the branch row: the disclosure itself.
-    const focusables = line.findAll('summary, button, a, input, select, textarea, [tabindex]')
-    expect(focusables).toHaveLength(1)
-    expect(focusables[0].element).toBe(wrapper.get('button.chat-repo-branch').element)
+    expect(wrapper.get('.chat-repo-branch-row .chat-repo-facts .chat-repo-kind').text()).toBe('worktree')
+    expect(wrapper.get('.chat-repo-branch-row').findAll('summary, button, a, input, select, textarea, [tabindex]')).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -134,39 +102,23 @@ describe('ChatRepoSection', () => {
   it('warns when the folder is missing and hides the copy button', () => {
     const wrapper = mountSection({ ...repo, missing: true }, {})
     expect(wrapper.get('.chat-repo-missing').text()).toContain('folder is missing')
-    expect(wrapper.find('.chat-repo-meta').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-branch-row').exists()).toBe(false)
+    expect(wrapper.findAll('.chat-repo-row')).toHaveLength(1)
     expect(wrapper.find('.chat-repo-copy').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('toggles code mode from the switch', async () => {
-    const store = useProjectStore()
-    const spy = vi.spyOn(store, 'setChatCodeMode').mockResolvedValue()
+  it('renders no code-mode switch: code mode follows the repository link', () => {
     const wrapper = mountSection(repo, worktree)
-    const sw = wrapper.get('button[type=button][role=switch]')
-    expect(sw.attributes('aria-checked')).toBe('false')
-    await sw.trigger('click')
-    await flushPromises()
-    expect(spy).toHaveBeenCalledWith('c1', true)
-    wrapper.unmount()
-  })
-
-  it("shows the engine's error inline", async () => {
-    const store = useProjectStore()
-    vi.spyOn(store, 'setChatCodeMode').mockRejectedValue({ payload: { error: 'Link a repository first' } })
-    const wrapper = mountSection(repo, worktree)
-    const sw = wrapper.get('[role=switch]')
-    await sw.trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[role=alert]').text()).toContain('Link a repository first')
-    expect(sw.attributes('aria-disabled')).toBe('false')
-    wrapper.unmount()
-  })
-
-  it('hides the switch on an archived chat', () => {
-    const wrapper = mountSection(repo, {}, { archived: true })
     expect(wrapper.find('[role=switch]').exists()).toBe(false)
-    expect(wrapper.find('.repo-code-hint').exists()).toBe(false)
+    expect(wrapper.find('input[type=checkbox]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Code mode')
+    expect(wrapper.text()).not.toContain('Locked on')
+    expect(wrapper.text()).not.toContain('work in code mode')
+    // The only control left is the path copy button.
+    const buttons = wrapper.findAll('button')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].classes()).toContain('chat-repo-copy')
     wrapper.unmount()
   })
 
@@ -187,22 +139,6 @@ describe('ChatRepoSection', () => {
     vi.useRealTimers()
   })
 
-  it('keeps the code-mode hint behind the info button', async () => {
-    const wrapper = mountSection(repo, {})
-    const info = wrapper.get('.repo-code-info')
-    const hint = wrapper.get('.repo-code-hint').element.parentElement!
-    expect(info.attributes('aria-expanded')).toBe('false')
-    expect(hint.classList.contains('sr-only')).toBe(true)
-    expect(info.attributes('aria-controls')).toBe(hint.id)
-    const describedBy = wrapper.get('[role=switch]').attributes('aria-describedby')!
-    expect(wrapper.get('.repo-code-hint').element.id).toBe(describedBy)
-    await info.trigger('click')
-    expect(info.attributes('aria-expanded')).toBe('true')
-    expect(hint.classList.contains('sr-only')).toBe(false)
-    expect(document.getElementById(describedBy)).not.toBeNull()
-    wrapper.unmount()
-  })
-
   it('carries no terminal button: the terminal has its own section', async () => {
     // The terminal is not a repository fact — a chat with no repository still
     // needs one — so it lives in the chat's own Terminal section, and this
@@ -220,26 +156,6 @@ describe('ChatRepoSection', () => {
     await flushPromises()
     const terminal = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
     expect(terminal).toHaveLength(0)
-    wrapper.unmount()
-  })
-
-  it('names a locked code mode without changing switch semantics', () => {
-    const wrapper = mountSection(repo, {}, { codeMode: true, codeModeLocked: true })
-    const note = wrapper.get('.repo-code-lock-note')
-    expect(note.text()).toBe('Locked on for this chat')
-    // The note sits under the label, not inside the switch: the switch still reads On.
-    const sw = wrapper.get('[role=switch]')
-    expect(sw.text()).toBe('On')
-    expect(sw.find('.repo-code-lock-note').exists()).toBe(false)
-    expect(sw.attributes('aria-checked')).toBe('true')
-    expect(sw.attributes('aria-disabled')).toBe('true')
-    wrapper.unmount()
-  })
-
-  it('says nothing about a lock while code mode can still change', () => {
-    const wrapper = mountSection(repo, {}, { codeMode: true })
-    expect(wrapper.find('.repo-code-lock-note').exists()).toBe(false)
-    expect(wrapper.get('[role=switch]').attributes('aria-disabled')).toBe('false')
     wrapper.unmount()
   })
 })

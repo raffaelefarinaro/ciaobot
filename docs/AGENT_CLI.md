@@ -109,11 +109,14 @@ there is no Ciaobot MCP server to attach. Every chat is on the CLI surface, so
 restarted when the token changes (`provider_reuse_key`).
 
 Separately, Claude Code and OpenCode own their external MCP server configuration
-and authentication. Settings → MCP is a read-only native-config inventory plus
-live status from already running chats in the selected workspace; it does not
-write configuration or credentials, probe a server, or start a provider/MCP
-process. Add and authenticate servers through the provider CLI from the
-workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
+and authentication. Settings → MCP is a native-config inventory plus live status from already running
+chats in the selected workspace; it writes configuration only to turn one server
+off or on (`POST /api/mcp/servers/enabled`), and never writes credentials or probes
+a server. For a server an open chat reports as needing a sign-in, that
+chat's sign-in card is the live path (Settings' **Sign in** raises and starts it,
+and may start the chat's OpenCode server); a CLI sign-in only reaches sessions
+started afterwards. Add servers, and authenticate them for new sessions, through
+the provider CLI from the workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
 `opencode mcp add` / `opencode mcp auth`). Every server declared for the
 workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
@@ -133,7 +136,7 @@ bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
 (`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
-Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), file
+Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), usage statistics (`ciao stats`), file
 surfacing (`ciao file surface`), and the suggested terminal command
 (`ciao chat needs-action`). Browser-session administration,
 login/OAuth secrets, and raw server deploy endpoints remain PWA/operator-only.

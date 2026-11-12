@@ -6,6 +6,8 @@ import {
   isChatAction,
   isGoogleConsentUrl,
   looksLikeLoopbackCallback,
+  mcpTurnOffErrorText,
+  mcpTurnOffScopeText,
   normalizeChatActions,
   restartTarget,
   SYSTEM_SETTING_TITLES,
@@ -361,5 +363,22 @@ describe('gws_auth copy', () => {
     expect(isGoogleConsentUrl('https://accounts.google.com.evil.io/x')).toBe(false)
     expect(isGoogleConsentUrl('javascript:alert(1)')).toBe(false)
     expect(isGoogleConsentUrl(undefined)).toBe(false)
+  })
+})
+
+describe('mcpTurnOffErrorText', () => {
+  it('says why in words for each refusal', () => {
+    expect(mcpTurnOffErrorText('unreadable_config', 'linear')).toBe(
+      "The command line tool's settings file could not be read or changed, so nothing was changed.",
+    )
+    expect(mcpTurnOffErrorText('managed', 'linear')).toContain('managed by your organization')
+    expect(mcpTurnOffErrorText('', 'linear')).toBe('linear could not be turned off. Try again.')
+  })
+})
+
+describe('mcpTurnOffScopeText', () => {
+  it('says where Turn off applies for each provider', () => {
+    expect(mcpTurnOffScopeText('claude')).toContain('git repository')
+    expect(mcpTurnOffScopeText('opencode')).toContain('config file')
   })
 })

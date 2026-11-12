@@ -17,6 +17,7 @@ function makeRouter() {
       { path: '/chat/:chatId', component: Empty },
       { path: '/project/:projectId', component: Empty },
       { path: '/tasks', component: Empty },
+      { path: '/stats', component: Empty },
     ],
   })
 }
@@ -59,6 +60,24 @@ describe('useHistoryNav', () => {
   // The board is a top-level destination like Automations and Memory. Without a
   // label the Back button's tooltip reads "Back to previous page" when the page
   // it leads to is the task board.
+  it('names the usage page as a neighbour', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
+
+    const router = makeRouter()
+    await router.push('/stats')
+    let nav!: ReturnType<typeof useHistoryNav>
+    mount(defineComponent({ setup() { nav = useHistoryNav(); return () => h('div') } }), {
+      global: { plugins: [router, pinia] },
+    })
+
+    await router.push('/')
+    expect(nav.canBack.value).toBe(true)
+    expect(nav.backLabel.value).toBe('Back to Usage')
+  })
+
   it('names the task board as a neighbour', async () => {
     const pinia = createPinia()
     setActivePinia(pinia)

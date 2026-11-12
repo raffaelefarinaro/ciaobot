@@ -55,6 +55,12 @@ describe('router', () => {
     expect(router.currentRoute.value.name).toBe('tasks')
   })
 
+  it('routes the usage page', async () => {
+    const router = makeRouter()
+    await router.push('/stats')
+    expect(router.currentRoute.value.name).toBe('stats')
+  })
+
   it('notifications_path_is_not_a_route', () => {
     expect(routes.find((r) => r.path === '/notifications')).toBeUndefined()
   })

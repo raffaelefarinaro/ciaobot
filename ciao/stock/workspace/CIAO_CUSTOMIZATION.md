@@ -81,7 +81,9 @@ Agents may check whether a key is set, but must not print the value.
 
 ## MCPs, Tools, Skills, and Agents
 
-Workspaces can limit tool access with `disallowed_tools`.
+Workspaces can limit tool access with `disallowed_tools`. It is added on top of Ciaobot's Claude trim defaults, so it never re-enables a trimmed tool.
+
+Settings → Overview → Claude context trimming toggles the built-in Claude Code tools, bundled skills and features Ciaobot hides; it is stored as `claude_trim`.
 
 Use this when a workspace should not see certain MCPs, connectors, or high-risk tools. Examples:
 

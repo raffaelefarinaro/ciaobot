@@ -1619,7 +1619,8 @@ def test_the_memory_skill_points_at_note_create() -> None:
 def test_the_memory_skill_did_not_grow() -> None:
     skill = _stock("skills/ciao-memory/SKILL.md")
 
-    assert len(skill.encode()) <= 13200
+    # 13400 since #2815: the correction, narrative and credential rules.
+    assert len(skill.encode()) <= 13400
 
 
 # ── The Learnings cleanup pass (#728-E) ──────────────────────────────────────

@@ -1,12 +1,8 @@
 <template>
   <div v-if="!store.bootstrapped && store.projects.length === 0" class="home-recent home-recent--loading" aria-hidden="true">
     <div class="home-lanes">
-      <section class="home-lane-skeleton">
-        <div class="mm-shimmer-line" style="width: 36%; height: 14px; margin-bottom: 14px;"></div>
-        <div class="mm-shimmer-line" style="width: 100%; height: 56px; margin-bottom: 10px;"></div>
-        <div class="mm-shimmer-line" style="width: 92%; height: 56px; margin-bottom: 10px;"></div>
-        <div class="mm-shimmer-line" style="width: 88%; height: 56px;"></div>
-      </section>
+      <!-- The rows' own shape (ListRow: a title over a sub-line, hairline under). -->
+      <SkeletonLoader class="home-lane-skeleton" label="Loading chats" :count="3" />
     </div>
   </div>
   <div v-else-if="hasHomeActivity" class="home-recent">
@@ -64,10 +60,9 @@
               :class="`home-tier--${entry.key}`"
             >
               <div class="home-tier-label"><span>{{ entry.label }}</span></div>
-              <button
+              <ListRow
                 v-for="chat in entry.chats"
                 :key="chat.chat_id"
-                type="button"
                 class="home-chat-item"
                 :class="chatItemClasses(entry.key, chat)"
                 :data-workspace-color="colorOf(chat)"
@@ -75,41 +70,41 @@
                 :title="homeRowTitle(chat)"
                 @click="chat.local !== false && store.switchChat(chat.chat_id)"
               >
-                <span class="home-chat-main">
-                  <span class="home-chat-heading">
-                    <span
-                      v-if="chat.title_status === 'pending'"
-                      class="title-shimmer"
-                      aria-hidden="true"
-                      title="Naming conversation"
-                    />
-                    <span
-                      v-else
-                      class="home-chat-title"
-                      :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                    >{{ chat.title }}</span>
-                    <!-- A bare span is role=generic, which cannot be named: the
-                         bar is hidden from assistive tech and the name travels
-                         as text beside it. -->
-                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
-                    <span
-                      v-if="taskSignals.isTaskChat(chat)"
-                      class="home-chat-task"
-                      :title="taskBadgeTitle(chat)"
-                    ><TaskGlyph /></span>
-                    <!-- A plain span cannot be named, so the relation also reads
-                         as text: in the row title for a pointer, and here for AT. -->
-                    <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
-                    <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode is on" title="Code mode is on">›_</span>
-                  </span>
-                  <!-- Project plus a status phrase read from the same signals
-                       that sorted the row into its tier, so the sub-line can
-                       never claim more than the tier heading above it. -->
-                  <span class="home-chat-meta">
-                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
-                    <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
-                    <span v-if="chat.local === false" class="remote-chip">remote</span>
-                  </span>
+                <template #heading>
+                  <span
+                    v-if="chat.title_status === 'pending'"
+                    class="title-shimmer"
+                    aria-hidden="true"
+                    title="Naming conversation"
+                  />
+                  <span
+                    v-else
+                    class="list-row-title home-chat-title"
+                    :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                  >{{ chat.title }}</span>
+                  <!-- A bare span is role=generic, which cannot be named: the
+                       bar is hidden from assistive tech and the name travels
+                       as text beside it. -->
+                  <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
+                  <span
+                    v-if="taskSignals.isTaskChat(chat)"
+                    class="home-chat-task"
+                    :title="taskBadgeTitle(chat)"
+                  ><TaskGlyph /></span>
+                  <!-- A plain span cannot be named, so the relation also reads
+                       as text: in the row title for a pointer, and here for AT. -->
+                  <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
+                  <span v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode" title="Code mode">›_</span>
+                </template>
+                <!-- Project plus a status phrase read from the same signals
+                     that sorted the row into its tier, so the sub-line can
+                     never claim more than the tier heading above it. -->
+                <template #sub>
+                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                  <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
+                  <span v-if="chat.local === false" class="remote-chip">remote</span>
+                </template>
+                <template #detail>
                   <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
                     {{ store.chatPendingQuestion(chat.chat_id) }}
                   </span>
@@ -119,16 +114,16 @@
                   <span v-if="entry.key === 'unread' && store.chatLastSnippet(chat.chat_id)" class="home-chat-snippet">
                     {{ store.chatLastSnippet(chat.chat_id) }}
                   </span>
-                </span>
-                <span class="home-chat-end">
+                </template>
+                <template #end>
                   <ChatSignals
                     :chat-id="chat.chat_id"
                     :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
                     :hue="colorOf(chat)"
                   />
-                  <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
-                </span>
-              </button>
+                  <span class="list-row-when home-chat-time">{{ relativeActivity(chat) }}</span>
+                </template>
+              </ListRow>
             </div>
 
           </template>
@@ -147,8 +142,7 @@
               class="home-insight-row"
               :data-workspace-color="insightColor(insight)"
             >
-              <button
-                type="button"
+              <ListRow
                 class="home-chat-item home-chat-item--insight"
                 :class="`home-chat-item--insight-${insight.phase}`"
                 :disabled="!insight.passChatId && !insight.archivePath"
@@ -159,27 +153,29 @@
                     : insight.title"
                 @click="openInsight(insight)"
               >
-                <span class="home-chat-heading">
-                  <span class="home-chat-title">{{ insight.title }}</span>
-                </span>
-                <span class="home-chat-meta">
-                  <span class="home-chat-tidy-note">
-                    <span
-                      v-if="insight.active"
-                      class="home-chat-tidy-dot"
-                      aria-hidden="true"
-                    />
-                    {{ insight.label }}
-                  </span>
-                  <span class="home-chat-time">{{ formatRelative(insight.timestamp) }}</span>
-                </span>
+                <template #heading><span class="list-row-title home-chat-title">{{ insight.title }}</span></template>
                 <!-- The one question the pass is blocked on, when it is blocked
                      on one. The row's label says it needs you; this says what
                      you are being asked. -->
-                <span v-if="insight.question" class="home-chat-question">
-                  {{ insight.question }}
-                </span>
-              </button>
+                <template #detail>
+                  <span v-if="insight.question" class="home-chat-question">
+                    {{ insight.question }}
+                  </span>
+                </template>
+                <template #end>
+                  <span class="home-chat-insight-end">
+                    <span class="home-chat-tidy-note">
+                      <span
+                        v-if="insight.active"
+                        class="home-chat-tidy-dot"
+                        aria-hidden="true"
+                      />
+                      {{ insight.label }}
+                    </span>
+                    <span class="list-row-when home-chat-time">{{ formatRelative(insight.timestamp) }}</span>
+                  </span>
+                </template>
+              </ListRow>
             </div>
           </div>
         </div>
@@ -200,8 +196,11 @@ import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
-import { isChatCodeModeOn } from '../lib/codeMode'
+import { inCodeMode } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
+import ListRow from './ListRow.vue'
+import SkeletonLoader from './SkeletonLoader.vue'
+import { roamFocus } from '../lib/listRoaming'
 import TaskGlyph from './TaskGlyph.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
@@ -564,63 +563,21 @@ function focusableLanes(): HTMLElement[][] {
   )
 }
 
-function focusElement(element: HTMLElement) {
-  element.focus()
-  element.scrollIntoView({ block: 'nearest' })
-}
-
-// ChatLayout owns the global keydown. The model is intentionally 2-D, but its
-// axes follow the rendered lane layout: the selected workspace's lane first,
-// then any rescue lanes (stale or unknown workspaces) stacked beneath it. When
-// lanes are stacked vertically moves between them and horizontally moves within
-// one; side by side it is the reverse. With a single lane every arrow stays in
-// that lane or is consumed at its edge.
+// ChatLayout owns the global keydown; the roaming itself is the shared helper
+// (lib/listRoaming.ts) the Automations overview uses. The model is 2-D, with
+// axes that follow the rendered lane layout: the selected workspace's lane
+// first, then any rescue lanes (stale or unknown workspaces) stacked beneath
+// it. Stacked, Up/Down move between lanes and Left/Right within one; side by
+// side it is the reverse. With a single lane every arrow stays in that lane or
+// is consumed at its edge.
 function onArrow(key: string): boolean {
   const model = focusableLanes()
-  const available = model.some(lane => lane.length)
-  if (!available) return false
-
-  let laneIndex = model.findIndex(lane => lane.includes(document.activeElement as HTMLElement))
-  let itemIndex = laneIndex >= 0 ? model[laneIndex].indexOf(document.activeElement as HTMLElement) : -1
-  if (laneIndex < 0) {
-    // Focus is somewhere the grid does not model: a lane header control ("+ new"
-    // or the caret), the sidebar, or the body after a click on empty space or a
-    // return from a chat. Anchor to the lane the user is actually looking at —
-    // the lane holding that focus, or the active workspace's lane — instead of
-    // jumping to whichever lane comes first in DOM order, which read as the
-    // arrow landing on a card in a random workspace.
-    laneIndex = anchorLaneIndex(model)
-    itemIndex = -1
-  }
-
-  const lanesAreStacked = laneAxis() === 'vertical'
-  const laneKey = lanesAreStacked
-    ? key === 'ArrowUp' || key === 'ArrowDown'
-    : key === 'ArrowLeft' || key === 'ArrowRight'
-  const itemKey = lanesAreStacked
-    ? key === 'ArrowLeft' || key === 'ArrowRight'
-    : key === 'ArrowUp' || key === 'ArrowDown'
-
-  if (itemKey) {
-    const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
-    const nextIndex = itemIndex < 0 ? 0 : clamp(itemIndex + delta, 0, model[laneIndex].length - 1)
-    if (nextIndex === itemIndex && itemIndex >= 0) return true
-    focusElement(model[laneIndex][nextIndex])
-    return true
-  }
-
-  if (!laneKey) return false
-  const delta = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
-  if (itemIndex < 0) {
-    focusElement(model[laneIndex][0])
-    return true
-  }
-  let nextLane = laneIndex + delta
-  while (nextLane >= 0 && nextLane < model.length && !model[nextLane].length) nextLane += delta
-  if (nextLane < 0 || nextLane >= model.length) return true
-  const nextIndex = clamp(itemIndex, 0, model[nextLane].length - 1)
-  focusElement(model[nextLane][nextIndex])
-  return true
+  // Focus is somewhere the grid does not model: a lane header control ("+ new"),
+  // the sidebar, or the body after a click on empty space or a return from a
+  // chat. Anchor to the lane the user is actually looking at — the lane holding
+  // that focus, or the active workspace's lane — instead of whichever lane
+  // comes first in DOM order.
+  return roamFocus(model, key, laneAxis() === 'vertical' ? 'rows' : 'columns', () => ({ group: anchorLaneIndex(model), item: -1 }))
 }
 
 // The grid is a single column now, but rescue lanes (stale or unknown
@@ -640,10 +597,6 @@ function laneAxis(): 'horizontal' | 'vertical' {
     return verticalDistance > horizontalDistance ? 'vertical' : 'horizontal'
   }
   return 'horizontal'
-}
-
-function clamp(value: number, lower: number, upper: number): number {
-  return Math.min(upper, Math.max(lower, value))
 }
 
 // Where arrows start when nothing in the chat grid has focus. Prefer the lane
@@ -1005,70 +958,35 @@ defineExpose({ onArrow })
   font-size: var(--text-xs);
 }
 
-/* Prototype A's chat row: a flat hairline list, title over a project/status
-   sub-line, time in its own right column. Every tier shares the row; urgency
-   rides the title weight, the ChatSignals dot and the tier label rather than
-   a card treatment. */
-.home-chat-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  width: 100%;
-  min-width: 0;
-  min-height: 62px;
-  padding: 10px 2px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  color: var(--fg);
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-  transition: background 120ms var(--ease);
-}
-
-.home-chat-item:hover .home-chat-title {
-  color: var(--accent);
-}
-
-.home-chat-item:active {
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-}
-
-.home-chat-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-  box-shadow: 0 0 0 2px var(--bg);
-}
-
+/* Prototype A's chat row is ListRow (shared with the Automations overview):
+   a flat hairline list, title over a project/status sub-line, time in its own
+   right column. Every tier shares the row; urgency rides the title weight, the
+   ChatSignals dot and the tier label rather than a card treatment. Rules that
+   change ListRow's own box name two classes, so they win over its base rule
+   whatever order the stylesheets load in. */
 /* Needs-you rows keep one quiet accent: a short rail on the left edge, so
    the tier stays findable when it is scrolled past its label. */
-.home-chat-item--needsYou {
+.home-chat-item.home-chat-item--needsYou {
   padding-left: 12px;
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.home-chat-item--needsYou:focus-visible {
+.home-chat-item.home-chat-item--needsYou:focus-visible {
   box-shadow: inset 2px 0 0 var(--accent), 0 0 0 2px var(--bg);
 }
 
-.home-chat-item--insight {
+.home-chat-item.home-chat-item--insight {
   min-height: var(--touch, 44px);
   flex: 1;
-  /* A pending question needs its own line. The tier rows get that from the
-     `.home-chat-main` column they sit in; this row is flat (title left, status
-     and time right), so it wraps instead and the question takes the full width
-     rather than landing between the status and the time. */
-  flex-wrap: wrap;
-  row-gap: 0;
   /* The hairline lives on the wrapper. */
   border-bottom: 0;
 }
 
-.home-chat-item--insight .home-chat-question {
-  flex: 1 0 100%;
+/* An insight's state and time sit on one line in the end column. */
+.home-chat-insight-end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* The row wrapper carries the workspace colour; it has no background and no
@@ -1083,36 +1001,6 @@ defineExpose({ onArrow })
 
 .home-chat-item--week-old { opacity: 0.72; }
 .home-chat-item--old { opacity: 0.55; }
-
-.home-chat-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.home-chat-heading {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.home-chat-title {
-  display: block;
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: var(--fg);
-  font-size: var(--text-base);
-  font-weight: 600;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: color 120ms var(--ease);
-}
 
 /* Quiet rows step the title back a register; anything that wants the user
    (needs you, unread) keeps full weight. A memory-insight row is a quiet row
@@ -1160,24 +1048,6 @@ defineExpose({ onArrow })
   -webkit-line-clamp: 2;
 }
 
-.home-chat-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  line-height: 1.4;
-}
-
-/* A memory-insight row puts its status and time in the meta; there it is the
-   row's right column rather than a sub-line. */
-.home-chat-item--insight .home-chat-meta {
-  flex: 0 1 auto;
-  align-items: center;
-  margin-left: auto;
-}
-
 .home-chat-project {
   min-width: 0;
   flex: 0 1 auto;
@@ -1191,8 +1061,6 @@ defineExpose({ onArrow })
   flex: 0 0 auto;
   white-space: nowrap;
 }
-
-.home-chat-heading:has(.home-chat-task, .home-chat-code) .home-chat-title { flex: 0 1 auto; }
 
 /* The sidebar's task and code marks (ProjectSidebar `.chat-task-tag`,
    `.chat-code-tag`): a checkbox glyph and a mono `›_` after the title. */
@@ -1228,16 +1096,6 @@ defineExpose({ onArrow })
   font-size: var(--text-xs);
   text-align: right;
   white-space: nowrap;
-}
-
-.home-chat-end {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 4px;
-  min-width: 5ch;
 }
 
 /* Live step of a memory insight ("extracting…"). Muted like the lane
@@ -1290,20 +1148,6 @@ defineExpose({ onArrow })
 /* The naming placeholder comes from the shared stylesheet (titleShimmer.css),
    the same bar the sidebar's rows and the chat header use. */
 
-.mm-shimmer-line {
-  display: block;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
-  background-size: 200% 100%;
-  animation: home-shimmer 1.2s ease-in-out infinite;
-}
-
-@keyframes home-shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
 @container (max-width: 760px) {
   /* The lane is already one column; this only widens the gap between the
      selected workspace's lane and any rescue lane beneath it on a phone. */
@@ -1326,8 +1170,6 @@ defineExpose({ onArrow })
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-chat-item,
-  .home-chat-title { transition: none; }
   .home-lane-new-spinner { animation: none; }
 }
 </style>

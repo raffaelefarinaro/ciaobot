@@ -103,6 +103,40 @@ def test_updated_knowledge_keeps_current_and_history_findable(
     assert "Villa Australis" in snippet
 
 
+def test_knowledge_update_returns_old_and_new_note_when_and_matches_one(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """The note holding the old value and the one holding the new value rarely
+    share every query word. AND matched only the newer note here, and because
+    the OR fallback fired only on zero hits, the older note was dropped; the
+    question "what changed" then had only half its evidence.
+    """
+    vault = tmp_path / "memory-vault"
+    logs = vault / "projects"
+    logs.mkdir(parents=True)
+    (logs / "Commute-2026-03.md").write_text(
+        "# Commute\n\nI drive to the office in Oerlikon, about 25 minutes.\n",
+        encoding="utf-8",
+    )
+    (logs / "Commute-2026-09.md").write_text(
+        "# Commute update\n\nSold the car: I now take tram 11 to the office in "
+        "Oerlikon, about 35 minutes.\n",
+        encoding="utf-8",
+    )
+    fts_search.index_vault(conn, vault)
+
+    query = "commute office Oerlikon tram"
+    # The fixture's premise: AND-of-all-words matches only the newer note.
+    and_only = conn.execute(
+        "SELECT path FROM vault_fts WHERE vault_fts MATCH ?",
+        (" AND ".join(query.split()),),
+    ).fetchall()
+    assert [row[0] for row in and_only] == ["memory-vault/projects/Commute-2026-09.md"]
+
+    hits = _paths(fts_search.search_vault(conn, query, limit=5))
+    assert hits == ["memory-vault/projects/Commute-2026-09.md", "memory-vault/projects/Commute-2026-03.md"]
+
+
 def test_abstention_nothing_is_better_than_noise(
     conn: sqlite3.Connection, eval_vault: Path
 ) -> None:

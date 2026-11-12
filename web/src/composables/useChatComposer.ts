@@ -25,6 +25,7 @@ export interface ComposerAttachmentStore {
   uploadImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]>
   addPendingImageRefs(chatId: string, refs: string[]): void
   removePendingImage(chatId: string, index: number): void
+  pendingImagesFor(chatId: string): string[]
   addPendingFiles(chatId: string, files: AttachedFile[]): void
   removePendingFile(chatId: string, index: number): void
   pushErrorToast(title: string, errorText: string): unknown
@@ -72,7 +73,6 @@ export interface ChatComposer {
    *  when the key was consumed. */
   handlePromptHistoryKey(e: KeyboardEvent): boolean
   insertTextAtCursor(token: string): void
-  insertImageRef(n: number): void
   /** Attach picked files: images stage as thumbnails, others as file chips. */
   handleFileSelect(e: Event): Promise<void>
   handlePaste(e: ClipboardEvent): Promise<void>
@@ -120,6 +120,12 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       workspace: toValue(options.workspace),
     })
   }, { flush: 'sync' })
+
+  // Re-fit on every draft change, not only on the textarea's input event: an
+  // inserted [Image N], a renumbered image ref, a slash insert or a recalled
+  // prompt sets the draft in code, and a stale height clips the new line.
+  // `post` runs after Vue has written the new value into the textarea.
+  watch(draft, () => autoResize(), { flush: 'post' })
 
   function clearDraft(id: string): void {
     writeChatDraft(id, '')
@@ -198,7 +204,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     }
   }
 
-  function insertTextAtCursor(token: string): void {
+  function insertTextAtCursor(token: string, focus = true): void {
     const el = input.value
     if (!el) return
     const start = el.selectionStart ?? 0
@@ -214,12 +220,8 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     nextTick(() => {
       const pos = start + prefix.length + token.length + suffix.length
       el.selectionStart = el.selectionEnd = pos
-      el.focus()
+      if (focus) el.focus()
     })
-  }
-
-  function insertImageRef(n: number): void {
-    insertTextAtCursor(`[Image ${n}]`)
   }
 
   function errorText(error: unknown): string {
@@ -252,8 +254,15 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
 
   async function attachImages(id: string, images: File[]): Promise<void> {
     try {
-      await trackUpload(uploadLabel(images.map(f => f.name)), totalBytes(images),
+      const refs = await trackUpload(uploadLabel(images.map(f => f.name)), totalBytes(images),
         onProgress => store.uploadImages(id, images, onProgress))
+      // Each new image's reference lands in the prompt at the cursor, so the
+      // message says which image it means without a second step.
+      const staged = store.pendingImagesFor(id)
+      const tokens = refs.map(r => staged.indexOf(r) + 1).filter(n => n > 0).map(n => `[Image ${n}]`)
+      if (tokens.length && id === chatId()) {
+        insertTextAtCursor(tokens.join(' '), document.activeElement === input.value)
+      }
     } catch (error) {
       store.pushErrorToast('Could not attach images', errorText(error))
     }
@@ -296,8 +305,11 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     await attachImages(chatId(), items.map(i => i.getAsFile()).filter(Boolean) as File[])
   }
 
+  /** Drop an image and its `[Image N]` from the prompt; later images move up
+   *  one, so their references are renumbered to match what is sent. */
   function removePendingImage(index: number): void {
     store.removePendingImage(chatId(), index)
+    draft.value = renumberImageRefs(draft.value, index + 1)
   }
 
   function removePendingFile(index: number): void {
@@ -384,7 +396,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     autoResize,
     handlePromptHistoryKey,
     insertTextAtCursor,
-    insertImageRef,
     handleFileSelect,
     handlePaste,
     handleDrop,
@@ -397,4 +408,12 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     clearDraft,
     persistDraft,
   }
+}
+
+/** Remove `[Image removed]` (with one adjoining space) and shift every higher
+ *  `[Image N]` down by one. */
+export function renumberImageRefs(text: string, removed: number): string {
+  return text
+    .replace(new RegExp(`( ?)\\[Image ${removed}\\]( ?)`, 'g'), (_m, a: string, b: string) => (a && b ? ' ' : ''))
+    .replace(/\[Image (\d+)\]/g, (m, n: string) => (Number(n) > removed ? `[Image ${Number(n) - 1}]` : m))
 }

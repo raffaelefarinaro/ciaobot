@@ -26,6 +26,7 @@
     <ArchiveTaskDialog />
     <PromptDialog />
     <NewChatPicker />
+    <div class="status-bar-tint" aria-hidden="true" />
   </div>
 </template>
 
@@ -189,10 +190,10 @@ watch(shouldPollStartup, (shouldPoll) => {
 
 <style>
 :root {
-  /* Font scale multiplier. The reference is the original (pre-rescale) UI;
-     the default 1.2 corresponds to "100%" in the Settings display, so the
-     slider's display math (scale / 1.2 * 100) yields 100 at this value. */
-  --font-scale: 1.2;
+  /* Font scale multiplier. The default is the platform's 16px body, not a
+     designed 120%: the body token is 14px, so 14 × 1.15 = 16.1px. Settings
+     still shows it as "100%" (scale / DEFAULT_FONT_SCALE * 100). */
+  --font-scale: 1.15;
 
   /* Surface */
   --bg: #1a1a2e;        /* page */
@@ -246,15 +247,20 @@ watch(shouldPollStartup, (shouldPoll) => {
   --page-gutter: 32px;
   --page-rail: 280px;
   --page-inset: max(var(--page-gutter), calc((100% - var(--page-max)) / 2 + var(--page-gutter)));
-  /* Safe area passthrough. In browser mode we zero out --safe-bottom because
-     the browser's own bottom UI (Safari toolbar) already occupies that zone;
-     adding our own safe-inset on top creates dead space below the input bar.
-     Only in standalone/fullscreen PWA does the home indicator actually need
-     the inset, so we re-enable it via the media query below. */
+  /* Safe area passthrough. The platform owns the insets: without
+     viewport-fit=cover the viewport is already inset, so these are env()
+     passthroughs for platforms that report them and 0 otherwise. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
-  --safe-bottom: 0px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+  /* Prompt surface (chat composer, Home intake). Touch phones round it to sit
+     concentric with the screen's corners; see the media rule below. */
+  --radius-composer: 15px;
+  /* Top edge that full-screen surfaces (drawer, sheets, file viewer) must
+     clear: the safe-area inset, plus the .status-bar-tint strip where it is
+     shown (installed app on phones, redefined with the strip below). */
+  --chrome-top: var(--safe-top);
   /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
   --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -391,22 +397,6 @@ watch(shouldPollStartup, (shouldPoll) => {
 :root.theme-light [data-workspace-color="fuchsia"] {
   --accent: #a21caf;
   --accent-strong: #86198f;
-}
-
-/* In standalone/fullscreen PWA the home indicator is live, so restore the
-   safe-area inset. Browser mode stays at 0 (set in :root above) to avoid
-   double-counting with Safari's own bottom toolbar. */
-@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
-  :root {
-    --safe-bottom: env(safe-area-inset-bottom, 0px);
-  }
-}
-
-/* When the on-screen keyboard is open, it covers the home indicator,
-   so collapse the bottom safe-area inset to avoid an empty gap
-   between the input bar and the keyboard. */
-html.keyboard-open {
-  --safe-bottom: 0px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -730,9 +720,12 @@ input:focus, textarea:focus, select:focus {
    override the global input rule with smaller text tokens; this carve-out
    pins every input/textarea/select to 16px when the pointer is coarse, no
    matter what scoped styles say. Pairs with the (pointer: fine) tightening
-   above: trackpad/desktop stays tight, touch stays zoom-stable. */
+   above: trackpad/desktop stays tight, touch stays zoom-stable. The chat
+   composer is the exception: ChatPanel gives it its own body-token floor
+   (`max(16px, var(--text-base))` under a coarse pointer) so typed text and
+   the sent message agree at every width. */
 @media (pointer: coarse) {
-  input, textarea, select { font-size: 16px !important; }
+  input:not(.chat-input), textarea:not(.chat-input), select { font-size: 16px !important; }
 }
 
 /* ── Shared page layout (schedules, settings, login) ─────────── */
@@ -986,7 +979,7 @@ input:focus, textarea:focus, select:focus {
     max-height: 100dvh;
     border-radius: 0;
     border: none;
-    padding-top: var(--safe-top);
+    padding-top: var(--chrome-top);
     padding-bottom: var(--safe-bottom);
   }
 }
@@ -1009,5 +1002,39 @@ input:focus, textarea:focus, select:focus {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+/* On a touch phone the composer sits ~12px from rounded screen corners; a
+   15px box reads square against them. Its inner controls go pill/circle in
+   ChatPanel and HomeIntake so their corners stay concentric. */
+@media (max-width: 768px) and (pointer: coarse) {
+  :root { --radius-composer: 28px; }
+}
+/* iOS 26 status-bar tint. WebKit ignores `theme-color` and the status-bar-style
+   meta for the installed app's bar colour: it hit-tests the top edge and fills
+   the bar solid only when an opaque fixed box at least 90% of the viewport wide
+   and over 10px tall sits there (LocalFrameView::fixedContainerEdges);
+   otherwise it draws a soft blur over the page. Pane headers are in-flow, so
+   without this strip every page got the blur and only the open sidebar (fixed
+   drawer + dimming backdrop) made it solid, in the scrim's near-black.
+   The strip is exactly the phone header's --space-3 top padding in --bg, so it
+   is invisible on pages, and it sits above every overlay so the bar keeps the
+   header colour while a menu or sheet is open; those full-screen surfaces
+   clear it through --chrome-top. Phones in standalone only: a
+   browser tab owns its own chrome, and desktop headers are shorter. */
+.status-bar-tint { display: none; }
+@media (display-mode: standalone) and (max-width: 768px),
+       (display-mode: fullscreen) and (max-width: 768px) {
+  :root { --chrome-top: calc(var(--space-3) + var(--safe-top)); }
+  .status-bar-tint {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--chrome-top);
+    background: var(--bg);
+    pointer-events: none;
+    z-index: 2000; /* above every overlay, incl. the 1100 engine-offline curtain */
+  }
 }
 </style>
