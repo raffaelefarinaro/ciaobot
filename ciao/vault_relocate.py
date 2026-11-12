@@ -88,6 +88,7 @@ _SHARED_NAMES: frozenset[str] = frozenset(
         "INDEX.md",
         "MEMORY.md",
         "VOCABULARY.md",
+        ".ciao-vault-links.json",  # `vault_migrate_links.MARKER_NAME`: stays with the shared root
         ".DS_Store",
         ".runtime",
     }
