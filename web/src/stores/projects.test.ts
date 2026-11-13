@@ -5742,6 +5742,33 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
   })
 
+  it("turn_verification sets verification on the turn's last assistant row", () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const verification = {
+      supported: 1,
+      unsupported: 1,
+      general: 0,
+      claims: [
+        { text: 'Lisbon is the capital', status: 'supported' as const, source: 'notes/geo.md' },
+        { text: 'The bridge opened in 1966', status: 'unsupported' as const, source: '' },
+      ],
+      sources: ['notes/geo.md'],
+    }
+    store.messages = {
+      'c-v': [
+        { role: 'user', content: 'q', timestamp: '2026-11-12T10:00:00Z', turn_index: 0 } as ChatMessage,
+        { role: 'assistant', content: 'a', timestamp: '2026-11-12T10:00:01Z' } as ChatMessage,
+      ],
+    }
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'turn_verification', chat_id: 'c-v', turn_index: 0, verification }),
+    })
+    expect(store.messages['c-v'][1].verification).toEqual(verification)
+  })
+
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
