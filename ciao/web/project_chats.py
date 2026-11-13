@@ -798,6 +798,8 @@ class ChatInfo:
     # True when the failed turn was an automation run, so the replay runs
     # unattended too (unattended guidance, no attended-turn bookkeeping).
     retry_unattended: bool = False
+    # Reserved for explicitly opted-in recovery; legacy retries have no marker.
+    retry_recovery: object = ""
     # Visible messages preserved when the chat is handed to a fresh provider
     # session. They are prepended by /messages so the same chat does not lose
     # pre-handover history after reload.
@@ -1397,6 +1399,7 @@ class ProjectChatManager:
                 retry_kind=_load_retry_kind(cd.get("retry_kind", "")),
                 retry_interval_seconds=_load_retry_timing(cd)[1],
                 retry_unattended=bool(cd.get("retry_unattended", False)),
+                retry_recovery=cd.get("retry_recovery", ""),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
                 ),
@@ -1523,6 +1526,7 @@ class ProjectChatManager:
                     "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "retry_unattended": c.retry_unattended,
+                    "retry_recovery": c.retry_recovery,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "context_digest": c.context_digest,
@@ -8098,6 +8102,7 @@ class ProjectChatManager:
         chat.retry_last_error = reason
         chat.retry_interval_seconds = interval_seconds
         chat.retry_unattended = unattended
+        chat.retry_recovery = ""
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
@@ -8192,6 +8197,8 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived or chat.retry_status != "pending":
             return None
+        if not self._valid_recovery_retry(chat):
+            return None
         if self._broker.get(chat_id) is not None:
             return None
         network = chat.retry_kind == _NETWORK_RETRY_KIND
@@ -8232,6 +8239,11 @@ class ProjectChatManager:
         return images
 
     @staticmethod
+    def _valid_recovery_retry(chat: ChatInfo) -> bool:
+        # No recovery scheduler exists yet; never interpret its records as legacy.
+        return chat.retry_recovery == ""
+
+    @staticmethod
     def _image_refs(images: list[ImageAttachment] | None) -> list[str]:
         refs: list[str] = []
         for img in images or []:
@@ -8263,6 +8275,7 @@ class ProjectChatManager:
         chat.retry_kind = ""
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
         chat.retry_unattended = False
+        chat.retry_recovery = ""
         self._save()
         self._publish_retry(chat)
         if status == "stopped" and _has_running_loop():
@@ -8310,6 +8323,9 @@ class ProjectChatManager:
                     return
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived or chat.retry_status != "pending":
+                    return
+                if not self._valid_recovery_retry(chat):
+                    logger.warning("chat %s has an invalid recovery retry; refusing to run", chat_id)
                     return
                 due = chat_service._parse_iso(chat.retry_next_at)
                 delay = 0.0

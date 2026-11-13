@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,28 @@ async def _consume(stream) -> list[dict]:
     async for event in stream.subscribe():
         events.append(event)
     return events
+
+
+@pytest.mark.parametrize("marker", [
+    {"mode": "continue", "session_id": "session-1", "cadence_seconds": 3600},
+    None,
+    {"mode": "unknown"},
+])
+def test_recovery_record_cannot_replay_original_after_restart(tmp_path: Path, marker: object) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id = "session-1"
+    pcm.set_chat_retry(chat.chat_id, "original dangerous prompt", image_refs=["image.png"])
+    path = tmp_path / ".runtime" / "web_projects.json"
+    payload = json.loads(path.read_text())
+    payload["chats"][chat.chat_id]["retry_recovery"] = marker
+    path.write_text(json.dumps(payload))
+    restarted = _make_manager(tmp_path)
+    sent = []
+    restarted.start_stream = lambda *args, **kwargs: sent.append((args, kwargs))  # type: ignore[method-assign,assignment]
+    assert restarted.try_chat_retry_now(chat.chat_id) is None
+    assert sent == []
 
 
 async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
