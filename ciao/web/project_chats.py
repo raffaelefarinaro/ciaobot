@@ -719,6 +719,7 @@ class ChatInfo:
     # One-line snippet of the error that ended the last turn. Empty when the
     # last turn did not fail; cleared when a new turn starts.
     last_error: str = ""
+    failure_id: str = ""
     # restart_resume.PROCESS_TOKEN of the process running this chat's turn, set
     # when a turn starts and cleared when it ends; a foreign token at boot is a
     # turn a restart or crash cut off (#2128). Never sent to clients.
@@ -929,6 +930,11 @@ class ChatInfo:
             "last_read_at": self.last_read_at,
             "last_snippet": self.last_snippet,
             "last_error": self.last_error,
+            "failure_id": self.failure_id,
+            "recovery_eligible": bool(not self.archived and self.session_id and self.last_error
+                                      and self.failure_id and self.last_response_status == "error"
+                                      and (self.retry_status != "pending" or
+                                           isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" and self.retry_recovery.get("state") == "active")),
             "title_status": self.title_status,
             "actions": [action_payload(a) for a in self.actions],
             "pending_question": self.pending_question,
@@ -964,6 +970,7 @@ class ChatInfo:
                 "last_error": self.retry_last_error,
                 "attempts": self.retry_attempts,
                 "interval_seconds": self.retry_interval_seconds,
+                "mode": "continue_recovery" if isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" else "literal",
             } if self.retry_status else None,
         }
         if self.archive_path:
@@ -1379,6 +1386,7 @@ class ProjectChatManager:
                 last_response=cd.get("last_response", ""),
                 last_response_status=cd.get("last_response_status", ""),
                 last_error=cd.get("last_error", ""),
+                failure_id=cd.get("failure_id", ""),
                 turn_owner=str(cd.get("turn_owner", "") or ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 turn_index_base=int(cd.get("turn_index_base", 0) or 0),
@@ -1506,6 +1514,7 @@ class ProjectChatManager:
                     "last_response": c.last_response,
                     "last_response_status": c.last_response_status,
                     "last_error": c.last_error,
+                    "failure_id": c.failure_id,
                     "turn_owner": c.turn_owner,
                     "user_turn_count": c.user_turn_count,
                     "turn_index_base": c.turn_index_base,
@@ -1710,7 +1719,7 @@ class ProjectChatManager:
     def _save(self, *, reason: str = "registry_mutation") -> None:
         self._save_checked(reason=reason)
 
-    def _save_checked(self, *, reason: str, _recovery_expected: tuple[str, str, str, int] | None = None,
+    def _save_checked(self, *, reason: str, _recovery_expected: tuple[str, str, str, int, str] | None = None,
                       _firing_expected: tuple[str, dict[str, Any]] | None = None) -> bool:
         if not self._path:
             return _recovery_expected is None
@@ -1748,13 +1757,14 @@ class ProjectChatManager:
                 if not isinstance(row, dict) or any(row.get(key) != value for key, value in expected.items()):
                     return False
             if _recovery_expected is not None:
-                chat_id, session, error, turn_count = _recovery_expected
+                chat_id, session, error, turn_count, failure_id = _recovery_expected
                 row = latest_chats.get(chat_id) if isinstance(latest_chats, dict) else None
                 if not isinstance(row, dict) or (
                     row.get("archived") or row.get("retry_status") == "pending"
                     or row.get("session_id") != session or row.get("last_error") != error
                     or row.get("last_response_status") != "error"
                     or row.get("user_turn_count", 0) != turn_count
+                    or row.get("failure_id", "") != failure_id
                 ):
                     return False
             revision = int(latest.get("revision", 0) or 0) + 1
@@ -1776,7 +1786,10 @@ class ProjectChatManager:
                 f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
             try:
-                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
+                prepared = copy.deepcopy(payload) if _recovery_expected is not None else payload
+                if _recovery_expected is not None:
+                    prepared["chats"][_recovery_expected[0]]["retry_recovery"]["state"] = "prepared"
+                tmp.write_text(json.dumps(prepared, indent=2), encoding="utf-8", newline="")
                 tmp.replace(self._path)
                 self._append_registry_audit(
                     revision=revision,
@@ -1785,20 +1798,16 @@ class ProjectChatManager:
                     chat_mutations=chat_mutations,
                     **({"strict": True} if _recovery_expected is not None else {}),
                 )
-            except Exception:
                 if _recovery_expected is not None:
-                    # The replace may already have happened. Quarantine only our
-                    # marker while still holding the same registry lock.
-                    chat_id = _recovery_expected[0]
-                    saved = self._read_latest_payload()
-                    rows = saved.get("chats", {})
-                    row = rows.get(chat_id) if isinstance(rows, dict) else None
-                    ours = payload["chats"].get(chat_id, {}).get("retry_recovery")
-                    if isinstance(row, dict) and row.get("retry_recovery") == ours:
-                        row["retry_recovery"] = {"mode": "quarantined"}
-                        tmp.write_text(json.dumps(saved, indent=2), encoding="utf-8", newline="")
-                        os.replace(tmp, self._path)
-                raise
+                    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
+                    try:
+                        tmp.replace(self._path)
+                    except OSError:
+                        # A replace may report failure after taking effect.
+                        # A readable matching active record is a committed opt-in.
+                        saved = self._read_latest_payload()
+                        if saved.get("chats", {}).get(_recovery_expected[0], {}).get("retry_recovery") != payload["chats"][_recovery_expected[0]]["retry_recovery"]:
+                            raise
             finally:
                 try:
                     tmp.unlink(missing_ok=True)
@@ -8007,7 +8016,8 @@ class ProjectChatManager:
             return False
         if chat is not None and chat.retry_recovery != "":
             # The opted-in hourly schedule owns this retry, not the failure classifier.
-            return self._valid_recovery_retry(chat)
+            return (self._valid_recovery_retry(chat) and isinstance(chat.retry_recovery, dict)
+                    and chat.retry_recovery.get("manual") is not True)
         if had_progress and (chat is None or not chat.session_id):
             logger.warning("chat %s cannot safely retry partial work without a session", chat_id)
             return False
@@ -8108,13 +8118,14 @@ class ProjectChatManager:
         ).isoformat().replace("+00:00", "Z")
 
     def schedule_continue_recovery(
-        self, chat_id: str, session_id: str, last_error: str, turn_count: int,
+        self, chat_id: str, session_id: str, last_error: str, turn_count: int, failure_id: str = "", *, manual: bool = False,
     ) -> bool:
         """Opt in to an hourly session nudge, without replaying the failed turn."""
         chat = self._chats.get(chat_id)
         if (chat is None or chat.archived or not session_id or not last_error
                 or chat.session_id != session_id or chat.last_error != last_error
                 or chat.last_response_status != "error" or chat.user_turn_count != turn_count
+                or chat.failure_id != failure_id
                 or chat.retry_status == "pending" or self._broker.get(chat_id) is not None):
             return False
         fields = ("retry_status", "retry_prompt", "retry_image_refs", "retry_last_error",
@@ -8131,9 +8142,10 @@ class ProjectChatManager:
         chat.retry_kind = ""
         chat.retry_attempts = 0
         chat.retry_recovery = {"mode": "continue", "session_id": session_id,
-                               "cadence_seconds": _RETRY_INTERVAL_SECONDS, "id": uuid.uuid4().hex}
+                               "cadence_seconds": _RETRY_INTERVAL_SECONDS, "id": uuid.uuid4().hex,
+                               "state": "active", "manual": manual}
         try:
-            saved = self._save_checked(reason="continue_recovery", _recovery_expected=(chat_id, session_id, last_error, turn_count))
+            saved = self._save_checked(reason="continue_recovery", _recovery_expected=(chat_id, session_id, last_error, turn_count, failure_id))
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8144,7 +8156,8 @@ class ProjectChatManager:
             return False
         self._advance_retry_generation(chat_id)
         self._publish_retry(chat)
-        self._ensure_retry_task(chat_id)
+        if not manual:
+            self._ensure_retry_task(chat_id)
         return True
 
     def set_chat_retry(
@@ -8309,6 +8322,8 @@ class ProjectChatManager:
                 "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
                 "session_id": chat.session_id, "last_error": chat.last_error,
                 "last_response_status": "error", "user_turn_count": chat.user_turn_count,
+                "failure_id": chat.failure_id,
+                "retry_attempts": chat.retry_attempts, "retry_next_at": chat.retry_next_at,
             })
         previous_attempts, previous_next = chat.retry_attempts, chat.retry_next_at
         chat.retry_attempts += 1
@@ -8351,6 +8366,8 @@ class ProjectChatManager:
             return True
         return (isinstance(marker, dict) and marker.get("mode") == "continue"
                 and isinstance(marker.get("id"), str) and bool(marker["id"])
+                and marker.get("state") == "active"
+                and type(marker.get("manual", False)) is bool
                 and isinstance(marker.get("session_id"), str) and bool(marker["session_id"])
                 and marker["session_id"] == chat.session_id
                 and type(marker.get("cadence_seconds")) is int
@@ -8377,6 +8394,7 @@ class ProjectChatManager:
             "last_error": chat.retry_last_error,
             "attempts": chat.retry_attempts,
             "interval_seconds": chat.retry_interval_seconds,
+            "mode": "continue_recovery" if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("mode") == "continue" else "literal",
         })
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
@@ -8405,6 +8423,14 @@ class ProjectChatManager:
     def _ensure_retry_tasks(self) -> None:
         for chat in self._chats.values():
             if chat.retry_status == "pending" and not chat.archived:
+                if (isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("manual") is True
+                        and chat.turn_owner != restart_resume.PROCESS_TOKEN):
+                    self._clear_chat_retry(chat, status="stopped")
+                    continue
+                if (chat.retry_recovery != "" and not chat.last_error
+                        and chat.turn_owner != restart_resume.PROCESS_TOKEN):
+                    self._clear_chat_retry(chat, status="stopped")
+                    continue
                 self._ensure_retry_task(chat.chat_id)
 
     def _advance_retry_generation(self, chat_id: str) -> None:
@@ -8728,6 +8754,7 @@ class ProjectChatManager:
             # A new turn supersedes the failure that ended the previous one; the
             # save below persists the clear with the send stamp.
             chat_meta.last_error = ""
+            chat_meta.failure_id = ""
             # Waiting (parked) messages stay waiting: a new send never flushes
             # them. They leave only through send-now, edit, remove or reorder,
             # and stay visible on this stream.

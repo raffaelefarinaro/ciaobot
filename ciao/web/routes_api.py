@@ -2757,17 +2757,22 @@ async def chat_retry(request: Request) -> JSONResponse:
         prompt = str(body.get("prompt", ""))
         images = [str(x) for x in body.get("images", []) if str(x)]
         chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual")
-    elif action == "continue_recovery":
-        session = body.get("session_id")
-        error = body.get("last_error")
-        turn_count = body.get("user_turn_count")
-        if not isinstance(session, str) or not isinstance(error, str) or type(turn_count) is not int or turn_count < 0:
-            return JSONResponse({"error": "session_id, last_error and user_turn_count are required"}, status_code=400)
+    elif action in {"continue_recovery", "continue_recovery_now"}:
+        failure_id = body.get("failure_id")
+        if set(body) != {"action", "failure_id"} or not isinstance(failure_id, str) or not failure_id:
+            return JSONResponse({"error": "only action and failure_id are accepted"}, status_code=400)
         chat = pcm.get_chat(chat_id)
         if chat is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        if not pcm.schedule_continue_recovery(chat_id, session, error, turn_count):
+        if chat.failure_id != failure_id or not chat.session_id or not chat.last_error or chat.last_response_status != "error":
             return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if chat.retry_status == "pending":
+            if action != "continue_recovery_now" or not pcm._valid_recovery_retry(chat) or chat.retry_recovery == "":
+                return JSONResponse({"error": "retry already pending"}, status_code=409)
+        elif not pcm.schedule_continue_recovery(chat_id, chat.session_id, chat.last_error, chat.user_turn_count, failure_id, manual=action == "continue_recovery_now"):
+            return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if action == "continue_recovery_now" and pcm.try_chat_retry_now(chat_id) is None:
+            return JSONResponse({"error": "recovery not started"}, status_code=409)
     elif action == "try_now":
         stream = pcm.try_chat_retry_now(chat_id)
         chat = pcm.get_chat(chat_id)

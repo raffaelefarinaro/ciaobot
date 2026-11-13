@@ -1323,6 +1323,7 @@ class ChatStreaming:
                     if had_error
                     else ""
                 )
+                chat_meta.failure_id = uuid.uuid4().hex if had_error else ""
                 # A terminal SSE frame is not proof that a native V2 permission
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
@@ -1365,6 +1366,7 @@ class ChatStreaming:
                 "project_id": project_id,
                 "is_error": had_error,
                 "last_error": chat_meta.last_error if chat_meta is not None else "",
+                "failure_id": chat_meta.failure_id if chat_meta is not None else "",
             }
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
@@ -1428,7 +1430,8 @@ class ChatStreaming:
             ):
                 chat_unsettled = self._host._chats.get(chat_id)
                 if chat_unsettled is not None and chat_unsettled.retry_status == "pending":
-                    if chat_unsettled.retry_recovery == "":
+                    recovery = chat_unsettled.retry_recovery
+                    if recovery == "" or (isinstance(recovery, dict) and recovery.get("manual") is True):
                         logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
                         self._host._clear_chat_retry(chat_unsettled, status="stopped")
             if (stream.network_retry_turn or is_retry) and not began_compact and owns_retry:
@@ -2140,6 +2143,7 @@ class ChatStreaming:
                             ]
                             chat_now.last_response_status = "success"
                             chat_now.last_error = ""
+                            chat_now.failure_id = ""
                             self._host._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         if settled:
@@ -2178,6 +2182,7 @@ class ChatStreaming:
                                 else "empty"
                             )
                             chat_now.last_error = last_error
+                            chat_now.failure_id = uuid.uuid4().hex if is_error else ""
                             self._host._save()
                         if settled:
                             self._host._flush_result_announce(chat_id)

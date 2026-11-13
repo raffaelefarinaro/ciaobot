@@ -133,6 +133,70 @@ def test_concurrent_recovery_opt_ins_have_one_winner(tmp_path: Path) -> None:
     assert saved.retry_recovery["session_id"] == "session-1"
 
 
+def test_concurrent_managers_only_one_claims_recovery_attempt(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    other = _make_manager(tmp_path)
+    barrier = Barrier(2)
+    sent = []
+    for manager in (pcm, other):
+        manager.start_stream = lambda *args, **kwargs: sent.append(args) or object()  # type: ignore[method-assign,assignment]
+    def fire(manager):
+        barrier.wait()
+        return manager.try_chat_retry_now(chat.chat_id)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(fire, [pcm, other]))
+    assert sum(result is not None for result in results) == 1
+    assert len(sent) == 1
+
+
+def test_interrupted_recovery_is_stopped_on_restart(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    chat.last_error = ""
+    chat.turn_owner = "previous-process"
+    pcm._save()
+    restored = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert restored.retry_status == "stopped"
+
+
+def test_audit_and_quarantine_failure_leaves_recovery_nonrunnable(tmp_path: Path, monkeypatch) -> None:
+    import os
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    replace = os.replace
+    calls = 0
+    def fail_second_replace(*args):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("quarantine unavailable")
+        return replace(*args)
+    def fail_audit(**kwargs):
+        raise OSError("audit unavailable")
+    monkeypatch.setattr(os, "replace", fail_second_replace)
+    monkeypatch.setattr(pcm, "_append_registry_audit", fail_audit)
+    with pytest.raises(OSError):
+        pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    monkeypatch.undo()
+    restored = _make_manager(tmp_path)
+    sent = []
+    restored.start_stream = lambda *args, **kwargs: sent.append(args)  # type: ignore[method-assign,assignment]
+    assert restored.try_chat_retry_now(chat.chat_id) is None
+    assert not sent
+
+
 @pytest.mark.parametrize("failure", ["before_replace", "after_replace", "replace_then_raise", "audit_oserror"])
 def test_recovery_save_exception_never_fires_after_reload(tmp_path: Path, monkeypatch, failure: str) -> None:
     pcm = _make_manager(tmp_path)
@@ -201,15 +265,80 @@ async def test_recovery_api_is_explicit_and_conflicts_on_pending(tmp_path: Path)
     chat.last_error = "failed"
     chat.last_response_status = "error"
     pcm._save()
-    body = {"action": "continue_recovery", "session_id": "session-1",
-            "last_error": "failed", "user_turn_count": chat.user_turn_count}
+    chat.failure_id = "failure-token"
+    pcm._save()
+    body = {"action": "continue_recovery", "failure_id": "failure-token"}
     async def read_json():
         return body
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(project_chat_manager=pcm)),
                               path_params={"chat_id": chat.chat_id}, json=read_json)
     assert (await chat_retry(request)).status_code == 200
+    assert chat.to_dict()["retry"]["mode"] == "continue_recovery"
     assert (await chat_retry(request)).status_code == 409
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_guarded_continue_now_rejects_stale_and_literal_retry(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    chat.failure_id = "new-token"
+    pcm._save()
+    body = {"action": "continue_recovery_now", "failure_id": "old-token"}
+    async def read_json():
+        return body
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(project_chat_manager=pcm)),
+                              path_params={"chat_id": chat.chat_id}, json=read_json)
+    assert (await chat_retry(request)).status_code == 409
+    chat.session_id = ""
+    body["failure_id"] = "new-token"
+    assert (await chat_retry(request)).status_code == 409
+    chat.session_id = "session-1"
+    pcm.set_chat_retry(chat.chat_id, "dangerous original")
+    assert chat.to_dict()["retry"]["mode"] == "literal"
+    assert not chat.to_dict()["recovery_eligible"]
+    body["failure_id"] = "new-token"
+    assert (await chat_retry(request)).status_code == 409
+    assert chat.retry_prompt == "dangerous original"
+    pcm.stop_chat_retry(chat.chat_id)
+    body["prompt"] = "dangerous original"
+    assert (await chat_retry(request)).status_code == 400
+    del body["prompt"]
+    sent = []
+    pcm.start_stream = lambda *args, **kwargs: sent.append((args, kwargs)) or object()  # type: ignore[method-assign,assignment]
+    assert (await chat_retry(request)).status_code == 200
+    assert sent[0][0] == (chat.chat_id, "continue")
+    assert sent[0][1]["images"] is None
+    assert chat.retry_recovery["manual"] is True
+    assert chat.chat_id not in pcm._retry_tasks
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_distinct_failures_have_opaque_identity_in_completion(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id = "session-1"
+    events = []
+    original_publish = pcm._events.publish
+    def capture(event):
+        events.append(event)
+        original_publish(event)
+    pcm._events.publish = capture  # type: ignore[method-assign]
+    async def fake_stream(chat_id, prompt, images=None, **kwargs):
+        yield ResultEvent(type="result", result="same error", session_id="session-1", is_error=True,
+                          effective_model=chat.model, usage={}, quota={}, cost_usd=0.0)
+    pcm.stream_chat = fake_stream  # type: ignore[assignment]
+    first = pcm.start_stream(chat.chat_id, "one")
+    await asyncio.wait_for(_consume(first), timeout=10)
+    first_id = chat.failure_id
+    assert first_id and chat.to_dict()["failure_id"] == first_id
+    assert any(event.get("type") == "chat_streaming_done" and event.get("failure_id") == first_id for event in events)
+    second = pcm.start_stream(chat.chat_id, "two")
+    await asyncio.wait_for(_consume(second), timeout=10)
+    assert chat.failure_id and chat.failure_id != first_id
 
 
 async def test_recovery_failed_attempt_stays_hourly_then_success_stops(tmp_path: Path) -> None:

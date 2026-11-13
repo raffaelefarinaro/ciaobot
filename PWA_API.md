@@ -867,7 +867,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # Read mutations also cancel the delayed push and emit a cross-device clear
 # control. Connected PWAs close the matching service-worker notification tag.
 
-# Deferred retry after provider/session quota errors. action ∈ {set, continue_recovery, try_now, stop}.
+# Deferred retry after provider/session quota errors. action ∈ {set, continue_recovery,
+# continue_recovery_now, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' \
@@ -882,13 +883,19 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # A failed turn carries `last_error` (one-line snippet, "" when the last turn
 # succeeded or a new turn started) on the chat object, and the
 # `chat_streaming_done` event repeats it as `last_error`.
-# To explicitly schedule hourly recovery, send `continue_recovery` with the
-# failed chat's current `session_id`, `last_error` and `user_turn_count`:
-# {"action":"continue_recovery","session_id":"...","last_error":"...","user_turn_count":1}.
-# A stale failure, missing session, busy chat or existing pending retry returns
-# 409. It sends only "continue" without images; `try_now` fires it manually and
-# `stop` cancels it. The provider may have lost the session, and repeated
-# continues can have effects; this is not exactly-once execution.
+# A chat exposes `failure_id` (an opaque identity, empty without a current
+# failure), `recovery_eligible`, and `retry.mode` ("continue_recovery" or
+# "literal"). `chat_streaming_done` includes the current failure_id too.
+# Explicitly opt in to hourly recovery with exactly:
+# {"action":"continue_recovery","failure_id":"<current failure_id>"}
+# Or send a one-shot continue immediately (or fire an existing hourly recovery) with:
+# {"action":"continue_recovery_now","failure_id":"<current failure_id>"}
+# A new one-shot does not opt in to hourly retries. No prompt or images are accepted. A stale failure, missing session, busy chat
+# or conflicting pending retry returns 409; an invalid request returns 400.
+# `stop` cancels a pending retry. Generic `try_now` may send a literal retry:
+# clients offering recovery must use `continue_recovery_now` instead. Recovery
+# sends only "continue" without images. The provider may have lost the session,
+# and repeated continues can have effects; this is not exactly-once execution.
 
 # Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
 # `stop` message; use this when driving a chat over plain HTTP or when a
