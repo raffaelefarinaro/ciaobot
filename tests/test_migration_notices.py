@@ -101,6 +101,8 @@ def _cfg(
         workspace_names=lambda: list(registered),
         workspace_vault_root=lambda name: registered.get(name, vault / name),
         canonical_workspace_vault_root=lambda name: vault / name,
+        # These stubs model misplaced or legacy vaults, never adopted ones.
+        adopted_workspace_vault=lambda name: False,
     )
 
 

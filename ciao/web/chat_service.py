@@ -340,9 +340,22 @@ _PROVIDER_QUOTA_RE = re.compile(
     r"|\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b"
 )
 
+# Claude Code's five-hour window banner is a whole message ("You've hit your
+# 5-hour limit · resets 7:20pm (Europe/Zurich)"), so it is anchored rather than
+# matched as a substring: a tool quoting it, or a bare "5-hour limit", is not
+# the provider rejecting this turn.
+_CLAUDE_FIVE_HOUR_LIMIT_RE = re.compile(
+    r"(?:error:\s*)?you['\u2019]ve hit your 5-hour limit"
+    r"(?:[ \t]*·[ \t]*resets[ \t]+[0-9]{1,2}(?::[0-9]{2})?[ap]m"
+    r"[ \t]+\([a-z0-9_+./-]+\))?",
+    re.IGNORECASE | re.ASCII,
+)
+
 
 def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
+    if _CLAUDE_FIVE_HOUR_LIMIT_RE.fullmatch((text or "").strip()):
+        return True
     # Weekly, monthly and "upgrade for higher limits" phrasings are ordinary
     # usage limits: retried hourly like any other.
     if any(

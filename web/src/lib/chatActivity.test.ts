@@ -620,6 +620,41 @@ describe('collectToolUsage', () => {
       { name: 'Slack', count: 1, tools: ['slack_search_public'] },
     ])
   })
+
+  it('reads an opencode skill by the id its tool input carries', () => {
+    expect(collectToolUsage(['⚙️ skill {"id":"loop-engineering"}']).skills)
+      .toEqual([{ name: 'loop-engineering', count: 1 }])
+  })
+
+  it('trims the id and counts repeats, including subagent lines', () => {
+    const usage = collectToolUsage([
+      '⚙️  skill   {"id": "  loop-engineering  "}',
+      '↳ ⚙️ skill {"id":"loop-engineering"}',
+    ])
+    expect(usage.skills).toEqual([{ name: 'loop-engineering', count: 2 }])
+  })
+
+  it('keeps the existing name and skill keys ahead of id', () => {
+    expect(collectToolUsage(['🔧 skill {"id":"a","skill":"b"}']).skills)
+      .toEqual([{ name: 'b', count: 1 }])
+    expect(collectToolUsage(['🔧 skill {"id":"a","skill":"b","name":"c"}']).skills)
+      .toEqual([{ name: 'c', count: 1 }])
+    expect(collectToolUsage(['🧩 Skill ciao-dev-install']).skills)
+      .toEqual([{ name: 'ciao-dev-install', count: 1 }])
+  })
+
+  it('does not fabricate a skill from a bad id or unrelated tool text', () => {
+    const usage = collectToolUsage([
+      '⚙️ skill {"id":42}',
+      '⚙️ skill {"id":null}',
+      '⚙️ skill {"id":{}}',
+      '⚙️ skill {"id":""}',
+      '⚙️ skill {"id":',
+      '📖 read {"id":"loop-engineering"}',
+      '⚙️ execute {"id":"loop-engineering"}',
+    ])
+    expect(usage.skills).toEqual([])
+  })
 })
 
 describe('mentionedFilePaths', () => {
@@ -642,6 +677,9 @@ describe('describeToolStep', () => {
     expect(describeToolStep('🔧 edit src/app.ts')).toBe('Editing app.ts')
     expect(describeToolStep('🧩 Skill pr-review')).toBe('Using the pr-review skill')
     expect(describeToolStep('🔧 skill {"name":"docs"}')).toBe('Using the docs skill')
+    expect(describeToolStep('⚙️ skill {"id":"loop-engineering"}')).toBe('Using the loop-engineering skill')
+    expect(describeToolStep('⚙️ skill {"id":"  loop-engineering  "}')).toBe('Using the loop-engineering skill')
+    expect(describeToolStep('⚙️ skill {"id":42}')).toBe('Using a skill')
     expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
     expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
     expect(describeToolStep('🔧 ToolSearch select:mcp__claude_ai_Airtable__list_records_for_table')).toBe('Loading tools')

@@ -24,7 +24,7 @@ from ciao import cli_envelopes
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
-from ciao.providers.opencode import opencode_child_status
+from ciao.providers.opencode import _projected_message, opencode_child_status
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1152,6 +1152,39 @@ def test_opencode_thread_rows_match_the_wire_contract() -> None:
             "tool_name": "_activity",
         },
     ]
+
+
+def test_opencode_skill_input_keeps_the_id_in_the_activity_line() -> None:
+    """The reload path must hand the rail the skill's `id` unchanged (#2863).
+
+    `_projected_message` is what `read_thread` runs on every V2 wire message,
+    and `_render_opencode_thread` is the only renderer behind the chat
+    transcript, so this is the production reload path with no live service.
+    """
+    native = {
+        "type": "assistant",
+        "id": "msg-skill",
+        "content": [
+            {
+                "type": "tool",
+                "id": "call-skill",
+                "name": "skill",
+                "state": {
+                    "status": "completed",
+                    "input": {"id": "loop-engineering"},
+                },
+            },
+        ],
+    }
+    projected = _projected_message(native)
+    assert projected is not None
+    rendered = transcript_service._render_opencode_thread(
+        {"info": {"id": "s1"}, "messages": [projected]}, _chat()
+    )
+
+    activity = [row for row in rendered if row.get("tool_name") == "_activity"]
+    assert len(activity) == 1
+    assert activity[0]["content"] == '⚙️ skill {"id": "loop-engineering"}'
 
 
 def test_a_child_thread_keeps_its_own_turn_numbering() -> None:

@@ -430,3 +430,28 @@ def test_per_root_registration_at_old_shared_subpath_keeps_derived_vault(
     assert config.workspace_vault_root("work") == root / "memory-vault" / "work"
     assert config.agent_vault_root("work") == root / "work" / "memory-vault"
     assert config.canonical_workspace_vault_root("work") == root / "work" / "memory-vault"
+
+
+@pytest.mark.parametrize(
+    ("rerooted", "stored", "expected"),
+    [
+        (False, "memory-vault/work", False),
+        (False, "work/brain", False),
+        (True, "work/memory-vault", False),
+        (True, "memory-vault/work", False),
+        (True, "work/brain", True),
+        (True, ".", True),
+    ],
+)
+def test_adopted_workspace_vault_is_a_registered_nonstandard_per_root_vault(
+    tmp_path: Path, rerooted: bool, stored: str, expected: bool
+) -> None:
+    root = tmp_path.resolve()
+    if rerooted:
+        config = _per_root_config(root, {"work": stored})
+    else:
+        reset_reroot_cache()
+        config = _config(root, {"work": stored})
+
+    assert config.adopted_workspace_vault("work") is expected
+    assert config.adopted_workspace_vault("unregistered") is False

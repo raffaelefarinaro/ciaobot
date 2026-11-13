@@ -1508,6 +1508,8 @@ a remote browser can influence. Auth/origin coverage is in
 isolate browser storage/service workers, or replace the host password protocol
 with revocable per-device credentials; those remain follow-up work for #546.
 
+The completed-reply mention route (`/api/chats/{chat_id}/file-paths/resolve`, #2118) is a security-sensitive surface and needs a PR-scoped security review before merge. Its focused regression command is `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_chat_file_mentions.py -q`. Root-isolation tests must build real config layouts (legacy and migrated receipt) and must not monkeypatch `agent_root` or `workspace_vault_root`, because a stub can agree with itself about a layout the engine never produces.
+
 ## Quality gates
 
 For task progress/history changes, run `tests/test_task_updates.py`,

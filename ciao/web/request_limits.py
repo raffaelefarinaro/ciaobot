@@ -17,6 +17,8 @@ UPLOAD_BODY_LIMIT = 512 * 1024 * 1024 + 1024 * 1024
 IMAGE_BODY_LIMIT = 100 * 10 * 1024 * 1024 + 1024 * 1024
 SKILL_IMPORT_BODY_LIMIT = 10 * 1024 * 1024
 WORKSPACE_WRITE_BODY_LIMIT = 13 * 1024 * 1024
+# A read-only batch of up to 50 mention strings of at most 4 KiB each, JSON-escaped.
+FILE_MENTION_BODY_LIMIT = 32 * 1024
 SPOOL_MEMORY_LIMIT = 1024 * 1024
 REPLAY_CHUNK_SIZE = 64 * 1024
 
@@ -55,6 +57,8 @@ def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
                 return WORKSPACE_WRITE_BODY_LIMIT, ""
             if method == "POST" and route_path == "/api/skills/import":
                 return SKILL_IMPORT_BODY_LIMIT, "skill_import"
+            if method == "POST" and route_path == "/api/chats/{chat_id}/file-paths/resolve":
+                return FILE_MENTION_BODY_LIMIT, ""
             return DEFAULT_BODY_LIMIT, ""
     return DEFAULT_BODY_LIMIT, ""
 
@@ -130,10 +134,17 @@ class ApiRequestBodyLimitMiddleware:
             # Non-JSON bodies need the same rewind as parsed JSON bodies before
             # a handler starts consuming the replay stream.
             spool.seek(0)
+            terminal_delivered = False
 
             async def replay() -> dict[str, Any]:
+                nonlocal terminal_delivered
+                if terminal_delivered:
+                    message: dict[str, Any] = await receive()
+                    return message
                 data = spool.read(REPLAY_CHUNK_SIZE)
-                return {"type": "http.request", "body": data, "more_body": bool(data) or spool.tell() < size}
+                more_body = spool.tell() < size
+                terminal_delivered = not more_body
+                return {"type": "http.request", "body": data, "more_body": more_body}
 
             await self.app(scope, replay, send)
         finally:

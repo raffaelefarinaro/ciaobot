@@ -3,6 +3,8 @@ import { COMPOSER, boot, isolate } from '../support/app'
 
 /** The flag the page-side observer sets; declared here so the spec needs no `any`. */
 interface ChatRiseWindow { __sawChatRise?: boolean }
+/** The arriving tile's opacity when the class first appeared, latched by the page-side observer. */
+interface TileArrivalWindow { __tileArrival?: { opacity: number } }
 
 /**
  * Motion that only a real layout can show: a chat opened from Home rises (the
@@ -60,16 +62,21 @@ test('switching to a chat with a pinned file slides the chat first, then the fil
     await route.fulfill({ response, json: Array.isArray(body) ? body.map(pin) : pin(body) })
   })
   await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  // The arriving class lives only for the ~560 ms tile animation, and a loaded
+  // runner can return from the click after it is gone. Latch it in the page,
+  // before the click, and read its opacity in the same task that adds it.
+  await page.evaluate(() => {
+    const w = window as unknown as TileArrivalWindow
+    new MutationObserver(() => {
+      if (w.__tileArrival) return
+      const el = document.querySelector('.chat-split-side--arriving')
+      if (el) w.__tileArrival = { opacity: Number(getComputedStyle(el).opacity) }
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true })
+  })
   await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
-  // Still hidden while the chat slides in. The arriving class lives only for the
-  // ~520 ms tile animation, so find it and read its opacity in the same frame:
-  // a separate count check and evaluate can straddle its removal on a loaded runner.
-  const arriving = await page.waitForFunction(() => {
-    const el = document.querySelector('.chat-split-side--arriving')
-    // Wrapped in an object: a bare opacity of 0 is falsy and would keep waiting.
-    return el ? { opacity: Number(getComputedStyle(el).opacity) } : null
-  }, undefined, { polling: 'raf' })
-  expect((await arriving.jsonValue())!.opacity).toBeLessThan(0.5)
+  // Still hidden while the chat slides in.
+  await expect.poll(() => page.evaluate(() => (window as unknown as TileArrivalWindow).__tileArrival?.opacity ?? null)).not.toBeNull()
+  expect(await page.evaluate(() => (window as unknown as TileArrivalWindow).__tileArrival!.opacity)).toBeLessThan(0.5)
   await expect(page.locator('.chat-split-side--arriving')).toHaveCount(0)
   await expect(page.locator('.chat-split-side')).toBeVisible()
 })

@@ -5,7 +5,7 @@ description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <
 
 # ciao CLI
 
-One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell. Every command prints one JSON envelope.
+Use `ciao` for Ciaobot's managed operations. Most use `<noun> <verb>` and return a JSON envelope; the top-level review-queue commands below have their own output conventions. This reference is available through `ciao help`, even when `ciao-cli` is not installed as a skill.
 
 ## When to use / when not to
 
@@ -22,7 +22,7 @@ Not for:
 
 ## Calling convention
 
-- Every command prints exactly one JSON object on stdout: `{"ok": true, "data": ...}` on success, `{"ok": false, "error": {"code": "...", "message": "...", "retryable": bool}}` on failure. Nothing else goes to stdout. `--json` is accepted for compatibility but output is always JSON — there is no human-readable mode.
+- Agent-surface commands print exactly one JSON object on stdout: `{"ok": true, "data": ...}` on success, `{"ok": false, "error": {"code": "...", "message": "...", "retryable": bool}}` on failure. Nothing else goes to stdout. `--json` is accepted for compatibility but output is always JSON. Top-level review-queue commands are the exception (see that section).
 - Exit code `0` when `ok` is true, `1` when `ok` is false, `2` for a usage error (bad flags, missing required argument) caught before any operation runs.
 - Identity is never a flag. `CIAO_AGENT_TOKEN` and `CIAO_AGENT_URL` in the calling chat's environment say who is calling and against which server; there is no `--workspace` flag and no `--token` flag.
 - `--chat ID` is optional on every chat-scoped command and defaults to the calling chat. Pointing it at another chat in the same workspace is allowed; pointing it at a chat in a different workspace returns `workspace_forbidden`. The one exception is `chat needs-action`, which has no `--chat` at all: the request belongs to the chat that asked for it.
@@ -224,6 +224,10 @@ is **recorded**, not that a turn finished. Both recipes are in `PWA_API.md`.
 
 A trigger is created disabled, so ask the user before `webhook update --enable`,
 then tell them the sender needs the secret as a bearer token.
+
+`webhook create` and `webhook rotate` show the secret once. Hand it to the user for
+the intended sender; never save a copy in notes, memory or source files. Do not
+repeat it in later summaries or diagnostics: it is a credential, not vault content.
 
 Instructions are operator prose that the launched turn reads as its own, so
 they travel as a file (`--instructions-file`) rather than as a shell argument.

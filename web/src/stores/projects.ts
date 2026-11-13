@@ -7,6 +7,7 @@ import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
+import { applyTurnVerification } from '../lib/turnVerification'
 import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
 import {
   isRestartDrainMessage,
@@ -5295,6 +5296,12 @@ export const useProjectStore = defineStore('projects', () => {
       case 'chat_repo_location': {
         const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
         if (c) c.repo_location = msg.repo_location
+        break
+      }
+      case 'turn_verification': {
+        // Uncached chat: nothing to update; the next history load carries the overlay.
+        const rows = messages.value[msg.chat_id]
+        if (rows) applyTurnVerification(rows, msg.turn_index, msg.verification)
         break
       }
       case 'chat_pin_changed': {

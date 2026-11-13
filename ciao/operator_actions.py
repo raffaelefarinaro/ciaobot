@@ -339,11 +339,17 @@ def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dic
     check = _provider_checks(context).get(provider) or {}
     state = str(check.get("state", "unknown"))
     label = _PROVIDER_LABELS[provider]
-    if state != "below_tested":
+    if state == "current":
         return {"state": state}, f"{label} is up to date."
-    return {"state": state}, (
-        f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
-    )
+    if state == "below_tested":
+        return {"state": state}, (
+            f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
+        )
+    if state == "bundled":
+        return {"state": state}, f"{label} is bundled with Ciaobot."
+    if state == "unsupported":
+        return {"state": state}, f"{label} is not compatible with this Ciaobot version."
+    return {"state": state}, f"Could not verify {label}'s version."
 
 
 def _dismiss_provider_update(context: DetectionContext, provider: str) -> tuple[dict[str, Any], str]:

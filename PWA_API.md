@@ -87,7 +87,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
 | GET | `/api/system-prompt` | The text Ciaobot appends to every provider's system prompt (`ciao/system_prompt.md`): `{text, chars}`. Read-only; shown in Chat details → Always loaded |
-| GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
+| GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; fuzzy-matched only inside the chat's agent and vault roots |
+| POST | `/api/chats/{chat_id}/file-paths/resolve` | Browser-only batch: canonical path or `null` for each mentioned file in a completed reply; exact matching only, read-only (see the chat-file contract) |
 | GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id` or `project_id`) that workspace's agent root, vault and the project's linked repo. With a chat or project and no `path`, it lists the project's own vault folder (the project page's Browse files passes `project_id`); an unknown `project_id` is 404. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
@@ -777,9 +778,13 @@ exceptions preserve supported upload and write contracts: project files and
 chat attachments allow 512 MiB of files plus at most 1 MiB multipart overhead;
 chat image uploads allow a 1,001 MiB aggregate (the 100-file × 10 MiB supported
 batch size plus 1 MiB overhead);
-`POST /api/skills/import` remains capped at 10 MiB; and workspace file writes
+`POST /api/skills/import` remains capped at 10 MiB; workspace file writes
 allow a 13 MiB JSON body so a 2 MiB UTF-8 text value can be escaped in JSON
-with bounded metadata. Declared and received bytes are both checked. Admitted
+with bounded metadata; and the read-only `POST /api/chats/{chat_id}/file-paths/resolve`
+batch is capped at 32 KiB (`request_limits.FILE_MENTION_BODY_LIMIT`), with its
+JSON depth checked by the same middleware. Over-cap bodies get 413 from the
+middleware, and a body nested past 64 levels gets 400 `bad json`, both without
+`Cache-Control: no-store`; the handler's own responses carry it. Declared and received bytes are both checked. Admitted
 bodies use bounded-memory spooling and are replayed to handlers. Other `/api`
 routes, including public bootstrap/status endpoints, remain bounded by the
 default. WebSockets, webhook ingress and `/share-target` are outside this HTTP
@@ -1113,11 +1118,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # bound and logs at; pwa_host and log_level change only at the next start).
 # resume_after_restart (boolean, default true: at startup a chat whose turn a
 # restart or crash cut off gets one `restart_resume` turn).
+# verify_vault_answers (boolean, default true: a turn that read vault notes gets
+# a one-shot check of its answer's claims against them; see turn_verification).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode, app_repo and resume_after_restart (a non-boolean value is a 400).
+# dev_mode, app_repo, resume_after_restart and verify_vault_answers (a
+# non-boolean value is a 400).
 # The retired insights_enabled key is still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
 # are persisted in .runtime/app_settings.json and applied to the
@@ -1822,6 +1830,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
+- `turn_verification`: the vault answer check for one turn finished. Fields: `{chat_id, turn_index, verification}`, where `verification` is `{supported, unsupported, general, claims: [{text, status: "supported"|"unsupported"|"general", source}], sources}` (`source` is a vault-relative note path, `""` for general). Persisted in `ChatInfo.turn_verification` and overlaid as `verification` on the turn's last assistant row of the chat messages response.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.
@@ -1885,7 +1894,13 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - WS `/ws/chat/{chat_id}` `tool_result` event (OpenCode only): `{tool_name, tool_use_id?, is_error?, detail?, parent_tool_use_id?, session_id?}`. OpenCode emits one after every tool call, as its own frame rather than a second `tool_use` (#1416). The PWA marks the call's existing Activity line failed when `is_error` is set and never paints a second line. Claude emits none.
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
-- Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. Resolution is exact and anchors relative paths to that chat's agent root. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. The workspace File access setting (`agent_fs_scope`) confines the agent and its shell, not these viewers. A failed manual or automatic pin leaves the viewer open.
+- Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. GET `/file-path` anchors relative paths to that chat's agent root and may fuzzy-match a name inside the chat's agent and vault roots. The batch `POST /api/chats/{chat_id}/file-paths/resolve` (below) is the exact one; it does not fuzzy-match. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. The workspace File access setting (`agent_fs_scope`) confines the agent and its shell, not these viewers. A failed manual or automatic pin leaves the viewer open.
+
+`POST /api/chats/{chat_id}/file-paths/resolve` (#2118) is browser-only and has no agent recipe. Body: `{"paths": ["README.md", "docs/guide.md:17", "missing.md"]}`, exactly one key, at most 50 strings (counted before deduplication), each nonempty, at most 4096 characters, free of control characters, and strict UTF-8 with no lone surrogates. Anything else gets 400 with no-store, and nothing is looked up. The response is `{"results": [{"input": ..., "path": ...}]}`, one row per input in order, with duplicates kept. `path` is the canonical absolute `Path.as_posix()` without the `:line` suffix, or `null`. A null is the same for every reason: unavailable, forbidden, missing, ambiguous, unsupported, oversized, or a metadata error. A response never carries content, reasons, stat data, roots or possible matches. An unknown chat is 404, and a deleted chat is 404 even mid-lookup. A layout, membership, repo or root change during the lookup nulls every row. Signed session and same-origin checks apply, with no loopback or public exemption.
+
+Membership is the registered workspace of the chat's project, and nothing else. A missing project, an empty or unregistered workspace, or an invalid root never falls back to the primary workspace or the install root. Before the re-rooting only the owning workspace's vault is searched, not the install root, so legacy install-relative spellings such as `memory-vault/work/README.md` and a legacy `README.md` at the install root are not discovered; use the vault-relative path or an absolute path inside the vault. After the re-rooting the workspace's agent root and nested vault are searched. A vault that equals or contains the install root, a root shared by two workspaces, or a root that contains another workspace's vault fails closed. Legacy installs with `vault_root="."` therefore get all-null rows by design.
+
+Matching is exact: no fuzzy, basename, stem, recursive or case-insensitive search, and no environment or percent expansion. Relative inputs resolve against each root and must stay inside it. Absolute paths and `~/` paths are accepted only when their canonical form is inside a root. `~otheruser`, UNC, device, network-share and foreign drive forms are null. A single final `:line` (1 through 2147483647) is stripped, and a malformed, zero or overflowing suffix is null. Only regular files with the viewers' extensions and caps are returned: text 2 MiB, image 15 MiB, binary 50 MiB. Excluded: `.env`, `.example`, extensionless files, directories and special files. A file is never read or converted. A repo is searched only in code mode, never for a memory-pass chat, and a recorded worktree that is gone or belongs to another repo is unavailable, with no main-checkout substitute. Nothing about the repo is published. The GET `/file-path` and `/api/workspace-file` viewer policy is unchanged; the viewers still serve allowlisted absolute host paths by design.
 
 **Folder listing (`GET /api/workspace-dir`)**
 

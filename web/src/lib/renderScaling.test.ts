@@ -19,7 +19,7 @@
  * rebuild that creeps back into a per-span or per-message loop shows up as a
  * count, immediately and without flaking.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { buildKnownPathRules, knownPathRulesBuildCount, linkifyHtml } from './filePaths'
 import { renderMarkdown } from './safeMarkdown'
 
@@ -76,5 +76,26 @@ describe('transcript render cost', () => {
     const first = renderMarkdown(text, paths)
     const second = renderMarkdown(text, [...paths])
     expect(second).toBe(first)
+  })
+
+  it('checked targets preserve one known rule build per path array', () => {
+    const paths = knownPaths(100)
+    const targets = new Map([['docs/a.md', '/w/docs/a.md']])
+    const before = knownPathRulesBuildCount()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const message = `${BODY} see docs/a.md`
+    const first = renderMarkdown(message, paths, new Map(), { fileMentionTargets: targets })
+    for (let i = 0; i < 199; i++) renderMarkdown(`${BODY}${i} docs/a.md`, paths, new Map(), { fileMentionTargets: targets })
+    // 200 checked renders against one path array: one rule build.
+    expect(knownPathRulesBuildCount() - before).toBe(1)
+    // Rendering is request-free.
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+    // A copied map and array render the same markup and mutate nothing.
+    const copiedTargets = new Map(targets)
+    const copiedPaths = [...paths]
+    expect(renderMarkdown(message, copiedPaths, new Map(), { fileMentionTargets: copiedTargets })).toBe(first)
+    expect(targets).toEqual(new Map([['docs/a.md', '/w/docs/a.md']]))
+    expect(paths).toEqual(copiedPaths)
   })
 })
