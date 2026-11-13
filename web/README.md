@@ -46,6 +46,8 @@ The chat rail uses Option/Alt+Left and Right to move through the current workspa
 
 ## Dev workflow
 
+Signed-in Settings on the host offers terminal PATH approval under Advanced → This host and the existing Claude and opencode provider rows. It previews the executable, directory and exact destination before an explicit click; manual instructions remain available. Refusals and unverified writes are not success. Open a new terminal after a verified change.
+
 The embedded LoginView keeps terminal guidance and the six-item product tour for ordinary CLI bootstrap. Native installer bootstrap uses the same setup form and provider diagnostics without the terminal shell, first-launch note, or tour; installer workspace suggestions remain authoritative until the user types or selects a folder.
 
 ```bash

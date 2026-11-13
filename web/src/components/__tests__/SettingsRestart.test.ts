@@ -102,7 +102,8 @@ it('fails closed when the server type cannot be determined', async () => {
     await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')
     await flushPromises()
     expect(confirm).not.toHaveBeenCalled()
-    expect(post).not.toHaveBeenCalled()
+    // Settings may inspect PATH, but no restart, deploy or apply is authorized.
+    expect(post.mock.calls).toEqual([['/api/settings/terminal-path/preview', { target: 'ciao' }]])
     expect(wrapper.text()).toContain('Could not determine the server type')
   } finally {
     wrapper.unmount()
