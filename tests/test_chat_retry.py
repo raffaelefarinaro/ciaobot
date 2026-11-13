@@ -263,7 +263,8 @@ def test_claim_blocks_unrelated_turn_and_stop_before_stream_starts(tmp_path: Pat
         assert future.result() is not None
 
 
-def test_abandoned_recovery_claim_stops_on_restart(tmp_path: Path) -> None:
+def test_abandoned_recovery_claim_stops_on_restart(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import project_chats
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("recovery", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="recovery")
@@ -272,6 +273,7 @@ def test_abandoned_recovery_claim_stops_on_restart(tmp_path: Path) -> None:
     assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
     chat.retry_recovery = {**chat.retry_recovery, "claim": "claim", "owner": "2147483647-previous"}
     pcm._save()
+    monkeypatch.setattr(project_chats, "_recovery_owner_alive", lambda owner: False)
     restarted = _make_manager(tmp_path)
     assert restarted.get_chat(chat.chat_id).retry_status == "stopped"
 
@@ -289,6 +291,13 @@ def test_live_foreign_owner_claim_is_not_reconciled_as_abandoned(tmp_path: Path)
     other = _make_manager(tmp_path)
     assert other.recovery_status(chat.chat_id)["recovery_state"] == "in_flight"
     assert other.get_chat(chat.chat_id).retry_status == "pending"
+
+
+def test_process_liveness_probe_is_safe_for_current_process() -> None:
+    import os
+    from ciao.os_support.processes import pid_alive
+    assert pid_alive(os.getpid())
+    assert pid_alive(0)  # Unknown rather than signalling a process group.
 
 
 def test_stale_recovery_id_cannot_stop_replacement(tmp_path: Path) -> None:

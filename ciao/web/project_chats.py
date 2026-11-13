@@ -342,14 +342,10 @@ def _recovery_owner_alive(owner: object) -> bool:
         return True
     try:
         pid = int(owner.split("-", 1)[0])
-        if pid <= 0:
-            return True
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (ValueError, OverflowError, OSError):
+    except ValueError:
         return True
-    return True
+    from ciao.os_support.processes import pid_alive
+    return pid_alive(pid)
 
 
 def _load_retry_timing(cd: dict) -> tuple[str, int]:
