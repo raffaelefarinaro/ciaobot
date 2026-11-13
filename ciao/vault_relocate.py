@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -88,6 +89,7 @@ _SHARED_NAMES: frozenset[str] = frozenset(
         "INDEX.md",
         "MEMORY.md",
         "VOCABULARY.md",
+        ".ciao-vault-links.json",  # `vault_migrate_links.MARKER_NAME`: stays with the shared root
         ".DS_Store",
         ".runtime",
     }
@@ -150,7 +152,9 @@ def _at_or_beneath(container: Path, other: Path) -> bool:
     return container == other or container in other.parents
 
 
-def plan(config: Any, workspace: str) -> RelocationPlan:
+def plan(
+    config: Any, workspace: str, *, workspaces: Sequence[str] | None = None
+) -> RelocationPlan:
     """Classify the move for one workspace's vault. Read only."""
     try:
         source = Path(config.workspace_vault_root(workspace)).resolve()
@@ -202,10 +206,13 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
     except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
         vault_root = None
 
-    try:
-        all_names = list(config.workspace_names())
-    except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
-        all_names = [workspace]
+    if workspaces is not None:
+        all_names = list(workspaces)
+    else:
+        try:
+            all_names = list(config.workspace_names())
+        except Exception:  # noqa: BLE001 — advisory; a bad config must not crash the plan
+            all_names = [workspace]
 
     other_roots_by_name: dict[str, Path] = {}
     for name in all_names:

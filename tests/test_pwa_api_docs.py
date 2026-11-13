@@ -71,7 +71,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
     "/api/workspace-move": "browser Settings move of the install workspace (loopback only); agents run `ciao workspace-move`",
     "/api/workspace-move/plan": "browser Settings dry run for the workspace move (loopback only); agents run `ciao workspace-move`",
-    "/api/projects/{project_id}/files": "browser multipart upload; agents edit vault files directly",
     "/api/desktop-drop": "native app bridge; consumes a short-lived Finder-drop grant created outside HTTP",
     "/api/chats/{chat_id}/images": "browser image upload",
     "/api/chats/{chat_id}/attachments": "browser chat attachment upload",

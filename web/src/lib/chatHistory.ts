@@ -7,7 +7,7 @@
 
 import { isPlausibleFilePath } from './filePaths'
 import { isHostConnectionUnavailableMessage } from './chatWs'
-import type { ChatMessage, TurnOrigin } from './types'
+import type { ChatMessage, TurnOrigin, TurnVerification } from './types'
 
 export function stripLegacyContextPrefix(content: string): string {
   const lines = content.split('\n')
@@ -152,6 +152,8 @@ export function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMe
   if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
   if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
   if (lMsg.duration_ms != null && sMsg.duration_ms == null) merged.duration_ms = lMsg.duration_ms
+  // A verdict applied live from the turn_verification event, before the history reconcile caught up.
+  if (lMsg.verification && !sMsg.verification) merged.verification = lMsg.verification
   // Loop/schedule marker observed live but missing on the server row (older
   // servers, or a row built before the turn was recorded) — keep the ↻.
   if (lMsg.unattended && !sMsg.unattended) merged.unattended = lMsg.unattended
@@ -330,7 +332,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -378,6 +380,8 @@ export const toChatMessage = (m: ServerRow) => ({
   usage: m.usage,
   quota: m.quota,
   effective_model: m.effective_model,
+  // Vault answer check, overlaid on the turn's last assistant row by the engine.
+  verification: m.verification,
 })
 
 /** True for a trace row the client renders from streaming events. */
@@ -467,6 +471,8 @@ export function dropSupersededLiveTail(
         if (row.usage) carried.usage = row.usage
         if (row.effective_model) carried.effective_model = row.effective_model
         if (row.quota) carried.quota = row.quota
+        // A vault check that landed live on the streamed row before reconcile.
+        if (row.verification) carried.verification = row.verification
         changed = true
         continue
       }

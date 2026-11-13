@@ -453,6 +453,18 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
+  /**
+   * Project page › Browse files: the folder browser at the project's own
+   * folder. Resolved first, because the viewer itself browses without a chat.
+   * Returns the engine's error message when the folder cannot be listed.
+   */
+  async function openProjectFolder(projectId: string): Promise<string> {
+    const probe = await fetchWorkspaceDir('', '', undefined, projectId)
+    if (!probe.ok) return folderErrorMessage(probe.status, probe.error)
+    await openFolder(probe.listing.path)
+    return ''
+  }
+
   /** The browser moved to another folder: keep the header and Copy path on it. */
   function setFolderPath(dirPath: string): void {
     if (kind.value === 'folder') path.value = dirPath
@@ -634,6 +646,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     openImageUrl,
     openLink,
     openFolder,
+    openProjectFolder,
     setFolderPath,
     openFromFolder,
     backOrClose,

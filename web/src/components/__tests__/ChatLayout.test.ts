@@ -2450,6 +2450,52 @@ describe('ChatLayout shared chat pin', () => {
     wrapper.unmount()
   })
 
+  async function addPinnedSecondChat(store: ReturnType<typeof useProjectStore>, path = 'notes/plan.md') {
+    store.chats = [...store.chats, { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two' }] as unknown as typeof store.chats
+    if (path) store.applyChatPinState('chat-2', { path, dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+  }
+
+  it('slides the pinned file in once the route reaches the chat, however late it lands', async () => {
+    const { wrapper, router, store } = await mountChat(1180)
+    await addPinnedSecondChat(store)
+    vi.useFakeTimers()
+    try {
+      store.activeChatId = 'chat-2'
+      await vi.advanceTimersByTimeAsync(700)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(false)
+
+      await router.push('/chat/chat-2')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(560)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+      wrapper.unmount()
+    }
+  })
+
+  it('does not replay the arrival for a file pinned after the switch landed', async () => {
+    const { wrapper, router, store } = await mountChat(1180)
+    await addPinnedSecondChat(store, '')
+    vi.useFakeTimers()
+    try {
+      store.activeChatId = 'chat-2'
+      await router.push('/chat/chat-2')
+      await vi.advanceTimersByTimeAsync(100)
+      store.applyChatPinState('chat-2', { path: 'notes/plan.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+      wrapper.unmount()
+    }
+  })
+
   it('Home shows no shared-pin opener even when a chat is pinned', async () => {
     const { wrapper, store } = await mountChat(390, '/')
     store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
@@ -3808,8 +3854,8 @@ describe('ChatLayout chat route without a catalog entry', () => {
     const panelCalls: string[] = []
     const SplitChatPanelStub = defineComponent({
       name: 'ChatPanel',
-      props: { chatId: String, beside: Boolean, inactive: Boolean, split: Boolean, filePinned: Boolean },
-      emits: ['close', 'pull', 'pull-end'],
+      props: { chatId: String, beside: Boolean, inactive: Boolean, filePinned: Boolean },
+      emits: ['close', 'pull', 'pull-end', 'select-chat'],
       setup(props, { emit, expose }) {
         expose({
           toggleModelPicker: () => panelCalls.push(`model:${props.chatId}`),
@@ -3834,14 +3880,19 @@ describe('ChatLayout chat route without a catalog entry', () => {
     })
     const SidebarStub = defineComponent({
       name: 'ProjectSidebar',
-      props: { canOpenBeside: Boolean },
-      emits: ['open-beside'],
+      props: { canOpenBeside: Boolean, focusedBesideChatId: String },
+      emits: ['open-beside', 'select-beside'],
       setup(props, { emit }) {
-        return () => h('button', {
-          'data-testid': 'open-beside',
-          'data-can': String(props.canOpenBeside),
-          onClick: () => emit('open-beside', 'chat-2'),
-        })
+        return () => h('div', [
+          h('button', {
+            'data-testid': 'open-beside',
+            'data-can': String(props.canOpenBeside),
+            'data-focused-beside': props.focusedBesideChatId,
+            onClick: () => emit('open-beside', 'chat-2'),
+          }),
+          h('button', { 'data-testid': 'select-beside-3', onClick: () => emit('select-beside', 'chat-3') }),
+          h('button', { 'data-testid': 'select-beside-1', onClick: () => emit('select-beside', 'chat-1') }),
+        ])
       },
     })
 
@@ -3889,6 +3940,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
       store.chats = [
         { chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' },
         { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two', last_activity_at: '2026-11-01T10:00:00Z' },
+        { chat_id: 'chat-3', project_id: 'project-1', title: 'Chat three' },
       ] as unknown as typeof store.chats
       store.activeChatId = 'chat-1'
       store.bootstrapped = true
@@ -3952,18 +4004,29 @@ describe('ChatLayout chat route without a catalog entry', () => {
       wrapper.unmount()
     })
 
-    // With a second chat beside, the main pane's rail is replaced by a plain
-    // header, so Option+Right must not step the main chat behind the user's back.
-    it('leaves Option+Right alone while a second chat is beside the open one', async () => {
+    // Each pane has its own rail: Option+Right steps the pane with the keyboard.
+    it('steps the focused pane with Option+Right while a second chat is beside the open one', async () => {
       const wrapper = await mountSplit(1200, { beside: 'chat-2' })
       try {
-        const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, cancelable: true })
-        window.dispatchEvent(event)
-        expect(panelCalls.filter(call => call.startsWith('step:'))).toEqual([])
-        expect(event.defaultPrevented).toBe(false)
+        const right = () => new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', altKey: true, cancelable: true })
+        window.dispatchEvent(right())
+        await wrapper.get('.chat-split-side--chat').trigger('pointerdown')
+        window.dispatchEvent(right())
+        expect(panelCalls.filter(call => call.startsWith('step:'))).toEqual(['step:chat-1:1', 'step:chat-2:1'])
       } finally {
         wrapper.unmount()
       }
+    })
+
+    it("the second pane's own rail changes only that pane", async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const switchChat = vi.spyOn(useProjectStore(), 'switchChat').mockResolvedValue(undefined as never)
+      wrapper.findAllComponents({ name: 'ChatPanel' }).find(p => p.props('beside'))!.vm.$emit('select-chat', 'chat-3')
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-3"]').exists()).toBe(true)
+      expect(wrapper.find('.chat-body [data-chat-id="chat-1"]').exists()).toBe(true)
+      expect(switchChat).not.toHaveBeenCalled()
+      wrapper.unmount()
     })
 
     it('shows no second chat on a pane narrower than 940px, and brings it back when there is room', async () => {
@@ -3997,6 +4060,35 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(wrapper.get('.chat-split-side--chat [data-chat-id="chat-2"]').attributes('data-inactive')).toBe('false')
       expect(wrapper.get('.chat-body [data-chat-id="chat-1"]').attributes('data-inactive')).toBe('true')
       expect(wrapper.find('.chat-split-side--focused').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('a sidebar chat goes to the focused pane of the split', async () => {
+      const wrapper = await mountSplit(1200, { beside: 'chat-2' })
+      const store = useProjectStore()
+      const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined as never)
+      const sidebar = () => wrapper.get('[data-testid="open-beside"]')
+      // The main pane has the focus: the sidebar keeps its usual behaviour.
+      expect(sidebar().attributes('data-focused-beside')).toBe('')
+
+      await wrapper.get('.chat-split-side--chat').trigger('pointerdown')
+      expect(sidebar().attributes('data-focused-beside')).toBe('chat-2')
+
+      await wrapper.get('[data-testid="select-beside-3"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-3"]').exists()).toBe(true)
+      expect(wrapper.find('.chat-body [data-chat-id="chat-1"]').exists()).toBe(true)
+      expect(storedBeside()).toEqual({ personal: 'chat-3' })
+      expect(sidebar().attributes('data-focused-beside')).toBe('chat-3')
+      expect(switchChat).not.toHaveBeenCalled()
+
+      // The main pane's own chat is not duplicated: it takes the focus back.
+      panelCalls.length = 0
+      await wrapper.get('[data-testid="select-beside-1"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.chat-split-side--chat [data-chat-id="chat-3"]').exists()).toBe(true)
+      expect(sidebar().attributes('data-focused-beside')).toBe('')
+      expect(panelCalls).toEqual(['focus:chat-1'])
       wrapper.unmount()
     })
 

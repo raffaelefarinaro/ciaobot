@@ -1648,6 +1648,7 @@ def plan_rehome(
         "conflicts": [],
         "files": {},  # vault-relative path today -> (new text, changes, path after)
         "notes_scanned": 0,
+        "read_errors": [],
     }
     if not root.is_dir():
         plan["skipped"] = "vault root does not exist"
@@ -1720,6 +1721,7 @@ def plan_rehome(
         try:
             text = md_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            plan["read_errors"].append(relative.as_posix())
             continue
         before = relative.as_posix()
         after = moved_by_ref.get(before[:-3], "")
