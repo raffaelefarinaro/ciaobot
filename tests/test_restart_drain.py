@@ -40,6 +40,7 @@ async def test_restart_wait_requires_stable_idle_window() -> None:
 def _bare_manager() -> ProjectChatManager:
     manager = object.__new__(ProjectChatManager)
     manager._broker = ChatStreamBroker()
+    manager._retry_generations = {}
     manager._restart_draining = False
     manager._events = EventsHub()
     # The subagent watchers own the running counts and the live watcher

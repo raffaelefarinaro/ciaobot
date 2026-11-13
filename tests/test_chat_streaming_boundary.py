@@ -119,6 +119,9 @@ async def test_provider_pass_keeps_stream_events_and_terminal_outcome() -> None:
 
 
 class _DriveHost:
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool:
+        return True
+
     def __init__(
         self,
         events: list[StreamEvent],
