@@ -1009,6 +1009,70 @@ async def test_verify_recall_claims_candidate_failures_do_not_discard_other_note
     )
 
 
+@pytest.mark.parametrize("operation", ["is_file", "open", "read"])
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError, UnicodeError])
+async def test_verify_recall_claims_expected_candidate_errors_continue(
+    operation, error, tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "bad.md").write_text("bad", encoding="utf-8")
+    (root / "good.md").write_text("good evidence", encoding="utf-8")
+    opened: list[str] = []
+    closed: list[str] = []
+    original_is_file, original_open = Path.is_file, Path.open
+
+    class ReadProxy:
+        def __init__(self, handle, path):
+            self.handle, self.path = handle, path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+            closed.append(self.path.name)
+
+        def read(self, size=-1):
+            if operation == "read" and self.path.name == "bad.md":
+                raise error("candidate failure")
+            return self.handle.read(size)
+
+    def is_file(path):
+        if operation == "is_file" and path.name == "bad.md":
+            raise error("candidate failure")
+        return original_is_file(path)
+
+    def open_path(path, *args, **kwargs):
+        opened.append(path.name)
+        if operation == "open" and path.name == "bad.md":
+            raise error("candidate failure")
+        return ReadProxy(original_open(path, *args, **kwargs), path)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    monkeypatch.setattr(Path, "open", open_path)
+    helper_calls: list[str] = []
+
+    async def fake_run(prompt, **kwargs):
+        helper_calls.append(prompt)
+        return _recall_reply_from_prompt(prompt)
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run)
+    result = await vv.verify_recall_claims(
+        [vv.RecallClaim("a", "claim", ("bad.md", "good.md"))],
+        vault_root=root, model="m", provider="claude", cwd=None,
+    )
+    assert result["status"] == "checked"
+    assert result["coverage"]["omitted_sources"] == ["bad.md"]
+    assert len(helper_calls) == 1
+    notes = json.loads(re.findall(
+        r"<vault_recall_notes>(.*?)</vault_recall_notes>", helper_calls[0], re.S
+    )[0].strip())
+    assert [note["path"] for note in notes] == ["good.md"]
+    if operation == "read":
+        assert closed == ["bad.md", "good.md"]
+
+
 @pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
 async def test_verify_recall_claims_handles_disappeared_and_permission_failures(
     error, tmp_path, monkeypatch
@@ -1282,7 +1346,7 @@ async def test_verify_recall_claims_unexpected_worker_error_has_static_diagnosti
             self.handle.close()
             closed.append("closed")
         def read(self, size=-1):
-            raise RuntimeError("PRIVATE_SENTINEL")
+            raise KeyError("PRIVATE_SENTINEL")
     def open_path(path, *args, **kwargs):
         opened.append(path.name)
         return BrokenRead(original_open(path, *args, **kwargs))

@@ -415,7 +415,7 @@ def _read_recall_notes(
             continue
         try:
             is_file = resolved.is_file()
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError, UnicodeError):
             omitted.append(path)
             continue
         except Exception:  # noqa: BLE001 — abort on unexpected filesystem failures
@@ -429,7 +429,7 @@ def _read_recall_notes(
             continue
         try:
             handle = resolved.open("r", encoding="utf-8", errors="replace")
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, RuntimeError, ValueError, UnicodeError):
             omitted.append(path)
             continue
         except Exception:  # noqa: BLE001 — abort on unexpected filesystem failures
@@ -441,7 +441,7 @@ def _read_recall_notes(
         try:
             with handle:
                 text = handle.read(RECALL_MAX_NOTE_CHARS + 1)
-        except OSError:
+        except (OSError, RuntimeError, ValueError, UnicodeError):
             omitted.append(path)
             continue
         except Exception:  # noqa: BLE001 — read failures outside I/O errors invalidate all evidence
