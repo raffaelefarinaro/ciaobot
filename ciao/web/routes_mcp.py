@@ -32,13 +32,17 @@ async def mcp_status_endpoint(request: Request) -> JSONResponse:
         for tool in config.disallowed_tools_for_workspace(workspace)
         if isinstance(tool, str) and tool.startswith("mcp__") and len(tool) > len("mcp__")
     }
+    try:
+        opencode_available = resolve_opencode_binary() is not None
+    except OSError:
+        opencode_available = False
     payload = await provider_inventory(
         workspace=workspace,
         agent_root=Path(agent_root),
         explicitly_denied=denied,
         manager=manager,
         claude_available=get_bundled_claude_path() is not None,
-        opencode_available=resolve_opencode_binary() is not None,
+        opencode_available=opencode_available,
     )
     return JSONResponse(payload)
 

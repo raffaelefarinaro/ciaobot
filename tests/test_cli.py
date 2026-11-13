@@ -1598,6 +1598,36 @@ def test_auth_print_only_opencode_does_not_require_installation(monkeypatch, cap
     assert capsys.readouterr().out.strip() == "opencode auth login"
 
 
+@pytest.mark.parametrize("print_only", [False, True])
+def test_auth_corrupt_opencode_no_print_only_fallback(monkeypatch, capsys, print_only):
+    from ciao import provider_registry
+
+    def broken(self, *, device_auth=False):
+        raise OSError("private-sentinel")
+
+    monkeypatch.setattr(provider_registry.ProviderDescriptor, "auth_command", broken)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected process"))
+    args = ["auth", "opencode"] + (["--print-only"] if print_only else [])
+    assert cli.main(args) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Error: OpenCode is unavailable; check provider setup.\n"
+
+
+def test_nonopencode_auth_oserror_is_not_mislabeled(monkeypatch, capsys):
+    from ciao import provider_registry
+    error = OSError("private-sentinel")
+    def broken(self, *, device_auth=False):
+        raise error
+    monkeypatch.setattr(provider_registry.ProviderDescriptor, "auth_command", broken)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected process"))
+    with pytest.raises(OSError) as raised:
+        cli.main(["auth", "claude"])
+    assert raised.value is error
+    output = capsys.readouterr()
+    assert "OpenCode" not in output.out + output.err
+
+
 def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
     """Only the three runtime providers have a login; nothing else is offered."""
     with pytest.raises(SystemExit):

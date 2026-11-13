@@ -241,6 +241,27 @@ def test_release_check_defaults_to_the_running_ciaobot_version(
     assert release_check("opencode", "2.0.32", binary="/x", record=_tested()) == {"state": "untested"}
 
 
+@pytest.mark.parametrize("broken", [True, False], ids=["broken", "missing"])
+def test_current_checks_broken_opencode_is_unknown_not_missing(monkeypatch, broken):
+    from ciao import provider_versions, setup_status
+    from ciao.providers import opencode, claude
+
+    def resolve():
+        if broken:
+            raise OSError("private-sentinel")
+        return None
+
+    calls = []
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", resolve)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/owned/claude")
+    monkeypatch.setattr(claude, "get_bundled_claude_path", lambda: None)
+    monkeypatch.setattr(provider_versions, "_probe_version", lambda binary: calls.append(("probe", binary)) or "1")
+    monkeypatch.setattr(provider_versions, "release_check", lambda provider, version, **kw: calls.append(("release", provider)) or {"state": "tested"})
+    checks = provider_versions.current_checks()
+    assert checks == ({"opencode": {"state": "unknown"}, "claude": {"state": "tested"}} if broken else {"claude": {"state": "tested"}})
+    assert calls == [("probe", "/owned/claude"), ("release", "claude")]
+
+
 def test_release_check_survives_a_broken_record(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom() -> dict:
         raise ProviderRecordError("provider record: broken")

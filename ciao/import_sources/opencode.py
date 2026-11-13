@@ -460,11 +460,11 @@ def _resolve_binary(binary: str | None) -> str:
         return explicit
     try:
         found = resolve_opencode_binary()
-    except OSError as exc:
+    except OSError:
         raise SourceError(
             REASON_UNAVAILABLE,
-            f"The opencode CLI is on PATH but cannot be run: {exc}",
-        ) from exc
+            "The OpenCode CLI is unavailable; check provider setup.",
+        ) from None
     if not found:
         raise SourceError(
             REASON_UNAVAILABLE,
