@@ -378,7 +378,7 @@ describe('one card per lifecycle', () => {
 
 describe('which control leads each lifecycle', () => {
   it.each([
-    ['an offer that applies', {}, 'Start in chat', ['Hide it', 'Hide for now']],
+    ['an offer that applies', {}, 'Start in chat', ['Refresh preview', 'Hide it', 'Hide for now']],
     ['an attempt under way', { status: 'in_progress', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
     ['a failed attempt', { status: 'failed', chat_id: 'c', chat_live: true }, 'Try again', ['Open its chat', 'Hide it', 'Hide for now']],
     ['proposals waiting for review', { status: 'waiting_review', chat_id: 'c', chat_live: true }, 'Review proposals', ['Resume chat', 'Open its chat', 'Hide it', 'Hide for now']],

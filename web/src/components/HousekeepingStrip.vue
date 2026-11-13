@@ -583,18 +583,36 @@ function startText(task: UpdateTaskRow): string {
   return 'Start in chat'
 }
 
-/** One line: a refusal first (it is the thing the operator must read), then —
- *  for an offer the detector has confirmed — why it exists, and otherwise where
- *  the attempt stands. */
+function taskPreview(task: UpdateTaskRow) {
+  if (housekeeping.updateTasksWorkspace !== projectStore.activeWorkspace) return undefined
+  return housekeeping.taskPreviews[taskKey(task)]
+}
+
+/** A transition refusal comes first; only a confirmed offer uses its preview. */
 function taskLine(task: UpdateTaskRow): string {
   const error = taskError(task)
   if (error) return error
-  if (task.status === 'offered' && task.applicability !== 'unknown') return task.why
+  if (task.status === 'offered' && task.applicability === 'applicable') {
+    const preview = taskPreview(task)
+    if (preview?.result) return `Preview: ${preview.result.summary}`
+    if (preview?.error) return 'Could not prepare a preview. You can review this in chat.'
+    if (preview?.loading) return 'Preparing a preview…'
+    return task.why
+  }
   return taskStateLine(task)
 }
 
 function taskItems(task: UpdateTaskRow): NeedsYouMenuItem[] {
   const items: NeedsYouMenuItem[] = []
+  if (task.status === 'offered' && task.applicability === 'applicable') {
+    const preview = taskPreview(task)
+    const checked = preview?.result?.checked_at
+    const date = checked ? new Date(checked) : null
+    const label = date && !Number.isNaN(date.getTime())
+      ? `Refresh preview (checked ${date.toLocaleString()})`
+      : 'Refresh preview'
+    items.push({ id: 'refresh-preview', label, disabled: !!preview?.loading })
+  }
   // A review row leads with the queue; its chat is still one tap away.
   if (taskLead(task) === 'review') {
     items.push({ id: 'start', label: startText(task), disabled: taskBusy(task) })
@@ -607,6 +625,7 @@ function taskItems(task: UpdateTaskRow): NeedsYouMenuItem[] {
 
 async function onTaskSelect(task: UpdateTaskRow, id: string): Promise<void> {
   switch (id) {
+    case 'refresh-preview': return housekeeping.refreshTaskPreview(task)
     case 'start': return startTask(task)
     case 'chat': return openTaskChat(task.chat_id)
     case 'dismiss': return dismissTask(task)
