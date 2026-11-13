@@ -109,19 +109,22 @@ function makeIntervalSchedule(scheduleId: string): Schedule {
 async function mountPanel(
   setup: (store: ReturnType<typeof useProjectStore>) => void = () => {},
   schedules: Schedule[] = [],
+  options: { pinia?: ReturnType<typeof createPinia>; apiGet?: (path: string) => unknown } = {},
 ) {
-  const pinia = createPinia()
+  const pinia = options.pinia ?? createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
-  store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1')]
-  store.activeChatId = 'chat-1'
-  store.messages = { 'chat-1': [] }
-  store.workspaces = [
-    { name: 'personal', color: 'emerald' },
-    { name: 'work', color: 'pink' },
-  ] as unknown as typeof store.workspaces
-  store.bootstrapped = true
+  if (!options.pinia) {
+    store.projects = [makeProject()]
+    store.chats = [makeChat('chat-1')]
+    store.activeChatId = 'chat-1'
+    store.messages = { 'chat-1': [] }
+    store.workspaces = [
+      { name: 'personal', color: 'emerald' },
+      { name: 'work', color: 'pink' },
+    ] as unknown as typeof store.workspaces
+    store.bootstrapped = true
+  }
   setup(store)
 
   const taskStore = useTaskStore()
@@ -129,6 +132,8 @@ async function mountPanel(
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
+    const handled = options.apiGet?.(path)
+    if (handled !== undefined) return Promise.resolve(handled) as never
     if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
     if (path === '/api/commands') return Promise.resolve({ commands: [] }) as never
     return Promise.resolve([]) as never
@@ -154,7 +159,7 @@ async function mountPanel(
     },
   })
   await flushPromises()
-  return { wrapper, store }
+  return { wrapper, store, pinia }
 }
 
 function approval(id: string, tool: string) {
@@ -543,6 +548,111 @@ describe('ChatPanel model summary', () => {
     const summary = wrapper.get('.model-picker-summary')
     expect(summary.text()).toContain('anthropic/claude-sonnet-4-6')
     expect(summary.text()).not.toContain('think:auto')
+    wrapper.unmount()
+  })
+})
+
+describe('ChatPanel Chat details skills', () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  // The rail's Skills and MCP section was missing an opencode skill because its
+  // tool input names the skill `id`, not `name` (#2863). It must read the real
+  // transcript both ways: the persisted rows a reload hydrates, and the live
+  // timeline the socket fills.
+  function wideRail() {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    return observers
+  }
+
+  const HISTORY = [
+    { i: 0, role: 'user', content: 'Use the loop skill', sent_at: '2026-08-01T00:00:00Z', turn_index: 0 },
+    { i: 1, role: 'system', content: '⚙️ skill {"id": "loop-engineering"}\n🧩 Skill pr-review', tool_name: '_activity' },
+    { i: 2, role: 'assistant', content: 'Finished.', timestamp: '2026-08-01T00:00:10Z' },
+  ]
+  const ENVELOPE = { items: HISTORY, total: HISTORY.length, offset: 0, limit: 50, hasMore: false, nextOffset: null }
+
+  it('shows the opencode skill id from persisted activity in a fresh panel', async () => {
+    const apiGet = (path: string) => path === '/api/chats/chat-1/messages?limit=50' ? ENVELOPE : undefined
+    const observers = wideRail()
+    const { wrapper, store, pinia } = await mountPanel(undefined, [], { apiGet })
+    await store.loadMessages('chat-1')
+    wrapper.unmount()
+
+    const fresh = await mountPanel(undefined, [], { pinia, apiGet })
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const section = fresh.wrapper.get('#chat-work-rail .chat-rail-tools')
+    expect(section.get('.cd-heading').text()).toBe('Skills and MCP')
+    expect(section.get('.cd-count').text()).toBe('2')
+    const rows = section.findAll('.chat-rail-tool')
+    expect(rows.map(row => row.get('.cd-primary').text())).toEqual(['loop-engineering', 'pr-review'])
+    for (const row of rows) {
+      expect(row.get('.cd-detail').text()).toBe('Skill')
+      expect(row.find('.cd-value').exists()).toBe(false)
+    }
+    vi.unstubAllGlobals()
+    fresh.wrapper.unmount()
+  })
+
+  it('shows a live opencode skill once, before and after the turn settles', async () => {
+    const sockets: FakeChatSocket[] = []
+    class FakeChatSocket {
+      static OPEN = 1
+      static CLOSED = 3
+      readyState = FakeChatSocket.OPEN
+      onopen: (() => void) | null = null
+      onmessage: ((event: { data: string }) => void) | null = null
+      onclose: ((event: { code?: number }) => void) | null = null
+      onerror: (() => void) | null = null
+      constructor(public url: string) {
+        sockets.push(this)
+        queueMicrotask(() => this.onopen?.())
+      }
+      send = vi.fn()
+      close() { this.readyState = FakeChatSocket.CLOSED; this.onclose?.({}) }
+    }
+    vi.stubGlobal('WebSocket', FakeChatSocket)
+    const observers = wideRail()
+
+    const { wrapper, store } = await mountPanel()
+    observers.forEach(fire => fire())
+    await nextTick()
+    store.connectWs('chat-1')
+    const socket = sockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'skill', tool_input: '{"id":"loop-engineering"}', tool_use_id: 'sk1' })
+    send({ type: 'tool_use', tool_name: 'Skill', tool_input: 'pr-review' })
+    await nextTick()
+
+    const skillRows = () => wrapper.get('#chat-work-rail .chat-rail-tools')
+    const loop = () => skillRows().findAll('.chat-rail-tool').find(row => row.text().includes('loop-engineering'))!
+    expect(loop().get('.cd-detail').text()).toBe('Skill')
+    expect(loop().find('.cd-value').exists()).toBe(false)
+    expect(skillRows().findAll('.chat-rail-tool')).toHaveLength(2)
+
+    send({ type: 'tool_result', tool_name: 'skill', tool_use_id: 'sk1' })
+    send({ type: 'result', text: 'Finished.', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
+    await flushPromises()
+
+    expect(skillRows().findAll('.chat-rail-tool')).toHaveLength(2)
+    expect(loop().get('.cd-detail').text()).toBe('Skill')
+    expect(loop().find('.cd-value').exists()).toBe(false)
+    store.disconnectWs('chat-1')
+    vi.unstubAllGlobals()
     wrapper.unmount()
   })
 })

@@ -2450,6 +2450,52 @@ describe('ChatLayout shared chat pin', () => {
     wrapper.unmount()
   })
 
+  async function addPinnedSecondChat(store: ReturnType<typeof useProjectStore>, path = 'notes/plan.md') {
+    store.chats = [...store.chats, { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two' }] as unknown as typeof store.chats
+    if (path) store.applyChatPinState('chat-2', { path, dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+  }
+
+  it('slides the pinned file in once the route reaches the chat, however late it lands', async () => {
+    const { wrapper, router, store } = await mountChat(1180)
+    await addPinnedSecondChat(store)
+    vi.useFakeTimers()
+    try {
+      store.activeChatId = 'chat-2'
+      await vi.advanceTimersByTimeAsync(700)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(false)
+
+      await router.push('/chat/chat-2')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(560)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+      wrapper.unmount()
+    }
+  })
+
+  it('does not replay the arrival for a file pinned after the switch landed', async () => {
+    const { wrapper, router, store } = await mountChat(1180)
+    await addPinnedSecondChat(store, '')
+    vi.useFakeTimers()
+    try {
+      store.activeChatId = 'chat-2'
+      await router.push('/chat/chat-2')
+      await vi.advanceTimersByTimeAsync(100)
+      store.applyChatPinState('chat-2', { path: 'notes/plan.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('.chat-split-side').exists()).toBe(true)
+      expect(wrapper.find('.chat-split-side--arriving').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+      wrapper.unmount()
+    }
+  })
+
   it('Home shows no shared-pin opener even when a chat is pinned', async () => {
     const { wrapper, store } = await mountChat(390, '/')
     store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })

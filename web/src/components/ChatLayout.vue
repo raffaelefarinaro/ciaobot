@@ -1152,19 +1152,34 @@ const chatRising = ref(false)
 /**
  * Switching to a chat that has a pinned file: the chat slides in first, then its
  * file follows from the right (the tile stays hidden for the chat's slide).
+ *
+ * The switch only arms the arrival. The tile shows once the route and the
+ * selection agree (`activePinKey`), and switchChat moves the selection before
+ * the route lands, so the clock starts when the tile appears: timed from the
+ * selection, a slow route cut the slide short or skipped it (#2840).
  */
+const TILE_ARRIVAL_MS = 560
 const tileArriving = ref(false)
 let tileTimer: ReturnType<typeof setTimeout> | null = null
+let tileArrivalFor = ''
 watch(() => store.activeChat?.chat_id, (id, was) => {
+  tileArrivalFor = ''
   if (!id || !was || id === was) return
   if (prefersReducedMotion()) return
   tileArriving.value = false
-  if (tileTimer) clearTimeout(tileTimer)
-  void nextTick(() => {
-    tileArriving.value = true
-    tileTimer = setTimeout(() => { tileArriving.value = false; tileTimer = null }, 560)
-  })
+  if (tileTimer) { clearTimeout(tileTimer); tileTimer = null }
+  tileArrivalFor = id
 })
+// Post flush: `panelPath` (a pre-flush watcher) has settled, so `fileInTile` is final.
+watch([activePinKey, fileInTile], ([key, inTile]) => {
+  if (!key || key !== tileArrivalFor) return
+  // The switch has landed: its file slides in now, or not at all. A file pinned
+  // later in this chat opens without the arrival.
+  tileArrivalFor = ''
+  if (!inTile) return
+  tileArriving.value = true
+  tileTimer = setTimeout(() => { tileArriving.value = false; tileTimer = null }, TILE_ARRIVAL_MS)
+}, { flush: 'post' })
 let riseTimer: ReturnType<typeof setTimeout> | null = null
 let bootSettledAt = 0
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
