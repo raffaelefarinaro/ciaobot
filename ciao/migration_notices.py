@@ -228,6 +228,13 @@ RELOCATION_VAULT_MISSING = "vault_missing"
 #: there is nothing to offer.
 RELOCATION_INSTALL_FOLDER = "vault_is_install_folder"
 
+#: The vault is a folder this workspace adopted on purpose: on a re-rooted
+#: install, a registered root that is neither the standard per-root folder nor
+#: the superseded ``memory-vault/<name>`` (`CiaoConfig.adopted_workspace_vault`,
+#: the same rule ownership uses). Moving it would take the notes out of the
+#: folder the operator chose (#2845), so there is nothing to offer.
+RELOCATION_ADOPTED = "adopted_vault"
+
 #: A **completed** relocation is recorded for this workspace, and the workspace
 #: no longer sits outside its folder. Only a `status: "relocated"` receipt counts:
 #: a `refused` one means a run happened and moved nothing, and a receipt this
@@ -447,6 +454,18 @@ def relocation_state(config: Any, workspace: str) -> str:
         install_root = None
     if actual == install_root:
         return RELOCATION_INSTALL_FOLDER
+    # An explicitly adopted per-root vault is the workspace's own folder, not a
+    # misplaced one. Only the legacy ``memory-vault/<name>`` subpath (and the
+    # shared layout) still reads as misplaced.
+    try:
+        is_adopted = bool(config.adopted_workspace_vault(workspace))
+    except Exception as exc:  # noqa: BLE001 — an unresolvable entry is an unknown
+        raise ValueError(
+            f"the workspace registry does not resolve {workspace!r} to a "
+            f"vault root: {exc}"
+        ) from exc
+    if is_adopted:
+        return RELOCATION_ADOPTED
     return RELOCATION_MISPLACED
 
 
