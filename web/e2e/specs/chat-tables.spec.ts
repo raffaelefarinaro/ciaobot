@@ -88,4 +88,33 @@ test('prose wraps with enlarged text in a narrow pane', async ({ page }, testInf
   await quiesce(page)
   const ratio = await tables.first().locator('table').evaluate(el => el.querySelector('th:nth-child(2)')!.getBoundingClientRect().width / el.getBoundingClientRect().width)
   expect(ratio).toBeGreaterThanOrEqual(0.4)
+  const first = await tables.first().locator('tbody td:first-child').evaluate(el => {
+    const style = getComputedStyle(el)
+    return { height: el.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom), line: parseFloat(style.lineHeight) }
+  })
+  expect(first.height).toBeGreaterThan(first.line * 1.5)
+})
+
+test('prose wraps in a constrained desktop chat pane', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const tables = await openTables(page, `table-split-${testInfo.workerIndex}`)
+  const row = page.locator('.chat-item', { hasText: 'alpha second conversation' })
+  await row.hover()
+  await row.locator('.chat-beside-btn').click()
+  await expect(page.locator('.chat-split-side--chat')).toBeVisible()
+  await expect(page.locator('.chat-split-resizer')).toBeVisible()
+  await quiesce(page)
+  const paneWidth = await page.locator('.chat-main > .chat-body').evaluate(el => el.getBoundingClientRect().width)
+  expect(paneWidth).toBeLessThan(700)
+  const geometry = await tables.first().locator('table').evaluate(el => {
+    const first = el.querySelector('tbody td:first-child') as HTMLElement
+    const style = getComputedStyle(first)
+    return {
+      height: first.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+      line: parseFloat(style.lineHeight),
+      ratio: el.querySelector('th:nth-child(2)')!.getBoundingClientRect().width / el.getBoundingClientRect().width,
+    }
+  })
+  expect(geometry.ratio).toBeGreaterThanOrEqual(0.4)
+  expect(geometry.height).toBeGreaterThan(geometry.line * 1.5)
 })
