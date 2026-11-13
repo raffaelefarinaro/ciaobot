@@ -151,6 +151,7 @@ from ciao.web.routes_api import (
     run_housekeeping_action,
     dismiss_housekeeping_action,
     list_update_tasks,
+    preview_update_task,
     start_update_task,
     dismiss_update_task,
     reopen_update_task,
@@ -631,6 +632,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # Session-protected like every other /api route; not loopback-only,
         # because a second device is exactly the race the idempotency is for.
         Route("/api/update-tasks", list_update_tasks, methods=["GET"]),
+        Route("/api/update-tasks/{task_id}/preview", preview_update_task, methods=["GET"]),
         Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"]),
         Route("/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"]),
         Route("/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"]),
