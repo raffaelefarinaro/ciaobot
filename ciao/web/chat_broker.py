@@ -722,9 +722,11 @@ class ChatStream:
         "reload_continue",
         "network_retry_turn",
         "network_retry_armed",
+        "retry_generation",
     )
 
     def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
+        self.retry_generation: int = 0
         self._events: list[dict] = []
         self._subs: set[asyncio.Queue[dict | None]] = set()
         self._done: bool = False
