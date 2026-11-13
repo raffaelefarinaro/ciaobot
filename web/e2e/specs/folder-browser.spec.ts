@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate } from '../support/app'
+import { boot, COMPOSER, isolate, quiesce } from '../support/app'
 
 const WS = '/fixture/work'
 const DIR = `${WS}/memory-vault/Workspace`
@@ -74,6 +74,70 @@ test.describe('folder browser on a phone', () => {
 
 test.describe('folder browser on desktop', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
+
+  for (const theme of ['dark', 'light']) {
+    test(`shared styles survive loading the folder browser (${theme})`, async ({ page }, testInfo) => {
+      await setup(page, `fb-cascade-${theme}-${testInfo.workerIndex}`)
+      await page.addInitScript(value => localStorage.setItem('ciao-theme', value), theme)
+      await boot(page, '/', '.empty-shell:not(.home-boot)')
+      await expect(page.locator('.startup-overlay')).toHaveCount(0)
+      await quiesce(page)
+      await page.locator('html').evaluate((el, light) => el.classList.toggle('theme-light', light), theme === 'light')
+      await page.evaluate(() => {
+        for (const [tag, cls, text] of [['button', 'btn-small', 'Neutral probe'], ['button', 'btn-primary btn-small', 'Primary probe'], ['span', '', 'Text probe']]) {
+          const el = document.createElement(tag)
+          el.className = cls
+          el.textContent = text
+          el.setAttribute('data-cascade-probe', text)
+          document.body.appendChild(el)
+        }
+      })
+      const neutral = page.locator('[data-cascade-probe="Neutral probe"]')
+      const primary = page.locator('[data-cascade-probe="Primary probe"]')
+      const measure = async () => {
+        await primary.focus()
+        await page.keyboard.press('Shift+Tab')
+        await expect(neutral).toBeFocused()
+        return page.evaluate(() => {
+          const props = ['color', 'background-color', 'border-top-color', 'border-top-style', 'border-top-width', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'font-size', 'font-family', 'border-radius', 'outline-width', 'outline-style', 'outline-color', 'outline-offset']
+          const values = (el: Element, keys: string[]) => Object.fromEntries(keys.map(key => [key, getComputedStyle(el).getPropertyValue(key)]))
+          const body = values(document.body, ['color', 'background-color', 'font-family', 'font-size'])
+          const buttons = Array.from(document.querySelectorAll('[data-cascade-probe]')).slice(0, 2).map(el => values(el, props))
+          const text = values(document.querySelector('[data-cascade-probe="Text probe"]')!, ['color', 'font-family', 'font-size'])
+          const tokens = ['--bg', '--fg'].map(token => {
+            if (!getComputedStyle(document.documentElement).getPropertyValue(token).trim()) return ''
+            const el = document.createElement('span')
+            el.style.color = `var(${token})`
+            document.body.appendChild(el)
+            const value = getComputedStyle(el).color
+            el.remove()
+            return value
+          })
+          return { body, buttons, text, tokens, focusVisible: document.activeElement?.matches(':focus-visible') }
+        })
+      }
+      const before = await measure()
+      expect(before.tokens.every(Boolean)).toBe(true)
+      expect(before.body['background-color']).toBe(before.tokens[0])
+      expect(before.body.color).toBe(before.tokens[1])
+      expect(before.focusVisible).toBe(true)
+      expect(before.buttons[0]['outline-style']).not.toBe('none')
+      expect(parseFloat(before.buttons[0]['outline-width'])).toBeGreaterThan(0)
+      await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+      await expect(page.locator(COMPOSER)).toBeVisible()
+      await page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]').click()
+      const viewer = page.locator('.fv-modal')
+      await expect(viewer).toBeVisible()
+      await viewer.getByRole('button', { name: 'More file actions' }).click()
+      await page.getByRole('menuitem', { name: 'Show in folder' }).or(page.getByRole('button', { name: 'Show in folder' })).first().click()
+      await expect(viewer.locator('.vuefinder')).toBeVisible()
+      await expect(viewer.getByText('findings.md').first()).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(viewer).not.toBeVisible()
+      await quiesce(page)
+      expect(await measure()).toEqual(before)
+    })
+  }
 
   test('a subfolder and a file open in the viewer, and Back returns to the folder', async ({ page }, testInfo) => {
     await setup(page, `fb-desktop-${testInfo.workerIndex}`)
