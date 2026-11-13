@@ -559,9 +559,17 @@ get a fresh `~/Ciaobot`. Taking a different workspace would start a second engin
 with a fresh password and a fresh runtime root next to the real ones, retire the
 app's agent, and leave the original and every chat in it behind while the receipt
 still named the original. A hand-over that reaches `migrated` also removes the
-retired `Ciaobot.app` — the bundle the classifier named, guarded to a `.app`
-directory, deleted only after the app's own agent is gone, and reported rather
-than fatal if it would not go (`ciao desktop uninstall` is the manual fallback).
+retired `Ciaobot.app` named by the classifier after the app's own agent is gone.
+Explicit `--migrate` authorizes this cleanup without a second prompt; an ordinary
+interactive migration approval describes it upfront. Only an app under an allowed
+Applications directory with the retired executable and unchanged bundle and
+executable identities is attempted. These identities are not signatures and do
+not eliminate same-user races or inode reuse. Removal is unprivileged: there is
+no silent elevation or permission change. A denial, refusal, failure or partial
+removal is reported separately from the successful migration; partial removal
+does not mean the app remains intact. Resolve permissions before retrying. A later
+`--migrate` with a matching settled host receipt revalidates the recorded path,
+shows it and asks once (default no), without repeating the handover.
 Nothing before that removes it: `--no-start` leaves the app's agent loaded, a
 client gets somebody else's engine, and every rollback needs the bundle because
 the engine it hands back runs out of it. The bundle is recorded in the receipt
