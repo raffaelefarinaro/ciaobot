@@ -367,25 +367,9 @@
             :known-paths="knownFilePaths"
           >
             <template v-if="errorHasActions(i, item.msg.content)" #actions>
-              <template v-if="retryOwnerIdx === i && chat.retry">
-                <ChatRetryState
-                  :retry="chat.retry"
-                  :provider="chat.provider"
-                  :streaming="view.isStreaming"
-                  :chat-id="chat.chat_id"
-                  @continue="openRecoveryPicker(null)"
-                  @try-now="tryRetryNow"
-                  @stop="stopRetry"
-                />
-                <!-- The retry state does not replace the diagnosis chat. -->
-                <div v-if="errorBubbleAction(i, item.msg.content) === 'fix'" class="error-actions">
-                  <button class="retry-btn fix-btn" @click="openFixChat(i)">Fix this error</button>
-                </div>
-              </template>
-              <template v-else>
               <div class="error-actions">
                 <button
-                  v-if="lastUserBefore(i) && !hasLaterItem(i)"
+                  v-if="!hasPendingRetry && lastUserBefore(i) && !hasLaterItem(i)"
                   class="retry-btn"
                   @click="retryFromError(i)"
                 >Retry</button>
@@ -408,14 +392,13 @@
                 >Fix this error</button>
               </div>
               <ProviderSignInHint
-                v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
+                v-if="!hasPendingRetry && isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
                 :provider="chat.provider"
                 action-label="Retry"
                 :action-disabled="view.isStreaming"
                 :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
-              </template>
             </template>
           </InjectedPromptCard>
         </div>
@@ -527,13 +510,11 @@
       </template>
       </template>
 
-      <!-- A pending retry whose failure is not the transcript's last row (or
-           has none) gets its own error card; otherwise the last error row
-           carries the retry state itself. -->
-      <div v-if="retryPending && chat.retry && retryOwnerIdx === -1" class="message-wrap injected-prompt-wrap">
+      <!-- The stored reason does not prove that a transcript error owns this schedule. -->
+      <div v-if="retryPending && chat.retry" class="message-wrap injected-prompt-wrap">
         <InjectedPromptCard
-          :prompt="errorNoticePrompt(chat.retry.last_error || '')"
-          :raw="chat.retry.last_error || ''"
+          :prompt="retryScheduledNotice(chat.retry.last_error || '')"
+          raw=""
           :chat-title="chat.title"
           :known-paths="knownFilePaths"
         >
@@ -1538,7 +1519,7 @@ import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
-import { errorNoticePrompt, parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -4849,21 +4830,8 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
 function hasLaterItem(errorIdx: number): boolean {
   return renderItems.value.slice(errorIdx + 1).some(it => it.kind !== 'trace')
 }
-// A pending retry shows on the transcript's last row when that row is the
-// failure (a trace after it does not count); -1 when no error row owns it.
-const retryPending = computed(() => chat.value?.retry?.status === 'pending' && !view.isStreaming)
-const retryOwnerIdx = computed(() => {
-  if (!retryPending.value) return -1
-  const items = renderItems.value
-  for (let k = items.length - 1; k >= 0; k--) {
-    const it = items[k]
-    if (it.kind === 'trace') continue
-    const isError = (it.kind === 'assistant' && it.msg.is_error)
-      || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return isError ? k : -1
-  }
-  return -1
-})
+const hasPendingRetry = computed(() => chat.value?.retry?.status === 'pending')
+const retryPending = computed(() => hasPendingRetry.value && !view.isStreaming)
 // The next row that is not a trace, or -1.
 function nextNonTraceIdx(idx: number): number {
   const items = renderItems.value
@@ -4894,13 +4862,12 @@ function retryFailedFrom(errorIdx: number): boolean {
 // Whether the notice's actions slot has anything to draw. The same
 // conditions the template uses for each button and the sign-in hint.
 function errorHasActions(errorIdx: number, content: string): boolean {
-  if (retryOwnerIdx.value === errorIdx) return true
-  const canRetry = Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
+  const canRetry = !hasPendingRetry.value && Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
   const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
   return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
 }
 function retryFromError(errorIdx: number) {
-  if (chat.value.archived) return
+  if (chat.value.archived || hasPendingRetry.value) return
   const prior = lastUserBefore(errorIdx)
   if (!prior) return
   // Build a PreparedMessage so sendMessage sends the prior turn's image
@@ -4934,17 +4901,18 @@ function retryFromError(errorIdx: number) {
 function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 'switch-model' | 'fix' | null {
   const action = errorQuickAction(content)
   if (action === 'fix') return 'fix'
+  if (hasPendingRetry.value) return null
   if (chat.value.archived) return 'fix'
   if (hasLaterItem(errorIdx)) return null
   if (action === 'switch-model') return 'switch-model'
   if (!lastUserBefore(errorIdx)) return 'fix'
   if (action === 'sign-in') return null
-  return chat.value.retry?.status === 'pending' ? null : 'retry-hourly'
+  return 'retry-hourly'
 }
 
 // Arm the chat's hourly deferred retry with the turn that hit the limit.
 async function retryHourlyFromError(errorIdx: number) {
-  if (chat.value.archived) return
+  if (chat.value.archived || hasPendingRetry.value) return
   const prior = lastUserBefore(errorIdx)
   if (!prior) return
   try {
@@ -4985,6 +4953,7 @@ async function stopRetry() {
 // while the picker is open.
 function openRecoveryPicker(errorIdx: number | null) {
   if (!chat.value || chat.value.archived) return
+  if (errorIdx !== null && hasPendingRetry.value) return
   if (view.isStreaming) return
   recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
   pickerMode.value = 'recovery'
@@ -5140,6 +5109,10 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // pick (which drops the recovery) and a confirmation dialog can sit over a
   // chat that changes.
   const recovery = pickerMode.value === 'recovery' ? recoveryContext.value : null
+  if (recovery?.errorIdx != null && hasPendingRetry.value) {
+    showModelPicker.value = false
+    return
+  }
   const chatId = chat.value.chat_id
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude',
@@ -5202,6 +5175,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
         if (!ok) return
         // The user answered a dialog: the chat may have moved under it.
         if (chat.value?.chat_id !== chatId) return
+        if (recovery?.errorIdx != null && hasPendingRetry.value) return
         const applied = await applyModelChoice(chatId, updates, true, staged)
         if (!applied) return
       } else {

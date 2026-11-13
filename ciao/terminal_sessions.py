@@ -183,7 +183,7 @@ _SPAWN_WAIT_S = 5.0
 _SESSION_ID_BYTES = 16
 
 #: The kinds of thing a session can be opened against.
-TerminalTargetKind = Literal["chat", "project"]
+TerminalTargetKind = Literal["chat", "project", "workspace"]
 
 #: The closed vocabulary of refusal reasons. A caller maps a reason to a
 #: status without parsing prose.
@@ -629,7 +629,7 @@ class TerminalSessionManager:
         bad argv is refused with ``invalid_input`` before any process is
         touched.
         """
-        if target_kind not in ("chat", "project"):
+        if target_kind not in ("chat", "project", "workspace"):
             raise TerminalSessionError("invalid_target")
         if not isinstance(target_id, str) or not target_id.strip():
             raise TerminalSessionError("invalid_target")
@@ -866,7 +866,7 @@ class TerminalSessionManager:
         appears in the other's list. No other target's sessions are
         exposed.
         """
-        if target_kind not in ("chat", "project"):
+        if target_kind not in ("chat", "project", "workspace"):
             raise TerminalSessionError("invalid_target")
         return [
             self._info(session)
