@@ -454,10 +454,13 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
       What needs you; do not try to apply it another way.
     - `unverified` — no source this pass reached could support the verdict, the
       check did not cover the whole note, or the input was too large to judge.
-      Nothing was written, and a cooldown stops tonight's run re-asking.
+      Nothing was written, and a cooldown stops tonight's run re-asking. An
+      attended chat that has the source can settle it later.
     - `conflict` — the note moved since you read it. Re-read and judge again.
     - `already_checked` — a check for this exact revision is in its cooldown or
-      is waiting on a proposal. Nothing was asked or written.
+      is waiting on a proposal. Nothing was asked or written. The reply names the
+      check's reason; an unattended `unverified` with no proposal does not block
+      an attended chat, which can send its verdict.
     - `failed` — the note could not be used at all.
 
     A retirement is never applied here: it is a human decision, all the way
