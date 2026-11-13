@@ -1510,6 +1510,23 @@ with revocable per-device credentials; those remain follow-up work for #546.
 
 ## Quality gates
 
+Provider migration preflight uses the staged interpreter to check both the installed
+and target-recorded OpenCode versions. Capability markers and the actual operation
+fields must both be present before a managed migration can be offered; existing
+chats using a non-default provider can still need attention. The wheel signature
+does not authenticate npm artifacts or the separately resolved Claude SDK binary.
+Producer and validator both keep OpenCode major 3 or later manual-only, even if a
+future target accepts it. Ready installer claims must use a supported native
+package and the matching npm argv shape (POSIX npm or Windows node.exe plus
+npm-cli.js); this shape check is not executable or package authentication.
+Exercise the read-only preflight with `tests/test_provider_migration.py`; its
+fixtures isolate the stage, binaries and process boundary and perform no install,
+login or model call.
+On Windows, the probe starts a private isolated-Python bootstrap that waits for
+the parent to assign its Job Object before it can launch the requested command.
+The bootstrap ordering is exercised with owned test processes; native Windows
+process and Job behavior still requires the Windows-full CI gate.
+
 For task progress/history changes, run `tests/test_task_updates.py`,
 `tests/test_task_log.py`, `tests/test_task_resolution.py`,
 `tests/test_task_markdown.py` and `tests/test_task_board_store.py`. Progress-note
