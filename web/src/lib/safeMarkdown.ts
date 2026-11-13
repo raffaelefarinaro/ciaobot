@@ -6,7 +6,15 @@ import { isImageFilePath } from './chatActivity'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { linkifyChatIds } from './chatLinks'
 import { COMMENT_TAGS } from './commentContext'
-import { hasKnownFileExtension, isFolderLinkPath, isPlausibleFilePath, linkifyHtml } from './filePaths'
+import {
+  type FileMentionTargets,
+  findFileMentionSpans,
+  hasKnownFileExtension,
+  isFolderLinkPath,
+  isPlausibleFilePath,
+  linkifyHtml,
+  runMentionSpans,
+} from './filePaths'
 import { isLoopbackPage } from './loopback'
 import { DEAD_LINK_OPENABLE_CLASS, DEAD_LINK_PATH_ATTR } from './openWorkspaceFile'
 import { buildMarkdownIndex, joinRelative, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
@@ -24,6 +32,12 @@ type RenderOptions = {
   openLocal?: boolean
   /** The chat the message belongs to: its workspace resolves relative image paths. */
   chatId?: string
+  /**
+   * Confirmed mentions to link (see `collectAssistantFileMentions`). Undefined
+   * keeps the legacy inference; a map, even an empty one, links only known
+   * touched paths plus the mentions it names exactly.
+   */
+  fileMentionTargets?: FileMentionTargets
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
@@ -467,10 +481,77 @@ export function renderMarkdown(
     const html = lifted.restore(chatMarkdownParser.parse(lifted.text) as string)
     const linked = linkifyChatIds(html, knownChats)
     return neutralizeDeadAnchors(
-      linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths),
+      linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths, opts.fileMentionTargets),
     )
   } catch {
     return neutralizeDeadAnchors(sanitizeHtml(text))
+  } finally {
+    openLocalFiles = false
+    renderChatId = ''
+  }
+}
+
+// The chat renderer's markup with raw HTML dropped. Raw HTML is removed before
+// the DOM parse, where the token it came from is no longer visible.
+const mentionRenderer = new Renderer()
+Object.assign(mentionRenderer, {
+  table: chatMarkdownRenderer.table,
+  code: chatMarkdownRenderer.code,
+  codespan: chatMarkdownRenderer.codespan,
+  link: chatMarkdownRenderer.link,
+  image: chatMarkdownRenderer.image,
+})
+mentionRenderer.html = () => ''
+
+const mentionParser = new Marked({ ...MARKDOWN_OPTIONS, renderer: mentionRenderer })
+
+const MENTION_TEXT_LIMIT = 32768
+const MENTION_LIMIT = 200
+// Elements whose text is never a candidate: existing anchors and buttons,
+// images, scripts, styles, fenced code, and the quoted-comment cards.
+const MENTION_SKIP_TAGS = new Set(['a', 'button', 'img', 'script', 'style', 'pre', ...COMMENT_TAGS])
+
+function collectMentions(parent: Node, found: Set<string>): void {
+  for (const child of Array.from(parent.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      for (const span of runMentionSpans(child.textContent ?? '', false, child.previousSibling, child.nextSibling)) {
+        found.add(span.input)
+      }
+      continue
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue
+    const el = child as Element
+    if (MENTION_SKIP_TAGS.has(el.localName)) continue
+    // An inline code span holding only text is one candidate: its whole text.
+    if (el.localName === 'code' && Array.from(el.childNodes).every(n => n.nodeType === Node.TEXT_NODE)) {
+      for (const span of findFileMentionSpans(el.textContent ?? '', true)) found.add(span.input)
+      continue
+    }
+    collectMentions(el, found)
+  }
+}
+
+/**
+ * The file paths in an assistant message that could be linked, each exactly
+ * as it is displayed (with a valid `:line`). Pure and request-free: the caller
+ * confirms them with the engine and passes the answer to `renderMarkdown` as
+ * `fileMentionTargets`. Empty for a message over the length cap, so a cut
+ * path is never offered; at most `MENTION_LIMIT` unique entries, in order.
+ */
+export function collectAssistantFileMentions(text: string): string[] {
+  if (text.length > MENTION_TEXT_LIMIT) return []
+  openLocalFiles = false
+  renderChatId = ''
+  try {
+    const lifted = liftCommentReferences(text)
+    const html = lifted.restore(mentionParser.parse(lifted.text) as string)
+    const template = document.createElement('template')
+    template.innerHTML = sanitizeHtml(html)
+    const found = new Set<string>()
+    collectMentions(template.content, found)
+    return [...found].slice(0, MENTION_LIMIT)
+  } catch {
+    return []
   } finally {
     openLocalFiles = false
     renderChatId = ''

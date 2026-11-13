@@ -149,6 +149,34 @@ const TURN_FACTS_TRANSCRIPT = [
 ]
 
 /**
+ * One vault-grounded turn whose answer the engine checked against the notes it
+ * read: one claim supported, one not in the notes, one general knowledge. A
+ * browser spec checks the badge is visible without hover and opens its list.
+ */
+const VAULT_CHECK_TRANSCRIPT = [
+  { role: 'user', content: 'Where does Ann live now?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'Ann moved to Rome in March and works at the Bergamo office twice a week. Rome is the capital of Italy.',
+    sent_at: '2026-01-01T09:50:12Z',
+    duration_ms: 12000,
+    effective_model: 'claude-sonnet-5-5',
+    turn_index: 0,
+    verification: {
+      supported: 1,
+      unsupported: 1,
+      general: 1,
+      claims: [
+        { text: 'Ann moved to Rome in March.', status: 'supported', source: 'People/Ann.md' },
+        { text: 'Ann works at the Bergamo office twice a week.', status: 'unsupported', source: '' },
+        { text: 'Rome is the capital of Italy.', status: 'general', source: '' },
+      ],
+      sources: ['People/Ann.md'],
+    },
+  },
+]
+
+/**
  * A finished background run the engine wrote into the chat (origin
  * `background_run`): one failed run whose error only repeats the exit code and
  * whose log tail carries a test runner's colour codes. A browser spec checks the
@@ -952,6 +980,8 @@ const server = http.createServer(async (req, res) => {
             ? TASK_LINK_TRANSCRIPT
             : body?.shape === 'turn-facts'
               ? TURN_FACTS_TRANSCRIPT
+              : body?.shape === 'vault-check'
+              ? VAULT_CHECK_TRANSCRIPT
               : body?.shape === 'background-run'
                 ? BACKGROUND_RUN_TRANSCRIPT
                 : body?.shape === 'native-background'
