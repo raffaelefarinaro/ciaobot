@@ -479,7 +479,7 @@ export function fileCardIcon(filePath: string): FileCardIcon {
  * trace renders ("<icon> <ToolName> <summary>", subagent lines prefixed
  * with ↳). Both providers write that shape; they differ in naming:
  *   Claude Code  Skill <name>          mcp__<server>__<tool>
- *   opencode     skill {"name": ...}   <server>_<tool> (no fixed separator)
+ *   opencode     skill {"id": ...}     <server>_<tool> (no fixed separator)
  * opencode's MCP names cannot be split into server and tool reliably, so
  * they are reported by their full tool name.
  * ------------------------------------------------------------------ */
@@ -515,7 +515,7 @@ function skillNameFrom(summary: string): string {
   if (summary.startsWith('{')) {
     try {
       const parsed = JSON.parse(summary) as Record<string, unknown>
-      const name = parsed.name ?? parsed.skill
+      const name = parsed.name ?? parsed.skill ?? parsed.id
       return typeof name === 'string' ? name.trim() : ''
     } catch {
       return ''
