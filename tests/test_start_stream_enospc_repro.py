@@ -86,7 +86,7 @@ def storage_fault(monkeypatch):
                 with real_lock(path):
                     yield
             finally:
-                if path == registry and fault.armed and kind in {"unlock", "write_unlock"}:
+                if path == registry and fault.armed and fault.writes and kind in {"unlock", "write_unlock"}:
                     raise OSError(errno.EACCES, "synthetic unlock failure")
 
         monkeypatch.setattr(Path, "write_text", write)
@@ -559,3 +559,105 @@ def test_admission_without_running_loop_rejects_before_mutation(admission_case):
     assert registry.read_bytes() == before
     assert manager._broker.get(chat.chat_id) is None
     assert not manager._turn_perf_started
+
+
+async def test_recovery_cas_refusal_rolls_back_staged_memory_and_failure_fields(admission_case, monkeypatch):
+    manager, chat, registry = admission_case
+    source = manager.create_chat(chat.project_id, title="archived source")
+    source.archived = True
+    source.postprocess = {"steps": {"other": {"state": "done"}}}
+    chat.helper = {"kind": "memory_pass", "state": "attention", "source_chat_id": source.chat_id,
+                   "archive_policy": "when_clean"}
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failure", "error", "failure-id"
+    manager._save()
+    assert manager.schedule_continue_recovery(chat.chat_id, "session", "failure", 0, "failure-id")
+    manager._cancel_retry_task(chat.chat_id)
+    before_chat, before_source = state_checkpoint(chat), state_checkpoint(source)
+    prepare = manager._memory_pass.prepare_turn_start
+    competitors = []
+
+    def stage_then_claim(target, **kwargs):
+        changed = prepare(target, **kwargs)
+        assert target.helper["state"] == "running"
+        assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+        other = ProjectChatManager(manager._config, state_store=manager._state,
+                                   transcript_store=manager._transcripts, path=registry)
+        competitors.append(other)
+        monkeypatch.setattr(other, "start_stream", lambda *args, **kwargs: object())
+        assert other.try_chat_retry_now(chat.chat_id) is not None
+        return changed
+
+    monkeypatch.setattr(manager._memory_pass, "prepare_turn_start", stage_then_claim)
+    drive = Mock(wraps=manager._streaming.start_drive)
+    monkeypatch.setattr(manager._streaming, "start_drive", drive)
+    with pytest.raises(ValueError, match="recovery is in flight"):
+        manager.start_stream(chat.chat_id, "not admitted", send_id="rejected")
+    assert_restored(chat, before_chat)
+    assert_restored(source, before_source)
+    drive.assert_not_called()
+    assert manager._broker.get(chat.chat_id) is None
+    assert not manager._turn_perf_started
+    persisted = json.loads(registry.read_bytes())["chats"]
+    assert persisted[chat.chat_id]["retry_recovery"]["claim"]
+    assert persisted[source.chat_id]["postprocess"] == before_source[0]["postprocess"]
+    for other in competitors:
+        other._cancel_retry_task(chat.chat_id)
+        other._release_recovery_claim(chat.chat_id)
+
+
+@pytest.mark.parametrize("kind", ["unlink", "unlock", "audit"])
+async def test_postcommit_cleanup_still_stops_recovery_before_admitting_one_turn(
+    admission_case, storage_fault, driver_probe, kind,
+):
+    manager, chat, registry = admission_case
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failure", "error", "failure-id"
+    manager._save()
+    assert manager.schedule_continue_recovery(chat.chat_id, "session", "failure", 0, "failure-id", manual=True)
+    probe = driver_probe(manager, chat)
+    fault = storage_fault(manager, registry, kind)
+    stream = manager.start_stream(chat.chat_id, "new turn", send_id="one")
+    fault.armed = False
+    saved = json.loads(registry.read_bytes())["chats"][chat.chat_id]
+    for row in (saved, manager._state_payload()["chats"][chat.chat_id], manager._last_local_payload["chats"][chat.chat_id]):
+        assert row["retry_status"] == "stopped"
+        assert row["retry_recovery"] == row["retry_schedule_id"] == row["failure_id"] == ""
+        assert row["user_turn_count"] == 1
+    assert stream.retry_generation == manager._retry_generations[chat.chat_id]
+    assert manager._streaming.drive_task(chat.chat_id, stream) is not None
+    revision = json.loads(registry.read_bytes())["revision"]
+    manager._save()
+    assert json.loads(registry.read_bytes())["revision"] == revision
+    probe.release.set()
+    await consume(stream)
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["unlink", "unlock"])
+def test_active_recovery_is_not_rolled_back_after_postcommit_cleanup(admission_case, storage_fault, kind):
+    manager, chat, registry = admission_case
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failure", "error", "failure-id"
+    manager._save()
+    fault = storage_fault(manager, registry, kind)
+    try:
+        assert manager.schedule_continue_recovery(chat.chat_id, "session", "failure", 0, "failure-id", manual=True)
+    finally:
+        fault.armed = False
+    assert chat.retry_recovery["state"] == "active"
+    assert manager._last_local_payload == manager._state_payload()
+    assert json.loads(registry.read_bytes())["chats"][chat.chat_id]["retry_recovery"] == chat.retry_recovery
+
+
+def test_strict_recovery_audit_failure_is_prepared_not_admitted(admission_case, storage_fault):
+    manager, chat, registry = admission_case
+    chat.session_id, chat.last_error, chat.last_response_status = "session", "failure", "error"
+    manager._save()
+    baseline = copy.deepcopy(manager._last_local_payload)
+    fault = storage_fault(manager, registry, "audit")
+    with pytest.raises(RuntimeError, match="audit failure") as rejected:
+        manager.schedule_continue_recovery(chat.chat_id, "session", "failure", 0)
+    fault.armed = False
+    assert not isinstance(rejected.value, project_chats._RegistryCommittedError)
+    assert manager._last_local_payload == baseline
+    assert chat.retry_status == "" and chat.retry_recovery == ""
+    assert chat.chat_id not in manager._retry_tasks
+    assert json.loads(registry.read_bytes())["chats"][chat.chat_id]["retry_recovery"]["state"] == "prepared"

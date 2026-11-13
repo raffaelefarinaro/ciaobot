@@ -13,8 +13,321 @@ import {
 import { useTaskSignalsStore } from './taskSignals'
 import { nextTick } from 'vue'
 
+describe('continue recovery transport', () => {
+  it('persists a server-issued receipt before submitting recovery', async () => {
+    const store = useProjectStore()
+    apiPost.mockImplementation(async (_path: string, body: { action: string; request_id?: string }) => {
+      if (body.action === 'issue_recovery_request') return { request_id: 'server-id', expires: Date.now() / 1000 + 900 }
+      expect(body.request_id).toBe('server-id')
+      expect(localStorage.getItem('ciao-unknown-recovery:chat-a:server-id')).toBe('1')
+      return { request_id: 'server-id', status: 'completed', result: { http_status: 200 } }
+    })
+    apiGet.mockResolvedValue({ chat_id: 'chat-a' })
+    await store.continueRecovery('chat-a', 'failure', false)
+  })
+
+  it('does not dispatch with an already expired receipt', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ request_id: 'expired', expires: Date.now() / 1000 - 1 })
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('expired')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:expired')).toBeNull()
+  })
+
+  it('does not dispatch if the issued receipt cannot be persisted', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    vi.mocked(localStorage.setItem).mockImplementationOnce(() => { throw new Error('storage full') })
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('safety state cannot be saved')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('holds the cross-tab lock while a receipt is being issued', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let rejectIssue!: (error: Error) => void
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectIssue = reject }))
+    const pending = first.continueRecovery('chat-a', 'failure', false)
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    await expect(second.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('in progress')
+    await expect(second.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('in progress')
+    rejectIssue(new Error('issue failed'))
+    await expect(pending).rejects.toThrow('issue failed')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed when issuing a receipt is at capacity', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal full'), { status: 503 }))
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('journal full')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(store.unknownRecoveryOutcomes['chat-a']).toBeUndefined()
+  })
+
+  it('retains a marker if its expired receipt cannot be reconciled', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:expired', '1')
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('receipt expired'), { status: 409 }))
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('receipt expired')
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:expired')).toBe('1')
+  })
+  it('requires an empty slot and refreshes a competing schedule after a literal set conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'literal-chat', retry: null } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('slot occupied'), { status: 409 }))
+    apiGet.mockResolvedValueOnce({ chat_id: 'literal-chat', retry: { status: 'pending', mode: 'literal', schedule_id: 'other' } })
+    await expect(store.setChatRetry('literal-chat', 'task', ['image'])).rejects.toThrow('slot occupied')
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/literal-chat/retry', {
+      action: 'set', prompt: 'task', images: ['image'], require_empty: true,
+    })
+    expect(store.chats[0].retry?.schedule_id).toBe('other')
+  })
+  it.each([['try_now', 'tryChatRetryNow'], ['stop', 'stopChatRetry']] as const)(
+    'refreshes a replacement after a guarded literal %s conflict without reissuing it',
+    async (action, method) => {
+      const store = useProjectStore()
+      const retry = { status: 'pending', mode: 'literal', schedule_id: 'old', next_at: '', last_error: '', attempts: 0, interval_seconds: 3600 } as const
+      store.chats = [{ chat_id: 'literal-chat', retry } as ChatInfo]
+      apiPost.mockRejectedValueOnce(Object.assign(new Error('changed'), { status: 409 }))
+      apiGet.mockResolvedValueOnce({ chat_id: 'literal-chat', retry: { ...retry, schedule_id: 'new' } })
+      await expect(store[method]('literal-chat', 'old')).rejects.toThrow('changed')
+      expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/literal-chat/retry', { action, schedule_id: 'old' })
+      expect(store.chats[0].retry?.schedule_id).toBe('new')
+    },
+  )
+
+  it('never submits a literal action without a schedule identity', async () => {
+    const store = useProjectStore()
+    await expect(store.stopChatRetry('literal-chat', '')).rejects.toThrow('identity')
+    await expect(store.tryChatRetryNow('literal-chat', '')).rejects.toThrow('identity')
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('tombstones the exact abandoned request before clearing its marker, blocking delayed delivery', async () => {
+    const first = useProjectStore()
+    let delayed: Record<string, string> = {}
+    const journal = new Map<string, 'cancelled' | 'in_progress'>()
+    let actionStarted = false
+    const deliver = (body: Record<string, string>) => {
+      if (journal.has(body.request_id)) return { status: 409 }
+      journal.set(body.request_id, 'in_progress')
+      actionStarted = true
+      return { status: 200 }
+    }
+    apiPost.mockImplementation(async (_path: string, body: Record<string, string>) => {
+      if (body.action === 'issue_recovery_request') return { request_id: 'issued-id', expires: Date.now() / 1000 + 900 }
+      if (body.action === 'continue_recovery') {
+        delayed = body
+        throw new Error('tab died before delivery')
+      }
+      if (body.action === 'recovery_request_status') {
+        expect(body.request_id).toBe(delayed.request_id)
+        if (!journal.has(body.request_id)) journal.set(body.request_id, 'cancelled')
+        return { request_id: body.request_id, status: 'cancelled' }
+      }
+      if (body.action === 'recovery_status') return { status: 'stopped', recovery_state: '' }
+      throw new Error('unexpected action')
+    })
+    await expect(first.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow('tab died')
+    expect(delayed.request_id).toBeTruthy()
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    await reloaded.acknowledgeRecoveryReconciled('chat-a')
+    expect(journal.get(delayed.request_id)).toBe('cancelled')
+    expect(reloaded.unknownRecoveryOutcomes['chat-a']).toBeUndefined()
+    expect(deliver(delayed)).toEqual({ status: 409 })
+    expect(actionStarted).toBe(false)
+  })
+
+  it.each(['in_progress', 'unknown'])('keeps the marker when the request status is %s', async status => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:request-a', '1')
+    apiPost.mockResolvedValueOnce({ request_id: 'request-a', status })
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/in progress|unknown/)
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:request-a')).toBe('1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains the marker and surfaces a journal capacity error during reconciliation', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:request-a', '1')
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal unavailable'), { status: 503 }))
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('journal unavailable')
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:request-a')).toBe('1')
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/chat-a/retry', { action: 'recovery_request_status', request_id: 'request-a' })
+  })
+
+  it('retains the marker and surfaces a journal capacity error during submission', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal unavailable'), { status: 503, payload: { status: 'unknown' } }))
+    await expect(store.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow('journal unavailable')
+    expect(store.unknownRecoveryOutcomes['chat-a']).toBe(true)
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+  })
+
+  it('sends the captured failure identity and unique request IDs for recovery', async () => {
+    const store = useProjectStore()
+    let issued = 0
+    apiPost.mockImplementation(async (_path: string, body: { action: string; request_id: string }) => body.action === 'issue_recovery_request'
+      ? { request_id: `issued-${++issued}`, expires: Date.now() / 1000 + 900 }
+      : { request_id: body.request_id, status: 'completed', result: { http_status: 200 } })
+    apiGet.mockResolvedValue({ chat_id: 'recovery-chat' })
+    await store.continueRecovery('recovery-chat', 'failure-1', false)
+    await store.continueRecovery('recovery-chat', 'failure-1', true)
+    expect(apiPost).toHaveBeenNthCalledWith(2, '/api/chats/recovery-chat/retry', {
+      action: 'continue_recovery', failure_id: 'failure-1', request_id: expect.any(String),
+    })
+    expect(apiPost).toHaveBeenNthCalledWith(4, '/api/chats/recovery-chat/retry', {
+      action: 'continue_recovery_now', failure_id: 'failure-1', request_id: expect.any(String),
+    })
+    expect(apiPost.mock.calls[1][1].request_id).not.toBe(apiPost.mock.calls[3][1].request_id)
+  })
+
+  it('propagates conflicts without stopping or retrying literally', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(new Error('conflict'))
+    await expect(store.continueRecovery('recovery-chat', 'stale', true)).rejects.toThrow('conflict')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks further opt-ins after an unknown outcome and checks disk status only on request', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('outcome unknown'), {
+      payload: { code: 'recovery_outcome_unknown' },
+    }))
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow()
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('outcome is unknown')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    apiPost.mockResolvedValueOnce({ status: 'pending', mode: 'continue_recovery', recovery_state: 'prepared' })
+    expect(await store.checkRecoveryStatus('recovery-chat')).toMatchObject({ recovery_state: 'prepared' })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/recovery-chat/retry', { action: 'recovery_status' })
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('outcome is unknown')
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    expect(reloaded.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+    await expect(reloaded.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow('outcome is unknown')
+  })
+
+  it('preserves overlapping unknown outcomes from independent stores', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let finish!: (value: unknown) => void
+    apiPost.mockImplementation(async (path: string, body: { action: string }) => {
+      if (body.action === 'issue_recovery_request') return { request_id: path.includes('chat-a') ? 'issued-a' : 'issued-b', expires: Date.now() / 1000 + 900 }
+      if (path.includes('chat-a')) return new Promise(resolve => { finish = resolve })
+      throw new Error('network lost')
+    })
+    const pending = first.continueRecovery('chat-a', 'failure-a', false)
+    await expect(second.continueRecovery('chat-b', 'failure-b', false)).rejects.toThrow()
+    const requestId = 'issued-a'
+    apiGet.mockResolvedValueOnce({ chat_id: 'chat-a' })
+    finish({ request_id: requestId, status: 'completed', result: { http_status: 200 } })
+    await pending
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    expect(reloaded.unknownRecoveryOutcomes['chat-b']).toBe(true)
+    await expect(reloaded.continueRecovery('chat-b', 'failure-b', false)).rejects.toThrow('outcome is unknown')
+  })
+
+  it('cannot reconcile while another store has a request in flight', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let fail!: (reason: Error) => void
+    issueReceipt()
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+    const pending = first.continueRecovery('chat-a', 'failure-a', false)
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2))
+    await expect(second.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/in progress/i)
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+    fail(new Error('network lost'))
+    await expect(pending).rejects.toThrow('network lost')
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+    apiPost.mockImplementationOnce(async (_path: string, body: { request_id: string }) => ({ request_id: body.request_id, status: 'cancelled' }))
+    apiPost.mockResolvedValueOnce({ status: 'stopped', mode: 'literal', recovery_state: '' })
+    await second.acknowledgeRecoveryReconciled('chat-a')
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(false)
+  })
+
+  it('fails closed when cross-tab locks are unavailable', async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined })
+    const store = useProjectStore()
+    await expect(store.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow(/coordination/)
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/coordination/)
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a conflicting pending retry without stopping it', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    store.chats = [{ chat_id: 'recovery-chat', failure_id: 'failure-1' } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }))
+    apiGet.mockResolvedValueOnce({ chat_id: 'recovery-chat', failure_id: 'failure-1', retry: { status: 'pending', mode: 'literal' } })
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow('conflict')
+    expect(store.chats[0].retry).toMatchObject({ status: 'pending', mode: 'literal' })
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not overwrite a newer retry event with an older conflict refresh', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    store.chats = [{ chat_id: 'recovery-chat', failure_id: 'failure-1' } as ChatInfo]
+    let resolve!: (value: unknown) => void
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }))
+    apiGet.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const request = store.continueRecovery('recovery-chat', 'failure-1', false)
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalled())
+    store.chats[0].retry = { status: 'pending', mode: 'literal', attempts: 2, last_error: '', next_at: '', interval_seconds: 3600 }
+    resolve({ chat_id: 'recovery-chat', failure_id: 'failure-1', retry: { status: 'pending', mode: 'continue_recovery' } })
+    await expect(request).rejects.toThrow('conflict')
+    expect(store.chats[0].retry?.mode).toBe('literal')
+  })
+
+  it('clears an unknown outcome only after an explicit reconciliation and a safe disk status', async () => {
+    const store = useProjectStore()
+    store.unknownRecoveryOutcomes['recovery-chat'] = true
+    apiPost.mockResolvedValueOnce({ status: 'pending', mode: 'continue_recovery', recovery_state: 'prepared' })
+    await expect(store.acknowledgeRecoveryReconciled('recovery-chat')).rejects.toThrow('still pending')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+    apiPost.mockResolvedValueOnce({ status: 'stopped', mode: 'literal', recovery_state: '' })
+    await store.acknowledgeRecoveryReconciled('recovery-chat')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBeUndefined()
+    expect(Object.keys(localStorageData).filter(key => key.startsWith('ciao-unknown-recovery:'))).toEqual([])
+  })
+
+  it('stops only the observed recovery id and leaves a refused schedule intact', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'recovery-chat', retry: { status: 'pending', mode: 'continue_recovery' } } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('changed or in flight'), { status: 409 }))
+    await expect(store.stopRecovery('recovery-chat', 'observed-id')).rejects.toThrow('changed or in flight')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/recovery-chat/retry', { action: 'stop_recovery', recovery_id: 'observed-id' })
+    expect(store.chats[0].retry?.status).toBe('pending')
+  })
+
+  it('records an in-flight attempt before sending and keeps an ambiguous 409 blocked', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockImplementationOnce(async () => {
+      expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:recovery-chat:'))).toBe(true)
+      throw Object.assign(new Error('recovery not started'), { status: 409, payload: { error: 'recovery not started' } })
+    })
+    apiGet.mockRejectedValueOnce(new Error('unavailable'))
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('recovery not started')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+  })
+})
+
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+function issueReceipt(id = 'issued-id') {
+  apiPost.mockResolvedValueOnce({ request_id: id, expires: Date.now() / 1000 + 900 })
+}
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 const reloadWhenServerReady = vi.hoisted(() =>
@@ -127,12 +440,22 @@ beforeEach(() => {
   apiDel.mockReset()
   reloadWhenServerReady.mockClear()
   const storage = {
+    get length() { return Object.keys(localStorageData).length },
+    key: vi.fn((index: number) => Object.keys(localStorageData)[index] ?? null),
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
     removeItem: vi.fn((key: string) => { delete localStorageData[key] }),
     clear: vi.fn(() => { localStorageData = {} }),
   }
   vi.stubGlobal('localStorage', storage)
+  const held = new Set<string>()
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+    request: async (name: string, _options: unknown, callback: (lock: object | null) => Promise<unknown>) => {
+      if (held.has(name)) return callback(null)
+      held.add(name)
+      try { return await callback({ name }) } finally { held.delete(name) }
+    },
+  } })
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
   Object.defineProperty(document, 'hasFocus', {
     value: vi.fn(() => true),
