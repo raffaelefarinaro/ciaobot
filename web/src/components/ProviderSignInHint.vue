@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { api } from '../lib/api'
 import HostTerminalButton from './HostTerminalButton.vue'
+import { useRunInTerminal } from '../composables/useRunInTerminal'
 import type { ProviderConfigSettings, ProviderConnection } from '../lib/types'
 
 // Shown under a chat turn that failed because the provider CLI is signed out.
@@ -14,6 +15,7 @@ const props = defineProps<{
   provider: string
   actionLabel: string
   actionDisabled?: boolean
+  chatId?: string
 }>()
 const emit = defineEmits<{ (e: 'action'): void }>()
 
@@ -21,6 +23,8 @@ const connection = ref<ProviderConnection | null>(null)
 const loadError = ref('')
 const loading = ref(false)
 const copied = ref(false)
+const terminal = useRunInTerminal()
+const runNote = ref('')
 
 async function onToggle(event: Event) {
   if (!(event.target as HTMLDetailsElement).open || connection.value || loading.value) return
@@ -36,6 +40,17 @@ async function onToggle(event: Event) {
   } finally {
     loading.value = false
   }
+}
+
+async function runInTerminal() {
+  const cmd = connection.value?.command
+  if (!cmd || !props.chatId || terminal.busy.value) return
+  const result = await terminal.run(cmd, { chatId: props.chatId })
+  runNote.value = result === 'typed'
+    ? "Running in this chat's terminal. Finish signing in there."
+    : result === 'copied'
+      ? 'The terminal was not ready, so the command was copied. Paste it into a terminal on the computer running Ciaobot.'
+      : 'Could not reach the terminal or the clipboard. Select the command above and run it on the computer running Ciaobot.'
 }
 
 async function copy() {
@@ -58,14 +73,17 @@ async function copy() {
       <p v-if="loading" class="signin-hint-status">Looking up the sign-in command…</p>
       <p v-else-if="loadError" class="signin-hint-status" role="alert">{{ loadError }} Settings → Providers has the provider's sign-in button.</p>
       <ol v-else-if="connection" class="signin-hint-steps">
-        <li>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows), or use Run in Terminal below when you are on that computer.</li>
+        <li v-if="chatId">Open a terminal on the computer running Ciaobot. From any device, Run in this chat's terminal does this for you: the chat's terminal runs on that computer.</li>
+        <li v-else>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows), or use Run in Terminal below when you are on that computer.</li>
         <li>
           Paste this command, press Enter and finish signing in{{ connection.label ? ` to ${connection.label}` : '' }} in the browser window it opens:
           <div class="signin-hint-cmd">
             <code>{{ connection.command }}</code>
             <button class="btn-small" type="button" @click="copy">{{ copied ? 'Copied' : 'Copy' }}</button>
+            <button v-if="chatId" class="btn-small signin-hint-run" type="button" :disabled="terminal.busy.value" @click="runInTerminal">Run in this chat's terminal</button>
             <HostTerminalButton v-if="connection.terminal_action" :action="connection.terminal_action" variant="small" />
           </div>
+          <p v-if="runNote" class="signin-hint-status" role="status">{{ runNote }}</p>
         </li>
         <li>
           Come back here and click <strong>{{ actionLabel }}</strong>.
@@ -111,6 +129,7 @@ async function copy() {
 }
 .signin-hint-cmd {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin-top: 6px;

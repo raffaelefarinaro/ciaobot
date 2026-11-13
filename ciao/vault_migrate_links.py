@@ -49,6 +49,9 @@ before replacing notes. A stable advisory lock serializes managed operations;
 current images classify retries and undo without trusting a progress counter.
 Legacy span maps are upgraded to prepared images before undo. External edits
 that do not match a recorded image are left untouched for manual recovery.
+Receipts are bound to the vault directory's inode, so a vault replaced at the
+same path never inherits them. Schema-1 and schema-2 receipts are adopted once,
+on the first read, with their exact original bytes archived beside the receipt.
 """
 
 from __future__ import annotations
@@ -62,13 +65,14 @@ import shutil
 import subprocess
 import tempfile
 import stat
+import uuid
 from bisect import bisect_right
 from contextlib import contextmanager
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 from ciao.os_support.locks import lock_exclusive
 from ciao.os_support.private import carry_mode, open_private
@@ -99,6 +103,26 @@ RECEIPT_NAME = "vault-links.json"
 
 VAULT_PREFIX = "memory-vault"
 
+MARKER_NAME = ".ciao-vault-links.json"
+MARKER_FORMAT = 1
+MARKER_STATES = frozenset({"migrating", "migrated", "undoing", "unmigrated"})
+LEGACY_ARCHIVE_PREFIX = "vault-links-legacy-"  # + sha256(raw).hexdigest() + ".json"
+_OPERATION_ID = re.compile(r"[0-9a-f]{32}")  # fullmatch; uuid4().hex
+
+RECOVERY_ADVICE = "restore the original vault layout or recover manually from archived receipts or git history"
+_REPLACED_MESSAGE = "receipt was recorded for a different directory at this vault path (the vault was replaced, restored or re-created)"
+_REPLACED_ADVICE = "restore the original vault directory, or move this receipt aside to start a new migration; nothing was changed"
+_UNOBSERVED_MESSAGE = "vault directory cannot be observed ({exc})"
+_STALE_MESSAGE = "vault link state was changed by another Ciaobot runtime or another copy of this vault (marker operation {marker}, receipt operation {receipt})"
+_STALE_ADVICE = "this recovery evidence is stale and was not applied; it is kept for manual recovery, and running the migration again starts a new one"
+_MARKER_UNSAFE_MESSAGE = "vault link marker is a link or not a regular file"
+_MARKER_MALFORMED_MESSAGE = "vault link marker is malformed"
+_MARKER_UNREADABLE_MESSAGE = "vault link marker is unreadable ({exc})"
+_MARKER_ADVICE = "replace it with the version from the vault's git history"
+_MARKER_CHANGED_MESSAGE = "vault link state changed during this operation; another Ciaobot runtime is working on this vault"
+
+Binding = Literal["current", "staged", "stale"]
+
 # `is_excluded` covers Logs/Templates/.obsidian; `EXCLUDE_DIRS` adds the
 # directories that are not vault prose at all (`.git`, `.venv`, `node_modules`,
 # agent state). Rewriting a checked-out dependency's README is never wanted, and
@@ -116,9 +140,9 @@ def receipt_path(runtime_root: Path) -> Path:
 class ReceiptUnavailable(Exception):
     """Receipt evidence cannot safely authorize a migration or undo."""
 
-    def __init__(self, path: Path, message: str) -> None:
+    def __init__(self, path: Path, message: str, *, advice: str = RECOVERY_ADVICE) -> None:
         self.path = path
-        super().__init__(f"{path}: {message}; restore the original vault layout or recover manually from archived receipts or git history")
+        super().__init__(f"{path}: {message}; {advice}")
 
 
 def _valid_receipt_path(value: Any) -> bool:
@@ -128,11 +152,18 @@ def _valid_receipt_path(value: Any) -> bool:
     return not path.is_absolute() and not PureWindowsPath(value).drive and path.as_posix() == value and all(part not in ("", ".", "..") for part in value.split("/"))
 
 
+def _valid_marker(value: Any) -> bool:
+    return (isinstance(value, dict) and set(value) == {"format", "operation_id", "state"}
+            and type(value["format"]) is int and value["format"] == MARKER_FORMAT
+            and isinstance(value["operation_id"], str) and _OPERATION_ID.fullmatch(value["operation_id"]) is not None
+            and value["state"] in MARKER_STATES)
+
+
 def _validate_receipt(data: Any, path: Path, vault_root: Path) -> dict[str, Any]:
     def invalid(message: str) -> None:
         raise ReceiptUnavailable(path, message)
 
-    if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data.get("schema_version") not in (1, 2):
+    if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data.get("schema_version") not in (1, 2, 3):
         invalid("invalid or unsupported receipt")
     recorded = data.get("vault_root")
     if not isinstance(recorded, str) or not recorded or not Path(recorded).is_absolute():
@@ -145,7 +176,7 @@ def _validate_receipt(data: Any, path: Path, vault_root: Path) -> dict[str, Any]
     version = data["schema_version"]
     if data.get("status", "migrated" if version == 1 else None) not in (("migrated", "partial") if version == 1 else ("prepared", "partial", "migrated")):
         invalid("invalid receipt status")
-    if version == 2 and data.get("operation") not in ("migrate", "undo"):
+    if version >= 2 and data.get("operation") not in ("migrate", "undo"):
         invalid("invalid receipt operation")
     rewrites = data.get("rewrites")
     if not isinstance(rewrites, list):
@@ -156,7 +187,7 @@ def _validate_receipt(data: Any, path: Path, vault_root: Path) -> dict[str, Any]
             or not isinstance(entry.get("from"), str) or not entry["from"]
             or not isinstance(entry.get("to"), str) or not entry["to"]):
             invalid("invalid rewrite entry")
-    if version == 2:
+    if version >= 2:
         files = data.get("files")
         legacy = data.get("legacy_rewrites")
         if not isinstance(files, list) or not isinstance(legacy, list):
@@ -196,6 +227,13 @@ def _validate_receipt(data: Any, path: Path, vault_root: Path) -> dict[str, Any]
                 invalid("rewrite map does not reconstruct the before image")
     else:
         legacy = rewrites
+    if version == 3:
+        inode, operation_id = data.get("vault_inode"), data.get("operation_id")
+        if (not {"vault_inode", "operation_id", "base_marker"} <= set(data)
+                or (inode is not None and (type(inode) is not int or inode <= 0))
+                or (operation_id is not None and not (isinstance(operation_id, str) and _OPERATION_ID.fullmatch(operation_id)))
+                or (data["base_marker"] is not None and not _valid_marker(data["base_marker"]))):
+            invalid("invalid vault binding")
     for path_key in {e["path"] for e in legacy}:
         entries = sorted((e for e in legacy if e["path"] == path_key), key=lambda e: e["offset"])
         if any(a["offset"] + len(a["to"]) > b["offset"] for a, b in zip(entries, entries[1:])):
@@ -209,8 +247,18 @@ def _unsafe_receipt_path(path: Path) -> bool:
             or path.is_symlink() or path.is_junction())
 
 
-def peek_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | None:
-    """Read validated, vault-bound evidence regardless of status."""
+class _Loaded(NamedTuple):
+    receipt: dict[str, Any]  # schema-3 view
+    source_version: int  # 1, 2 or 3
+    raw: bytes  # exact bytes read
+
+
+def _vault_inode(root: Path) -> int | None:
+    """The directory's inode, or None where the filesystem reports 0."""
+    return os.stat(root).st_ino or None
+
+
+def _read_receipt_file(runtime_root: Path) -> tuple[bytes, Any] | None:
     path = receipt_path(runtime_root)
     if _unsafe_receipt_path(path):
         raise ReceiptUnavailable(path, "receipt path is a link")
@@ -223,23 +271,213 @@ def peek_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | No
     except OSError as exc:
         raise ReceiptUnavailable(path, f"receipt is unreadable ({exc})") from exc
     try:
-        data = json.loads(raw)
+        return raw, json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ReceiptUnavailable(path, "receipt is malformed") from exc
+
+
+def _load_receipt(runtime_root: Path, vault_root: Path) -> _Loaded | None:
+    """Validate the receipt, check it against the directory now at the vault path."""
+    found = _read_receipt_file(runtime_root)
+    if found is None:
+        return None
+    raw, data = found
+    path = receipt_path(runtime_root)
     try:
-        return _validate_receipt(data, path, vault_root)
+        receipt = _validate_receipt(data, path, vault_root)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise ReceiptUnavailable(path, "receipt contains invalid data") from exc
+    try:
+        inode = _vault_inode(Path(vault_root).resolve(strict=True))
+    except OSError as exc:
+        raise ReceiptUnavailable(path, _UNOBSERVED_MESSAGE.format(exc=exc)) from exc
+    version = receipt["schema_version"]
+    if version == 3:
+        if receipt["vault_inode"] != inode:
+            raise ReceiptUnavailable(path, _REPLACED_MESSAGE, advice=_REPLACED_ADVICE)
+        return _Loaded(receipt, 3, raw)
+    view = dict(receipt, schema_version=3, vault_inode=inode, operation_id=None, base_marker=None)
+    if version == 1:
+        view.update(status=receipt.get("status", "migrated"), operation="migrate", files=[], legacy_rewrites=list(receipt["rewrites"]))
+    return _Loaded(view, version, raw)
+
+
+def peek_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | None:
+    """Read validated, vault-bound evidence as a schema-3 view, regardless of status. Writes nothing."""
+    loaded = _load_receipt(Path(runtime_root), Path(vault_root))
+    return loaded.receipt if loaded else None
+
+
+def _archive_legacy(runtime_root: Path, raw: bytes) -> Path:
+    """Keep a legacy receipt's exact bytes under a name derived from them. Caller holds the lock."""
+    directory = receipt_path(runtime_root).parent
+    target = directory / f"{LEGACY_ARCHIVE_PREFIX}{hashlib.sha256(raw).hexdigest()}.json"
+    if target.is_symlink() or target.is_junction():
+        raise OSError("unsafe receipt archive")
+    if target.exists():
+        if target.read_bytes() == raw:
+            return target
+        raise OSError("legacy receipt archive exists with different bytes")
+    fd, temporary = tempfile.mkstemp(prefix=".vault-links-legacy-", suffix=".tmp", dir=directory)
+    replaced = False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+        os.replace(temporary, target)
+        replaced = True
+    finally:
+        if not replaced:
+            Path(temporary).unlink(missing_ok=True)
+    return target
+
+
+def _adopt_legacy(runtime_root: Path, vault_root: Path) -> None:
+    with _transaction_lock(runtime_root):
+        loaded = _load_receipt(runtime_root, vault_root)
+        if loaded is None or loaded.source_version == 3:
+            return
+        _archive_legacy(runtime_root, loaded.raw)
+        _publish_receipt(runtime_root, loaded.receipt, archive=False)
+
+
+def _new_operation_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _marker_path(root: Path) -> Path:
+    return root / MARKER_NAME
+
+
+def _marker_is_unsafe(path: Path) -> bool:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(mode) or path.is_junction() or not stat.S_ISREG(mode)
+
+
+def _read_marker(root: Path) -> dict[str, Any] | None:
+    path = _marker_path(root)
+    try:
+        if _marker_is_unsafe(path):
+            raise ReceiptUnavailable(path, _MARKER_UNSAFE_MESSAGE, advice=_MARKER_ADVICE)
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ReceiptUnavailable(path, _MARKER_UNREADABLE_MESSAGE.format(exc=exc), advice=_MARKER_ADVICE) from exc
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError) as exc:  # UnicodeDecodeError is a ValueError; deep nesting recurses
+        raise ReceiptUnavailable(path, _MARKER_MALFORMED_MESSAGE, advice=_MARKER_ADVICE) from exc
+    if not _valid_marker(data):
+        raise ReceiptUnavailable(path, _MARKER_MALFORMED_MESSAGE, advice=_MARKER_ADVICE)
+    marker: dict[str, Any] = data
+    return marker
+
+
+def _publish_marker(root: Path, marker: dict[str, Any], *, expected: dict[str, Any] | None) -> None:
+    """Replace the marker, but only if it is still what this operation last saw."""
+    current = _read_marker(root)
+    if current != expected:
+        raise OSError(_MARKER_CHANGED_MESSAGE)
+    if current == marker:
+        return
+    path = _marker_path(root)
+    encoded = (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd, temporary = tempfile.mkstemp(prefix=".ciao-vault-links.", suffix=".tmp", dir=root)
+    replaced = False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+        if _marker_is_unsafe(path):
+            raise OSError(_MARKER_UNSAFE_MESSAGE)
+        os.replace(temporary, path)
+        replaced = True
+    finally:
+        if not replaced:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def _set_marker(root: Path, operation_id: str, state: str, expected: dict[str, Any] | None, detail: str) -> dict[str, Any]:
+    """Publish an in-flight marker before notes change; return what is now on disk."""
+    marker = {"format": MARKER_FORMAT, "operation_id": operation_id, "state": state}
+    if marker != expected:
+        try:
+            _publish_marker(root, marker, expected=expected)
+        except (ReceiptUnavailable, OSError, ValueError, MemoryError) as exc:
+            raise OSError(f"cannot publish vault link state; {detail}: {exc}") from exc
+    return marker
+
+
+def _binding(receipt: dict[str, Any], marker: dict[str, Any] | None) -> Binding:
+    operation = receipt["operation_id"]
+    if operation is None:
+        return "current" if marker is None else "stale"
+    if marker is not None and marker["operation_id"] == operation:
+        return "current"
+    if receipt["status"] in ("prepared", "partial") and marker == receipt["base_marker"]:
+        return "staged"
+    return "stale"
+
+
+def _stale(receipt: dict[str, Any], marker: dict[str, Any] | None, runtime: Path) -> ReceiptUnavailable:
+    message = _STALE_MESSAGE.format(marker=marker["operation_id"] if marker else "none", receipt=receipt["operation_id"] or "legacy")
+    return ReceiptUnavailable(receipt_path(runtime), message, advice=_STALE_ADVICE)
+
+
+def _is_complete(receipt: dict[str, Any], marker: dict[str, Any] | None) -> bool:
+    return (receipt["status"] == "migrated" and receipt["operation"] == "migrate"
+            and (marker is None or marker["state"] == "migrated"))
 
 
 def read_receipt(runtime_root: Path, *, vault_root: Path) -> dict[str, Any] | None:
-    """Return only a validated completed migration for this vault."""
-    data = peek_receipt(runtime_root, vault_root=vault_root)
-    if data is None or data.get("status", "migrated") != "migrated":
+    """Return only a validated completed migration for this vault.
+
+    Completion is the runtime's own current receipt, else the vault marker's
+    `migrated` state (reported with `observed_only`). The first read of a
+    schema-1 or schema-2 receipt adopts it: the exact bytes are archived and the
+    schema-3 view is published, inside the runtime only. An adoption that cannot
+    write leaves the legacy receipt meaning what it meant.
+    """
+    runtime, root = Path(runtime_root), Path(vault_root)
+    loaded = _load_receipt(runtime, root)
+    if loaded is not None and loaded.source_version != 3:
+        try:
+            _adopt_legacy(runtime, root)
+        except (OSError, ValueError, MemoryError) as exc:
+            logger.debug("link receipt adoption deferred: %s", exc)
+    canonical = root.resolve()
+    marker = _read_marker(canonical)
+    if loaded is not None and _binding(loaded.receipt, marker) == "current":
+        return loaded.receipt if _is_complete(loaded.receipt, marker) else None
+    if marker is None or marker["state"] != "migrated":
         return None
-    if data["schema_version"] == 2 and data["operation"] != "migrate":
-        return None
-    return data
+    return {"schema_version": 3, "observed_only": True, "status": "migrated", "operation": "migrate",
+            "operation_id": marker["operation_id"], "vault_root": str(canonical)}
+
+
+def receipt_token(runtime_root: Path, *, vault_root: Path) -> str:
+    """Identity of the evidence behind completion: receipt, marker and vault directory.
+
+    A few `stat` calls and no reads, so a Home poll can key its stored answer on it.
+    """
+
+    def stamp(path: Path) -> str:
+        try:
+            info = path.stat()
+        except OSError:
+            return "absent"
+        return f"{info.st_mtime_ns}:{info.st_size}"
+
+    try:
+        inode = str(_vault_inode(Path(vault_root)))
+    except OSError:
+        inode = "unobserved"
+    return "|".join([str(runtime_root), str(vault_root), stamp(receipt_path(runtime_root)),
+                     stamp(_marker_path(Path(vault_root))), inode])
 
 
 def _publish_receipt(runtime_root: Path, payload: dict[str, Any], *, archive: bool) -> Path:
@@ -902,18 +1140,33 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
     progress: dict[str, Any] | None = None
     def run() -> dict[str, Any]:
         nonlocal recorded, progress
-        recorded = peek_receipt(runtime, vault_root=root)
+        loaded = _load_receipt(runtime, root)
+        recorded = loaded.receipt if loaded else None
+        marker = _read_marker(root) if apply else None
+        binding = _binding(recorded, marker) if apply and recorded else None
+        if binding == "stale":
+            recorded = None  # left on disk; the next publication archives it
+        # Another runtime already converted this vault: nothing to write unless fresh wikilinks turn up.
+        observer = apply and recorded is None and marker is not None and marker["state"] == "migrated" and not force
         git = vault_git_state(root)
         if apply and recorded and recorded.get("operation") == "undo":
             raise OSError("finish the interrupted undo first")
-        if apply and recorded and recorded.get("status", "migrated") == "migrated" and not force:
+        if apply and recorded and binding == "current" and _is_complete(recorded, marker) and not force:
             return {"skipped": "already migrated", "receipt_path": str(receipt_path(runtime)), "migrated_at": recorded.get("migrated_at", "")}
-        if apply and not force and git["dirty"] and (recorded is None or recorded.get("status", "migrated") == "migrated"):
+        if apply and not force and git["dirty"] and not observer and (recorded is None or recorded["status"] == "migrated"):
             return {"skipped": "vault has uncommitted changes", "git": git}
         resume_files = (recorded or {}).get("files", []) if apply and recorded and recorded.get("status") in ("prepared", "partial") else []
         resume_paths = frozenset(f["path"] for f in resume_files)
-        if resume_files:
+        if recorded is not None and resume_files:
             _preflight(root)
+            if recorded["operation_id"] is None:
+                claimed = dict(recorded, operation_id=_new_operation_id(), base_marker=marker)
+                try:
+                    _publish_receipt(runtime, claimed, archive=True)
+                except (OSError, ValueError, MemoryError) as exc:
+                    raise OSError(f"cannot prepare recovery receipt; no notes changed: {exc}") from exc
+                recorded = claimed
+            marker = _set_marker(root, recorded["operation_id"], "migrating", marker, "no notes changed")
         for image in resume_files:
             try:
                 if _replace_image(root, image, undo=False):
@@ -934,7 +1187,7 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
         if not apply or "skipped" in summary:
             return summary
         old_files = list((recorded or {}).get("files", []))
-        old_legacy = list((recorded or {}).get("legacy_rewrites", [])) if recorded and recorded.get("schema_version") == 2 else list((recorded or {}).get("rewrites", []))
+        old_legacy = list((recorded or {}).get("legacy_rewrites", []))
         legacy_by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for entry in old_legacy:
             legacy_by_path[entry["path"]].append(entry)
@@ -953,26 +1206,44 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
                 raise OSError("new rewrite conflicts with existing recovery evidence; undo or recover manually")
             fresh_images.append(image)
         fresh_paths = {f["path"] for f in fresh_images}
-        if (recorded and recorded.get("status", "migrated") == "migrated"
+        if observer and fresh_images and git["dirty"]:
+            return {"skipped": "vault has uncommitted changes", "git": git}
+        if recorded is None and marker is not None and not fresh_images:
+            if observer:
+                summary["observed_only"] = True
+            if observer or marker["state"] != "migrated":
+                return summary
+        if (recorded and recorded["status"] == "migrated"
                 and not fresh_images and not summary["failed"]
                 and all(_safe_note(root, Path(f["path"])).read_bytes() == f["after_text"].encode("utf-8") for f in old_files)):
             summary["receipt_path"] = str(receipt_path(runtime))
+            settled = {"format": MARKER_FORMAT, "operation_id": recorded["operation_id"], "state": "migrated"}
+            if recorded["operation_id"] is not None and marker != settled:
+                try:
+                    _publish_marker(root, settled, expected=marker)
+                except (ReceiptUnavailable, OSError, ValueError, MemoryError) as exc:
+                    summary["failed"].append({"path": str(_marker_path(root)), "error": f"settlement failed; recovery receipt retained: {exc}"})
+                    summary["complete"] = False
             return summary
         rewrites = list((recorded or {}).get("rewrites", [])) + [e for e in summary["rewrites"] if e["path"] in fresh_paths]
         files = sorted(old_files + fresh_images, key=lambda image: image["path"])
-        payload = {"schema_version": 2, "status": "prepared", "operation": "migrate", "vault_root": str(root),
+        operation_id = (recorded or {}).get("operation_id") or (_new_operation_id() if files else None)
+        payload = {"schema_version": 3, "status": "prepared", "operation": "migrate", "vault_root": str(root),
+                   "vault_inode": _vault_inode(root), "operation_id": operation_id, "base_marker": marker,
                    "migrated_at": datetime.now(UTC).isoformat(), "git_head_before": git["head"],
                    "files_scanned": summary["files_scanned"], "files_rewritten": len({e["path"] for e in rewrites}),
                    "files": files, "legacy_rewrites": old_legacy, "rewrites": rewrites,
                    "unresolved": _merge_notes((recorded or {}).get("unresolved"), summary["unresolved"]),
                    "anchors_dropped": _merge_notes((recorded or {}).get("anchors_dropped"), summary["anchors_dropped"]),
                    "failed": summary["failed"]}
+        detail = "prior recovery receipt retained" if resumed else "no notes changed"
         try:
-            _publish_receipt(runtime, payload, archive=recorded is not None)
+            _publish_receipt(runtime, payload, archive=loaded is not None)
         except (OSError, ValueError, MemoryError) as exc:
-            detail = "prior recovery receipt retained" if resumed else "no notes changed"
             raise OSError(f"cannot prepare recovery receipt; {detail}: {exc}") from exc
         summary["receipt_path"] = str(receipt_path(runtime))
+        if files and operation_id:
+            marker = _set_marker(root, operation_id, "migrating", marker, detail)
         for image in files:
             try:
                 if image["path"] not in resume_paths and _replace_image(root, image, undo=False):
@@ -987,6 +1258,13 @@ def migrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False, 
         except (OSError, ValueError, MemoryError) as exc:
             summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"settlement failed; recovery receipt retained: {exc}"})
             summary["complete"] = False
+        else:
+            if summary["complete"] and files:
+                try:
+                    _publish_marker(root, {"format": MARKER_FORMAT, "operation_id": operation_id, "state": "migrated"}, expected=marker)
+                except (ReceiptUnavailable, OSError, ValueError, MemoryError) as exc:
+                    summary["failed"].append({"path": str(_marker_path(root)), "error": f"settlement failed; recovery receipt retained: {exc}"})
+                    summary["complete"] = False
         return summary
     try:
         if apply:
@@ -1021,13 +1299,17 @@ def unmigrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False
     root = Path(vault_root).resolve()
     runtime = Path(runtime_root).resolve()
     def run() -> dict[str, Any]:
-        receipt = peek_receipt(runtime, vault_root=root)
-        if receipt is None:
+        loaded = _load_receipt(runtime, root)
+        if loaded is None:
             return {"skipped": "no migration receipt to reverse", "receipt_path": str(receipt_path(runtime))}
+        receipt = loaded.receipt
+        marker = _read_marker(root)
+        if _binding(receipt, marker) == "stale":
+            raise _stale(receipt, marker, runtime)
         summary: dict[str, Any] = {"vault_root": str(root), "receipt_vault_root": receipt["vault_root"], "applied": apply,
                                    "files_restored": 0, "restored": [], "failed": []}
-        files = list(receipt.get("files", []))
-        legacy = receipt.get("legacy_rewrites", []) if receipt["schema_version"] == 2 else receipt["rewrites"]
+        files = list(receipt["files"])
+        legacy = receipt["legacy_rewrites"]
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for entry in legacy:
             grouped[entry["path"]].append(entry)
@@ -1050,12 +1332,16 @@ def unmigrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False
                 assert normalized[start:end] == entry["to"]
                 entry = dict(entry, offset=boundaries[start], to=image["after_text"][boundaries[start]:boundaries[end]])
             rewrites.append(entry)
-        payload = dict(receipt, schema_version=2, status="prepared", operation="undo", files=files, legacy_rewrites=remaining, rewrites=rewrites)
+        operation_id = receipt["operation_id"] or (_new_operation_id() if files else None)
+        payload = dict(receipt, schema_version=3, status="prepared", operation="undo", files=files, legacy_rewrites=remaining,
+                       rewrites=rewrites, operation_id=operation_id, base_marker=marker)
         if apply:
             try:
                 _publish_receipt(runtime, payload, archive=receipt.get("operation") != "undo")
             except (OSError, ValueError, MemoryError) as exc:
                 raise OSError(f"cannot prepare recovery receipt; no notes changed: {exc}") from exc
+            if files and operation_id:
+                marker = _set_marker(root, operation_id, "undoing", marker, "no notes changed")
         for image in files:
             try:
                 if apply:
@@ -1080,14 +1366,21 @@ def unmigrate_links(vault_root: Path, runtime_root: Path, *, apply: bool = False
                     summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"settlement failed; recovery receipt retained, retry undo: {exc}"})
             else:
                 try:
-                    active_receipt = receipt_path(runtime)
-                    if _unsafe_receipt_path(active_receipt):
-                        raise OSError("unsafe receipt path")
-                    active_receipt.unlink()
-                    summary["receipt_removed"] = True
-                except OSError as exc:
+                    if files:
+                        _publish_marker(root, {"format": MARKER_FORMAT, "operation_id": operation_id, "state": "unmigrated"}, expected=marker)
+                except (ReceiptUnavailable, OSError, ValueError, MemoryError) as exc:
                     summary["receipt_removed"] = False
-                    summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"cleanup failed; retry undo: {exc}"})
+                    summary["failed"].append({"path": str(_marker_path(root)), "error": f"settlement failed; recovery receipt retained, retry undo: {exc}"})
+                else:
+                    try:
+                        active_receipt = receipt_path(runtime)
+                        if _unsafe_receipt_path(active_receipt):
+                            raise OSError("unsafe receipt path")
+                        active_receipt.unlink()
+                        summary["receipt_removed"] = True
+                    except OSError as exc:
+                        summary["receipt_removed"] = False
+                        summary["failed"].append({"path": str(receipt_path(runtime)), "error": f"cleanup failed; retry undo: {exc}"})
         return summary
     try:
         if apply:

@@ -426,7 +426,7 @@ CSS custom properties live in `App.vue` as `:root` declarations. The system is o
 - **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
-- **Wordmark**: `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` with an accent chevron prefix. Used in StartupView, UpdateProgressView, LoginView, ProjectSidebar brand, and empty states.
+- **Wordmark**: `BrandMark.vue` uses the supplied full wordmark in the sidebar and pane header, with a variant for each theme. The terminal-style `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` in StartupView, UpdateProgressView, and LoginView.
 - **Caret**: `.caret` is a blinking accent terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body and scroll:** the normal app surface is clean (no CRT grain); startup/update/native surfaces retain the terminal texture. Scrollbars are thin and visible so long files, tables, tabs, and settings panes never hide the fact that more content exists. The chat footer's turn-facts strip is the one exception: it scrolls sideways without a visible bar, because a bar under a reply reads as a rule across the transcript.
 
@@ -643,7 +643,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   and URL inputs, shell-quoted, with the engine's `cd` prefix from
   `/api/mcp/status` `shell`) and "Run in terminal", which types the command into
   the in-app terminal via `composables/useRunInTerminal.ts` and falls back to
-  copying it when the terminal is locked or unavailable. `composables/useMcpServers.ts`
+  copying it when the terminal is locked or unavailable. The Providers tab's Connect does the same with the sign-in command the engine returns to a browser that is not on its computer (403 `not_on_host`), then the user presses Verify. `composables/useMcpServers.ts`
   owns status and usage reads and `setEnabled` (Turn off / Turn on, `POST /api/mcp/servers/enabled`, row patched in place), while `components/settings/SettingsMcpServers.vue`
   renders provider configuration and per-chat connection states.
   Settings edits native MCP configuration only to turn one server off or on

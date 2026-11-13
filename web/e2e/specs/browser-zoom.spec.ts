@@ -43,13 +43,29 @@ test.describe('zoom and text scaling', () => {
     ).toBeLessThanOrEqual(0)
   })
 
+  test('the phone header wordmark follows its compact font size', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await boot(page)
+    const brand = page.locator('.header-center .brand')
+    await expect(brand).toBeVisible()
+    const sizes = await brand.evaluate((el) => ({
+      font: parseFloat(getComputedStyle(el).fontSize),
+      image: Array.from(el.querySelectorAll('img')).find(img => getComputedStyle(img).display !== 'none')!.getBoundingClientRect().width,
+      compact: 12 * parseFloat(getComputedStyle(el).getPropertyValue('--font-scale')),
+    }))
+    expect(sizes.font).toBeCloseTo(sizes.compact, 1)
+    expect(sizes.image / sizes.font).toBeCloseTo(5.5, 1)
+  })
+
   test('the largest in-app font scale keeps the composer usable', async ({ page }) => {
-    // 1.5 is the top of the range Settings > Appearance offers. Setting it
-    // before boot is how a returning user arrives, since main.ts restores the
-    // scale from localStorage before Vue mounts.
+    // 1.5 is the top of the range Settings > Appearance offers. The engine
+    // holds the scale; localStorage only paints it before the engine value
+    // loads, which is how a returning user's first frame looks.
     await page.addInitScript(() => {
       try { localStorage.setItem('ciao-font-scale', '1.5') } catch { /* blocked */ }
     })
+    const appearance = await page.request.patch('/api/settings/appearance', { data: { font_scale: 1.5 } })
+    expect(appearance.ok()).toBe(true)
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     const composer = page.locator(COMPOSER)
 
@@ -72,6 +88,8 @@ test.describe('zoom and text scaling', () => {
     await page.addInitScript(() => {
       try { localStorage.setItem('ciao-font-scale', '1.5') } catch { /* blocked */ }
     })
+    const appearance = await page.request.patch('/api/settings/appearance', { data: { font_scale: 1.5 } })
+    expect(appearance.ok()).toBe(true)
     await page.setViewportSize({ width: 640, height: 450 })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     // 640px is a phone layout: the code badge is hidden, so open Chat details from ⓘ.
@@ -90,6 +108,8 @@ test.describe('zoom and text scaling', () => {
     await page.addInitScript(() => {
       try { localStorage.setItem('ciao-font-scale', '1.5') } catch { /* blocked */ }
     })
+    const appearance = await page.request.patch('/api/settings/appearance', { data: { font_scale: 1.5 } })
+    expect(appearance.ok()).toBe(true)
     await page.setViewportSize({ width: 640, height: 450 })
     await boot(page, '/settings/appearance', '.settings-main')
     await page.getByRole('button', { name: 'Customise…' }).click()

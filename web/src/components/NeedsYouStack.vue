@@ -21,6 +21,7 @@
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import NeedsYouCard from './NeedsYouCard.vue'
+import { mcpServerName } from '../lib/chatActions'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction } from '../lib/types'
 
@@ -53,7 +54,7 @@ const ordered = computed(() => [
   ...props.actions.filter(a => foldedIds.value.has(a.id)),
 ])
 const firstFolded = computed(() => ordered.value.find(a => foldedIds.value.has(a.id))?.id ?? '')
-const names = computed(() => foldable.value.map(a => a.params.server ?? '').filter(Boolean))
+const names = computed(() => foldable.value.map(a => mcpServerName(a.params.server ?? '')).filter(Boolean))
 const summary = computed(() => `${foldable.value.length} connectors need a sign-in`)
 
 // A fold that dissolves forgets its toggle and its error: the next one starts closed and clean.

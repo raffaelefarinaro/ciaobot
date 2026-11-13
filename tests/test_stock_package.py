@@ -433,11 +433,11 @@ def test_curation_references_keep_every_command_and_flag_of_the_old_prompt() -> 
     assert missing == []
 
 
-def test_every_curation_reference_is_named_by_the_prompt_or_another_reference() -> None:
-    prompt = _curation_prompt()
+def test_every_memory_reference_is_named_by_the_prompt_skill_or_another_reference() -> None:
+    roots = _curation_prompt() + (_memory_skill_dir() / "SKILL.md").read_text(encoding="utf-8")
     refs = {path.name: path.read_text(encoding="utf-8") for path in (_memory_skill_dir() / "references").glob("*.md")}
     for name in refs:
-        others = prompt + "\n".join(text for other, text in refs.items() if other != name)
+        others = roots + "\n".join(text for other, text in refs.items() if other != name)
         assert name in others, f"{name} is an orphan"
 
 

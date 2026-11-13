@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import math
 import os
 import plistlib
 import signal
@@ -98,23 +97,13 @@ class _RepairPolicy:
     port_bind_timeout: float = REPAIR_PORT_BIND_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        for name in (
-            "run_timeout",
-            "readiness_timeout",
-            "readiness_interval",
-            "poll_interval",
-            "port_bind_timeout",
-        ):
-            value = getattr(self, name)
-            if type(value) not in (int, float):
-                raise NativeCoordinatorError("invalid_timeout", "internal_error")
-            number = float(value)
-            if (
-                not math.isfinite(number)
-                or number <= 0
-                or number > native_installer.COORDINATOR_MAX_TIMEOUT_SECONDS
-            ):
-                raise NativeCoordinatorError("invalid_timeout", "internal_error")
+        native_installer._validate_policy_timeouts((
+            self.run_timeout,
+            self.readiness_timeout,
+            self.readiness_interval,
+            self.poll_interval,
+            self.port_bind_timeout,
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,7 +441,7 @@ def _plan_host(
     try:
         policy = server_host_install._entry_policy(entry)
         state, _ = server_host_install._classify_host(
-            bundle, record, subprocess.run, policy
+            bundle, record, subprocess.run, policy, repair=True
         )
     except server_host_install._SignedDowngradeRefused:
         raise _Refusal("unknown_state") from None
@@ -860,37 +849,6 @@ def _activating(step: Callable[[], _T]) -> _T:
         raise _Refusal("activation_refused") from None
 
 
-def _await_repair_port(
-    deps: _RepairDeps,
-    port: int,
-    host: str,
-    policy: _RepairPolicy,
-    deadline: _Deadline,
-    cancellation: NativeCancellation,
-) -> None:
-    """Return once the service port is bindable; otherwise refuse before activation."""
-    bind = _Deadline.after(policy.port_bind_timeout)
-    while True:
-        _check_stage(deadline, cancellation)
-        try:
-            bindable = deps.port_bindable(port, host)
-        except (_Cancelled, _TimedOut):
-            raise
-        except Exception:
-            raise _Refusal("activation_refused") from None
-        if not isinstance(bindable, bool):
-            raise _Refusal("activation_refused")
-        if bindable:
-            return
-        if bind.remaining() <= 0:
-            raise _Refusal("activation_refused")
-        _wait_observing(
-            min(policy.poll_interval, bind.remaining()),
-            cancellation,
-            policy.poll_interval,
-        )
-
-
 def _run_native_repair(
     request: NativeRepairRequest,
     *,
@@ -1002,7 +960,13 @@ def _run_native_repair(
                 digest = _mutating(lambda: deps.write_definition(target, rendered))
                 held.assert_held(run_id=request.run_id)
                 _check_stage(deadline, cancellation)
-                _await_repair_port(deps, target.port, target.host, policy, deadline, cancellation)
+                native_installer._await_bindable(
+                    lambda: deps.port_bindable(target.port, target.host),
+                    policy.port_bind_timeout,
+                    policy.poll_interval,
+                    deadline,
+                    cancellation,
+                )
 
                 writer.phase("activation")
                 activation_attempted = True

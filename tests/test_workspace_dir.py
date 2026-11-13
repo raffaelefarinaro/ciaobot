@@ -277,3 +277,58 @@ def test_unknown_chat_is_404(tmp_path: Path) -> None:
     resp = client.get("/api/workspace-dir", params={"chat_id": "missing"})
     assert resp.status_code == 404
     assert resp.json() == {"error": "chat not found"}
+
+
+def _project_with_folder(manager: ProjectChatManager):
+    """A project whose active vault folder exists, plus one chat in it."""
+    chat = _one_chat(manager)
+    project = manager.get_project(chat.project_id)
+    project.vault_folder = "browse"
+    folder = manager._vault_active_root(project.workspace) / "browse"
+    folder.mkdir(parents=True)
+    (folder / "README.md").write_text("# Browse\n", encoding="utf-8")
+    return project, chat, folder
+
+
+def test_chat_in_project_starts_in_project_folder(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _, chat, folder = _project_with_folder(manager)
+    client = _make_manager_client(manager)
+    body = client.get("/api/workspace-dir", params={"chat_id": chat.chat_id}).json()
+    assert body["path"] == folder.resolve().as_posix()
+    assert [e["name"] for e in body["entries"]] == ["README.md"]
+    # The rest of the workspace stays one step up.
+    assert body["parent"] == folder.resolve().parent.as_posix()
+
+
+def test_explicit_path_wins_over_project_folder(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _, chat, folder = _project_with_folder(manager)
+    client = _make_manager_client(manager)
+    up = folder.resolve().parent.as_posix()
+    body = client.get("/api/workspace-dir", params={"chat_id": chat.chat_id, "path": up}).json()
+    assert body["path"] == up
+
+
+def test_chat_without_project_folder_starts_at_root(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    client = _make_manager_client(manager)
+    body = client.get("/api/workspace-dir", params={"chat_id": chat.chat_id}).json()
+    assert body["path"] == body["roots"][0]["path"]
+
+
+def test_project_id_starts_in_project_folder(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project, _, folder = _project_with_folder(manager)
+    client = _make_manager_client(manager)
+    body = client.get("/api/workspace-dir", params={"project_id": project.project_id}).json()
+    assert body["path"] == folder.resolve().as_posix()
+
+
+def test_unknown_project_is_404(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    client = _make_manager_client(manager)
+    resp = client.get("/api/workspace-dir", params={"project_id": "missing"})
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "project not found"}
