@@ -421,6 +421,13 @@ export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
   | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover' | 'chat_action'
 
+export type VerifiedClaimStatus = 'supported' | 'unsupported' | 'general'
+export interface VerifiedClaim { text: string; status: VerifiedClaimStatus; source: string }
+export interface TurnVerification {
+  supported: number; unsupported: number; general: number
+  claims: VerifiedClaim[]; sources: string[]
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -454,6 +461,8 @@ export interface ChatMessage {
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
+  // Engine vault answer check for this turn (last assistant row only).
+  verification?: TurnVerification
   // Populated when tool_name === '_filecard'. Drives the inline preview card
   // rendered alongside the activity trace. `file_path` is whatever the agent
   // told us; absolute host paths are intentionally supported by the viewer.
@@ -675,6 +684,7 @@ export type EventsWsMessage =
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
+  | { type: 'turn_verification'; chat_id: string; turn_index: number; verification: TurnVerification }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
@@ -976,6 +986,8 @@ export interface RoutineSettings {
   // Settings → General: a chat whose turn a restart or crash cut off gets one
   // "Continue after restart" turn at the next start. Missing = on.
   resume_after_restart?: boolean
+  // Settings → General: check vault-grounded answers against the notes read. Missing = on.
+  verify_vault_answers?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string
