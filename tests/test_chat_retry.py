@@ -8,6 +8,9 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.models import ChatContext, ResultEvent
@@ -36,6 +39,85 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         transcript_store=transcripts,
         path=runtime / "web_projects.json",
     ))
+
+
+@pytest.mark.parametrize("operation", ["delete", "archive", "reset", "handover"])
+def test_lifecycle_route_reports_persisted_claim_conflict(tmp_path: Path, operation: str) -> None:
+    from ciao.web.routes_api import chat_archive, chat_detail, chat_handover, chat_new_session
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    chat.pending_queue = [{"id": "keep", "text": "do not lose", "images": []}]
+    owner._save()
+    assert owner.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    manager = _make_manager(tmp_path)
+    claimed, resume = Event(), Event()
+
+    def start(*args, **kwargs):
+        claimed.set()
+        assert resume.wait(5)
+        return object()
+
+    owner.start_stream = start
+    app = Starlette(routes=[
+        Route("/chats/{chat_id}", chat_detail, methods=["DELETE"]),
+        Route("/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
+        Route("/chats/{chat_id}/reset", chat_new_session, methods=["POST"]),
+        Route("/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
+    ])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(owner.try_chat_retry_now, chat.chat_id)
+        assert claimed.wait(5)
+        try:
+            before = owner._path.read_bytes()
+            url = f"/chats/{chat.chat_id}"
+            response = client.delete(url) if operation == "delete" else client.post(
+                f"{url}/{operation}", json={"provider": "claude", "model": "test"}
+            )
+            assert response.status_code == 409
+            assert response.json() == {"error": "recovery is in flight"}
+            assert owner._path.read_bytes() == before
+            assert manager.get_chat(chat.chat_id).pending_queue[0]["text"] == "do not lose"
+        finally:
+            resume.set()
+        assert future.result() is not None
+
+
+@pytest.mark.parametrize("operation", ["delete", "archive", "reset", "handover"])
+@pytest.mark.parametrize("error", [ValueError("other validation"), OSError("storage failure")])
+def test_lifecycle_routes_do_not_mask_other_errors(tmp_path: Path, monkeypatch, operation: str, error: Exception) -> None:
+    from ciao.web.routes_api import chat_archive, chat_detail, chat_handover, chat_new_session
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("test", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="test")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    async def fail_async(*args, **kwargs):
+        raise error
+
+    name = {"delete": "delete_chat", "archive": "archive_chat", "reset": "new_session",
+            "handover": "handover_chat"}[operation]
+    monkeypatch.setattr(manager, name, fail_async if operation == "archive" else fail)
+    app = Starlette(routes=[
+        Route("/chats/{chat_id}", chat_detail, methods=["DELETE"]),
+        Route("/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
+        Route("/chats/{chat_id}/reset", chat_new_session, methods=["POST"]),
+        Route("/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
+    ])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    url = f"/chats/{chat.chat_id}"
+    response = client.delete(url) if operation == "delete" else client.post(
+        f"{url}/{operation}", json={"provider": "claude", "model": "test"}
+    )
+    assert response.status_code == (400 if isinstance(error, ValueError) and operation in ("reset", "handover") else 500)
 
 
 async def _consume(stream) -> list[dict]:
@@ -261,6 +343,110 @@ def test_claim_blocks_unrelated_turn_and_stop_before_stream_starts(tmp_path: Pat
         finally:
             resume.set()
         assert future.result() is not None
+
+
+@pytest.mark.parametrize("operation", ["archive", "delete", "reset", "handover"])
+async def test_lifecycle_refuses_claim_before_side_effects(tmp_path: Path, operation: str, monkeypatch) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    chat.pending_queue = [{"id": "keep", "text": "do not lose", "images": []}]
+    pcm._save()
+    assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    other = _make_manager(tmp_path)
+    claimed, resume = Event(), Event()
+    def start(*args, **kwargs):
+        claimed.set()
+        assert resume.wait(5)
+        return object()
+    pcm.start_stream = start  # type: ignore[method-assign,assignment]
+    touched = []
+    monkeypatch.setattr(other._transcripts, "archive_session", lambda **kwargs: touched.append("archive"))
+    monkeypatch.setattr(other._state, "delete_context", lambda *args: touched.append("delete"))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(pcm.try_chat_retry_now, chat.chat_id)
+        assert claimed.wait(5)
+        try:
+            with pytest.raises(ValueError, match="recovery"):
+                if operation == "archive":
+                    await other.archive_chat(chat.chat_id)
+                elif operation == "delete":
+                    other.delete_chat(chat.chat_id)
+                elif operation == "handover":
+                    other.handover_chat(chat.chat_id, provider="claude", model="test")
+                else:
+                    other.new_session(chat.chat_id)
+            assert not touched
+            saved = other.get_chat(chat.chat_id)
+            assert saved is not None and saved.session_id == "session-1"
+            assert saved.pending_queue[0]["text"] == "do not lose"
+        finally:
+            resume.set()
+        assert future.result() is not None
+
+
+@pytest.mark.parametrize("operation", ["archive", "delete", "reset"])
+async def test_lifecycle_reservation_blocks_other_manager_firing(tmp_path: Path, operation: str, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    manager._save()
+    assert manager.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    other = _make_manager(tmp_path)
+    started = []
+    monkeypatch.setattr(other, "start_stream", lambda *a, **kw: started.append(True))
+    observed = []
+
+    def during_lifecycle(*args, **kwargs):
+        observed.append(other.try_chat_retry_now(chat.chat_id))
+        return None
+
+    if operation == "archive":
+        monkeypatch.setattr(manager, "_read_archive_inputs", lambda *args: (during_lifecycle(), None))
+        await manager.archive_chat(chat.chat_id)
+    elif operation == "delete":
+        monkeypatch.setattr(manager._state, "delete_context", during_lifecycle)
+        manager.delete_chat(chat.chat_id)
+    else:
+        monkeypatch.setattr(manager._transcripts, "archive_session", during_lifecycle)
+        manager.new_session(chat.chat_id)
+    assert observed == [None]
+    assert not started
+    assert other.try_chat_retry_now(chat.chat_id) is None
+
+
+def test_lifecycle_reservation_blocks_activation_and_abandoned_reservation_recovers(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import project_chats
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    manager._save()
+    other = _make_manager(tmp_path)
+    with manager._chat_lifecycle_guard(chat.chat_id):
+        assert not other.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    payload = manager._read_latest_payload()
+    payload["chats"][chat.chat_id]["recovery_lifecycle"] = {"owner": "99999999-dead", "id": "old"}
+    manager._path.write_text(json.dumps(payload))
+    monkeypatch.setattr(project_chats, "_recovery_owner_alive", lambda owner: False)
+    restarted = _make_manager(tmp_path)
+    assert restarted.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+
+
+def test_literal_retry_still_fires_during_lifecycle_reservation(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("retry", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="retry")
+    manager.set_chat_retry(chat.chat_id, "literal prompt")
+    other = _make_manager(tmp_path)
+    sent = []
+    monkeypatch.setattr(other, "start_stream", lambda *args, **kwargs: sent.append(args[1]))
+    with manager._chat_lifecycle_guard(chat.chat_id):
+        other.try_chat_retry_now(chat.chat_id)
+    assert sent == ["literal prompt"]
 
 
 def test_abandoned_recovery_claim_stops_on_restart(tmp_path: Path, monkeypatch) -> None:

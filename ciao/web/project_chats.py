@@ -313,6 +313,10 @@ def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
 
 
+class RecoveryLifecycleConflict(ValueError):
+    """A recovery or lifecycle operation is already in flight."""
+
+
 class RecoveryOutcomeUnknown(OSError):
     """Activation reported an error and its result could not be read back."""
 
@@ -1662,6 +1666,44 @@ class ProjectChatManager:
             raise ValueError(f"Chat registry {self._path} is not a JSON object")
         return payload
 
+    @contextmanager
+    def _chat_lifecycle_guard(self, chat_id: str) -> Iterator[None]:
+        """Reserve lifecycle work against recovery claims without holding a lock across I/O."""
+        if not self._path:
+            yield
+            return
+        token = uuid.uuid4().hex
+        def write(payload: dict[str, Any]) -> None:
+            assert self._path is not None
+            tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
+                tmp.replace(self._path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        with _state_file_lock(self._path):
+            payload = self._read_latest_payload()
+            row = payload.get("chats", {}).get(chat_id)
+            if not isinstance(row, dict):
+                raise ValueError("chat no longer exists")
+            marker, lease = row.get("retry_recovery"), row.get("recovery_lifecycle")
+            if isinstance(marker, dict) and marker.get("claim"):
+                raise RecoveryLifecycleConflict("recovery is in flight")
+            if isinstance(lease, dict) and _recovery_owner_alive(lease.get("owner")):
+                raise RecoveryLifecycleConflict("chat lifecycle operation is already in flight")
+            row["recovery_lifecycle"] = {"owner": restart_resume.PROCESS_TOKEN, "id": token}
+            write(payload)
+        try:
+            yield
+        finally:
+            with _state_file_lock(self._path):
+                payload = self._read_latest_payload()
+                row = payload.get("chats", {}).get(chat_id)
+                lease = row.get("recovery_lifecycle") if isinstance(row, dict) else None
+                if isinstance(lease, dict) and lease.get("id") == token:
+                    row.pop("recovery_lifecycle", None)
+                    write(payload)
+
     @staticmethod
     def _mutation_summary(
         baseline: dict[str, Any], current: dict[str, Any]
@@ -1799,11 +1841,17 @@ class ProjectChatManager:
             if _firing_expected is not None:
                 firing_id, expected = _firing_expected
                 row = latest_chats.get(firing_id) if isinstance(latest_chats, dict) else None
+                lease = row.get("recovery_lifecycle") if isinstance(row, dict) else None
+                if isinstance(lease, dict) and _recovery_owner_alive(lease.get("owner")):
+                    return False
                 if not isinstance(row, dict) or any(row.get(key) != value for key, value in expected.items()):
                     return False
             if _recovery_expected is not None:
                 chat_id, session, error, turn_count, failure_id = _recovery_expected
                 row = latest_chats.get(chat_id) if isinstance(latest_chats, dict) else None
+                lease = row.get("recovery_lifecycle") if isinstance(row, dict) else None
+                if isinstance(lease, dict) and _recovery_owner_alive(lease.get("owner")):
+                    return False
                 if not isinstance(row, dict) or (
                     row.get("archived") or row.get("retry_status") == "pending"
                     or row.get("session_id") != session or row.get("last_error") != error
@@ -4713,6 +4761,14 @@ class ProjectChatManager:
         resetting the active provider session and preserving visible messages
         as a handover context pack for the next turn.
         """
+        if chat_id not in self._chats:
+            return None
+        with self._chat_lifecycle_guard(chat_id):
+            return self._handover_chat_guarded(chat_id, provider=provider, model=model, messages=messages)
+
+    def _handover_chat_guarded(
+        self, chat_id: str, *, provider: str, model: str, messages: list[dict] | None = None
+    ) -> ChatInfo | None:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
@@ -4910,6 +4966,12 @@ class ProjectChatManager:
         asyncio.ensure_future(cleanup())
 
     def delete_chat(self, chat_id: str) -> bool:
+        if chat_id not in self._chats:
+            return False
+        with self._chat_lifecycle_guard(chat_id):
+            return self._delete_chat_guarded(chat_id)
+
+    def _delete_chat_guarded(self, chat_id: str) -> bool:
         # Resolved before the row leaves the registry: the cleanup below runs
         # after the pop (and asynchronously), and `_agent_root_for_chat` reads
         # `self._chats`, so resolving it there lands on the primary workspace's
@@ -5108,7 +5170,8 @@ class ProjectChatManager:
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived:
                     return None
-                return await self._archive_chat_unlocked(chat_id)
+                with self._chat_lifecycle_guard(chat_id):
+                    return await self._archive_chat_unlocked(chat_id)
         finally:
             remaining = self._archive_lock_users.get(chat_id, 1) - 1
             if remaining <= 0:
@@ -5234,6 +5297,12 @@ class ProjectChatManager:
 
     def new_session(self, chat_id: str) -> ChatInfo | None:
         """Archive current transcript and start a fresh session."""
+        if chat_id not in self._chats:
+            return None
+        with self._chat_lifecycle_guard(chat_id):
+            return self._new_session_guarded(chat_id)
+
+    def _new_session_guarded(self, chat_id: str) -> ChatInfo | None:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None

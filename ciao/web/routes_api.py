@@ -149,6 +149,7 @@ from ciao.web.project_chats import (
     ChatInfo,
     ProjectChatManager,
     ProjectOrderError,
+    RecoveryLifecycleConflict,
     RecoveryOutcomeUnknown,
 )
 from ciao.web.routes_helpers import (
@@ -2546,7 +2547,10 @@ async def chat_detail(request: Request) -> Response:
         if request.query_params.get("only_if_empty") in {"1", "true"}:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
-        ok = pcm.delete_chat(chat_id)
+        try:
+            ok = pcm.delete_chat(chat_id)
+        except RecoveryLifecycleConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
@@ -2663,6 +2667,8 @@ async def chat_new_session(request: Request) -> JSONResponse:
     chat_id = request.path_params["chat_id"]
     try:
         chat = pcm.new_session(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2686,6 +2692,8 @@ async def chat_handover(request: Request) -> JSONResponse:
             model=model,
             messages=[m for m in messages if isinstance(m, dict)],
         )
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -3004,7 +3012,10 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    outcome = await pcm.archive_chat(chat_id)
+    try:
+        outcome = await pcm.archive_chat(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
     return JSONResponse({
