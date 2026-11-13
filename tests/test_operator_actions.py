@@ -19,6 +19,7 @@ import pytest
 from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import (
     DetectionContext,
+    _run_provider_recheck,
     detect_actions,
     dismiss_action,
     run_action,
@@ -1518,6 +1519,28 @@ def test_provider_update_dismissals_keep_other_providers_and_ignore_junk(tmp_pat
     assert json.loads(path.read_text(encoding="utf-8")) == {"claude": "2.0.0", "opencode": "2.1.0"}
     path.write_text("not json", encoding="utf-8")
     assert len(_provider_tiles(context)) == 1
+
+
+@pytest.mark.parametrize(
+    ("check", "state", "summary"),
+    [
+        ({"state": "current"}, "current", "OpenCode is up to date."),
+        (_below_tested(), "below_tested", "OpenCode 2.0.32 is still older than 2.1.0."),
+        ({"state": "bundled"}, "bundled", "OpenCode is bundled with Ciaobot."),
+        ({"state": "unsupported"}, "unsupported", "OpenCode is not compatible with this Ciaobot version."),
+        ({"state": "unknown"}, "unknown", "Could not verify OpenCode's version."),
+        ({"state": "untested"}, "untested", "Could not verify OpenCode's version."),
+        (None, "unknown", "Could not verify OpenCode's version."),
+        ({"state": "unexpected"}, "unexpected", "Could not verify OpenCode's version."),
+    ],
+)
+def test_provider_recheck_reports_actual_state(
+    tmp_path: Path, check: dict[str, str] | None, state: str, summary: str
+) -> None:
+    checks = _FakeProviderChecks({"opencode": check} if check is not None else {})
+    result, actual_summary = _run_provider_recheck(_context(tmp_path, provider_checks=checks), "opencode")
+    assert result == {"state": state}
+    assert actual_summary == summary
 
 
 @pytest.mark.asyncio
