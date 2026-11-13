@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.responses import Response
+from starlette.responses import FileResponse, Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -20,6 +20,227 @@ from ciao.web.request_limits import SKILL_IMPORT_BODY_LIMIT
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.security import SecurityHeadersMiddleware
 from ciao.web.app import create_app
+
+
+def test_file_response_asgi23_does_not_spin(tmp_path: Path) -> None:
+    file = tmp_path / "guide.txt"
+    content = b"file response contents"
+    file.write_bytes(content)
+
+    async def run() -> None:
+        reads = 0
+        replay_reads = 0
+        sent = []
+        never = asyncio.Event()
+
+        async def receive():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await never.wait()
+            raise AssertionError("disconnect was not emitted")
+
+        async def send(message):
+            sent.append(message)
+
+        async def endpoint(scope, replay, send):
+            async def guarded_receive():
+                nonlocal replay_reads
+                replay_reads += 1
+                assert replay_reads <= 1000, "EOF replay busy-loop"
+                return await replay()
+
+            await FileResponse(file)(scope, guarded_receive, send)
+
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+                 "method": "GET", "path": "/api/guide", "headers": []}
+        await asyncio.wait_for(ApiRequestBodyLimitMiddleware(endpoint)(scope, receive, send), 5)
+        assert b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body") == content
+        assert reads == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("size", [0, 5, 65536, 65537])
+def test_replay_body_then_delegates(size: int) -> None:
+    async def run() -> None:
+        body = b"x" * size
+        reads = 0
+        waiting = asyncio.Event()
+        disconnect = asyncio.Event()
+
+        async def receive():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return {"type": "http.request", "body": body, "more_body": False}
+            waiting.set()
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def endpoint(scope, replay, send):
+            messages = []
+            while True:
+                message = await replay()
+                messages.append(message)
+                if not message["more_body"]:
+                    break
+            assert b"".join(m["body"] for m in messages) == body
+            assert all(m["type"] == "http.request" and len(m["body"]) <= 65536 for m in messages)
+            assert sum(not m["more_body"] for m in messages) == 1
+            pending = asyncio.create_task(replay())
+            await asyncio.wait_for(waiting.wait(), 5)
+            assert not pending.done()
+            disconnect.set()
+            assert await pending == {"type": "http.disconnect"}
+
+        async def send(message):
+            raise AssertionError("unexpected response")
+
+        scope = {"type": "http", "method": "POST", "path": "/api/write", "headers": []}
+        await asyncio.wait_for(ApiRequestBodyLimitMiddleware(endpoint)(scope, receive, send), 5)
+        assert reads == 2
+
+    asyncio.run(run())
+
+
+def test_replay_forwards_unexpected_post_terminal_event() -> None:
+    async def run() -> None:
+        unexpected = {"type": "http.request", "body": b"late", "more_body": True}
+        messages = iter([{"type": "http.request", "body": b"", "more_body": False}, unexpected])
+
+        async def receive():
+            return next(messages)
+
+        async def endpoint(scope, replay, send):
+            assert (await replay())["more_body"] is False
+            # A conforming server does not send request events after the terminal one.
+            assert await replay() is unexpected
+
+        async def send(message):
+            raise AssertionError("unexpected response")
+
+        await ApiRequestBodyLimitMiddleware(endpoint)(
+            {"type": "http", "method": "POST", "path": "/api/write", "headers": []}, receive, send
+        )
+
+    asyncio.run(run())
+
+
+def test_file_response_disconnect_closes_spool(monkeypatch, tmp_path: Path) -> None:
+    import tempfile
+    from ciao.web import request_limits
+
+    file = tmp_path / "guide.txt"
+    file.write_bytes(b"file contents")
+    opened = []
+    real_spool = tempfile.SpooledTemporaryFile
+
+    def tracked_spool(*args, **kwargs):
+        spool = real_spool(*args, **kwargs)
+        opened.append(spool)
+        return spool
+
+    monkeypatch.setattr(request_limits.tempfile, "SpooledTemporaryFile", tracked_spool)
+
+    async def run() -> None:
+        reads = 0
+        body_send = asyncio.Event()
+        disconnect = asyncio.Event()
+        never = asyncio.Event()
+        started = False
+
+        async def receive():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            elif message["type"] == "http.response.body":
+                body_send.set()
+                await never.wait()
+
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+                 "method": "GET", "path": "/api/guide", "headers": []}
+        task = asyncio.create_task(ApiRequestBodyLimitMiddleware(FileResponse(file))(scope, receive, send))
+        try:
+            await asyncio.wait_for(body_send.wait(), 5)
+            assert started and not opened[0].closed
+            disconnect.set()
+            await asyncio.wait_for(task, 5)
+            assert reads == 2 and opened[0].closed
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_file_response_asgi23_repeated_requests_keep_loop_responsive(tmp_path: Path) -> None:
+    file = tmp_path / "guide.txt"
+    content = b"guide contents"
+    file.write_bytes(content)
+
+    async def run() -> None:
+        ticks = 0
+        done = False
+
+        async def heartbeat():
+            nonlocal ticks
+            while not done:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        async def requests():
+            for _ in range(20):
+                reads = 0
+                sent = []
+                never = asyncio.Event()
+
+                async def receive():
+                    nonlocal reads
+                    reads += 1
+                    if reads == 1:
+                        return {"type": "http.request", "body": b"", "more_body": False}
+                    await never.wait()
+                    raise AssertionError("disconnect was not emitted")
+
+                async def send(message):
+                    sent.append(message)
+
+                async def endpoint(scope, replay, send):
+                    calls = 0
+                    async def guarded_receive():
+                        nonlocal calls
+                        calls += 1
+                        assert calls <= 1000, "EOF replay busy-loop"
+                        return await replay()
+                    await FileResponse(file)(scope, guarded_receive, send)
+
+                scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+                         "method": "GET", "path": "/api/guide", "headers": []}
+                before = ticks
+                await ApiRequestBodyLimitMiddleware(endpoint)(scope, receive, send)
+                assert ticks > before
+                assert b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body") == content
+                assert reads == 2
+
+        task = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.wait_for(requests(), 10)
+        finally:
+            done = True
+            await task
+
+    asyncio.run(run())
 
 
 def _config(tmp_path: Path):
