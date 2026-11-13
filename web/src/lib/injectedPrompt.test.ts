@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { errorNoticePrompt, parseInjectedPrompt, summarizeInjectedPrompt } from './injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, summarizeInjectedPrompt } from './injectedPrompt'
 import type { InjectedPrompt } from './injectedPrompt'
+
+describe('retryScheduledNotice', () => {
+  it.each(['manual', 'mcp', '', '  \n'])('treats %j as a neutral scheduled retry', text => {
+    const prompt = retryScheduledNotice(text)
+    expect(prompt).toEqual({ kind: 'retry_scheduled' })
+    expect(summarizeInjectedPrompt(prompt)).toEqual({ label: 'Retry scheduled', facts: '', tone: null })
+  })
+
+  it.each(['you have reached your 5-hour usage limit', 'Error: manual intervention required', ' manual '])('preserves a real or nonexact error: %s', text => {
+    expect(retryScheduledNotice(text)).toEqual(errorNoticePrompt(text))
+  })
+
+  it('keeps a usage limit classified as an error', () => {
+    expect(retryScheduledNotice('you have reached your 5-hour usage limit')).toMatchObject({ kind: 'error', label: 'Usage limit reached' })
+  })
+})
 
 it('compaction origin produces a summary notice without classifying ordinary messages', () => {
   const prompt = parseInjectedPrompt('The preserved context', 'compaction')

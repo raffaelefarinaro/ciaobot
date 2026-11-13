@@ -11,6 +11,7 @@ import type {
   OperatorAction,
   UpdateTaskActionResponse,
   UpdateTaskCoverageGap,
+  UpdateTaskPreview,
   UpdateTaskRow,
   UpdateTasksResponse,
   WorkspaceHealthCheck,
@@ -35,6 +36,13 @@ export interface UpdateTaskOutcome {
   chatId: string
   resumed: boolean
   error: string
+}
+
+export interface UpdateTaskPreviewState {
+  loading: boolean
+  result: UpdateTaskPreview | null
+  error: string
+  applicabilityCheckedAt: string
 }
 
 /**
@@ -175,6 +183,72 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   })
   const pendingUpdateTaskIds = ref<Set<string>>(new Set())
   const taskErrors = ref<Record<string, string>>({})
+  const taskPreviews = ref<Record<string, UpdateTaskPreviewState>>({})
+  let previewGeneration = 0
+  const previewSeq = new Map<string, number>()
+  const invalidatedPreviews = new Set<string>()
+
+  function eligible(row: UpdateTaskRow): boolean {
+    return row.offered && !row.suppressed && row.status === 'offered' && row.applicability === 'applicable'
+  }
+
+  function invalidatePreview(key: string): void {
+    previewSeq.set(key, (previewSeq.get(key) ?? 0) + 1)
+    invalidatedPreviews.add(key)
+    delete taskPreviews.value[key]
+  }
+
+  async function fetchTaskPreview(row: UpdateTaskRow, fresh: boolean): Promise<void> {
+    const key = taskKey(row)
+    const workspace = updateTasksWorkspace.value
+    const current = updateTasks.value.find(item => taskKey(item) === key)
+    if (!workspace || !current || !eligible(current) || current.applicability_checked_at !== row.applicability_checked_at) return
+    const existing = taskPreviews.value[key]
+    if (existing?.loading && existing.applicabilityCheckedAt === row.applicability_checked_at) return
+    if (existing && existing.applicabilityCheckedAt !== row.applicability_checked_at) {
+      invalidatePreview(key)
+      fresh = true
+    }
+    const generation = previewGeneration
+    const seq = (previewSeq.get(key) ?? 0) + 1
+    previewSeq.set(key, seq)
+    taskPreviews.value[key] = { loading: true, result: null, error: '', applicabilityCheckedAt: row.applicability_checked_at }
+    const isCurrent = () => {
+      const latest = updateTasks.value.find(item => taskKey(item) === key)
+      return generation === previewGeneration && workspace === updateTasksWorkspace.value &&
+        previewSeq.get(key) === seq && !!latest && eligible(latest) &&
+        latest.applicability_checked_at === row.applicability_checked_at
+    }
+    try {
+      const result = await api.get<UpdateTaskPreview>(`/api/update-tasks/${encodeURIComponent(row.id)}/preview${query(workspace)}${fresh ? '&fresh=1' : ''}`)
+      if (!isCurrent()) return
+      if (!result || result.task_id !== row.id || result.revision !== row.revision || result.workspace !== workspace) {
+        throw new Error('Preview response does not match this task.')
+      }
+      taskPreviews.value[key] = { loading: false, result, error: '', applicabilityCheckedAt: row.applicability_checked_at }
+    } catch (e) {
+      if (!isCurrent()) return
+      taskPreviews.value[key] = { loading: false, result: null, error: apiErrorMessage(e, 'Could not load preview.'), applicabilityCheckedAt: row.applicability_checked_at }
+    }
+  }
+
+  function prepareTaskPreviews(): void {
+    const rows = new Map(updateTasks.value.filter(eligible).map(row => [taskKey(row), row]))
+    for (const key of Object.keys(taskPreviews.value)) {
+      const row = rows.get(key)
+      if (!row || (taskPreviews.value[key].applicabilityCheckedAt && taskPreviews.value[key].applicabilityCheckedAt !== row.applicability_checked_at)) invalidatePreview(key)
+    }
+    for (const [key, row] of rows) {
+      const existing = taskPreviews.value[key]
+      if (existing?.applicabilityCheckedAt === row.applicability_checked_at && (existing.loading || existing.result || existing.error)) continue
+      // A later generation must not join a server scan from an earlier workspace visit.
+      void fetchTaskPreview(row, previewGeneration > 1 || invalidatedPreviews.has(key))
+    }
+  }
+
+  function refreshTaskPreview(row: UpdateTaskRow): Promise<void> {
+    return fetchTaskPreview(row, true)
+  }
 
   /** How many listings have been asked for, and therefore which answers are
    *  still current.
@@ -237,6 +311,9 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       return
     }
     if (updateTasksWorkspace.value !== wanted) {
+      previewGeneration += 1
+      taskPreviews.value = {}
+      invalidatedPreviews.clear()
       updateTasks.value = []
       updateTasksCoverageGap.value = null
       updateTasksHealth.value = checkingHealth()
@@ -254,6 +331,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       updateTasks.value = data.tasks ?? []
       updateTasksCoverageGap.value = data.coverage_gap ?? null
       updateTasksHealth.value = readyHealth()
+      prepareTaskPreviews()
     } catch (e) {
       // Best-effort, exactly like `refresh` above, and for the same reason: this
       // is a background poll on the home screen, and a red line here would nag
@@ -325,6 +403,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     requestSeq += 1
     updateTasksHealth.value = readyHealth()
     updateTasks.value = data.tasks
+    prepareTaskPreviews()
     return true
   }
 
@@ -445,6 +524,12 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    * answer as soon as its window allows. The card shows the check time, so
    * "nothing changed" is visible rather than guessed at. */
   async function recheckUpdateTask(): Promise<void> {
+    previewGeneration += 1
+    for (const row of updateTasks.value.filter(eligible)) {
+      const key = taskKey(row)
+      invalidatePreview(key)
+      taskPreviews.value[key] = { loading: false, result: null, error: 'Preview needs refreshing.', applicabilityCheckedAt: '' }
+    }
     await refreshUpdateTasks()
   }
 
@@ -492,6 +577,8 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     updateTasksCoverageBlocked,
     pendingUpdateTaskIds,
     taskErrors,
+    taskPreviews,
+    refreshTaskPreview,
     refreshUpdateTasks,
     startUpdateTask,
     dismissUpdateTask,

@@ -1766,6 +1766,16 @@ export interface UpdateTaskRow {
   updated_at: string
 }
 
+export interface UpdateTaskPreview {
+  task_id: string
+  revision: number
+  workspace: string
+  state: 'review' | 'blocked' | 'unknown'
+  summary: string
+  plan: Record<string, unknown> | null
+  checked_at: string
+}
+
 /** Why `GET /api/update-tasks` is offering nothing. Present only then, because
  *  an absent key and an empty list are different statements and `[]` is the
  *  one a card would read as "you are done". */
