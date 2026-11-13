@@ -27,8 +27,8 @@ verifiers raise ``OSError`` rather than answering "no extended ACL", so their
 callers refuse the file instead of treating an unverified ACL as permission.
 Linux POSIX ACLs (``system.posix_acl_access``) are *not* inspected; the strict
 verifier there checks owner and mode only. On Windows strict additionally
-requires the file's owner SID to be the current account, alongside the
-protected DACL that ``is_private_descriptor`` already checks.
+requires the file's owner SID to be the current account and its DACL to be
+protected against inheritance, in addition to the legacy ACE checks.
 
 ``is_owned_descriptor`` and ``descriptor_acl_grants_another_account`` expose
 those two pieces for callers that need a different mode rule (for example an
@@ -181,6 +181,10 @@ if sys.platform == "win32":
     _SetSecurityDescriptorDacl = _declare(
         _advapi32, "SetSecurityDescriptorDacl", wintypes.BOOL,
         ctypes.c_void_p, wintypes.BOOL, ctypes.c_void_p, wintypes.BOOL,
+    )
+    _GetSecurityDescriptorControl = _declare(
+        _advapi32, "GetSecurityDescriptorControl", wintypes.BOOL,
+        _PSECURITY_DESCRIPTOR, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD),
     )
     _SetSecurityDescriptorControl = _declare(
         _advapi32, "SetSecurityDescriptorControl", wintypes.BOOL,
@@ -371,18 +375,56 @@ if sys.platform == "win32":
         """Windows has no separate extended ACL beyond the DACL already checked."""
         return False
 
+    def _security_descriptor_is_protected(descriptor: ctypes.c_void_p) -> bool:
+        _address(descriptor)
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        _check(_GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)))
+        return bool(control.value & _SE_DACL_PROTECTED)
+
+    def _descriptor_dacl_is_protected(fd: int) -> bool:
+        dacl = _PACL()
+        descriptor = _PSECURITY_DESCRIPTOR()
+        error = _GetSecurityInfo(
+            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
+            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+        )
+        try:
+            if error:
+                raise ctypes.WinError(error)
+            return _security_descriptor_is_protected(descriptor)
+        finally:
+            if descriptor.value:
+                _LocalFree(descriptor)
+
+    def _named_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
+        dacl = _PACL()
+        descriptor = _PSECURITY_DESCRIPTOR()
+        error = _GetNamedSecurityInfoW(
+            os.fspath(path), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
+            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+        )
+        try:
+            if error:
+                raise ctypes.WinError(error)
+            return _security_descriptor_is_protected(descriptor)
+        finally:
+            if descriptor.value:
+                _LocalFree(descriptor)
+
     def is_private_descriptor_strict(fd: int) -> bool:
         """Whether the open file is this account's, with a protected owner-only DACL."""
-        return is_owned_descriptor(fd) and is_private_descriptor(fd)
+        return (is_owned_descriptor(fd) and is_private_descriptor(fd)
+                and _descriptor_dacl_is_protected(fd))
 
     def is_private_strict(path: str | os.PathLike[str]) -> bool:
         """Path-bound strict variant of :func:`is_private_descriptor_strict`.
 
-        The pathname is inspected with a no-follow handle, but a same-UID writer
-        can still replace it after the check; prefer the descriptor form for
-        anything that is then read or written.
+        A same-UID writer can replace the path after or between checks; prefer
+        the descriptor form for anything that is then read or written.
         """
-        return is_private(path) and _named_owner_is_current_user(path)
+        return (is_private(path) and _named_owner_is_current_user(path)
+                and _named_dacl_is_protected(path))
 
     def _named_owner_is_current_user(path: str | os.PathLike[str]) -> bool:
         owner = _PSID()
