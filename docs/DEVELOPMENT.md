@@ -2269,7 +2269,10 @@ would never show a person is not tonight's question) and
 `note_verification.should_check` (a note whose check is still inside its 30-day
 cooldown or still waiting on the proposal that check pinned is a question already
 answered — without this the same cooled-down notes take the first slots every
-night, come back `already_checked`, and the rest of the backlog starves). The cap
+night, come back `already_checked`, and the rest of the backlog starves). An
+attended chat is the one exception: `verify_note` with `attended=True` is not held
+off by an `unverified` check that has no proposal (`note_verification.reopens_unverified`).
+The cap
 is applied **after** that filter, and both exist for the same reason: the pass
 sits ahead of the two required hygiene keys in `PASS_ORDER` and the budget is a
 whole-run allowance, so an uncapped backlog spends it and `last_full_pass` can
