@@ -1756,8 +1756,9 @@ async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) ->
     pcm.stop_chat_retry(chat.chat_id)
 
 
+@pytest.mark.parametrize("already_due", [False, True])
 async def test_retry_loop_wakes_at_a_rearmed_retry_time(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, already_due: bool
 ) -> None:
     """A failed daily retry that re-arms a near time is retried then, not a day later."""
     from ciao.web import project_chats
@@ -1766,20 +1767,22 @@ async def test_retry_loop_wakes_at_a_rearmed_retry_time(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
-    near_at = chat_service._iso_after(1)
     calls: list[str] = []
     second_call = asyncio.Event()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         calls.append(prompt)
         if len(calls) == 1:
-            # The first daily retry fails and re-arms a retry one second out.
+            # The first daily retry fails and re-arms a near or already-due retry.
+            owner = pcm._broker.get(chat_id)
+            assert owner is not None
             pcm.set_chat_retry(
                 chat_id,
                 prompt,
                 reason="connection",
-                next_at=near_at,
+                next_at="2000-01-01T00:00:00Z" if already_due else chat_service._iso_after(1),
                 interval_seconds=24 * 60 * 60,
+                _owner=owner,
             )
             return
         second_call.set()

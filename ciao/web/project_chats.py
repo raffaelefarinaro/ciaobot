@@ -8146,7 +8146,7 @@ class ProjectChatManager:
         self._publish_retry(chat)
         if _owner is not None:
             self._cancel_retry_task(chat_id, keep_current=True)
-        self._ensure_retry_task(chat_id)
+        self._ensure_retry_task(chat_id, owner=_owner)
         return chat
 
     def stop_chat_retry(self, chat_id: str) -> ChatInfo | None:
@@ -8343,17 +8343,21 @@ class ProjectChatManager:
     def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool:
         return stream.retry_generation == self._retry_generations.get(chat_id, 0)
 
-    def _ensure_retry_task(self, chat_id: str) -> None:
+    def _ensure_retry_task(self, chat_id: str, *, owner: ChatStream | None = None) -> None:
         if not _has_running_loop():
             return
         existing = self._retry_tasks.get(chat_id)
         if existing is not None and not existing.done():
             return
         generation = self._retry_generations.get(chat_id, 0)
-        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id, generation))
+        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id, generation, owner))
 
-    async def _retry_loop(self, chat_id: str, generation: int) -> None:
+    async def _retry_loop(
+        self, chat_id: str, generation: int, owner: ChatStream | None = None
+    ) -> None:
         try:
+            while owner is not None and self._broker.get(chat_id) is owner:
+                await asyncio.sleep(_RETRY_STREAM_POLL_SECONDS)
             while True:
                 if generation != self._retry_generations.get(chat_id, 0):
                     return
