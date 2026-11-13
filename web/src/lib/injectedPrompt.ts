@@ -27,6 +27,7 @@ export type InjectedPrompt =
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
   | { kind: 'retry' }
+  | { kind: 'retry_scheduled' }
   | { kind: 'restart_resume' }
   | { kind: 'chat_action' }
   | { kind: 'error'; label: string; copy: string; text: string; retried: boolean }
@@ -217,6 +218,12 @@ export function errorNoticePrompt(text: string, retried = false): InjectedPrompt
   return { kind: 'error', label, copy, text, retried }
 }
 
+export function retryScheduledNotice(text: string): InjectedPrompt {
+  return !text.trim() || text === 'manual' || text === 'mcp'
+    ? { kind: 'retry_scheduled' }
+    : errorNoticePrompt(text)
+}
+
 const ERROR_HINT_MAX = 200
 
 /** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
@@ -291,6 +298,8 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
+    case 'retry_scheduled':
+      return { label: 'Retry scheduled', facts: '', tone: null }
     case 'restart_resume':
       return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
     case 'chat_action':
