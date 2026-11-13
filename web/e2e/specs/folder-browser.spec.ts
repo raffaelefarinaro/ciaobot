@@ -34,6 +34,7 @@ async function setup(page: import('@playwright/test').Page, name: string) {
     const p = new URL(route.request().url()).searchParams.get('path') || ''
     return route.fulfill({ json: { path: p.startsWith('/') ? p : `${WS}/${p}` } })
   })
+  await page.route('**/api/chats/alpha-chat-1/file-paths/resolve', route => route.fulfill({ json: { results: route.request().postDataJSON().paths.map((input: string) => ({ input, path: input === 'memory-vault/Workspace/draft.md' ? `${WS}/memory-vault/Workspace/draft.md` : null })) } }))
   await page.route('**/api/workspace-file?*', route => {
     const p = new URL(route.request().url()).searchParams.get('path') || ''
     return route.fulfill({ body: `# ${p.split('/').pop()}\n\nOpened from \`${p}\`.\n\n## Notes\n\nSome text to comment on.`, contentType: 'text/plain' })
@@ -50,7 +51,7 @@ async function setup(page: import('@playwright/test').Page, name: string) {
 async function openFolder(page: import('@playwright/test').Page) {
   await boot(page, '/chat/alpha-chat-1', COMPOSER)
   await expect(page.locator('.startup-overlay')).toHaveCount(0)
-  await page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]').click()
+  await page.locator(`a[data-file-path="${WS}/memory-vault/Workspace/draft.md"]`).click()
   const viewer = page.locator('.fv-modal')
   await expect(viewer).toBeVisible()
   await viewer.getByRole('button', { name: 'More file actions' }).click()
