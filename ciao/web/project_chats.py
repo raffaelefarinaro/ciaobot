@@ -313,10 +313,24 @@ def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
 
 
+class RecoveryOutcomeUnknown(OSError):
+    """Activation reported an error and its result could not be read back."""
+
+
 def _load_retry_kind(raw: object) -> str:
     """A persisted retry kind; the retired "quota_terminal" loads as "quota"."""
     kind = str(raw or "")
     return "quota" if kind == "quota_terminal" else kind
+
+
+def _recovery_state(marker: object) -> str:
+    if marker == "":
+        return ""
+    if isinstance(marker, dict) and marker.get("mode") == "continue":
+        state = marker.get("state")
+        if state in ("prepared", "active"):
+            return str(state)
+    return "invalid"
 
 
 def _load_retry_timing(cd: dict) -> tuple[str, int]:
@@ -971,6 +985,7 @@ class ChatInfo:
                 "attempts": self.retry_attempts,
                 "interval_seconds": self.retry_interval_seconds,
                 "mode": "continue_recovery" if isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" else "literal",
+                "recovery_state": _recovery_state(self.retry_recovery),
             } if self.retry_status else None,
         }
         if self.archive_path:
@@ -1720,7 +1735,8 @@ class ProjectChatManager:
         self._save_checked(reason=reason)
 
     def _save_checked(self, *, reason: str, _recovery_expected: tuple[str, str, str, int, str] | None = None,
-                      _firing_expected: tuple[str, dict[str, Any]] | None = None) -> bool:
+                      _firing_expected: tuple[str, dict[str, Any]] | None = None,
+                      _unrelated_turn: str = "") -> bool:
         if not self._path:
             return _recovery_expected is None
         current = self._state_payload()
@@ -1747,6 +1763,7 @@ class ProjectChatManager:
         ):
             return True
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        stopped_recovery = False
         with _state_file_lock(self._path):
             latest = self._read_latest_payload()
             latest_projects = latest.get("projects")
@@ -1782,6 +1799,19 @@ class ProjectChatManager:
                     baseline_chats if isinstance(baseline_chats, dict) else {},
                 ),
             }
+            if _unrelated_turn and isinstance(latest_chats, dict):
+                old_row = latest_chats.get(_unrelated_turn)
+                marker = old_row.get("retry_recovery") if isinstance(old_row, dict) else None
+                if (isinstance(old_row, dict) and old_row.get("retry_status") == "pending"
+                        and isinstance(marker, dict) and marker.get("mode") == "continue"):
+                    cleared = {
+                        "retry_status": "stopped", "retry_prompt": "", "retry_image_refs": [],
+                        "retry_next_at": "", "retry_last_error": "", "retry_attempts": 0,
+                        "retry_kind": "", "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
+                        "retry_unattended": False, "retry_recovery": "",
+                    }
+                    payload["chats"][_unrelated_turn].update(cleared)
+                    stopped_recovery = True
             tmp = self._path.with_name(
                 f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
@@ -1805,7 +1835,10 @@ class ProjectChatManager:
                     except OSError:
                         # A replace may report failure after taking effect.
                         # A readable matching active record is a committed opt-in.
-                        saved = self._read_latest_payload()
+                        try:
+                            saved = self._read_latest_payload()
+                        except (OSError, ValueError) as exc:
+                            raise RecoveryOutcomeUnknown("recovery activation outcome unknown") from exc
                         if saved.get("chats", {}).get(_recovery_expected[0], {}).get("retry_recovery") != payload["chats"][_recovery_expected[0]]["retry_recovery"]:
                             raise
             finally:
@@ -1820,6 +1853,13 @@ class ProjectChatManager:
         # sees ``before == value`` for every in-place mutation and drops it, and
         # the value never reaches disk. That silently lost per-turn send times
         # and image refs whenever they were the only change in a save.
+        if stopped_recovery:
+            chat = self._chats[_unrelated_turn]
+            for key, value in cleared.items():
+                setattr(chat, key, value)
+                current["chats"][_unrelated_turn][key] = value
+            self._advance_retry_generation(_unrelated_turn)
+            self._publish_retry(chat)
         self._last_local_payload = copy.deepcopy(current)
         return True
 
@@ -8117,6 +8157,23 @@ class ProjectChatManager:
             microsecond=0
         ).isoformat().replace("+00:00", "Z")
 
+    def recovery_status(self, chat_id: str) -> dict[str, Any] | None:
+        """Read the authoritative registry after an uncertain scheduling result."""
+        if not self._path:
+            return None
+        with _state_file_lock(self._path):
+            rows = self._read_latest_payload().get("chats", {})
+            row = rows.get(chat_id) if isinstance(rows, dict) else None
+            if not isinstance(row, dict):
+                return None
+            marker = row.get("retry_recovery", "")
+            return {
+                "status": row.get("retry_status", ""),
+                "mode": "continue_recovery" if isinstance(marker, dict) and marker.get("mode") == "continue" else "literal",
+                "recovery_state": _recovery_state(marker),
+                "next_at": row.get("retry_next_at", ""),
+            }
+
     def schedule_continue_recovery(
         self, chat_id: str, session_id: str, last_error: str, turn_count: int, failure_id: str = "", *, manual: bool = False,
     ) -> bool:
@@ -8318,6 +8375,7 @@ class ProjectChatManager:
         if chat.retry_recovery != "":
             firing_expected = (chat_id, {
                 "retry_status": "pending", "retry_recovery": chat.retry_recovery,
+                "archived": False,
                 "retry_prompt": _RESUME_CONTINUE_PROMPT, "retry_image_refs": [],
                 "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
                 "session_id": chat.session_id, "last_error": chat.last_error,
@@ -8395,6 +8453,7 @@ class ProjectChatManager:
             "attempts": chat.retry_attempts,
             "interval_seconds": chat.retry_interval_seconds,
             "mode": "continue_recovery" if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("mode") == "continue" else "literal",
+            "recovery_state": _recovery_state(chat.retry_recovery),
         })
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
@@ -8801,7 +8860,13 @@ class ProjectChatManager:
             stream.publish(echo_payload)
 
         if chat_meta is not None:
-            self._save()
+            if not is_retry and not compact:
+                generation = self._retry_generations.get(chat_id, 0)
+                self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id)
+                if self._retry_generations.get(chat_id, 0) != generation:
+                    stream.retry_generation = self._retry_generations[chat_id]
+            else:
+                self._save()
         # Auto-title fires *immediately* on the first user message instead
         # of waiting for the assistant reply. The titler can produce a
         # decent label from the prompt alone, and firing early means the

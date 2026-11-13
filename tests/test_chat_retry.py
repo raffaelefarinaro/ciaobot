@@ -195,6 +195,37 @@ def test_audit_and_quarantine_failure_leaves_recovery_nonrunnable(tmp_path: Path
     restored.start_stream = lambda *args, **kwargs: sent.append(args)  # type: ignore[method-assign,assignment]
     assert restored.try_chat_retry_now(chat.chat_id) is None
     assert not sent
+    assert restored.recovery_status(chat.chat_id)["recovery_state"] == "prepared"
+    restored.stop_chat_retry(chat.chat_id)
+    assert restored.recovery_status(chat.chat_id)["status"] == "stopped"
+
+
+def test_activation_error_with_unavailable_readback_reports_actual_disk_status(tmp_path: Path, monkeypatch) -> None:
+    import os
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    replace = os.replace
+    read = pcm._read_latest_payload
+    calls = 0
+    def fail_after_activation(*args):
+        nonlocal calls
+        calls += 1
+        replace(*args)
+        if calls == 2:
+            raise OSError("activation outcome unknown")
+    def fail_readback():
+        if calls >= 2:
+            raise OSError("readback unavailable")
+        return read()
+    monkeypatch.setattr(os, "replace", fail_after_activation)
+    monkeypatch.setattr(pcm, "_read_latest_payload", fail_readback)
+    with pytest.raises(OSError):
+        pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    monkeypatch.undo()
+    assert pcm.recovery_status(chat.chat_id)["recovery_state"] == "active"
 
 
 @pytest.mark.parametrize("failure", ["before_replace", "after_replace", "replace_then_raise", "audit_oserror"])
@@ -274,8 +305,34 @@ async def test_recovery_api_is_explicit_and_conflicts_on_pending(tmp_path: Path)
                               path_params={"chat_id": chat.chat_id}, json=read_json)
     assert (await chat_retry(request)).status_code == 200
     assert chat.to_dict()["retry"]["mode"] == "continue_recovery"
+    body.clear()
+    body["action"] = "recovery_status"
+    status = await chat_retry(request)
+    assert json.loads(status.body)["recovery_state"] == "active"
+    body.update({"action": "continue_recovery", "failure_id": "failure-token"})
     assert (await chat_retry(request)).status_code == 409
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_recovery_api_reports_unknown_outcome(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.project_chats import RecoveryOutcomeUnknown
+    from ciao.web.routes_api import chat_retry
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    chat.failure_id = "failure-token"
+    pcm._save()
+    def fail(*args, **kwargs):
+        raise RecoveryOutcomeUnknown("unknown")
+    monkeypatch.setattr(pcm, "schedule_continue_recovery", fail)
+    async def read_json():
+        return {"action": "continue_recovery", "failure_id": "failure-token"}
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(project_chat_manager=pcm)),
+                              path_params={"chat_id": chat.chat_id}, json=read_json)
+    response = await chat_retry(request)
+    assert response.status_code == 503
+    assert json.loads(response.body)["code"] == "recovery_outcome_unknown"
 
 
 async def test_guarded_continue_now_rejects_stale_and_literal_retry(tmp_path: Path) -> None:
@@ -367,6 +424,85 @@ async def test_recovery_failed_attempt_stays_hourly_then_success_stops(tmp_path:
     await asyncio.wait_for(_consume(stream), timeout=10)
     assert chat.retry_status != "pending"
     assert prompts == [("continue", None), ("continue", None)]
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_new_turn_stops_only_its_old_recovery(tmp_path: Path, is_error: bool) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    async def fake_stream(chat_id, prompt, images=None, **kwargs):
+        yield ResultEvent(type="result", result="ordinary failure" if is_error else "done",
+                          session_id="session-1", is_error=is_error,
+                          effective_model=chat.model, usage={}, quota={}, cost_usd=0.0)
+    pcm.stream_chat = fake_stream  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "unrelated new request")
+    await asyncio.wait_for(_consume(stream), timeout=10)
+    assert chat.retry_status != "pending"
+    restored = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert restored.retry_status != "pending"
+    assert pcm.try_chat_retry_now(chat.chat_id) is None
+
+
+async def test_new_turn_does_not_cancel_literal_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    pcm.set_chat_retry(chat.chat_id, "literal")
+    async def fake_stream(chat_id, prompt, images=None, **kwargs):
+        yield ResultEvent(type="result", result="done", session_id="session-1", is_error=False,
+                          effective_model=chat.model, usage={}, quota={}, cost_usd=0.0)
+    pcm.stream_chat = fake_stream  # type: ignore[assignment]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "unrelated")), timeout=10)
+    assert chat.retry_status == "pending"
+    assert chat.retry_prompt == "literal"
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+@pytest.mark.parametrize("replace_with_literal", [False, True])
+async def test_new_turn_checks_current_retry_under_registry_lock(tmp_path: Path, replace_with_literal: bool) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    if replace_with_literal:
+        assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+        other = _make_manager(tmp_path)
+        other.set_chat_retry(chat.chat_id, "literal")
+    else:
+        other = _make_manager(tmp_path)
+        assert other.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    async def fake_stream(chat_id, prompt, images=None, **kwargs):
+        yield ResultEvent(type="result", result="done", session_id="session-1", is_error=False,
+                          effective_model=chat.model, usage={}, quota={}, cost_usd=0.0)
+    pcm.stream_chat = fake_stream  # type: ignore[assignment]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "new request")), timeout=10)
+    saved = _make_manager(tmp_path).get_chat(chat.chat_id)
+    if replace_with_literal:
+        assert saved.retry_status == "pending" and saved.retry_prompt == "literal"
+    else:
+        assert saved.retry_status == "stopped"
+    other.stop_chat_retry(chat.chat_id) if replace_with_literal else other._cancel_retry_task(chat.chat_id)
+
+
+def test_recovery_firing_refuses_concurrently_archived_chat(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("recovery", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    pcm._save()
+    assert pcm.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    other = _make_manager(tmp_path)
+    other.get_chat(chat.chat_id).archived = True
+    other._save()
+    sent = []
+    pcm.start_stream = lambda *args, **kwargs: sent.append(args)  # type: ignore[method-assign,assignment]
+    assert pcm.try_chat_retry_now(chat.chat_id) is None
+    assert not sent
 
 
 async def test_recovery_timer_fires_after_restart(tmp_path: Path) -> None:

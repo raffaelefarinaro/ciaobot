@@ -149,6 +149,7 @@ from ciao.web.project_chats import (
     ChatInfo,
     ProjectChatManager,
     ProjectOrderError,
+    RecoveryOutcomeUnknown,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -2753,6 +2754,16 @@ async def chat_retry(request: Request) -> JSONResponse:
     action = str(body.get("action", "try_now"))
     if action == "stop":
         chat = pcm.stop_chat_retry(chat_id)
+    elif action == "recovery_status":
+        if set(body) != {"action"}:
+            return JSONResponse({"error": "only action is accepted"}, status_code=400)
+        try:
+            status = pcm.recovery_status(chat_id)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "recovery status unavailable"}, status_code=503)
+        if status is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(status)
     elif action == "set":
         prompt = str(body.get("prompt", ""))
         images = [str(x) for x in body.get("images", []) if str(x)]
@@ -2769,8 +2780,13 @@ async def chat_retry(request: Request) -> JSONResponse:
         if chat.retry_status == "pending":
             if action != "continue_recovery_now" or not pcm._valid_recovery_retry(chat) or chat.retry_recovery == "":
                 return JSONResponse({"error": "retry already pending"}, status_code=409)
-        elif not pcm.schedule_continue_recovery(chat_id, chat.session_id, chat.last_error, chat.user_turn_count, failure_id, manual=action == "continue_recovery_now"):
-            return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        else:
+            try:
+                armed = pcm.schedule_continue_recovery(chat_id, chat.session_id, chat.last_error, chat.user_turn_count, failure_id, manual=action == "continue_recovery_now")
+            except RecoveryOutcomeUnknown:
+                return JSONResponse({"error": "recovery outcome unknown", "code": "recovery_outcome_unknown"}, status_code=503)
+            if not armed:
+                return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
         if action == "continue_recovery_now" and pcm.try_chat_retry_now(chat_id) is None:
             return JSONResponse({"error": "recovery not started"}, status_code=409)
     elif action == "try_now":
