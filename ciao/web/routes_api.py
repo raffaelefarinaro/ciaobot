@@ -6909,6 +6909,137 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
 
 
+def _resolve_terminal_path_ciao() -> str | None:
+    """Resolve only the installed entry point belonging to this engine."""
+    from ciao.install_receipt import running_receipt
+
+    try:
+        receipt = running_receipt()
+        if receipt is None:
+            return None
+        executable = Path(receipt.executable)
+        python = Path(receipt.python)
+        name = "ciao.exe" if sys.platform == "win32" else "ciao"
+        if (not executable.is_absolute() or executable.name != name
+                or not python.is_absolute() or not executable.is_file()
+                or not os.access(executable, os.X_OK)):
+            return None
+        if sys.platform != "win32" and not executable.samefile(python.parent / "ciao"):
+            return None
+        return str(executable)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+
+
+def _resolve_terminal_path_target(target: str) -> str | None:
+    """Resolve a closed server-owned target without accepting client paths."""
+    if target == "ciao":
+        return _resolve_terminal_path_ciao()
+    if target not in ("claude", "opencode"):
+        return None
+    try:
+        if target == "claude":
+            from ciao.tool_path import resolve_tool
+            from ciao.providers.claude import get_bundled_claude_path
+
+            selected = resolve_tool("claude")
+        else:
+            from ciao.providers.opencode import resolve_opencode_binary
+
+            selected = resolve_opencode_binary()
+        if not selected:
+            return None
+        executable = Path(selected)
+        if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+            return None
+        if target == "claude":
+            bundled = get_bundled_claude_path()
+            if bundled and executable.samefile(bundled):
+                return None
+        else:
+            directory = str(executable.parent)
+            if sys.platform == "win32":
+                from ciao.os_support.tool_path import _search_pathext, resolve_executable
+
+                if not _search_pathext("opencode", directory):
+                    return None
+                command = resolve_executable("opencode", path=directory)
+            else:
+                command = str(executable.parent / "opencode")
+            if not command or not os.access(command, os.X_OK) or not executable.samefile(command):
+                return None
+        return str(executable)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+
+
+async def _terminal_path_request(request: Request, *, apply: bool) -> JSONResponse:
+    if not host_browser_request(request):
+        return JSONResponse({"error": "not_on_host"}, status_code=403)
+    invalid = JSONResponse({"error": "invalid_request"}, status_code=400)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return invalid
+    body = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 4096:
+                return invalid
+            body.extend(chunk)
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate key")
+                result[key] = value
+            return result
+        data = json.loads(body, object_pairs_hook=unique_object)
+        keys = {"target", "revision"} if apply else {"target"}
+        if not isinstance(data, dict) or set(data) != keys:
+            return invalid
+        target = data["target"]
+        if not isinstance(target, str) or target not in ("ciao", "claude", "opencode"):
+            return invalid
+        revision = data.get("revision", "")
+        if apply and (not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{64}", revision) is None):
+            return invalid
+    except (ValueError, UnicodeDecodeError):
+        return invalid
+
+    def work() -> dict[str, str]:
+        from ciao.os_support import shell_hints
+
+        executable = _resolve_terminal_path_target(target)
+        if executable is None:
+            if apply:
+                return {"status": "stale", "detail": "PATH approval is stale.", "mutation": "none", "warning": ""}
+            return {"status": "refused", "detail": "The selected executable is unavailable.", "executable": "", "directory": "", "destination": "", "revision": ""}
+        if apply:
+            return shell_hints.apply_path_change(target, executable, revision)
+        return shell_hints.preview_path_change(target, executable)
+
+    try:
+        result = await asyncio.to_thread(work)
+        if apply:
+            payload = {key: result[key] for key in ("status", "detail", "mutation", "warning")}
+            status = 200 if payload["status"] in ("applied", "already_configured") else 409 if payload["status"] in ("refused", "stale") else 500
+        else:
+            payload = {key: result[key] for key in ("status", "detail", "executable", "directory", "destination", "revision")}
+            status = 200
+        return JSONResponse(payload, status_code=status)
+    except Exception:
+        if apply:
+            return JSONResponse({"status": "write_failed", "detail": "The change could not be confirmed. Inspect the configuration before trying again.", "mutation": "unknown", "warning": ""}, status_code=500)
+        return JSONResponse({"error": "internal_error"}, status_code=500)
+
+
+async def terminal_path_preview(request: Request) -> JSONResponse:
+    return await _terminal_path_request(request, apply=False)
+
+
+async def terminal_path_apply(request: Request) -> JSONResponse:
+    return await _terminal_path_request(request, apply=True)
+
+
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     payload = await asyncio.to_thread(setup_status, request.app.state.config)

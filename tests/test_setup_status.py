@@ -18,6 +18,8 @@ from ciao.config import CiaoConfig
 from ciao.setup_marker import read_setup_vault_mode
 from ciao.setup_status import claude_auth_status, setup_status
 from ciao.web.auth import AuthMiddleware
+from ciao import install_receipt
+from ciao.web import routes_api
 from ciao.web.routes_api import (
     provider_connection_action,
     setup_finish_endpoint,
@@ -30,6 +32,304 @@ from ciao.web.routes_api import (
 
 # The setup routes check the TCP peer; TestClient defaults to "testclient".
 _LOOPBACK_PEER = ("127.0.0.1", 50000)
+
+
+def _path_receipt(executable: Path, python: Path) -> install_receipt.InstallReceipt:
+    return install_receipt.InstallReceipt(
+        version="1", executable=str(executable), python=str(python),
+        service_backend="none", service_label="", installed_at="test",
+    )
+
+
+def test_terminal_path_ciao_uses_matching_native_receipt_and_uv_symlink(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    tool_bin = tmp_path / "tool" / "bin"
+    tool_bin.mkdir(parents=True)
+    installed = tool_bin / "ciao"
+    installed.write_text("fixture")
+    installed.chmod(0o755)
+    shim = tmp_path / "ciao"
+    shim.symlink_to(installed)
+    receipt = _path_receipt(shim, tool_bin / "python")
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
+    assert routes_api._resolve_terminal_path_ciao() == str(shim)
+
+
+def test_terminal_path_windows_receipt_accepts_copied_executable(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="win32"))
+    executable = tmp_path / "ciao.exe"
+    executable.write_text("fixture")
+    executable.chmod(0o755)
+    receipt = _path_receipt(executable, tmp_path / "tool" / "python.exe")
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
+    assert routes_api._resolve_terminal_path_ciao() == str(executable)
+    wrong_name = tmp_path / "ciao"
+    wrong_name.write_text("fixture")
+    wrong_name.chmod(0o755)
+    receipt = _path_receipt(wrong_name, tmp_path / "tool" / "python.exe")
+    assert routes_api._resolve_terminal_path_ciao() is None
+
+
+def test_terminal_path_refuses_stale_receipt_foreign_symlink_and_bootstrap(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: None)
+    assert routes_api._resolve_terminal_path_ciao() is None
+    tool_bin = tmp_path / "tool" / "bin"
+    tool_bin.mkdir(parents=True)
+    installed = tool_bin / "ciao"
+    installed.write_text("fixture")
+    installed.chmod(0o755)
+    foreign = tmp_path / "foreign"
+    foreign.write_text("fixture")
+    foreign.chmod(0o755)
+    shim = tmp_path / "ciao"
+    shim.symlink_to(foreign)
+    receipt = _path_receipt(shim, tool_bin / "python")
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
+    assert routes_api._resolve_terminal_path_ciao() is None
+    shim.unlink()
+    assert routes_api._resolve_terminal_path_ciao() is None
+    shim.write_text("bootstrap")
+    shim.chmod(0o755)
+    assert routes_api._resolve_terminal_path_ciao() is None
+    shim.unlink()
+    shim.symlink_to(installed)
+    installed.chmod(0o644)
+    if os.name == "posix":
+        assert routes_api._resolve_terminal_path_ciao() is None
+    checked = []
+    def not_executable(path, mode):
+        checked.append((path, mode))
+        return False
+    with monkeypatch.context() as scoped:
+        scoped.setattr(routes_api, "os", SimpleNamespace(access=not_executable, X_OK=os.X_OK))
+        assert routes_api._resolve_terminal_path_ciao() is None
+    assert checked == [(shim, os.X_OK)]
+    installed.chmod(0o755)
+    for bad in ("ciao", str(tmp_path / "not-ciao"), ""):
+        receipt = _path_receipt(Path(bad), tool_bin / "python")
+        assert routes_api._resolve_terminal_path_ciao() is None
+
+
+def test_terminal_path_refuses_missing_bundled_or_unresolvable_provider(tmp_path, monkeypatch):
+    from ciao import tool_path
+    from ciao.providers import claude, opencode
+
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    selected = tmp_path / "claude"
+    selected.write_text("fixture")
+    selected.chmod(0o755)
+    bundled = tmp_path / "bundled"
+    bundled.write_text("fixture")
+    bundled.chmod(0o755)
+    monkeypatch.setattr(claude, "get_bundled_claude_path", lambda: str(bundled))
+    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: str(selected))
+    assert routes_api._resolve_terminal_path_target("claude") == str(selected)
+    monkeypatch.setattr(claude, "get_bundled_claude_path", lambda: str(selected))
+    assert routes_api._resolve_terminal_path_target("claude") is None
+    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: None)
+    assert routes_api._resolve_terminal_path_target("claude") is None
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: None)
+    assert routes_api._resolve_terminal_path_target("opencode") is None
+    assert routes_api._resolve_terminal_path_target(str(selected)) is None
+    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: str(tmp_path / "missing"))
+    assert routes_api._resolve_terminal_path_target("claude") is None
+
+
+def test_terminal_path_opencode_candidate_directory_without_current_path(tmp_path, monkeypatch):
+    from ciao.providers import opencode
+    from ciao.os_support import tool_path
+
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    directory = tmp_path / "installed"
+    directory.mkdir()
+    command = directory / "opencode"
+    command.write_text("fixture")
+    command.chmod(0o755)
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: str(command))
+    assert routes_api._resolve_terminal_path_target("opencode") == str(command)
+    override = directory / "custom"
+    override.write_text("fixture")
+    override.chmod(0o755)
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: str(override))
+    assert routes_api._resolve_terminal_path_target("opencode") is None
+    command.unlink()
+    assert routes_api._resolve_terminal_path_target("opencode") is None
+
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="win32"))
+    exe = directory / "opencode.exe"
+    exe.write_text("fixture")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATHEXT", ".exe;.cmd")
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: str(exe))
+    calls = []
+    def resolve(name, *, path):
+        calls.append((name, path))
+        return str(exe)
+    monkeypatch.setattr(tool_path, "resolve_executable", resolve)
+    assert routes_api._resolve_terminal_path_target("opencode") == str(exe)
+    assert calls == [("opencode", str(directory))]
+    monkeypatch.setattr(tool_path, "resolve_executable", lambda name, *, path: str(override))
+    assert routes_api._resolve_terminal_path_target("opencode") is None
+    exe.unlink()
+    script = directory / "opencode.cmd"
+    script.write_text("fixture")
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: str(override))
+    monkeypatch.setattr(tool_path, "resolve_executable", lambda name, *, path: None)
+    assert routes_api._resolve_terminal_path_target("opencode") is None
+
+
+@pytest.fixture
+def terminal_path_client(tmp_path, monkeypatch):
+    from ciao.os_support import shell_hints
+    bindir = tmp_path / "owned-bin"
+    bindir.mkdir()
+    exe = bindir / "ciao"
+    exe.write_text("fixture")
+    exe.chmod(0o755)
+    receipt = _path_receipt(exe, bindir / "python")
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    preview = {"status": "ready", "detail": "ok", "executable": str(exe), "directory": str(bindir), "destination": "fixture", "revision": "a" * 64}
+    monkeypatch.setattr(shell_hints, "preview_path_change", lambda *args: preview)
+    monkeypatch.setattr(shell_hints, "apply_path_change", lambda *args: {"status": "applied", "detail": "ok", "mutation": "written", "warning": ""})
+    serializer = URLSafeTimedSerializer("fixture-secret")
+    app = Starlette(routes=[Route("/api/settings/terminal-path/preview", routes_api.terminal_path_preview, methods=["POST"]), Route("/api/settings/terminal-path/apply", routes_api.terminal_path_apply, methods=["POST"])], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
+    client.cookies.set("ciao_session", serializer.dumps({"user": "owner"}))
+    return client, exe, shell_hints
+
+
+def test_terminal_path_rejects_arbitrary_paths_unknown_fields_and_changed_revision(terminal_path_client, monkeypatch):
+    client, exe, shell_hints = terminal_path_client
+    preview = "/api/settings/terminal-path/preview"
+    apply = "/api/settings/terminal-path/apply"
+    for body in ({"target": str(exe)}, {"target": "ciao", "path": str(exe)}, {"target": 1}, {}, []):
+        response = client.post(preview, json=body)
+        assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
+    for revision in ("", "A" * 64, "a" * 63, 123):
+        assert client.post(apply, json={"target": "ciao", "revision": revision}).status_code == 400
+    assert client.post(preview, content=b"{" , headers={"content-type": "application/json"}).status_code == 400
+    assert client.post(preview, content=b"{}" + b" " * 4095, headers={"content-type": "application/json"}).status_code == 400
+    assert client.post(preview, content=b'{"target":"ciao","target":"ciao"}', headers={"content-type": "application/json"}).status_code == 400
+    assert client.post(preview, content=b'{"target":"ciao"}', headers={"content-type": "text/plain"}).status_code == 400
+    stale = {"status": "stale", "detail": "changed", "mutation": "none", "warning": ""}
+    monkeypatch.setattr(shell_hints, "apply_path_change", lambda *args: stale)
+    response = client.post(apply, json={"target": "ciao", "revision": "b" * 64})
+    assert (response.status_code, response.json()) == (409, stale)
+
+
+def test_terminal_path_status_response_matrix(terminal_path_client, monkeypatch):
+    client, exe, shell_hints = terminal_path_client
+    preview = "/api/settings/terminal-path/preview"
+    apply = "/api/settings/terminal-path/apply"
+    for status in ("ready", "already_configured", "refused"):
+        result = {"status": status, "detail": "detail", "executable": str(exe), "directory": str(exe.parent), "destination": "fixture", "revision": "a" * 64}
+        monkeypatch.setattr(shell_hints, "preview_path_change", lambda *args: result)
+        response = client.post(preview, json={"target": "ciao"})
+        assert (response.status_code, response.json()) == (200, result)
+    for status, code, mutation in (("applied", 200, "written"), ("already_configured", 200, "none"), ("refused", 409, "none"), ("stale", 409, "none"), ("write_failed", 500, "partial"), ("verification_failed", 500, "written")):
+        result = {"status": status, "detail": "detail", "mutation": mutation, "warning": "warning"}
+        monkeypatch.setattr(shell_hints, "apply_path_change", lambda *args: result)
+        response = client.post(apply, json={"target": "ciao", "revision": "a" * 64})
+        assert (response.status_code, response.json()) == (code, result)
+    def explode(*args):
+        raise RuntimeError("fixture failure")
+    monkeypatch.setattr(shell_hints, "preview_path_change", explode)
+    monkeypatch.setattr(shell_hints, "apply_path_change", explode)
+    assert client.post(preview, json={"target": "ciao"}).json() == {"error": "internal_error"}
+    response = client.post(apply, json={"target": "ciao", "revision": "a" * 64})
+    assert (response.status_code, response.json()) == (500, {"status": "write_failed", "detail": "The change could not be confirmed. Inspect the configuration before trying again.", "mutation": "unknown", "warning": ""})
+    exe.unlink()
+    response = client.post(preview, json={"target": "ciao"})
+    assert response.status_code == 200 and response.json() == {"status": "refused", "detail": "The selected executable is unavailable.", "executable": "", "directory": "", "destination": "", "revision": ""}
+    response = client.post(apply, json={"target": "ciao", "revision": "a" * 64})
+    assert response.status_code == 409 and response.json() == {"status": "stale", "detail": "PATH approval is stale.", "mutation": "none", "warning": ""}
+
+
+def test_terminal_path_apply_calls_primitive_once_without_private_lock(terminal_path_client, monkeypatch):
+    client, exe, shell_hints = terminal_path_client
+    calls = []
+    def apply(*args):
+        calls.append(args)
+        return {"status": "applied", "detail": "ok", "mutation": "written", "warning": ""}
+    def forbidden(*args):
+        raise AssertionError("apply must not preview")
+    monkeypatch.setattr(shell_hints, "preview_path_change", forbidden)
+    monkeypatch.setattr(shell_hints, "apply_path_change", apply)
+    response = client.post("/api/settings/terminal-path/apply", json={"target": "ciao", "revision": "a" * 64})
+    assert response.status_code == 200
+    assert calls == [("ciao", str(exe), "a" * 64)]
+
+
+def test_terminal_path_stream_cap_rejects_valid_padded_json_before_copy(terminal_path_client, monkeypatch):
+    import builtins
+
+    client, _, _ = terminal_path_client
+    class BoundedBuffer(builtins.bytearray):
+        def extend(self, chunk):
+            assert len(self) + len(chunk) <= 4096, "oversized chunk copied before limit"
+            super().extend(chunk)
+    monkeypatch.setattr(routes_api, "bytearray", BoundedBuffer, raising=False)
+    body = b'{"target":"ciao"}' + b" " * 4096
+    response = client.post("/api/settings/terminal-path/preview", content=body,
+                           headers={"content-type": "application/json"})
+    assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
+
+
+def test_terminal_path_running_receipt_verifies_interpreter_identity(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    tool_bin = tmp_path / "tool" / "bin"
+    tool_bin.mkdir(parents=True)
+    executable = tool_bin / "ciao"
+    executable.write_text("fixture")
+    executable.chmod(0o755)
+    receipt_path = tmp_path / "install-receipt.json"
+    receipt = _path_receipt(executable, tool_bin / "python")
+    receipt_path.write_text(json.dumps(asdict(receipt)))
+    monkeypatch.setattr(install_receipt, "default_receipt_path", lambda: receipt_path)
+    monkeypatch.setattr(install_receipt, "sys", SimpleNamespace(executable=str(tool_bin / "python")))
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    assert install_receipt.running_receipt() == receipt
+    assert routes_api._resolve_terminal_path_ciao() == str(executable)
+    foreign = tmp_path / "foreign" / "bin"
+    foreign.mkdir(parents=True)
+    monkeypatch.setattr(install_receipt, "sys", SimpleNamespace(executable=str(foreign / "python")))
+    assert install_receipt.running_receipt() is None
+    assert routes_api._resolve_terminal_path_ciao() is None
+
+
+def test_terminal_path_apply_resolves_changed_target_again(terminal_path_client, monkeypatch):
+    client, first, shell_hints = terminal_path_client
+    second_bin = first.parent.parent / "second" / "bin"
+    second_bin.mkdir(parents=True)
+    second = second_bin / "ciao"
+    second.write_text("fixture")
+    second.chmod(0o755)
+    current = [_path_receipt(first, first.parent / "python")]
+    lookups = []
+    def receipt():
+        lookups.append(current[0].executable)
+        return current[0]
+    monkeypatch.setattr(install_receipt, "running_receipt", receipt)
+    def preview(command, executable):
+        assert (command, executable) == ("ciao", str(first))
+        return {"status": "ready", "detail": "ok", "executable": executable,
+                "directory": str(first.parent), "destination": "fixture", "revision": "a" * 64}
+    def apply(command, executable, revision):
+        assert (command, executable, revision) == ("ciao", str(second), "a" * 64)
+        return {"status": "stale", "detail": "changed", "mutation": "none", "warning": ""}
+    monkeypatch.setattr(shell_hints, "preview_path_change", preview)
+    monkeypatch.setattr(shell_hints, "apply_path_change", apply)
+    response = client.post("/api/settings/terminal-path/preview", json={"target": "ciao"})
+    assert response.status_code == 200
+    revision = response.json()["revision"]
+    current[0] = _path_receipt(second, second_bin / "python")
+    response = client.post("/api/settings/terminal-path/apply", json={"target": "ciao", "revision": revision})
+    assert (response.status_code, response.json()) == (409, {"status": "stale", "detail": "changed", "mutation": "none", "warning": ""})
+    assert lookups == [str(first), str(second)]
 
 
 @pytest.fixture(autouse=True)
