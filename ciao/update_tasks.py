@@ -588,6 +588,8 @@ def _vault_relocate_needed(
       is no misplaced vault to relocate; offering a move for a path that is not
       there is the unactionable card #800's rules out, so the answer is
       :data:`~ciao.migration_notices.RELOCATION_VAULT_MISSING` rather than a card.
+    * an explicitly adopted per-root vault is the workspace's own folder, so the
+      answer is :data:`~ciao.migration_notices.RELOCATION_ADOPTED` rather than a card.
 
     Evidence is deliberately portable: the reason, the workspace name, and whether
     a completed receipt already records a run. No `actual`/`standard` path travels
@@ -619,7 +621,7 @@ def _vault_relocate_needed(
     return Detection(
         state == RELOCATION_MISPLACED,
         {
-            # The one answer that offers the card; the other two exist so a task
+            # The one answer that offers the card; the others exist so a task
             # that is *not* offered reads as a reason rather than as silence, and
             # so "the vault is missing" — a different notice — is nameable.
             "reason": state,
