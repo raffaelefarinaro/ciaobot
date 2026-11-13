@@ -243,6 +243,8 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 
 ## Components
 
+- **Terminal PATH:** Settings on the host previews the executable, directory and destination before one explicit approval. Progress and results are announced; refusals and unverified or uncertain writes retain manual recovery and never claim success. A new terminal is required after a verified change.
+
 - **Google sign-in dialog:** setup steps that are done show as a checklist with a quiet Replace action; a pending browser sign-in is a status row with Stop sign-in; the footer is Close and Done, and a disabled Done says why. The full flow is described under the Google account card.
 - **Customise dialog:** Settings › Appearance › Custom colours opens `CustomColorsDialog.vue`, a Reka dialog (portalled, because Settings sits inside a container-type pane) with a Dark theme and a Light theme section. Each section has a Background and a Text row (native colour input plus a hex field kept in sync), a preview strip drawn from the candidate pair, and a `role="status"` line showing the ratio and "Readable", or the refusal reason in the `hint--warn` style. Apply is disabled while an edited section fails the check and never saves a failing pair; Reset clears both themes; every control is 44px under a coarse pointer and the body scrolls (`max-height: 90dvh`).
 - **Memory proposal row:** meta (kind, scope, who decides) → the fact once → why → one change box whose header names the file, the place and the line count → one action row (the accept is the primary, named after the file; Dismiss last) → a small footer with the server's note and the source.

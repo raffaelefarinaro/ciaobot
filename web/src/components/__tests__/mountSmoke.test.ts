@@ -193,7 +193,7 @@ vi.mock('../../lib/api', () => {
     if (path.startsWith('/api/chats/')) return Promise.resolve({})
     return Promise.resolve([])
   })
-  const post = vi.fn(() => Promise.resolve({}))
+  const post = vi.fn((path: string) => Promise.resolve(path === '/api/settings/terminal-path/preview' ? { status: 'refused', detail: 'Executable unavailable', executable: '', directory: '', destination: '', revision: '' } : {}))
   const patch = vi.fn((path: string, body: Record<string, unknown>) => {
     if (path === '/api/settings/routines') {
       routineSettings = { ...routineSettings, ...body }
@@ -512,7 +512,88 @@ describe('component mount smoke', () => {
     expect(backup).toBeTruthy()
     expect(backup!.text()).toContain('github.com/person/memory.git')
     expect(wrapper.findAll('.settings-toc-item').map(i => i.text())).toContain('Memory backup')
+    expect(wrapper.find('#restart-host [aria-label="ciao terminal PATH"]').exists()).toBe(true)
     wrapper.unmount()
+  })
+
+  it('SettingsView mounts terminal PATH controls on Advanced and Providers', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    expect(wrapper.find('.provider-connections [aria-label="claude terminal PATH"]').exists()).toBe(true)
+    expect(wrapper.find('.provider-connections [aria-label="opencode terminal PATH"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('provider_path_control_follows_real_rendered_rows_and_missing_install', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void; getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers')
+    testApi.setResponse('/api/settings/providers', { connections: { claude: { auth: 'not_installed', detail: 'Missing CLI', command: 'install-claude', path_command: 'manual path', label: 'Claude' } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.find('[aria-label="claude terminal PATH"]').text()).toContain('Executable unavailable')
+      expect(wrapper.text()).toContain('manual path')
+      expect(wrapper.text()).toContain('Install it with')
+      expect(wrapper.find('[aria-label="claude terminal PATH"]').text()).not.toContain('Add to terminal PATH')
+      expect(wrapper.find('[aria-label="opencode terminal PATH"]').exists()).toBe(false)
+      expect(wrapper.get('details.provider-brings').attributes('open')).toBeUndefined()
+      expect(wrapper.find('details.provider-brings [aria-label="claude terminal PATH"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); testApi.setResponse('/api/settings/providers', original) }
+  })
+
+  it('provider loading and errors never render PATH controls', async () => {
+    let reject!: (reason: Error) => void
+    const pending = new Promise<never>((_resolve, fail) => { reject = fail })
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    get.mockImplementation(((path: string) => path === '/api/settings/providers' ? pending : original(path)) as typeof api.get)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await nextTick()
+      expect(wrapper.find('[aria-label="Loading providers"]').exists()).toBe(true)
+      expect(wrapper.find('.terminal-path').exists()).toBe(false)
+      reject(new Error('provider unavailable'))
+      await flushPromises()
+      expect(wrapper.text()).toContain('provider unavailable')
+      expect(wrapper.find('.terminal-path').exists()).toBe(false)
+    } finally { wrapper.unmount(); get.mockImplementation(original) }
+  })
+
+  it('provider PATH availability follows preview, not path_command, and revisiting previews again', async () => {
+    const post = vi.mocked(api.post)
+    const original = post.getMockImplementation()!
+    post.mockImplementation(((path: string) => path === '/api/settings/terminal-path/preview'
+      ? Promise.resolve({ status: 'ready', detail: 'Review', executable: '/bin/claude', directory: '/bin', destination: '/home/test/.profile', revision: 'a'.repeat(64) })
+      : original(path)) as typeof api.post)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.get('[aria-label="claude terminal PATH"]').text()).toContain('Add to terminal PATH')
+      expect(wrapper.findAll('details.provider-brings').every(d => d.attributes('open') === undefined)).toBe(true)
+      const count = post.mock.calls.filter(([path]) => path === '/api/settings/terminal-path/preview').length
+      await router.push('/settings/general')
+      await flushPromises()
+      expect(wrapper.find('[aria-label="claude terminal PATH"]').exists()).toBe(false)
+      await router.push('/settings/providers')
+      await flushPromises()
+      expect(post.mock.calls.filter(([path]) => path === '/api/settings/terminal-path/preview').length).toBeGreaterThan(count)
+    } finally { wrapper.unmount(); post.mockImplementation(original) }
   })
 
 

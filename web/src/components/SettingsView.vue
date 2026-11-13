@@ -505,6 +505,7 @@
               </button>
             </div>
           </div>
+          <SettingsTerminalPath target="ciao" />
           <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
           <div v-if="hasDeployError" class="deploy-steps">
             <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
@@ -710,6 +711,7 @@
                       Your terminal cannot find this CLI yet — put it on your PATH with
                       <code>{{ conn.path_command }}</code>
                     </p>
+                    <SettingsTerminalPath v-if="connKey === 'claude' || connKey === 'opencode'" :target="connKey" />
                   </div>
                   <div class="set-row-actions provider-connection-actions">
                     <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
@@ -1477,6 +1479,7 @@ import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
+import SettingsTerminalPath from './settings/SettingsTerminalPath.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'
 import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
