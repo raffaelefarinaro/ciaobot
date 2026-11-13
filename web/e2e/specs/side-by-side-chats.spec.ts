@@ -123,6 +123,30 @@ test('the keyboard opens a chat beside and moves between the panes', async ({ pa
   await expect(page.locator('.chat-split-side--chat')).toHaveCount(0)
 })
 
+test('the pane with the keyboard is the selected chat in the sidebar', async ({ page }) => {
+  await boot(page, CHAT_PATH, COMPOSER)
+  const second = page.locator('.chat-item', { hasText: SECOND_TITLE })
+  await second.hover()
+  await second.locator('.chat-beside-btn').click()
+  const tile = page.locator('.chat-split-side--chat')
+  await expect(tile).toBeVisible()
+  await expect(second).toHaveClass(/\bactive\b/)
+  // The second pane wears the same header as a chat open on its own.
+  await expect(tile.locator('.chat-title-row .title-rail')).toBeVisible()
+
+  // The main pane's chat, picked from the sidebar, takes the keyboard back.
+  await page.locator('.chat-item.active').first().waitFor()
+  const first = page.locator('.chat-item').filter({ hasNotText: SECOND_TITLE }).filter({ has: page.locator('[class*="title"]') }).first()
+  await page.locator('.chat-main > .chat-body .messages').click()
+  await expect(second).not.toHaveClass(/\bactive\b/)
+  await expect(first).toHaveClass(/\bactive\b/)
+  await tile.locator('.messages').click()
+  await first.click()
+  await expect(page.locator('.chat-body--pane-focused')).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`${CHAT_PATH}$`))
+  await expect(tile.locator('.chat-title')).toHaveText(SECOND_TITLE)
+})
+
 test('renaming the side chat fills its title column and selects the title', async ({ page }) => {
   await boot(page, CHAT_PATH, COMPOSER)
   const row = page.locator('.chat-item', { hasText: SECOND_TITLE })
@@ -147,7 +171,7 @@ test('renaming the side chat fills its title column and selects the title', asyn
     }
   })
   expect(m.client).toBeGreaterThanOrEqual(m.scroll)
-  // 64px: the close button, the split-pane signals and the gaps.
+  // 64px: the close button and the gaps.
   expect(m.width).toBeGreaterThanOrEqual(m.column - 64)
   expect(m.selection).toEqual([0, SECOND_TITLE.length])
 

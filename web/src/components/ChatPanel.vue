@@ -74,7 +74,6 @@
                 @dblclick.stop="startEditTitle"
                 @click.stop
               >{{ chat.title }}</span>
-              <ChatSignals v-if="split" class="chat-title-signals" :chat-id="chat.chat_id" density="row" />
             </ItemTitleRow>
           </div>
         </div>
@@ -287,16 +286,21 @@
           <div class="message-row">
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
+                <!-- Sent images stay chips, as they were in the composer: a
+                     thumbnail plus the "Image N" the prompt refers to. Click
+                     opens the full image in the viewer. -->
                 <div v-if="item.msg.images?.length" class="message-images">
                   <button
-                    v-for="img in item.msg.images"
+                    v-for="(img, ii) in item.msg.images"
                     :key="img"
                     type="button"
                     class="message-image-link"
-                    :aria-label="`Open image ${img}`"
+                    :aria-label="`Open image ${ii + 1}`"
+                    title="Open image"
                     @click="openMessageImage(img)"
                   >
-                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
+                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" alt="" aria-hidden="true" class="message-image" />
+                    <span class="message-image-label">Image {{ ii + 1 }}</span>
                   </button>
                 </div>
                 <ul v-if="userAttachments(item.msg.content).length" class="message-files" aria-label="Attached files">
@@ -495,6 +499,7 @@
                 <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group" v-html="formatTokenUsage(item.meta.usage)"></span>
               </div>
             </div>
+            <TurnVerificationBadge v-if="item.meta?.verification" :verification="item.meta.verification" />
           </div>
         </div>
         <!-- System message (errors, etc) -->
@@ -1506,7 +1511,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1517,7 +1522,6 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
-import ChatSignals from './ChatSignals.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
@@ -1526,6 +1530,7 @@ import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
 import ChatRetryState from './ChatRetryState.vue'
+import TurnVerificationBadge from './TurnVerificationBadge.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'
@@ -1606,6 +1611,7 @@ type TurnMeta = {
   duration_ms?: number
   effective_model?: string
   usage?: Record<string, string>
+  verification?: TurnVerification
 }
 
 type RenderItemInput =
@@ -1667,10 +1673,11 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-// `split`: two chats are on screen.
-const props = defineProps<{ chatId: string; filePinned?: boolean; plainHeader?: boolean; beside?: boolean; inactive?: boolean; split?: boolean }>()
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean }>()
 const emit = defineEmits<{
   close: []
+  // The second pane's rail picked another chat: the layout shows it in this pane.
+  'select-chat': [chatId: string]
   'open-sidebar': []
   // The title is being pulled down (px), and the pull ended (px, px per ms):
   // the layout moves the pane and decides whether to close.
@@ -1813,12 +1820,12 @@ const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
 
-const titleRail = useChatRail(() => view.chat?.chat_id ?? '')
-const titleRailOn = computed(() => !props.plainHeader && titleRail.items.value.length > 1)
+const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
+const titleRailOn = computed(() => titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
 // travel, fading); a panel opened from the rail slides its transcript in from that side.
 const railLean = ref(0)
-const railArrival = ref<-1 | 1 | 0>(props.plainHeader ? 0 : takeChatRailArrival())
+const railArrival = ref<-1 | 1 | 0>(takeChatRailArrival(props.beside))
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
@@ -4282,6 +4289,7 @@ function turnMetaFrom(buffer: ChatMessage[], base: TurnMeta | null = null): Turn
     if (m.duration_ms) meta.duration_ms = m.duration_ms
     if (m.effective_model) meta.effective_model = m.effective_model
     if (m.usage) meta.usage = m.usage
+    if (m.verification) meta.verification = m.verification
   }
   return Object.keys(meta).length ? meta : null
 }
@@ -5279,7 +5287,7 @@ const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
   // With the title rail on, archiving moves to the next chat in its order (the
   // previous one at the end), sliding in like a swipe, rather than going Home.
-  const next = titleRailOn.value ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
+  const next = titleRailOn.value && !props.beside ? (titleRail.neighbours.value.next ?? titleRail.neighbours.value.previous) : null
   if (next) markChatRailArrival(next === titleRail.neighbours.value.next ? 1 : -1)
   try {
     if (!await archiveChatWithTaskCheck(chat.value, { next: next ?? undefined })) { if (next) markChatRailArrival(0); return }
@@ -5756,7 +5764,6 @@ onMounted(() => {
    title is the one title that may take a second line, and the full title
    stays in the title attribute. `overflow-wrap: anywhere` breaks a title
    that has no spaces in it (a URL, a path). */
-.chat-title-signals { flex: none; margin-left: var(--space-1); }
 
 .chat-title-row .chat-title {
   flex: 0 1 auto;
@@ -6667,9 +6674,6 @@ details[open] > .activity-summary::before {
 .message-content :deep(tbody tr:nth-child(even) > td) {
   background: color-mix(in srgb, var(--fg) 2.5%, transparent);
 }
-.message-content :deep(tr > :first-child) {
-  white-space: nowrap;
-}
 .message-content :deep(tbody tr > td:first-child) {
   font-weight: 600;
 }
@@ -6720,18 +6724,35 @@ details[open] > .activity-summary::before {
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.message-image-link { display: inline-block; line-height: 0; text-decoration: none; border: 0; padding: 0; background: none; cursor: zoom-in; }
+.message-image-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 10px 0 3px;
+  border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent2) 12%, transparent);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  cursor: zoom-in;
+}
+.message-image-link:hover .message-image-label { color: var(--accent2); }
+.message-image-link:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
+.message-image-label { white-space: nowrap; }
+@media (pointer: coarse) { .message-image-link { min-height: var(--touch); } }
 .message-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; padding: 0; list-style: none; }
 .message-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); color: var(--fg); font-size: var(--text-xs); }
 .message-file-icon { flex: none; color: var(--accent2); }
 .message-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .message-image {
-  max-height: 160px;
-  max-width: 240px;
-  border-radius: 6px;
+  flex: none;
+  width: 24px;
+  height: 24px;
   object-fit: cover;
-  border: 1px solid var(--border);
-  cursor: zoom-in;
+  border-radius: 5px;
   background: var(--bg);
 }
 

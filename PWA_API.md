@@ -52,7 +52,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats. `?archived=1&offset=0&limit=10` returns a paginated compact archive catalog. POST refuses a body carrying a `memory_pass` helper (400) and refuses the app-owned Memory project (400): that project holds the engine's own memory passes |
-| GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
+| GET | `/api/projects/{project_id}/files` | List project files (feeds the composer's @-mention picker) |
 | GET | `/api/repos/candidates` | Git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects: `{roots, candidates: [{path, name, root}]}` |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
@@ -88,7 +88,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-file` | Read allowed text file |
 | GET | `/api/system-prompt` | The text Ciaobot appends to every provider's system prompt (`ciao/system_prompt.md`): `{text, chars}`. Read-only; shown in Chat details → Always loaded |
 | GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
-| GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id`) the chat's agent root, vault and linked repo. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
+| GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id` or `project_id`) that workspace's agent root, vault and the project's linked repo. With a chat or project and no `path`, it lists the project's own vault folder (the project page's Browse files passes `project_id`); an unknown `project_id` is 404. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
 | GET | `/api/workspace-image` | Read allowed image file (`?chat_id=` anchors a relative path to that chat's agent and vault roots, exact match only, no fuzzy walk; absolute and `..` paths keep the unrestricted viewer policy) |
@@ -198,7 +198,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
 | POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, and restored ones are pinned to the workspace. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
 | GET | `/api/settings/providers` | Read each provider CLI's connection status |
-| POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`), verify, or log out through the Claude Code or opencode CLI |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`, which Settings types into the in-app browser terminal (`useRunInTerminal`), copying or showing it when the terminal cannot take it), verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status; `install_problem` is non-empty when the npm package is present but its binary is missing |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -1112,11 +1112,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # bound and logs at; pwa_host and log_level change only at the next start).
 # resume_after_restart (boolean, default true: at startup a chat whose turn a
 # restart or crash cut off gets one `restart_resume` turn).
+# verify_vault_answers (boolean, default true: a turn that read vault notes gets
+# a one-shot check of its answer's claims against them; see turn_verification).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode, app_repo and resume_after_restart (a non-boolean value is a 400).
+# dev_mode, app_repo, resume_after_restart and verify_vault_answers (a
+# non-boolean value is a 400).
 # The retired insights_enabled key is still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
 # are persisted in .runtime/app_settings.json and applied to the
@@ -1821,6 +1824,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
+- `turn_verification`: the vault answer check for one turn finished. Fields: `{chat_id, turn_index, verification}`, where `verification` is `{supported, unsupported, general, claims: [{text, status: "supported"|"unsupported"|"general", source}], sources}` (`source` is a vault-relative note path, `""` for general). Persisted in `ChatInfo.turn_verification` and overlaid as `verification` on the turn's last assistant row of the chat messages response.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.

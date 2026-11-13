@@ -10,6 +10,8 @@ rather than approximately.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -542,9 +544,12 @@ def test_a_receipt_written_before_status_existed_still_reads_as_complete(
     for key in ("operation", "files", "legacy_rewrites"):
         del legacy[key]
     receipt_path(runtime).write_text(json.dumps(legacy), encoding="utf-8")
+    (vault / ".ciao-vault-links.json").unlink(missing_ok=True)
 
     assert read_receipt(runtime, vault_root=vault) is not None
     assert migrate_links(vault, runtime, apply=True)["skipped"] == "already migrated"
+    assert json.loads(receipt_path(runtime).read_bytes())["schema_version"] == 3
+    assert len(list(receipt_path(runtime).parent.glob("vault-links-legacy-*.json"))) == 1
 
 
 # ---- receipt and rails -----------------------------------------------------
@@ -558,7 +563,9 @@ def test_the_receipt_records_the_reverse_map(tmp_path: Path) -> None:
 
     receipt = read_receipt(runtime, vault_root=vault)
     assert receipt is not None
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
+    assert receipt["vault_inode"] in (os.stat(vault).st_ino, None)
+    assert re.fullmatch(r"[0-9a-f]{32}", receipt["operation_id"])
     assert receipt["migrated_at"]
     assert len(receipt["files"]) == 3
     assert {"path", "line", "offset", "from", "to"} <= set(receipt["rewrites"][0])
@@ -1799,7 +1806,7 @@ def test_interrupted_legacy_only_undo_retries_from_prepared_images(tmp_path: Pat
     def interrupt(root, image, *, undo):
         nonlocal calls
         prepared = json.loads(path.read_bytes())
-        assert prepared["schema_version"] == 2 and prepared["operation"] == "undo"
+        assert prepared["schema_version"] == 3 and prepared["operation"] == "undo"
         if calls == 1:
             raise KeyboardInterrupt()
         calls += 1

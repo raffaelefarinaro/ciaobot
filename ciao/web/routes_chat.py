@@ -609,6 +609,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_actions_changed`    {chat_id, actions}  (the whole list; [] = none)
     - `chat_title`              {chat_id, title}
+    - `turn_verification`       {chat_id, turn_index, verification}
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
     On connect, sends a snapshot of currently-active streams so a fresh client

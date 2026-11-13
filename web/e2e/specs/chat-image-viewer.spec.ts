@@ -19,6 +19,7 @@ test('a message image opens in the file viewer', async ({ page }, testInfo) => {
   const link = page.locator('.message-image-link')
   await expect(link).toBeVisible()
   await expect(link.locator('.message-image')).toHaveAttribute('src', '/api/images/upload-sample.png')
+  await expect(link).toHaveText('Image 1')
 
   const url = page.url()
   await link.click()

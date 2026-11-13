@@ -1405,6 +1405,22 @@ def test_read_decisions_numbers_rows_for_id_disambiguation(tmp_path: Path) -> No
     assert mp.history_row_id(rows[0], "personal") != mp.history_row_id(rows[0], "work")
 
 
+def test_read_decisions_can_exclude_history_only(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    mp.record_promotion(queue, text="Ledger-only.", kind="memory", via="auto",
+                        outcome="suppressed", history_only=True)
+    mp.record_promotion(queue, text="Accepted fact.", kind="memory", via="pwa")
+    mp.record_dismissal(queue, text="Dismissed fact.", kind="memory", via="pwa")
+
+    assert [row["text"] for row in mp.read_decisions(queue)] == [
+        "Ledger-only.", "Accepted fact.", "Dismissed fact."
+    ]
+    assert [row["text"] for row in mp.read_decisions(queue, include_history_only=False)] == [
+        "Accepted fact.", "Dismissed fact."
+    ]
+
+
 def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> None:
     """Archiving asks "already decided?" once per proposal.
 
