@@ -488,10 +488,12 @@ def test_windows_strict_descriptor_inspects_open_handle_not_replaced_path(tmp_pa
     try:
         assert private.is_private_descriptor(fd)
         assert not private.is_private_descriptor_strict(fd)
-        replacement = tmp_path / "replacement"
-        replacement.write_bytes(b"replacement")
-        make_private(replacement)
-        os.replace(replacement, path)
+        # Rename the open file away instead of replacing an open destination.
+        os.rename(path, tmp_path / "original")
+        path.write_bytes(b"replacement")
+        make_private(path)
+        assert path.read_bytes() == b"replacement"
+        assert os.read(fd, 8) == b"original"
         assert private.is_private_strict(path)
         assert not private.is_private_descriptor_strict(fd)
     finally:
