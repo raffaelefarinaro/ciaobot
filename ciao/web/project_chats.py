@@ -9186,6 +9186,7 @@ class ProjectChatManager:
         not end, so from here on the stamp stays for the next boot to resume.
         """
         self._shutting_down = True
+        self._memory_pass.close()
 
     def resume_interrupted_turns(self, *, enabled: bool) -> int:
         """At boot, consume every interrupted-turn stamp and arm one resume each.

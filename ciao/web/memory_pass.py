@@ -50,6 +50,7 @@ because a workspace that owns nothing still has lessons with somewhere to go.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -69,6 +70,7 @@ logger = logging.getLogger(__name__)
 # On since the guardrail work (D2a-2) and the PWA work (D2a-3) landed. Every
 # reader must go through this module attribute so the flip is a single edit.
 MEMORY_PASS_CHATS = True
+_PUMP_RETRY_SECONDS = 30
 
 MEMORY_PROJECT_NAME = "Memory"
 MEMORY_PROJECT_KIND = "memory"
@@ -581,6 +583,38 @@ class MemoryPassCoordinator:
 
     def __init__(self, host: ProjectChatManager) -> None:
         self._host = host
+        self._pump_retry_handles: dict[str, asyncio.TimerHandle] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        """Stop deferred admission without changing the persisted queue."""
+        self._closed = True
+        for handle in self._pump_retry_handles.values():
+            handle.cancel()
+        self._pump_retry_handles.clear()
+
+    def _cancel_pump_retry(self, workspace: str) -> None:
+        handle = self._pump_retry_handles.pop(workspace, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _schedule_pump_retry(self, workspace: str) -> None:
+        if self._closed or workspace in self._pump_retry_handles:
+            return
+        self._pump_retry_handles[workspace] = asyncio.get_running_loop().call_later(
+            _PUMP_RETRY_SECONDS, self._retry_pump, workspace
+        )
+
+    def _retry_pump(self, workspace: str) -> None:
+        self._pump_retry_handles.pop(workspace, None)
+        if self._closed:
+            return
+        if self._host.restart_draining:
+            states = [self._helper(chat).get("state") for chat in self._passes_in(workspace)]
+            if "queued" in states and "running" not in states:
+                self._schedule_pump_retry(workspace)
+            return
+        self.pump(workspace)
 
     # ── the system project ──────────────────────────────────────────────
 
@@ -843,11 +877,7 @@ class MemoryPassCoordinator:
     def pump(self, workspace: str) -> None:
         """Start the oldest queued pass in *workspace*, if nothing is running."""
         host = self._host
-        if host.restart_draining:
-            # An update claim holds admission closed. Leave every pass in the
-            # state it is already in — a queued one stays queued, so it starts
-            # once the claim is released — rather than starting a turn the
-            # restart would interrupt.
+        if self._closed:
             return
         passes = self._passes_in(workspace)
         queued: list[ChatInfo] = []
@@ -856,10 +886,15 @@ class MemoryPassCoordinator:
             if state == "running":
                 # One at a time: a second concurrent pass in the same workspace
                 # would have two turns writing the same vault notes.
+                self._cancel_pump_retry(workspace)
                 return
             if state == "queued":
                 queued.append(chat)
         if not queued:
+            self._cancel_pump_retry(workspace)
+            return
+        if host.restart_draining:
+            # Retain a failed admission's wakeup until the drain is cancelled.
             return
 
         chat = min(queued, key=lambda candidate: candidate.created_at)
@@ -869,7 +904,11 @@ class MemoryPassCoordinator:
             # attended behaviour.
             host.start_stream(chat.chat_id, self._prompt_for(chat), _memory_pass_dispatch=True)
         except Exception:  # noqa: BLE001 — no turn was admitted; leave it queued
+            if self._helper(chat).get("state") == "queued":
+                self._schedule_pump_retry(workspace)
             logger.exception("Memory pass %s could not start", chat.chat_id)
+        else:
+            self._cancel_pump_retry(workspace)
 
     def update_idle_reasons(self) -> list[str]:
         """Why the memory-pass queue is not idle, empty when it is.
