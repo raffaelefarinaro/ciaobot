@@ -267,6 +267,7 @@ class ChatStreamingHost(Protocol):
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool: ...
     def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
     @staticmethod
@@ -1383,12 +1384,15 @@ class ChatStreaming:
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
+            owns_retry = self._host._owns_retry(chat_id, stream)
+            if turn_succeeded and not had_error and is_retry and not stream.network_retry_armed and owns_retry:
+                chat_now = self._host._chats.get(chat_id)
+                if chat_now is not None and chat_now.retry_status == "pending":
+                    self._host._clear_chat_retry(chat_now)
             if not had_error and last_answer_text.strip():
                 snippet = self._host._result_snippet(last_answer_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
-                    if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
-                        self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
                     self._save_at_turn_end(chat_id)
@@ -1420,12 +1424,13 @@ class ChatStreaming:
                 and not began_compact
                 and not retry_armed
                 and not stream.network_retry_armed
+                and owns_retry
             ):
                 chat_unsettled = self._host._chats.get(chat_id)
                 if chat_unsettled is not None and chat_unsettled.retry_status == "pending":
                     logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
                     self._host._clear_chat_retry(chat_unsettled, status="stopped")
-            if (stream.network_retry_turn or is_retry) and not began_compact:
+            if (stream.network_retry_turn or is_retry) and not began_compact and owns_retry:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
                 )
