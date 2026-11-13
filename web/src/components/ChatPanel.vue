@@ -6670,9 +6670,6 @@ details[open] > .activity-summary::before {
 .message-content :deep(tbody tr:nth-child(even) > td) {
   background: color-mix(in srgb, var(--fg) 2.5%, transparent);
 }
-.message-content :deep(tr > :first-child) {
-  white-space: nowrap;
-}
 .message-content :deep(tbody tr > td:first-child) {
   font-weight: 600;
 }
