@@ -36,6 +36,40 @@ _FILE_REF_MAX_ENTRIES = 256
 _FILE_REF_PATTERN = re.compile(r"ciao-drop:(drop_[0-9a-f]{32})")
 
 
+class _RegistryCommittedError(OSError):
+    """The registry was replaced, but a subsequent operation failed."""
+
+
+class _AdmissionSnapshot:
+    """Only fields staged by synchronous turn admission, preserving identities."""
+
+    _target_fields = (
+        "retry_status", "retry_prompt", "retry_image_refs", "retry_next_at",
+        "retry_last_error", "retry_attempts", "retry_kind", "retry_interval_seconds",
+        "retry_unattended", "pending_question", "pending_permission", "last_error",
+        "user_turn_count", "turn_owner", "last_activity_at", "last_read_at",
+        "user_turn_images", "user_turn_timings", "user_turn_unattended",
+        "user_turn_origin", "user_turn_send_ids", "helper", "postprocess",
+        "failure_id", "retry_recovery", "retry_schedule_id",
+    )
+
+    def __init__(self, chat: ChatInfo, *, source_only: bool = False) -> None:
+        self.chat = chat
+        self.values = {
+            name: (getattr(chat, name), copy.deepcopy(getattr(chat, name)))
+            for name in (("postprocess",) if source_only else self._target_fields)
+        }
+
+    def restore(self) -> None:
+        for name, (original, contents) in self.values.items():
+            if isinstance(original, dict):
+                original.clear()
+                original.update(contents)
+            elif isinstance(original, list):
+                original[:] = contents
+            setattr(self.chat, name, original)
+
+
 class RestartDrainingError(RuntimeError):
     """Raised when a new turn is rejected because a server restart is draining."""
 
@@ -1891,7 +1925,35 @@ class ProjectChatManager:
             return True
         self._path.parent.mkdir(parents=True, exist_ok=True)
         stopped_recovery = False
-        with _state_file_lock(self._path):
+        committed = False
+        next_baseline = copy.deepcopy(current)
+        cleared: dict[str, Any] = {}
+
+        @contextmanager
+        def transaction() -> Iterator[None]:
+            try:
+                assert self._path is not None
+                with _state_file_lock(self._path):
+                    yield
+            except Exception as exc:
+                if committed:
+                    raise _RegistryCommittedError("registry replaced but cleanup failed") from exc
+                raise
+
+        def record_commit() -> None:
+            nonlocal committed
+            committed = True
+            if stopped_recovery:
+                chat = self._chats[_unrelated_turn]
+                for key, value in cleared.items():
+                    setattr(chat, key, value)
+                    next_baseline["chats"][_unrelated_turn][key] = copy.deepcopy(value)
+            self._last_local_payload = next_baseline
+            if stopped_recovery:
+                self._advance_retry_generation(_unrelated_turn)
+                self._publish_retry(self._chats[_unrelated_turn])
+
+        with transaction():
             latest = self._read_latest_payload()
             latest_projects = latest.get("projects")
             latest_chats = latest.get("chats")
@@ -1978,19 +2040,22 @@ class ProjectChatManager:
                         "retry_status": "stopped", "retry_prompt": "", "retry_image_refs": [],
                         "retry_next_at": "", "retry_last_error": "", "retry_attempts": 0,
                         "retry_kind": "", "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
-                        "retry_unattended": False, "retry_recovery": "",
+                        "retry_unattended": False, "retry_recovery": "", "retry_schedule_id": "",
                     }
                     payload["chats"][_unrelated_turn].update(cleared)
                     stopped_recovery = True
             tmp = self._path.with_name(
                 f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
+            write_error = None
             try:
                 prepared = copy.deepcopy(payload) if _recovery_expected is not None else payload
                 if _recovery_expected is not None:
                     prepared["chats"][_recovery_expected[0]]["retry_recovery"]["state"] = "prepared"
                 tmp.write_text(json.dumps(prepared, indent=2), encoding="utf-8", newline="")
                 tmp.replace(self._path)
+                if _recovery_expected is None:
+                    record_commit()
                 self._append_registry_audit(
                     revision=revision,
                     reason=reason,
@@ -2011,26 +2076,17 @@ class ProjectChatManager:
                             raise RecoveryOutcomeUnknown("recovery activation outcome unknown") from exc
                         if saved.get("chats", {}).get(_recovery_expected[0], {}).get("retry_recovery") != payload["chats"][_recovery_expected[0]]["retry_recovery"]:
                             raise
+                    record_commit()
+            except Exception as exc:
+                write_error = exc
+                raise
             finally:
                 try:
                     tmp.unlink(missing_ok=True)
-                except OSError:
-                    logger.warning("Could not remove registry temporary file %s", tmp, exc_info=True)
-        # Deep copy, not the payload itself: ``_state_payload`` embeds the live
-        # container objects (``user_turn_timings``, ``user_turn_images``,
-        # ``handover_messages``, ...), so keeping a reference makes the baseline
-        # alias current state. The field-level diff in ``_merge_local_map`` then
-        # sees ``before == value`` for every in-place mutation and drops it, and
-        # the value never reaches disk. That silently lost per-turn send times
-        # and image refs whenever they were the only change in a save.
-        if stopped_recovery:
-            chat = self._chats[_unrelated_turn]
-            for key, value in cleared.items():
-                setattr(chat, key, value)
-                current["chats"][_unrelated_turn][key] = value
-            self._advance_retry_generation(_unrelated_turn)
-            self._publish_retry(chat)
-        self._last_local_payload = copy.deepcopy(current)
+                except Exception as cleanup_error:
+                    if write_error is not None:
+                        raise write_error from cleanup_error
+                    raise
         return True
 
     # ── Defaults and auto-discovery ──────────────────────────────────────
@@ -8623,6 +8679,8 @@ class ProjectChatManager:
         chat.retry_schedule_id = ""
         try:
             saved = self._save_checked(reason="continue_recovery", _recovery_expected=(chat_id, session_id, last_error, turn_count, failure_id))
+        except _RegistryCommittedError:
+            saved = True
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8689,6 +8747,8 @@ class ProjectChatManager:
                 saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _empty_retry=chat_id)
             else:
                 saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id)
+        except _RegistryCommittedError:
+            saved = True
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8702,7 +8762,7 @@ class ProjectChatManager:
         self._publish_retry(chat)
         if _owner is not None:
             self._cancel_retry_task(chat_id, keep_current=True)
-        self._ensure_retry_task(chat_id)
+        self._ensure_retry_task(chat_id, owner=_owner)
         return chat
 
     def stop_chat_retry(self, chat_id: str, *, allow_recovery: bool = True, schedule_id: str | None = None) -> ChatInfo | None:
@@ -8731,6 +8791,8 @@ class ProjectChatManager:
         try:
             saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _reject_recovery=True,
                                        _literal_expected=(chat_id, schedule_id) if schedule_id is not None else None)
+        except _RegistryCommittedError:
+            saved = True
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8888,6 +8950,8 @@ class ProjectChatManager:
                     _firing_expected=firing_expected,
                     _literal_expected=(chat_id, schedule_id) if schedule_id is not None else None,
                 )
+            except _RegistryCommittedError:
+                saved = True
             except Exception:
                 if claim_id:
                     _ABORTED_RECOVERY_CLAIMS.add(claim_id)
@@ -8920,6 +8984,8 @@ class ProjectChatManager:
         try:
             saved = self._save_checked(reason="release_recovery_claim",
                                        _firing_expected=(chat_id, {"retry_status": "pending", "retry_recovery": marker}))
+        except _RegistryCommittedError:
+            saved = True
         except Exception:
             _ABORTED_RECOVERY_CLAIMS.add(marker["claim"])
             chat.retry_recovery = marker
@@ -8980,6 +9046,11 @@ class ProjectChatManager:
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
         self._advance_retry_generation(chat.chat_id)
+        self._reset_chat_retry_fields(chat, status=status)
+        self._save()
+        self._finish_chat_retry_clear(chat, status=status)
+
+    def _reset_chat_retry_fields(self, chat: ChatInfo, *, status: str = "") -> None:
         chat.retry_status = status
         chat.retry_prompt = ""
         chat.retry_image_refs = []
@@ -8991,7 +9062,8 @@ class ProjectChatManager:
         chat.retry_unattended = False
         chat.retry_recovery = ""
         chat.retry_schedule_id = ""
-        self._save()
+
+    def _finish_chat_retry_clear(self, chat: ChatInfo, *, status: str = "") -> None:
         self._publish_retry(chat)
         if status == "stopped" and _has_running_loop():
             # A memory pass keeps its workspace slot while a retry is pending
@@ -9036,17 +9108,21 @@ class ProjectChatManager:
     def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool:
         return stream.retry_generation == self._retry_generations.get(chat_id, 0)
 
-    def _ensure_retry_task(self, chat_id: str) -> None:
+    def _ensure_retry_task(self, chat_id: str, *, owner: ChatStream | None = None) -> None:
         if not _has_running_loop():
             return
         existing = self._retry_tasks.get(chat_id)
         if existing is not None and not existing.done():
             return
         generation = self._retry_generations.get(chat_id, 0)
-        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id, generation))
+        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id, generation, owner))
 
-    async def _retry_loop(self, chat_id: str, generation: int) -> None:
+    async def _retry_loop(
+        self, chat_id: str, generation: int, owner: ChatStream | None = None
+    ) -> None:
         try:
+            while owner is not None and self._broker.get(chat_id) is owner:
+                await asyncio.sleep(_RETRY_STREAM_POLL_SECONDS)
             while True:
                 if generation != self._retry_generations.get(chat_id, 0):
                     return
@@ -9219,6 +9295,7 @@ class ProjectChatManager:
         compact: bool = False,
         origin: str = "",
         send_id: str = "",
+        _memory_pass_dispatch: bool = False,
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -9250,39 +9327,26 @@ class ProjectChatManager:
             return existing
         if self._restart_draining:
             raise RestartDrainingError()
-        if existing is not None and existing.background:
-            # A between-turns drain stream is live. The user's send starts a
-            # real turn: cancel the drain (its cleanup finishes the stream)
-            # and fall through — the new stream replaces it in the broker.
-            self._cancel_between_turns_drain(chat_id)
-            self._broker.clear(chat_id, existing)
-
-        chat_for_retry = self._chats.get(chat_id)
+        chat_meta = self._chats.get(chat_id)
         network_retry_turn = (
             not compact
-            and chat_for_retry is not None
-            and chat_for_retry.retry_status == "pending"
-            and chat_for_retry.retry_kind == _NETWORK_RETRY_KIND
+            and chat_meta is not None
+            and chat_meta.retry_status == "pending"
+            and chat_meta.retry_kind == _NETWORK_RETRY_KIND
         )
+        if _memory_pass_dispatch and (compact or chat_meta is None):
+            raise ValueError("Only a queued memory pass may be dispatched")
         stream = ChatStream(prompt_text=prompt)
         stream.retry_generation = self._retry_generations.get(chat_id, 0)
-        if not is_retry and chat_for_retry is not None and chat_for_retry.retry_status == "pending":
+        if not is_retry and chat_meta is not None and chat_meta.retry_status == "pending":
             stream.retry_generation = -1
         stream.network_retry_turn = network_retry_turn
-        self._broker.register(chat_id, stream)
         image_refs: list[str] = []
         for img in images or []:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
 
-        chat_meta = self._chats.get(chat_id)
-        admission_fields = ("pending_question", "pending_permission", "last_error", "failure_id",
-                            "user_turn_count", "turn_owner", "user_turn_images", "last_activity_at",
-                            "last_read_at", "user_turn_timings", "user_turn_unattended",
-                            "user_turn_origin", "user_turn_send_ids")
-        admission_before = ({name: copy.deepcopy(getattr(chat_meta, name)) for name in admission_fields}
-                            if chat_meta is not None and not is_retry and not compact else {})
         project_id = chat_meta.project_id if chat_meta else ""
         # Stamp activity on send so the sidebar Recent list orders by latest
         # interaction (not just created_at). Also record image refs keyed by
@@ -9302,7 +9366,6 @@ class ProjectChatManager:
         )
         if native_request:
             if self._providers.get(chat_id) is not None:
-                self._broker.clear(chat_id, stream)
                 stream.finish()
                 raise ValueError(
                     "Answer the open question before sending another message."
@@ -9313,63 +9376,67 @@ class ProjectChatManager:
             if chat_meta is not None and self._providers.get(chat_id) is None
             else ""
         )
+        asyncio.get_running_loop()
+        snapshots = [_AdmissionSnapshot(chat_meta)] if chat_meta is not None else []
+        if chat_meta is not None and not compact:
+            source = self._chats.get(str(chat_meta.helper.get("source_chat_id") or ""))
+            if source is not None and source is not chat_meta:
+                snapshots.append(_AdmissionSnapshot(source, source_only=True))
+        changed_source = None
+        committed_error = None
+        generation = self._retry_generations.get(chat_id, 0)
+        try:
+            if chat_meta is not None:
+                if not compact:
+                    changed_source = self._memory_pass.prepare_turn_start(
+                        chat_meta, allow_queued=_memory_pass_dispatch
+                    )
+                if dead_form_request:
+                    chat_meta.pending_question = ""
+                if dead_permission_request:
+                    chat_meta.pending_permission = ""
+                if not compact:
+                    chat_meta.pending_question = ""
+                    chat_meta.last_error = ""
+                    chat_meta.failure_id = ""
+                    turn_index = chat_meta.user_turn_count
+                    chat_meta.user_turn_count = turn_index + 1
+                    chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
+                    if image_refs:
+                        chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
+                    sent_at_iso = chat_service._now_iso()
+                    chat_meta.last_activity_at = sent_at_iso
+                    chat_meta.last_read_at = sent_at_iso
+                    chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
+                    if unattended:
+                        chat_meta.user_turn_unattended[str(turn_index)] = True
+                    if origin:
+                        chat_meta.user_turn_origin[str(turn_index)] = origin
+                    if send_id:
+                        chat_meta.record_send_id(turn_index, send_id)
+                if not is_retry and not compact:
+                    if not self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id):
+                        raise ValueError("recovery is in flight")
+                else:
+                    self._save()
+        except _RegistryCommittedError as exc:
+            committed_error = exc
+        except Exception:
+            for snapshot in snapshots:
+                snapshot.restore()
+            stream.finish()
+            raise
+
+        # Nothing external owns the new stream until the single registry commit.
+        if self._retry_generations.get(chat_id, 0) != generation:
+            stream.retry_generation = self._retry_generations[chat_id]
+        if existing is not None and existing.background:
+            self._cancel_between_turns_drain(chat_id)
+            self._broker.clear(chat_id, existing)
+        self._broker.register(chat_id, stream)
         if chat_meta is not None:
-            # Waiting (parked) messages stay waiting: a new send never flushes
-            # them. They leave only through send-now, edit, remove or reorder,
-            # and stay visible on every stream, compactions included.
             stream.waiting = lambda: chat_meta.pending_queue
-            if chat_meta.pending_queue:
-                stream.publish_pending()
-        if chat_meta is not None and not compact:
-            try:
-                self._memory_pass.on_turn_started(chat_meta)
-            except ValueError:
-                self._broker.clear(chat_id, stream)
-                stream.finish()
-                raise
-        if dead_form_request and chat_meta is not None:
-            logger.info(
-                "Superseding dead native form %s for chat %s",
-                dead_form_request,
-                chat_id,
-            )
-            chat_meta.pending_question = ""
-        if dead_permission_request and chat_meta is not None:
-            logger.info(
-                "Superseding dead permission request %s for chat %s",
-                dead_permission_request,
-                chat_id,
-            )
-            chat_meta.pending_permission = ""
-        if chat_meta is not None and not compact:
-            # A new user turn answers (or supersedes) any legacy paused
-            # question, so the persisted picker state no longer applies.
-            chat_meta.pending_question = ""
-            # A new turn supersedes the failure that ended the previous one; the
-            # save below persists the clear with the send stamp.
-            chat_meta.last_error = ""
-            chat_meta.failure_id = ""
-            # Waiting (parked) messages stay waiting: a new send never flushes
-            # them. They leave only through send-now, edit, remove or reorder,
-            # and stay visible on this stream.
-            turn_index = chat_meta.user_turn_count
-            chat_meta.user_turn_count = turn_index + 1
-            chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
-            if image_refs:
-                chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
-            sent_at_iso = chat_service._now_iso()
-            chat_meta.last_activity_at = sent_at_iso
-            chat_meta.last_read_at = sent_at_iso  # user sending = implicitly read
-            chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
-            if unattended:
-                # Persisted so the ↻ marker survives a reload; /messages reads
-                # this back because the SDK session file has no notion of who
-                # sent a turn.
-                chat_meta.user_turn_unattended[str(turn_index)] = True
-            if origin:
-                chat_meta.user_turn_origin[str(turn_index)] = origin
-            if send_id:
-                chat_meta.record_send_id(turn_index, send_id)
+        if turn_index is not None:
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -9394,21 +9461,42 @@ class ProjectChatManager:
         if not compact:
             stream.publish(echo_payload)
 
-        if chat_meta is not None:
-            if not is_retry and not compact:
-                generation = self._retry_generations.get(chat_id, 0)
-                if not self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id):
-                    for name, value in admission_before.items():
-                        setattr(chat_meta, name, value)
-                    if turn_index is not None:
-                        self._streaming.discard_turn_perf(chat_id, turn_index)
-                    self._broker.clear(chat_id, stream)
-                    stream.finish()
-                    raise ValueError("recovery is in flight")
-                if self._retry_generations.get(chat_id, 0) != generation:
-                    stream.retry_generation = self._retry_generations[chat_id]
-            else:
-                self._save()
+        self._streaming.start_drive(
+            chat_id=chat_id,
+            project_id=project_id,
+            prompt=prompt,
+            images=images,
+            turn_index=turn_index,
+            chat_meta=chat_meta,
+            stream=stream,
+            is_retry=is_retry,
+            unattended=unattended,
+            compact=compact,
+        )
+        if committed_error is not None:
+            try:
+                logger.warning("Chat %s admitted despite registry cleanup failure", chat_id,
+                               exc_info=committed_error)
+            except Exception:
+                pass  # A diagnostic cannot reject a turn whose driver is already owned.
+        if changed_source is not None:
+            try:
+                self._publish_postprocess(changed_source)
+            except Exception:
+                logger.exception("Postprocess notification failed for chat %s", chat_id)
+        try:
+            self._events.publish({
+                "type": "chat_streaming_started",
+                "chat_id": chat_id,
+                "project_id": project_id,
+            })
+        except Exception:
+            logger.exception("Stream-start notification failed for chat %s", chat_id)
+        if chat_meta is not None and chat_meta.pending_queue:
+            try:
+                stream.publish_pending()
+            except Exception:
+                logger.exception("Pending-queue notification failed for chat %s", chat_id)
         # Auto-title fires *immediately* on the first user message instead
         # of waiting for the assistant reply. The titler can produce a
         # decent label from the prompt alone, and firing early means the
@@ -9427,37 +9515,17 @@ class ProjectChatManager:
         # disagrees, so the assistant's framing can still win on the rare cases
         # where it matters.
         if chat_meta and chat_meta.title == "New Chat" and prompt.strip() and not compact:
-            chat_meta.title_status = "pending"
-            self._events.publish({
-                "type": "chat_title",
-                "chat_id": chat_id,
-                "title": chat_meta.title,
-                "status": "pending",
-            })
-            asyncio.create_task(
-                self._auto_title_and_publish(chat_id, prompt, "")
-            )
-
-        # Announce stream start to the global awareness hub so non-active
-        # clients (different chat selected, sidebar only) can render the
-        # per-project / per-chat "working" indicator immediately.
-        self._events.publish({
-            "type": "chat_streaming_started",
-            "chat_id": chat_id,
-            "project_id": project_id,
-        })
-        self._streaming.start_drive(
-            chat_id=chat_id,
-            project_id=project_id,
-            prompt=prompt,
-            images=images,
-            turn_index=turn_index,
-            chat_meta=chat_meta,
-            stream=stream,
-            is_retry=is_retry,
-            unattended=unattended,
-            compact=compact,
-        )
+            try:
+                chat_meta.title_status = "pending"
+                self._events.publish({
+                    "type": "chat_title",
+                    "chat_id": chat_id,
+                    "title": chat_meta.title,
+                    "status": "pending",
+                })
+                asyncio.create_task(self._auto_title_and_publish(chat_id, prompt, ""))
+            except Exception:
+                logger.exception("Auto-title scheduling failed for chat %s", chat_id)
         return stream
 
     def find_turn_by_send_id(self, chat_id: str, send_id: str) -> dict | None:
@@ -9902,6 +9970,7 @@ class ProjectChatManager:
         not end, so from here on the stamp stays for the next boot to resume.
         """
         self._shutting_down = True
+        self._memory_pass.close()
 
     def resume_interrupted_turns(self, *, enabled: bool) -> int:
         """At boot, consume every interrupted-turn stamp and arm one resume each.

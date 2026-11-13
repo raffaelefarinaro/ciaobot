@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import appVue from '../App.vue?raw'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
@@ -14,6 +13,9 @@ import {
   restoreAppearanceFromCache,
   writeAppearanceCache,
 } from './appearance'
+
+const cssPath = '../styles/app.css'
+const appCss = readFileSync(fileURLToPath(new URL(cssPath, import.meta.url)), 'utf8')
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -76,17 +78,17 @@ describe('font tokens', () => {
     ]),
   ) as Record<string, string>
 
-  it('no component uses var(--font-sans) outside App.vue and the Body font picker', () => {
+  it('no component uses var(--font-sans) outside the global stylesheet and the Body font picker', () => {
     // SettingsAppearance.vue is the one exception: its System button must draw
     // itself in the system face even while Serif or Mono is active.
     const offenders = Object.entries(sources)
-      .filter(([path, text]) => !path.endsWith('/App.vue') && !path.endsWith('/SettingsAppearance.vue')
+      .filter(([path, text]) => !path.endsWith('/styles/app.css') && !path.endsWith('/SettingsAppearance.vue')
         && text.includes('var(--font-sans)'))
       .map(([path]) => path)
     expect(offenders).toEqual([])
     const picker = Object.entries(sources).find(([path]) => path.endsWith('/SettingsAppearance.vue'))
     expect(picker?.[1].split('var(--font-sans)').length).toBe(2)
-    expect(Object.keys(sources).some((path) => path.endsWith('/App.vue'))).toBe(true)
+    expect(Object.keys(sources).some((path) => path.endsWith('/styles/app.css'))).toBe(true)
     expect(Object.keys(sources).some((path) => path.endsWith('settingsPanels.css'))).toBe(true)
     expect(sources[Object.keys(sources).find((p) => p.endsWith('settingsPanels.css'))!]).toContain('{')
   })
@@ -185,9 +187,9 @@ describe('applyAppearanceToRoot custom colours', () => {
 })
 
 describe('DEFAULT_PAIRS', () => {
-  it('equals the --bg and --fg of the dark and light blocks in App.vue', () => {
+  it('equals the --bg and --fg of the dark and light blocks in the global stylesheet', () => {
     const block = (selector: RegExp): string => {
-      const match = selector.exec(appVue)
+      const match = selector.exec(appCss)
       expect(match).not.toBeNull()
       return match![1]
     }
