@@ -51,9 +51,7 @@ def test_system_prompt_routes_urls_to_provider_fetch_and_gh() -> None:
     assert "defuddle" not in append
     # GitHub goes through gh, which the model already knows how to drive; what
     # the prompt has to add is that it beats web-fetch and works on private
-    # repos. The full URL->command mapping is deliberately NOT here: this text
-    # loads every turn and the payload budget is 9000 chars
-    # (test_agent_surface.py::test_cli_surface_prompt_carries_the_whole_command_table).
+    # repos. Exact URL->command recipes belong in help, not the core.
     assert "For GitHub URLs, use `gh` instead" in append
     assert "web pages, email and connector content" in append
 
@@ -72,8 +70,8 @@ def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
     assert payload is not None
     append = payload["append"]
     assert "When diagnosing Ciaobot itself" in append
-    assert "engine-wide error, debug and service logs are omitted" in append
-    assert "`scope`/`omitted`" in append
+    assert "scoped evidence" in append
+    assert "do not interpret omitted logs as a clean bill of health" in append
     # The engine-wide runtime files are not advertised as readable evidence.
     assert ".runtime/server_errors.log" not in append
     assert ".runtime/job_runs.jsonl" not in append
@@ -87,9 +85,9 @@ def test_system_prompt_states_workspace_scope_limits() -> None:
     assert payload is not None
     append = payload["append"]
     assert "file_access=workspace only" in append
-    assert "Do not probe them" in append
+    assert "Do not probe excluded paths or retry denied access" in append
     assert "Settings → Overview → File access" in append
-    assert "`gh` is not signed in" in append
+    assert "do not assume integrations are signed out" in append
 
 
 def test_system_prompt_includes_project_canonical_doc_notes() -> None:
@@ -99,27 +97,28 @@ def test_system_prompt_includes_project_canonical_doc_notes() -> None:
     append = payload["append"]
     assert "canonical document" in append
     assert "meaningful decisions" in append
-    assert "`README.md` first, then `<folder-name>.md`" in append
-    assert "Use the supplied canonical path" in append
-    assert "do not duplicate or rename it" in append
-    assert "not a folder-naming rule" in append
+    assert "do not duplicate or rename the supplied canonical path" in append
+    assert "only within authorized document or implementation work" in append
+    assert "otherwise offer and wait" in append
 
 
 def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "ciao:memory" in append
-    assert "ciao:profile" in append
+    assert "`AGENTS.md` is the authoritative native workspace guide and bounded-memory source" in append
+    assert "Do not duplicate its memory" in append
+    assert "competing `CLAUDE.md`" in append
     assert "ciao vault search" in append
     assert "private working evidence" in append
     assert "internal sentinels" in append
-    assert "ciao memory update" in append
+    assert "memory update" in append
+    assert "read `ciao-memory`" in append
     assert "memory_update" not in append
 
 
 def test_the_core_prompt_carries_no_cli_recipes() -> None:
-    """The core is the single CLI-first prompt: only `ciao <noun> <verb>`."""
+    """The core routes managed operations to the current CLI, not old recipes."""
     payload = mi.system_prompt_payload("memory block")
     assert payload is not None
 
@@ -217,13 +216,17 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
         return next(line for line in bullets if needle in line)
 
     assert "cuts off the PWA session" in bullet("Never restart Ciaobot")
-    assert "bypasses those guards" in bullet("Do not use curl")
-    assert "agent surface" in bullet("Do not use curl")
-    assert "outside Ciaobot's schedule list" in bullet("provider-native recurring automations")
-    assert "cannot be undone or are seen by others" in bullet("destructive git operations")
-    assert "output lands in transcripts and replies" in bullet("never quote or repeat credentials")
+    assert "agent surface enforces" in bullet("route around permission checks")
+    assert "ordinary note content" in bullet("route around permission checks")
+    assert "outside Ciaobot's schedule list" in bullet("Provider-native recurring automations")
+    assert "irreversible or visible to others" in bullet("destructive git operations")
+    assert "output lands in transcripts and replies" in bullet("never quote credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
-    assert "land in notes and transcripts" in bullet("webhook create|rotate")
+    # Secret handling moves with the webhook procedure, reachable via help.
+    from pathlib import Path
+
+    reference = (Path(mi.__file__).parent / "stock/skills/ciao-cli/SKILL.md").read_text(encoding="utf-8")
+    assert "never save a copy in notes, memory or source files" in reference
 
 
 def test_system_prompt_task_bullet_runs_task_rules_before_filing() -> None:
@@ -232,3 +235,49 @@ def test_system_prompt_task_bullet_runs_task_rules_before_filing() -> None:
     append = payload["append"]
     assert append.count("ciao task-rules") == 1
     assert "Workspace/Task-Rules.md" not in append
+
+
+def test_core_uses_guard_boundaries_not_a_curl_or_github_login_ban() -> None:
+    text = mi._system_instructions()
+    assert "Do not use curl" not in text
+    assert "route around permission checks or refusals" in text
+    assert "ordinary note content" in text
+    assert "`gh` is not signed in" not in text
+    assert "check its authentication" in text
+
+
+def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
+    text = mi._system_instructions()
+    assert "Before durable writes or proposal curation, read `ciao-memory`" in text
+    assert "Separate entries with" not in text
+    assert "[expires:" not in text
+    assert "A note without frontmatter cannot be indexed" not in text
+    assert "Every Ciaobot operation is a `ciao <noun> <verb>" not in text
+    assert "run_in_background" not in text
+    assert "`Agent`/`Task`" not in text
+
+
+def test_core_synopsis_only_offers_agent_allowed_task_move_columns() -> None:
+    text = mi._system_instructions()
+    move = next(line for line in text.splitlines() if line.startswith("task move "))
+    assert "backlog|in_progress|in_review" in move
+    assert "|done" not in move
+
+
+def test_disclosed_memory_procedures_remain_available() -> None:
+    from pathlib import Path
+
+    root = Path(mi.__file__).parent / "stock/skills/ciao-memory"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    assert "Before document writes or bounded-region edits, read" in skill
+    assert "(references/writing.md)" in skill
+    procedures = (root / "references/writing.md").read_text(encoding="utf-8")
+    for instruction in (
+        "Separate entries with `§`",
+        "[expires: YYYY-MM-DD]",
+        "`README.md` first, then `<folder-name>.md`",
+        "relative Markdown links",
+        "preserve its frontmatter",
+        "`ciao file surface",
+    ):
+        assert instruction in procedures, instruction

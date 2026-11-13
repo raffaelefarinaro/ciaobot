@@ -210,6 +210,12 @@ vi.mock('../../lib/api', () => {
   }
 })
 
+const runInTerminal = vi.hoisted(() => vi.fn(async (_command: string, _opts?: unknown) => 'typed' as string))
+vi.mock('../../composables/useRunInTerminal', async () => {
+  const { ref } = await import('vue')
+  return { useRunInTerminal: () => ({ run: runInTerminal, busy: ref(false) }) }
+})
+
 vi.mock('../../lib/push', () => ({
   pushSupported: () => false,
   pushEnabled: () => false,
@@ -1016,10 +1022,11 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.find('.action-result').text()).toBe('Opened the opencode sign-in in Terminal.')
+    expect(runInTerminal).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('SettingsView Connect on a remote browser shows the command to run on the host', async () => {
+  it('SettingsView Connect on a remote browser types the sign-in into the Ciao terminal', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1030,7 +1037,7 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const hint = 'Opening a terminal is only available in a browser on the computer running Ciaobot. Run this in a terminal on the computer running Ciaobot: opencode auth login'
+    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
     vi.mocked(api.post).mockRejectedValueOnce(
       Object.assign(new Error(hint), {
         status: 403,
@@ -1044,9 +1051,100 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
+    expect(runInTerminal).toHaveBeenCalledTimes(1)
+    expect(runInTerminal).toHaveBeenCalledWith('opencode auth login')
+    expect(wrapper.find('.action-result').text()).toBe('Started the opencode sign-in in the Ciao terminal. Finish it there, then press Verify.')
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect shows the sign-in command when the Ciao terminal cannot take it', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
+    vi.mocked(api.post).mockRejectedValueOnce(
+      Object.assign(new Error(hint), {
+        status: 403,
+        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
+      }),
+    )
+    runInTerminal.mockResolvedValueOnce('failed')
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
     const text = wrapper.find('.action-result').text()
-    expect(text).toContain('opencode auth login')
+    expect(text).toBe(hint)
     expect(text.startsWith('Error:')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect copies the sign-in command when the Ciao terminal is locked', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
+    vi.mocked(api.post).mockRejectedValueOnce(
+      Object.assign(new Error(hint), {
+        status: 403,
+        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
+      }),
+    )
+    runInTerminal.mockResolvedValueOnce('copied')
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('.action-result').text()).toBe(`Copied the command. ${hint}`)
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect without a command reports an error and leaves the terminal alone', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    vi.mocked(api.post).mockRejectedValueOnce(
+      Object.assign(new Error('this provider has no sign-in action'), {
+        status: 404,
+        payload: { error: 'this provider has no sign-in action' },
+      }),
+    )
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(runInTerminal).not.toHaveBeenCalled()
+    expect(wrapper.find('.action-result').text()).toBe('Error: this provider has no sign-in action')
     wrapper.unmount()
   })
 

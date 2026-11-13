@@ -250,13 +250,21 @@ belongs in Settings; a request is for the steps Settings does not cover.
 
 ## Skills and system-prompt policy
 
-The CLI replaces the transport recipes, not behavioural knowledge. Ciaobot's
-core prompt tells the agent to use `ciao <noun> <verb>` commands for the
-control plane and points at `ciao help` / `ciao <noun> --help` for the command
-reference (the command tables live in the `ciao-cli` skill, not in
-`ciao/system_prompt.md`, #1464). Provider and
-integration skills — Google Workspace, research, document authoring — remain
-useful because the CLI does not encode those domain decisions.
+The CLI replaces transport recipes, not behavioural knowledge. The core keeps
+the safety boundaries, recall and write-authorization rules, and a compact
+common-command synopsis: removing that synopsis previously hurt routing.
+`ciao help` exposes the full packaged `ciao-cli` reference even though that
+skill is not installed in workspace catalogs; `ciao <noun> --help` gives group
+syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
+commands have their own documented output conventions.
+
+Durable writes must load `ciao-memory` for destinations, frontmatter,
+verification stamps and consolidation. Integration and provider mechanics stay
+in their relevant skills or CLI help. The core requires the managed interface
+and forbids routing around its checks or refusals; it does not blacklist HTTP
+clients or forbid ordinary authorized note-content edits. Workspace-only file
+access does not imply that GitHub is signed out: the engine can grant its
+existing login to a sandboxed chat.
 
 ## Validation status
 

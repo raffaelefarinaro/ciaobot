@@ -80,8 +80,30 @@ def test_remote_signed_in_browser_gets_403_with_the_command(tmp_path: Path, monk
     body = response.json()
     assert body["reason"] == "not_on_host"
     assert body["command"] == "cmd-for-claude-login"
-    assert "cmd-for-claude-login" in body["error"]
+    assert body["error"] == (
+        "This browser cannot open a terminal window on the computer running Ciaobot. "
+        "Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell "
+        "on the computer running Ciaobot, as the account Ciaobot runs as: cmd-for-claude-login"
+    )
     assert rec.launches == []
+
+
+def test_remote_connect_guidance_never_points_at_the_users_computer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch, peer="100.64.0.7")
+    error = client.post(PATH, headers=_signed(client)).json()["error"]
+    assert "Ciaobot terminal" in error
+    assert host_terminal.REASON_MESSAGES["not_on_host"] not in error
+    lowered = error.lower()
+    for phrase in ("your computer", "this computer", "this device"):
+        assert phrase not in lowered
+
+
+def test_connect_hint_names_the_command_and_the_engine_account() -> None:
+    hint = routes_api._connect_hint("opencode auth login")
+    assert hint.endswith(": opencode auth login")
+    assert "as the account Ciaobot runs as" in hint
 
 
 def test_rebound_host_is_not_on_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
