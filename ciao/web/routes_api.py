@@ -2757,6 +2757,17 @@ async def chat_retry(request: Request) -> JSONResponse:
         prompt = str(body.get("prompt", ""))
         images = [str(x) for x in body.get("images", []) if str(x)]
         chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual")
+    elif action == "continue_recovery":
+        session = body.get("session_id")
+        error = body.get("last_error")
+        turn_count = body.get("user_turn_count")
+        if not isinstance(session, str) or not isinstance(error, str) or type(turn_count) is not int or turn_count < 0:
+            return JSONResponse({"error": "session_id, last_error and user_turn_count are required"}, status_code=400)
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not pcm.schedule_continue_recovery(chat_id, session, error, turn_count):
+            return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
     elif action == "try_now":
         stream = pcm.try_chat_retry_now(chat_id)
         chat = pcm.get_chat(chat_id)
