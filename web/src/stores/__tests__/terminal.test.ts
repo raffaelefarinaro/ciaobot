@@ -230,6 +230,808 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe('workspace terminal scope', () => {
+  it.each(['close', 'navigation'] as const)(
+    'ignores a late successful create after %s and rediscovers it on reopen', async (how) => {
+      const store = useTerminalStore()
+      store.followChat('')
+      await store.open({ workspace: 'personal' })
+      const reply = deferred<unknown>()
+      apiPost.mockReturnValueOnce(reply.promise)
+      const creating = store.createSession()
+      if (how === 'close') store.hide()
+      else store.followChat('chat')
+      const oldPhase = store.phase
+      reply.resolve({ session: sessionPayload('server-created') })
+      expect(await creating).toBe(false)
+      expect(store.visible).toBe(false)
+      expect(store.activeSession).toBeNull()
+      expect(store.sessions).toEqual([])
+      expect(store.phase).toBe(oldPhase)
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+        ? statusPayload() : { sessions: [sessionPayload('server-created')] }))
+      await store.open({ workspace: 'personal' })
+      expect(store.activeSession?.session_id).toBe('server-created')
+      expect(apiPost).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it.each(['close', 'navigation'] as const)(
+    'ignores a late capacity refusal after %s', async (how) => {
+      const store = useTerminalStore()
+      store.followChat('')
+      await store.open({ workspace: 'personal' })
+      const reply = deferred<unknown>()
+      apiPost.mockReturnValueOnce(reply.promise)
+      const creating = store.createSession()
+      if (how === 'close') store.hide()
+      else store.followChat('chat')
+      const oldPhase = store.phase
+      reply.reject(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+      expect(await creating).toBe(false)
+      expect(store.visible).toBe(false)
+      expect(store.capacityError).toBe('')
+      expect(store.error).toBe('')
+      expect(store.phase).toBe(oldPhase)
+      expect(apiPost).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('reconciles a pending create after reopen without adopting the stale reply or repeating POST', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    await store.openWorkspaceForSettings('personal')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    const list = deferred<unknown>()
+    apiGet.mockReturnValueOnce(list.promise)
+    reply.resolve({ session: sessionPayload('server-created') })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(store.activeSession).toBeNull()
+    expect(store.sessions).toEqual([])
+    expect(apiGet.mock.calls.at(-1)?.[0]).toBe('/api/terminal/sessions?workspace=personal')
+    list.resolve({ sessions: [sessionPayload('server-created')] })
+    expect(await creating).toBe(false)
+    expect(store.activeSession?.session_id).toBe('server-created')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('refetches a list that began before the pending create settled and never repeats the POST', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    const staleList = deferred<unknown>()
+    let lists = 0
+    apiGet.mockImplementation((path: string) => {
+      if (path.endsWith('/status')) return Promise.resolve(statusPayload())
+      lists += 1
+      return lists === 1 ? staleList.promise : Promise.resolve({ sessions: [sessionPayload('server-created')] })
+    })
+    const reopening = store.openWorkspaceForSettings('personal')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(lists).toBe(1)
+    reply.resolve({ session: sessionPayload('server-created') })
+    await creating
+    staleList.resolve({ sessions: [] })
+    await reopening
+    expect(lists).toBeGreaterThanOrEqual(2)
+    expect(store.activeSession?.session_id).toBe('server-created')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not repeat an uncertain POST when an older empty list arrives after it settles', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    const staleList = deferred<unknown>()
+    let lists = 0
+    apiGet.mockImplementation((path: string) => {
+      if (path.endsWith('/status')) return Promise.resolve(statusPayload())
+      lists += 1
+      return lists === 1 ? staleList.promise : Promise.resolve({ sessions: [] })
+    })
+    const reopening = store.openWorkspaceForSettings('personal')
+    await Promise.resolve()
+    await Promise.resolve()
+    reply.reject(new Error('network'))
+    await creating
+    staleList.resolve({ sessions: [] })
+    await reopening
+    expect(lists).toBeGreaterThanOrEqual(2)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(store.error).toContain('could not be confirmed')
+  })
+
+  it('preserves uncertainty if the create fails while hidden before reopening', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    reply.reject(new Error('network'))
+    await creating
+    expect(store.error).toBe('')
+    await store.openWorkspaceForSettings('personal')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(store.error).toContain('could not be confirmed')
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('manual') })
+    expect(await store.createSession()).toBe(true)
+    expect(store.activeSession?.session_id).toBe('manual')
+    expect(store.error).toBe('')
+  })
+
+  it('preserves uncertainty when reconciliation fails after an uncertain create', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    await store.openWorkspaceForSettings('personal')
+    apiGet.mockRejectedValueOnce(new Error('list failed'))
+    reply.reject(new Error('network'))
+    await creating
+    expect(store.error).toContain('could not be confirmed')
+    expect(store.error).toContain('could not be listed')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['success', 'uncertain'] as const)(
+    'reconciles an A→B→A pending create after it settles (%s)', async (outcome) => {
+      const store = useTerminalStore()
+      await store.open({ workspace: 'A' })
+      const reply = deferred<unknown>()
+      apiPost.mockReturnValueOnce(reply.promise)
+      const creating = store.createSession()
+      await store.open({ workspace: 'B' })
+      await store.open({ workspace: 'A' }, { ensureSession: true })
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      const fresh = deferred<unknown>()
+      const before = apiGet.mock.calls.length
+      apiGet.mockReturnValueOnce(fresh.promise)
+      if (outcome === 'success') reply.resolve({ session: sessionPayload('server-created') })
+      else reply.reject(new Error('network'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(apiGet.mock.calls.length).toBe(before + 1)
+      expect(apiGet.mock.calls.at(-1)?.[0]).toBe('/api/terminal/sessions?workspace=A')
+      expect(store.activeSession).toBeNull()
+      expect(store.sessions).toEqual([])
+      fresh.resolve({ sessions: outcome === 'success' ? [sessionPayload('server-created')] : [] })
+      expect(await creating).toBe(false)
+      if (outcome === 'success') expect(store.activeSession?.session_id).toBe('server-created')
+      else expect(store.error).toContain('could not be confirmed')
+      expect(apiPost).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it.each(['success', 'uncertain'] as const)(
+    'fences an A→B→A list that predates the create settlement (%s)', async (outcome) => {
+      const store = useTerminalStore()
+      await store.open({ workspace: 'A' })
+      const reply = deferred<unknown>()
+      apiPost.mockReturnValueOnce(reply.promise)
+      const creating = store.createSession()
+      await store.open({ workspace: 'B' })
+      const stale = deferred<unknown>()
+      let lists = 0
+      apiGet.mockImplementation((path: string) => {
+        if (path.endsWith('/status')) return Promise.resolve(statusPayload())
+        lists += 1
+        return lists === 1 ? stale.promise : Promise.resolve({
+          sessions: outcome === 'success' ? [sessionPayload('server-created')] : [],
+        })
+      })
+      const reopening = store.open({ workspace: 'A' }, { ensureSession: true })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(lists).toBe(1)
+      if (outcome === 'success') reply.resolve({ session: sessionPayload('server-created') })
+      else reply.reject(new Error('network'))
+      await creating
+      stale.resolve({ sessions: [] })
+      await reopening
+      expect(lists).toBeGreaterThanOrEqual(2)
+      if (outcome === 'success') expect(store.activeSession?.session_id).toBe('server-created')
+      else expect(store.error).toContain('could not be confirmed')
+      expect(apiPost).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('fences an A→B→A reconciliation if the user leaves A again', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'A' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    await store.open({ workspace: 'B' })
+    await store.open({ workspace: 'A' }, { ensureSession: true })
+    const list = deferred<unknown>()
+    apiGet.mockReturnValueOnce(list.promise)
+    reply.resolve({ session: sessionPayload('server-created') })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(apiGet.mock.calls.at(-1)?.[0]).toBe('/api/terminal/sessions?workspace=A')
+    await store.open({ workspace: 'B' })
+    list.resolve({ sessions: [sessionPayload('server-created')] })
+    await creating
+    expect(store.target).toEqual({ workspace: 'B' })
+    expect(store.activeSession).toBeNull()
+    expect(store.sessions).toEqual([])
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reconcile A while B is visible when A’s create settles', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'A' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    await store.open({ workspace: 'B' })
+    const before = apiGet.mock.calls.length
+    reply.resolve({ session: sessionPayload('server-created') })
+    await creating
+    expect(apiGet).toHaveBeenCalledTimes(before)
+    expect(store.target).toEqual({ workspace: 'B' })
+    expect(store.activeSession).toBeNull()
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['hide', 'scope', 'reopen'] as const)(
+    'discards a reconciliation list after a subsequent %s', async (change) => {
+      const store = useTerminalStore()
+      await store.open({ workspace: 'personal' })
+      const reply = deferred<unknown>()
+      apiPost.mockReturnValueOnce(reply.promise)
+      const creating = store.createSession()
+      store.hide()
+      await store.openWorkspaceForSettings('personal')
+      const list = deferred<unknown>()
+      const previousCalls = apiGet.mock.calls.length
+      apiGet.mockReturnValueOnce(list.promise)
+      reply.resolve({ session: sessionPayload('server-created') })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(apiGet.mock.calls.length).toBeGreaterThan(previousCalls)
+      if (change === 'hide') store.hide()
+      else {
+        apiGet.mockReset()
+        apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: [] }))
+        await store.open(change === 'scope' ? { projectId: 'other' } : { workspace: 'personal' })
+      }
+      list.resolve({ sessions: [sessionPayload('server-created')] })
+      await creating
+      expect(store.activeSession?.session_id).not.toBe('server-created')
+      expect(store.sessions.map(session => session.session_id)).not.toContain('server-created')
+      expect(apiPost).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('does not reconcile after a reopened pane fails its status check', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    store.hide()
+    apiGet.mockResolvedValueOnce({})
+    await store.openWorkspaceForSettings('personal')
+    expect(store.phase).toBe('error')
+    const calls = apiGet.mock.calls.length
+    reply.resolve({ session: sessionPayload('server-created') })
+    await creating
+    expect(apiGet).toHaveBeenCalledTimes(calls)
+    expect(store.error).toContain('did not report a terminal status')
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'does not resume a hidden open when its pending grant answers with %s', async (outcome) => {
+      const store = useTerminalStore()
+      const grant = deferred<unknown>()
+      apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+      apiPost.mockReturnValueOnce(grant.promise)
+      const opening = store.open({ workspace: 'personal' }, { ensureSession: true })
+      await Promise.resolve()
+      expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+      store.hide()
+      const phase = store.phase
+      if (outcome === 'success') grant.resolve({ ok: true, expires_in: 900 })
+      else grant.reject(new Error('refused'))
+      await opening
+      expect(apiGet).toHaveBeenCalledTimes(1)
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(store.unlocked).toBe(false)
+      expect(store.phase).toBe(phase)
+      expect(store.error).toBe('')
+    },
+  )
+
+  it('does not acquire a grant when an expired status arrives after hide', async () => {
+    const store = useTerminalStore()
+    const status = deferred<unknown>()
+    apiGet.mockReturnValueOnce(status.promise)
+    const opening = store.open({ workspace: 'personal' }, { ensureSession: true })
+    store.hide()
+    status.resolve(statusPayload({ unlock_expires_in: 0 }))
+    await opening
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    expect(store.visible).toBe(false)
+  })
+
+  it.each([{ chatId: 'chat' }, { projectId: 'project' }])(
+    'keeps capacity refusals generic for existing target %o', async (target) => {
+      const store = useTerminalStore()
+      await store.open(target)
+      apiPost.mockRejectedValueOnce(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+      await store.createSession()
+      expect(store.capacityError).toBe('')
+      expect(store.error).toBe('The engine refused to start a terminal session.')
+    },
+  )
+
+  it('retains independent local and global capacity facts across refresh and failed actions', async () => {
+    const store = useTerminalStore()
+    let rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`ended-${i}`, { exited: true }))
+    apiGet.mockImplementation((path: string) => Promise.resolve(
+      path.endsWith('/status') ? statusPayload() : { sessions: rows },
+    ))
+    await store.openWorkspaceForSettings('personal')
+    expect(store.capacityError).toBe('All four terminal slots are occupied. End a session in this workspace, then try again.')
+    expect(apiPost).not.toHaveBeenCalled()
+    apiPost.mockRejectedValue(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+    await store.createSession()
+    expect(store.capacityError).toContain('in this workspace')
+    apiDel.mockRejectedValue(new Error('failure'))
+    await store.endSession('ended-0')
+    expect(store.error).toContain('could not be ended')
+    expect(store.capacityError).toContain('in this workspace')
+    rows = rows.slice(1)
+    await store.refreshSessions()
+    expect(store.capacityError).toBe('All four terminal slots are occupied. End a terminal session in its chat, project, or workspace, then try again.')
+    await store.refreshSessions()
+    expect(store.capacityError).toContain('chat, project, or workspace')
+    apiPost.mockResolvedValue({ session: sessionPayload('new') })
+    await store.createSession()
+    expect(store.capacityError).toBe('')
+  })
+
+  it('continues the original ensure-session request after the grant retry', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(
+      path.endsWith('/status') ? statusPayload({ unlock_expires_in: 0 }) : { sessions: [] },
+    ))
+    apiPost.mockRejectedValueOnce(new Error('grant')).mockResolvedValueOnce({ ok: true, expires_in: 900 })
+      .mockResolvedValueOnce({ session: sessionPayload('new') })
+    await store.openWorkspaceForSettings('personal')
+    await vi.runAllTimersAsync()
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(1)
+  })
+
+  it('records a current create refusal even after a newer list, but not after selection changes', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValueOnce(pending.promise)
+    const creating = store.createSession()
+    await store.refreshSessions()
+    pending.reject(Object.assign(new Error('refused'), { status: 409, payload: { reason: 'capacity' } }))
+    await creating
+    expect(store.capacityError).toContain('chat, project, or workspace')
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s1') })
+    await store.createSession()
+    expect(store.capacityError).toBe('')
+    apiGet.mockResolvedValue({ sessions: [sessionPayload('s1'), sessionPayload('s2')] })
+    await store.refreshSessions()
+    const stale = deferred<unknown>()
+    apiPost.mockReturnValueOnce(stale.promise)
+    const second = store.createSession()
+    store.selectSession('s2')
+    store.selectSession('s1')
+    stale.reject(Object.assign(new Error('refused'), { status: 409, payload: { reason: 'capacity' } }))
+    await second
+    expect(store.capacityError).toBe('')
+  })
+
+  it('does not continue an ensure request after an explicit create during its list', async () => {
+    const store = useTerminalStore()
+    const list = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => path.endsWith('/status')
+      ? Promise.resolve(statusPayload()) : list.promise)
+    const opening = store.openWorkspaceForSettings('personal')
+    await Promise.resolve()
+    await Promise.resolve()
+    apiPost.mockResolvedValue({ session: sessionPayload('manual') })
+    await store.createSession()
+    list.resolve({ sessions: [] })
+    await opening
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(1)
+  })
+
+  it('keeps global capacity when an older pending list arrives after the refusal', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const list = deferred<unknown>()
+    apiGet.mockReturnValueOnce(list.promise)
+    const refreshing = store.refreshSessions()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+    await store.createSession()
+    list.resolve({ sessions: Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true })) })
+    await refreshing
+    expect(store.capacityError).toContain('in this workspace')
+    apiGet.mockResolvedValueOnce({ sessions: [] })
+    await store.refreshSessions()
+    expect(store.capacityError).toContain('chat, project, or workspace')
+  })
+
+  it('keeps global capacity through pending and unconfirmed creates, clearing only on scope change', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+    await store.createSession()
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValueOnce(pending.promise)
+    const creating = store.createSession()
+    expect(store.capacityError).toContain('chat, project, or workspace')
+    pending.resolve({ ok: true })
+    await creating
+    expect(store.error).toContain('did not report the new session')
+    expect(store.capacityError).toContain('chat, project, or workspace')
+    apiPost.mockRejectedValueOnce(new Error('network'))
+    await store.createSession()
+    expect(store.error).toContain('could not be confirmed')
+    expect(store.capacityError).toContain('chat, project, or workspace')
+    await store.open({ projectId: 'other' })
+    expect(store.capacityError).toBe('')
+  })
+
+  it('shows retained global capacity when local capacity is suppressed by selecting an exited session', async () => {
+    const store = useTerminalStore()
+    const rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true }))
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: rows }))
+    await store.openWorkspaceForSettings('personal')
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+    await store.createSession()
+    expect(store.capacityError).toContain('in this workspace')
+    store.selectSession('s0')
+    expect(store.capacityError).toContain('chat, project, or workspace')
+  })
+
+  it.each(['failed', 'malformed', 'lost ownership'] as const)(
+    'keeps global capacity through a %s End', async (outcome) => {
+      const store = useTerminalStore()
+      await store.open({ workspace: 'personal' })
+      apiPost.mockRejectedValueOnce(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+      await store.createSession()
+      apiGet.mockResolvedValueOnce({ sessions: [
+        sessionPayload('s1', { exited: true }), sessionPayload('s2', { exited: true }),
+      ] })
+      await store.refreshSessions()
+      store.selectSession('s1')
+      const reply = deferred<unknown>()
+      apiDel.mockReturnValueOnce(reply.promise)
+      const ending = store.endSession('s1')
+      if (outcome === 'lost ownership') store.selectSession('s2')
+      if (outcome === 'malformed') reply.resolve({})
+      else reply.reject(new Error('failed'))
+      await ending
+      expect(store.capacityError).toContain('chat, project, or workspace')
+      if (outcome !== 'lost ownership') expect(store.error).not.toBe('')
+    },
+  )
+
+  it.each([
+    [409, 'other', 'The engine refused to start a terminal session.'],
+    [500, 'capacity', 'The new terminal session could not be confirmed.'],
+  ] as const)('keeps a %s %s create failure distinct from capacity', async (status, reason, message) => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('failure'), { status, payload: { reason } }))
+    await store.createSession()
+    expect(store.error).toContain(message)
+    expect(store.capacityError).toBe('')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(1)
+  })
+
+  it('keeps the local capacity warning when an unselected End is malformed', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload()
+      : { sessions: Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true })) }))
+    await store.openWorkspaceForSettings('personal')
+    apiDel.mockResolvedValueOnce({})
+    expect(await store.endSession('s0')).toBe(false)
+    expect(store.error).toContain('did not confirm the end')
+    expect(store.capacityError).toContain('in this workspace')
+  })
+
+  it('suppresses local capacity on selection and recomputes after ending it', async () => {
+    const store = useTerminalStore()
+    const rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true }))
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: rows }))
+    await store.openWorkspaceForSettings('personal')
+    store.selectSession('s0')
+    expect(store.capacityError).toBe('')
+    apiDel.mockResolvedValueOnce({ ok: true })
+    await store.endSession('s0')
+    expect(store.capacityError).toBe('')
+    expect(store.sessions).toHaveLength(3)
+  })
+
+  it('retains local capacity for unchanged lists and recomputes when selection is cleared', async () => {
+    const store = useTerminalStore()
+    const rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true }))
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: rows }))
+    await store.openWorkspaceForSettings('personal')
+    await store.refreshSessions()
+    expect(store.capacityError).toContain('in this workspace')
+    store.selectSession('s0')
+    expect(store.capacityError).toBe('')
+    store.activeSession = null
+    expect(store.capacityError).toContain('in this workspace')
+    await store.open({ chatId: 'chat' })
+    expect(store.capacityError).toBe('')
+  })
+
+  it('encodes the registered name and sends only the workspace selector', async () => {
+    const store = useTerminalStore()
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.open({ workspace: 'Work & life' })
+    expect(apiGet).toHaveBeenCalledWith('/api/terminal/sessions?workspace=Work+%26+life')
+    await store.createSession()
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { workspace: 'Work & life' })
+    await store.createSession('workspace')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/terminal/sessions', {
+      workspace: 'Work & life', location: 'workspace',
+    })
+  })
+
+  it('rejects invalid workspace names without side effects', async () => {
+    const store = useTerminalStore()
+    for (const workspace of ['', '  ', ' work', 'work ']) {
+      expect(await store.openWorkspaceForSettings(workspace)).toBe('invalid')
+      await store.open({ workspace })
+      expect(store.visible).toBe(false)
+      expect(store.target).toBeNull()
+    }
+    expect(apiGet).not.toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('rejects invalid selectors without detaching an existing connected shell', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+      ? statusPayload() : { sessions: [sessionPayload('s1')] }))
+    await store.open({ chatId: 'chat' })
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const socket = fakeSockets.at(-1)!
+    const calls = apiGet.mock.calls.length
+    for (const workspace of ['', '  ', ' work', 'work ']) {
+      expect(await store.openWorkspaceForSettings(workspace)).toBe('invalid')
+      await store.open({ workspace })
+    }
+    expect(store.target).toEqual({ chatId: 'chat' })
+    expect(store.visible).toBe(true)
+    expect(socket.closed).toBe(false)
+    expect(apiGet).toHaveBeenCalledTimes(calls)
+    expect(socket.ofType('input')).toEqual([])
+  })
+
+  it('does not replace a visible terminal, including a pending open', async () => {
+    const store = useTerminalStore()
+    const status = deferred<unknown>()
+    apiGet.mockReturnValueOnce(status.promise)
+    const opening = store.openWorkspaceForSettings('personal')
+    expect(await store.openWorkspaceForSettings('work')).toBe('busy')
+    expect(await store.openWorkspaceForSettings('personal')).toBe('opened')
+    status.resolve(statusPayload({ available: false }))
+    expect(await opening).toBe('opened')
+    expect(store.target).toEqual({ workspace: 'personal' })
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not replace visible chat or project sessions', async () => {
+    const store = useTerminalStore()
+    for (const target of [{ chatId: 'chat' }, { projectId: 'project' }]) {
+      await store.open(target)
+      const calls = apiGet.mock.calls.length
+      expect(await store.openWorkspaceForSettings('personal')).toBe('busy')
+      expect(store.target).toEqual(target)
+      expect(apiGet).toHaveBeenCalledTimes(calls)
+      store.hide()
+    }
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('selects the first live workspace session and retains the selected one on refresh', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload()
+      : { sessions: [sessionPayload('old', { exited: true }), sessionPayload('first'), sessionPayload('second')] }))
+    await store.openWorkspaceForSettings('personal')
+    expect(store.activeSession?.session_id).toBe('first')
+    store.selectSession('second')
+    await store.refreshSessions()
+    expect(store.activeSession?.session_id).toBe('second')
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('attaches an existing workspace shell without input or automatic takeover', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload()
+      : { sessions: [sessionPayload('attached', { attached: true })] }))
+    await store.openWorkspaceForSettings('personal')
+    store.attachRenderer(makeRenderer('attached').renderer)
+    const socket = fakeSockets.at(-1)!
+    expect(socket.ofType('attach')).toEqual([{ type: 'attach', offset: 0, takeover: false }])
+    expect(socket.ofType('input')).toEqual([])
+    socket.close(4409)
+    expect(store.phase).toBe('takeover')
+    expect(fakeSockets).toHaveLength(1)
+  })
+
+  it('does not automatically create after an unsuccessful list on grant retry', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => path.endsWith('/status')
+      ? Promise.resolve(statusPayload({ unlock_expires_in: 0 })) : Promise.reject(new Error('failed')))
+    apiPost.mockRejectedValueOnce(new Error('grant')).mockResolvedValueOnce({ ok: true, expires_in: 900 })
+    await store.openWorkspaceForSettings('personal')
+    await vi.runAllTimersAsync()
+    expect(store.error).toContain('could not be listed')
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(0)
+  })
+
+  it('does not create after hiding while a grant retry is pending', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+      ? statusPayload({ unlock_expires_in: 0 }) : { sessions: [] }))
+    const grant = deferred<unknown>()
+    apiPost.mockRejectedValueOnce(new Error('grant')).mockReturnValueOnce(grant.promise)
+    await store.openWorkspaceForSettings('personal')
+    await vi.advanceTimersByTimeAsync(10_000)
+    store.hide()
+    grant.resolve({ ok: true, expires_in: 900 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(0)
+  })
+
+  it('reports local capacity instead of creating after a grant retry', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+      ? statusPayload({ unlock_expires_in: 0 })
+      : { sessions: Array.from({ length: 4 }, (_, i) => sessionPayload(`s${i}`, { exited: true })) }))
+    apiPost.mockRejectedValueOnce(new Error('grant')).mockResolvedValueOnce({ ok: true, expires_in: 900 })
+    await store.openWorkspaceForSettings('personal')
+    await vi.runAllTimersAsync()
+    expect(store.capacityError).toContain('in this workspace')
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(0)
+  })
+
+  it('does not create on an ordinary grant retry or retry an uncertain creation', async () => {
+    const store = useTerminalStore()
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+      ? statusPayload({ unlock_expires_in: 0 }) : { sessions: [] }))
+    apiPost.mockRejectedValueOnce(new Error('grant')).mockResolvedValueOnce({ ok: true, expires_in: 900 })
+    await store.open({ workspace: 'personal' })
+    await vi.runAllTimersAsync()
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(0)
+    store.hide()
+    apiPost.mockResolvedValueOnce({ ok: true, expires_in: 900 }).mockRejectedValueOnce(new Error('uncertain'))
+    await store.open({ workspace: 'personal' }, { ensureSession: true })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(1)
+    expect(store.error).toContain('could not be confirmed')
+  })
+
+  it.each(['scope', 'reopen'] as const)('ignores an old capacity refusal after %s', async (change) => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const reply = deferred<unknown>()
+    apiPost.mockReturnValueOnce(reply.promise)
+    const creating = store.createSession()
+    await store.open(change === 'scope' ? { projectId: 'next' } : { workspace: 'personal' })
+    reply.reject(Object.assign(new Error('capacity'), { status: 409, payload: { reason: 'capacity' } }))
+    await creating
+    expect(store.capacityError).toBe('')
+    expect(store.error).toBe('')
+  })
+
+  it('does not let an older list overwrite a newer accepted workspace list', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    const older = deferred<unknown>()
+    apiGet.mockReturnValueOnce(older.promise)
+    const first = store.refreshSessions()
+    apiGet.mockResolvedValueOnce({ sessions: [sessionPayload('new', { exited: true })] })
+    await store.refreshSessions()
+    older.resolve({ sessions: Array.from({ length: 4 }, (_, i) => sessionPayload(`old${i}`, { exited: true })) })
+    expect(await first).toBe(false)
+    expect(store.sessions.map(session => session.session_id)).toEqual(['new'])
+    expect(store.capacityError).toBe('')
+  })
+
+  it.each(['hide', 'reopen', 'scope', 'select', 'create'] as const)(
+    'cancels the retry continuation when the user acts during its grant (%s)', async (action) => {
+      const store = useTerminalStore()
+      apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+        ? statusPayload() : { sessions: [sessionPayload('exited', { exited: true })] }))
+      await store.open({ workspace: 'personal' })
+      const grant = deferred<unknown>()
+      apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+      apiPost.mockRejectedValueOnce(new Error('grant')).mockReturnValueOnce(grant.promise)
+      await store.open({ workspace: 'personal' }, { ensureSession: true })
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(apiPost).toHaveBeenCalledTimes(2)
+      if (action === 'hide') store.hide()
+      if (action === 'reopen') await store.open({ workspace: 'personal' })
+      if (action === 'scope') await store.open({ projectId: 'other' })
+      if (action === 'select') store.selectSession('exited')
+      if (action === 'create') {
+        apiPost.mockResolvedValueOnce({ session: sessionPayload('manual') })
+        await store.createSession()
+      }
+      grant.resolve({ ok: true, expires_in: 900 })
+      await vi.advanceTimersByTimeAsync(0)
+      const creates = apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')
+      expect(creates).toHaveLength(action === 'create' ? 1 : 0)
+    },
+  )
+
+  it.each(['hide', 'reopen', 'scope', 'select', 'create'] as const)(
+    'cancels the retry continuation when the user acts during its list (%s)', async (action) => {
+      const store = useTerminalStore()
+      apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+        ? statusPayload() : { sessions: [sessionPayload('exited', { exited: true })] }))
+      await store.open({ workspace: 'personal' })
+      const list = deferred<unknown>()
+      apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+      apiPost.mockRejectedValueOnce(new Error('grant')).mockResolvedValueOnce({ ok: true, expires_in: 900 })
+      await store.open({ workspace: 'personal' }, { ensureSession: true })
+      apiGet.mockReturnValueOnce(list.promise)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(apiGet.mock.calls.at(-1)?.[0]).toContain('/api/terminal/sessions?workspace=personal')
+      if (action === 'hide') store.hide()
+      if (action === 'reopen') await store.open({ workspace: 'personal' })
+      if (action === 'scope') await store.open({ projectId: 'other' })
+      if (action === 'select') store.selectSession('exited')
+      if (action === 'create') {
+        apiPost.mockResolvedValueOnce({ session: sessionPayload('manual') })
+        await store.createSession()
+      }
+      list.resolve({ sessions: [] })
+      await vi.advanceTimersByTimeAsync(0)
+      const creates = apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')
+      expect(creates).toHaveLength(action === 'create' ? 1 : 0)
+    },
+  )
+
+  it('never creates when the engine refuses availability or the grant', async () => {
+    const store = useTerminalStore()
+    apiGet.mockResolvedValueOnce(statusPayload({ available: false }))
+    await store.openWorkspaceForSettings('personal')
+    expect(store.error).toContain('not available')
+    expect(apiPost).not.toHaveBeenCalled()
+    store.hide()
+    apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+    apiPost.mockRejectedValue(new Error('grant'))
+    await store.openWorkspaceForSettings('personal')
+    expect(store.error).toContain('grant could not be obtained')
+    expect(apiPost.mock.calls.filter(([path]) => path === '/api/terminal/sessions')).toHaveLength(0)
+  })
+})
+
 describe('primary review regressions', () => {
   it('refuses a rebound renderer without letting an old reset corrupt a successor', async () => {
     const store = useTerminalStore()
@@ -801,7 +1603,7 @@ describe('terminal store ownership races', () => {
     expect(store.activeSession?.session_id).toBe('s2')
   })
 
-  it('does not let a hide during a pending create change the successor', async () => {
+  it('does not let a hide during a pending create change hidden state', async () => {
     const store = await started()
     const pending = deferred<unknown>()
     apiPost.mockReturnValue(pending.promise)
@@ -810,11 +1612,11 @@ describe('terminal store ownership races', () => {
     store.hide()
     pending.resolve({ session: sessionPayload('s2') })
 
-    expect(await create).toBe(true)
-    // The pane is hidden, so nothing is connected, but the session that was
-    // created is still listed for when the pane comes back.
+    expect(await create).toBe(false)
+    // A later list discovers the server-side session; this stale reply cannot select it.
     expect(store.visible).toBe(false)
-    expect(store.sessions.map((session) => session.session_id)).toContain('s2')
+    expect(store.sessions.map((session) => session.session_id)).not.toContain('s2')
+    expect(store.activeSession?.session_id).toBe('s1')
     expect(fakeSockets).toHaveLength(0)
   })
 

@@ -32,6 +32,95 @@ const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 
+describe('deferred terminal renderer module', () => {
+  afterEach(() => {
+    vi.doMock('../../lib/terminalRenderer', () => ({ TerminalRenderer: screen.FakeScreen }))
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+  })
+
+  it.each([
+    ['workspace', 'owned'], ['workspace', 'moved'],
+    ['chat', 'owned'], ['chat', 'moved'],
+    ['project', 'owned'], ['project', 'moved'],
+    ['workspace', 'hidden'], ['chat', 'navigation'], ['project', 'superseded'],
+  ] as const)('guards deferred renderer focus for %s (%s)', async (scope, scenario) => {
+    vi.resetModules()
+    let release!: () => void
+    let started!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const loading = new Promise<void>(resolve => { started = resolve })
+    let constructed = 0
+    class DeferredScreen {
+      readonly sessionId: string
+      private element: HTMLElement
+      constructor(options: { sessionId: string; element: HTMLElement }) {
+        constructed += 1
+        this.sessionId = options.sessionId
+        this.element = options.element
+      }
+      setInputEnabled(): void {}
+      write(): Promise<void> { return Promise.resolve() }
+      reset(): void {}
+      dispose(): void {}
+      focus(): void { this.element.tabIndex = -1; this.element.focus() }
+    }
+    vi.doMock('../../lib/terminalRenderer', async () => {
+      started()
+      await gate
+      return { TerminalRenderer: DeferredScreen }
+    })
+    const [{ createPinia: piniaFactory, setActivePinia: activate }, { mount: mountFresh, flushPromises: flushFresh },
+      { default: Pane }, { useTerminalStore: terminalStore }] = await Promise.all([
+      import('pinia'), import('@vue/test-utils'), import('../TerminalPane.vue'), import('../../stores/terminal'),
+    ])
+    activate(piniaFactory())
+    vi.stubGlobal('WebSocket', FakeSocket)
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status')
+      ? statusPayload() : { sessions: [sessionInfo('deferred')] }))
+    const opener = document.createElement('button')
+    const other = document.createElement('button')
+    document.body.append(opener, other)
+    const wrapper = mountFresh(Pane, { attachTo: document.body })
+    const store = terminalStore()
+    let resolveStatus: ((value: unknown) => void) | undefined
+    let newerOpen: Promise<void> | undefined
+    opener.focus()
+    const target = scope === 'workspace' ? { workspace: 'personal' }
+      : scope === 'chat' ? { chatId: 'c1' } : { projectId: 'p1' }
+    await store.open(target, { fromChatSwitch: scenario === 'navigation' })
+    await loading
+    await flushFresh()
+    expect(document.activeElement).toBe(scenario === 'navigation' ? opener : wrapper.get('.tp-close').element)
+    if (scenario === 'moved') other.focus()
+    if (scenario === 'hidden') {
+      store.hide()
+      await flushFresh()
+      expect(document.activeElement).toBe(opener)
+    }
+    if (scenario === 'superseded') {
+      other.focus()
+      apiGet.mockReturnValueOnce(new Promise(resolve => { resolveStatus = resolve }))
+      newerOpen = store.open({ workspace: 'other' })
+      opener.focus()
+    }
+    release()
+    if (newerOpen) {
+      await flushFresh()
+      expect(document.activeElement).toBe(opener)
+      resolveStatus?.(statusPayload())
+      await newerOpen
+    }
+    await vi.waitFor(() => expect(constructed).toBe(1))
+    const expected = scenario === 'owned' ? wrapper.get('.tp-surface').element
+      : scenario === 'moved' ? other : opener
+    expect(document.activeElement).toBe(expected)
+    wrapper.unmount()
+    store.dispose()
+  })
+})
+
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: apiDel },
 }))
@@ -237,6 +326,178 @@ describe('TerminalPane', () => {
     document.body.innerHTML = ''
     setViewportWidth(DEFAULT_VIEWPORT_WIDTH)
     vi.unstubAllGlobals()
+  })
+
+  it('makes unselected workspace sessions reachable and restores the original opener', async () => {
+    serve(Array.from({ length: 4 }, (_, i) => sessionInfo(`s${i}`, { exited: true })))
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+    const store = useTerminalStore()
+    await store.openWorkspaceForSettings('personal')
+    const wrapper = await mountPane()
+    expect(wrapper.text()).toContain('No shell is open for this workspace yet.')
+    expect(wrapper.get('[role="alert"]').text()).toContain('End a session in this workspace')
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map(tab => tab.attributes('tabindex'))).toEqual(['0', '-1', '-1', '-1'])
+    expect(tabs.every(tab => tab.attributes('aria-selected') === 'false')).toBe(true)
+    expect(document.activeElement).toBe(wrapper.get('.tp-close').element)
+    await wrapper.get('.tp-close').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(opener)
+    wrapper.unmount()
+  })
+
+  it('does not steal focus when it mounts after the user leaves the opener', async () => {
+    serve([])
+    const opener = document.createElement('button')
+    const other = document.createElement('button')
+    document.body.append(opener, other)
+    opener.focus()
+    const store = useTerminalStore()
+    await store.open({ workspace: 'personal' })
+    other.focus()
+    const wrapper = await mountPane()
+    expect(document.activeElement).toBe(other)
+    wrapper.unmount()
+  })
+
+  it('moves focus from its own Close fallback to a later screen, but not from another control', async () => {
+    const focus = vi.spyOn(screen.FakeScreen.prototype, 'focus').mockImplementation(function (this: InstanceType<typeof screen.FakeScreen>) {
+      this.element.tabIndex = -1
+      this.element.focus()
+    })
+    for (const moveAway of [false, true]) {
+      setActivePinia(createPinia())
+      serve([])
+      const opener = document.createElement('button')
+      const other = document.createElement('button')
+      document.body.append(opener, other)
+      opener.focus()
+      const store = useTerminalStore()
+      const wrapper = await mountPane()
+      await store.open({ workspace: 'personal' })
+      await flushPromises()
+      expect(document.activeElement).toBe(wrapper.get('.tp-close').element)
+      let resolve!: (value: unknown) => void
+      apiPost.mockReturnValueOnce(new Promise((done) => { resolve = done }))
+      const creating = store.createSession()
+      if (moveAway) other.focus()
+      resolve({ session: sessionInfo('late') })
+      await creating
+      await flushPromises()
+      await vi.waitFor(() => expect(screen.FakeScreen.instances.length).toBeGreaterThan(0))
+      expect(document.activeElement).toBe(moveAway ? other : wrapper.get('.tp-surface').element)
+      wrapper.unmount()
+      store.dispose()
+      opener.remove()
+      other.remove()
+    }
+    focus.mockRestore()
+  })
+
+  it('uses the latest opener when a visible pane is opened again', async () => {
+    serve([])
+    const first = document.createElement('button')
+    const second = document.createElement('button')
+    document.body.append(first, second)
+    first.focus()
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'first' })
+    await flushPromises()
+    second.focus()
+    await store.open({ projectId: 'second' })
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('.tp-close').element)
+    await wrapper.get('.tp-close').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(second)
+    wrapper.unmount()
+  })
+
+  it('does not restore an older opener after a newer open and close in the same tick', async () => {
+    serve([])
+    const first = document.createElement('button')
+    const second = document.createElement('button')
+    document.body.append(first, second)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    first.focus()
+    const firstFocus = vi.spyOn(first, 'focus')
+    const openingFirst = store.open({ workspace: 'first' })
+    store.hide()
+    second.focus()
+    const openingSecond = store.open({ workspace: 'second' })
+    store.hide()
+    await flushPromises()
+    await Promise.all([openingFirst, openingSecond])
+    expect(firstFocus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(second)
+    wrapper.unmount()
+  })
+
+  it('focuses the newly created screen when the user starts it from the plus button', async () => {
+    serve([])
+    const focus = vi.spyOn(screen.FakeScreen.prototype, 'focus').mockImplementation(function (this: InstanceType<typeof screen.FakeScreen>) {
+      this.element.tabIndex = -1
+      this.element.focus()
+    })
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ workspace: 'personal' })
+    await flushPromises()
+    const button = wrapper.get('.tp-new')
+    ;(button.element as HTMLElement).focus()
+    await button.trigger('click')
+    await flushPromises()
+    await vi.waitFor(() => expect(document.activeElement).toBe(wrapper.get('.tp-surface').element))
+    focus.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('does not steal focus after the user moves away while a plus-button creation is pending', async () => {
+    serve([])
+    let resolve!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(done => { resolve = done }))
+    const opener = document.createElement('button')
+    const other = document.createElement('button')
+    document.body.append(opener, other)
+    opener.focus()
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ workspace: 'personal' })
+    await flushPromises()
+    const button = wrapper.get('.tp-new')
+    ;(button.element as HTMLElement).focus()
+    await button.trigger('click')
+    other.focus()
+    resolve({ session: sessionInfo('late') })
+    await vi.waitFor(() => expect(screen.FakeScreen.instances.length).toBeGreaterThan(0))
+    expect(document.activeElement).toBe(other)
+    wrapper.unmount()
+  })
+
+  it('keeps End failures separate from workspace capacity and selects exited tabs only on keyboard action', async () => {
+    serve(Array.from({ length: 4 }, (_, i) => sessionInfo(`s${i}`, { exited: true })))
+    apiDel.mockRejectedValue(new Error('failure'))
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.openWorkspaceForSettings('personal')
+    await flushPromises()
+    const tabs = wrapper.findAll('[role="tab"]')
+    ;(tabs[0].element as HTMLElement).focus()
+    expect(store.activeSession).toBeNull()
+    await wrapper.findAll('.tp-session-end')[0].trigger('click')
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(2)
+    await tabs[0].trigger('keydown', { key: 'ArrowRight' })
+    expect(store.activeSession?.session_id).toBe('s1')
+    expect(store.capacityError).toBe('')
+    expect(sockets).toHaveLength(0)
+    wrapper.unmount()
   })
 
   it('never renders a password field, not even when the terminal is locked', async () => {
