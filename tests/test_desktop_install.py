@@ -1,7 +1,12 @@
 """Removal of a legacy Ciaobot.app bundle left by an older install."""
 from __future__ import annotations
 
+import errno
+import os
 import plistlib
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +19,277 @@ def _native_bundle(root: Path) -> Path:
     executable.mkdir(parents=True)
     (executable / desktop_install.APP_EXECUTABLE_NAME).write_bytes(b"native app")
     return executable.parent.parent
+
+
+def _tree_bytes(root: Path) -> dict[str, tuple[str, bytes | str]]:
+    result: dict[str, tuple[str, bytes | str]] = {}
+    for path in root.rglob("*"):
+        name = str(path.relative_to(root))
+        if path.is_symlink():
+            result[name] = ("link", os.readlink(path))
+        elif path.is_file():
+            result[name] = ("file", path.read_bytes())
+        else:
+            result[name] = ("directory", "")
+    return result
+
+
+@pytest.fixture
+def retired_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    home = tmp_path / "home"
+    bundle = _native_bundle(home / "Applications")
+    sentinels = {
+        home / "Library/LaunchAgents/com.ciao.server.plist": b"server plist",
+        home / "Library/LaunchAgents/Ciaobot.plist": b"desktop plist",
+        home / ".local/bin/ciao": b"shim",
+        home / "workspace/.runtime/state.json": b"workspace",
+        tmp_path / "outside/important": b"outside Applications",
+    }
+    for path, content in sentinels.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(home / "memory"))
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(home / "Library/LaunchAgents"))
+    return home, bundle
+
+
+@pytest.mark.parametrize("case", [
+    "relative", "dotdot", "wrong_root", "root", "wrong_name", "server_host",
+    "parent_link", "bundle_link", "dangling_bundle", "contents_link", "macos_link",
+    "missing_executable", "nonregular_executable", "executable_link", "replaced_executable", "replaced_bundle",
+    "missing_identity", "short_identity", "long_identity", "list_identity", "negative_identity", "wrong_identity_type",
+])
+def test_retired_cleanup_refusals_preserve_every_byte(
+    tmp_path: Path, retired_tree: tuple[Path, Path], case: str,
+) -> None:
+    home, bundle = retired_tree
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    expected: object = identity
+    candidate = bundle
+    executable = bundle / "Contents/MacOS/ciaobot-desktop"
+    if case == "relative":
+        candidate = Path("Ciaobot.app")
+    elif case == "dotdot":
+        candidate = bundle.parent / ".." / "Applications" / bundle.name
+    elif case == "wrong_root":
+        candidate = _native_bundle(tmp_path / "foreign")
+    elif case == "root":
+        candidate = bundle.parent
+    elif case in ("wrong_name", "server_host"):
+        candidate = bundle.with_name("Other.app" if case == "wrong_name" else "Ciaobot Server.app")
+        candidate.mkdir()
+    elif case == "parent_link":
+        link = bundle.parent / "link"
+        link.symlink_to(bundle.parent, target_is_directory=True)
+        candidate = link / bundle.name
+    elif case in ("bundle_link", "dangling_bundle"):
+        saved = bundle.with_name("saved.app")
+        bundle.rename(saved)
+        bundle.symlink_to(saved if case == "bundle_link" else tmp_path / "missing", target_is_directory=True)
+    elif case in ("contents_link", "macos_link"):
+        original = bundle / ("Contents" if case == "contents_link" else "Contents/MacOS")
+        saved = tmp_path / "saved"
+        original.rename(saved)
+        original.symlink_to(saved, target_is_directory=True)
+    elif case == "missing_executable":
+        executable.unlink()
+    elif case == "nonregular_executable":
+        executable.unlink()
+        executable.mkdir()
+    elif case == "executable_link":
+        executable.rename(executable.with_name("saved"))
+        executable.symlink_to(executable.with_name("saved"))
+    elif case == "replaced_executable":
+        executable.rename(executable.with_name("saved"))
+        executable.write_bytes(b"replacement")
+    elif case == "replaced_bundle":
+        bundle.rename(bundle.with_name("saved.app"))
+        _native_bundle(bundle.parent)
+    elif case == "missing_identity":
+        expected = None
+    elif case == "short_identity":
+        expected = identity[:3]
+    elif case == "long_identity":
+        expected = (*identity, 1)
+    elif case == "list_identity":
+        expected = list(identity)
+    elif case == "negative_identity":
+        expected = (-1, *identity[1:])
+    elif case == "wrong_identity_type":
+        expected = (str(identity[0]), *identity[1:])
+    before = _tree_bytes(tmp_path)
+    assert desktop_install.remove_retired_bundle(candidate, expected_identity=expected, home=home) == "refused"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_retired_cleanup_invalid_identity_refused_when_bundle_absent(retired_tree: tuple[Path, Path]) -> None:
+    home, bundle = retired_tree
+    bundle.rename(bundle.with_name("saved.app"))
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=None, home=home) == "refused"
+
+
+def test_retired_cleanup_absent_requires_existing_safe_parent(
+    tmp_path: Path, retired_tree: tuple[Path, Path],
+) -> None:
+    home, bundle = retired_tree
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    bundle.rename(bundle.with_name("saved.app"))
+    before = _tree_bytes(tmp_path)
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "absent"
+    missing_parent = bundle.parent / "missing" / bundle.name
+    assert desktop_install.remove_retired_bundle(missing_parent, expected_identity=identity, home=home) == "refused"
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_retired_cleanup_success_preserves_service_shim_workspace_and_outside(
+    tmp_path: Path, retired_tree: tuple[Path, Path],
+) -> None:
+    home, bundle = retired_tree
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    before = _tree_bytes(tmp_path)
+    bundle_key = str(bundle.relative_to(tmp_path))
+    expected = {name: value for name, value in before.items()
+                if name != bundle_key and not name.startswith(bundle_key + os.sep)}
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "removed"
+    assert _tree_bytes(tmp_path) == expected
+
+
+def test_retired_cleanup_cli_identity_and_closed_status(
+    tmp_path: Path, retired_tree: tuple[Path, Path],
+) -> None:
+    home, bundle = retired_tree
+    command = [sys.executable, "-m", "ciao.desktop_install"]
+    before = _tree_bytes(tmp_path)
+    inspected = subprocess.run(
+        [*command, "inspect-retired-bundle", "--path", str(bundle)],
+        capture_output=True, text=True, check=False,
+    )
+    assert inspected.returncode == 0 and inspected.stderr == ""
+    assert re.fullmatch(r"[0-9]+ [0-9]+ [0-9]+ [0-9]+\n", inspected.stdout)
+    fields = inspected.stdout.split()
+    assert tuple(map(int, fields)) == desktop_install.inspect_retired_bundle(bundle, home=home)
+    base = [*command, "remove-retired-bundle", "--path", str(bundle), "--identity"]
+    negative = subprocess.run([*base, "-1", *fields[1:]], capture_output=True, text=True, check=False)
+    assert negative.returncode != 0 and negative.stdout == "refused\n"
+    for invalid in (fields[:3], [*fields, "1"], ["not-a-number", *fields[1:]]):
+        result = subprocess.run([*base, *invalid], capture_output=True, text=True, check=False)
+        assert result.returncode != 0 and result.stdout == ""
+    assert _tree_bytes(tmp_path) == before
+    removed = subprocess.run([*base, *fields], capture_output=True, text=True, check=False)
+    assert removed.returncode == 0 and removed.stdout == "removed\n"
+    absent = subprocess.run([*base, *fields], capture_output=True, text=True, check=False)
+    assert absent.returncode == 0 and absent.stdout == "absent\n"
+
+
+def test_retired_cleanup_validates_identity_and_only_removes_bundle(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    bundle = _native_bundle(home / "Applications")
+    outside = home / "workspace"
+    outside.write_bytes(b"keep")
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=(0, 0, 0, 0), home=home) == "refused"
+    assert bundle.exists()
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "removed"
+    assert outside.read_bytes() == b"keep"
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "absent"
+
+
+def test_retired_cleanup_rejects_untrusted_bundle(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    bundle = _native_bundle(home / "Applications")
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    foreign = _native_bundle(tmp_path / "foreign")
+    linked = home / "Applications" / "link"
+    linked.symlink_to(foreign.parent, target_is_directory=True)
+    for path in (Path("Ciaobot.app"), bundle.parent / ".." / "Applications" / bundle.name,
+                 foreign, bundle.parent, bundle.parent / "Ciaobot Server.app", linked / bundle.name):
+        assert desktop_install.remove_retired_bundle(path, expected_identity=identity, home=home) == "refused"
+    executable = bundle / "Contents/MacOS/ciaobot-desktop"
+    executable.rename(executable.with_name("old"))
+    executable.write_bytes(b"replacement")
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "refused"
+    assert foreign.exists() and bundle.exists()
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    bundle.rename(bundle.with_name("old.app"))
+    replacement = _native_bundle(home / "Applications")
+    assert desktop_install.remove_retired_bundle(replacement, expected_identity=identity, home=home) == "refused"
+    assert replacement.exists()
+    replacement.rename(replacement.with_name("replacement.app"))
+    replacement.symlink_to(foreign, target_is_directory=True)
+    assert desktop_install.remove_retired_bundle(replacement, expected_identity=identity, home=home) == "refused"
+    replacement.unlink()
+    replacement.symlink_to(tmp_path / "missing", target_is_directory=True)
+    assert desktop_install.remove_retired_bundle(replacement, expected_identity=identity, home=home) == "refused"
+    assert foreign.exists()
+
+
+def test_retired_cleanup_does_not_follow_descendant_symlinks(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    bundle = _native_bundle(home / "Applications")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "important").write_bytes(b"keep")
+    (bundle / "link").symlink_to(outside, target_is_directory=True)
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "removed"
+    assert (outside / "important").read_bytes() == b"keep"
+
+
+def test_retired_cleanup_removed_absent_permission_denied_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retired_tree: tuple[Path, Path],
+) -> None:
+    home, bundle = retired_tree
+    (bundle / "extra").write_bytes(b"extra")
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    before = _tree_bytes(tmp_path)
+    real_unlink = os.unlink
+    calls = 0
+
+    def deny(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise PermissionError(errno.EPERM, "denied")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(desktop_install.os, "unlink", deny)
+        assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "permission_denied"
+    assert calls == 1 and bundle.exists()
+    assert _tree_bytes(tmp_path) == before
+
+    calls = 0
+    def deny_second(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError(errno.EPERM, "denied")
+        real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(desktop_install.os, "unlink", deny_second)
+        assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "partial"
+    assert calls == 2 and bundle.exists()
+    after = _tree_bytes(tmp_path)
+    assert after.keys() < before.keys()
+    assert all(before[name] == value for name, value in after.items())
+    for name in ("home/Library/LaunchAgents/com.ciao.server.plist", "home/.local/bin/ciao",
+                 "home/workspace/.runtime/state.json", "outside/important"):
+        assert after[str(Path(name))] == before[str(Path(name))]
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or getattr(os, "geteuid", lambda: 0)() == 0,
+                    reason="real chmod denial requires a non-root POSIX account")
+def test_retired_cleanup_real_unprivileged_permission_denial(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    bundle = _native_bundle(home / "Applications")
+    identity = desktop_install.inspect_retired_bundle(bundle, home=home)
+    directory = bundle / "Contents/MacOS"
+    directory.chmod(0o555)
+    try:
+        assert desktop_install.remove_retired_bundle(bundle, expected_identity=identity, home=home) == "permission_denied"
+        assert (directory / "ciaobot-desktop").is_file()
+    finally:
+        directory.chmod(0o755)
 
 
 def test_uninstall_removes_only_the_native_app(tmp_path: Path) -> None:

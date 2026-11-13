@@ -10,10 +10,14 @@ cleanly. Nothing here builds, installs or updates the bundle.
 from __future__ import annotations
 
 import os
+import argparse
+import errno
 import plistlib
 import re
 import shutil
 import subprocess
+import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +35,105 @@ APP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 class InstallError(Exception):
     """The requested app-bundle cleanup could not proceed safely."""
+
+
+def _retired_path(candidate: Path, home: Path | None) -> None:
+    if not candidate.is_absolute() or ".." in candidate.parts or candidate.name != APP_BUNDLE_NAME:
+        raise InstallError("unsafe bundle path")
+    roots = (Path("/Applications"), (home or Path.home()) / "Applications")
+    if not any(candidate != root and candidate.is_relative_to(root) for root in roots):
+        raise InstallError("bundle is outside Applications")
+    current = Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        current /= part
+        if stat.S_ISLNK(current.lstat().st_mode):
+            raise InstallError("symlink in bundle path")
+
+
+def inspect_retired_bundle(candidate: Path, *, home: Path | None = None) -> tuple[int, int, int, int]:
+    _retired_path(candidate, home)
+    bundle = candidate.lstat()
+    if not stat.S_ISDIR(bundle.st_mode):
+        raise InstallError("bundle is not a directory")
+    current = candidate
+    for part in ("Contents", "MacOS", APP_EXECUTABLE_NAME):
+        current /= part
+        entry = current.lstat()
+        if stat.S_ISLNK(entry.st_mode):
+            raise InstallError("symlink in executable path")
+    if not stat.S_ISREG(entry.st_mode):
+        raise InstallError("retired executable is not a regular file")
+    return bundle.st_dev, bundle.st_ino, entry.st_dev, entry.st_ino
+
+
+def remove_retired_bundle(candidate: Path, *, expected_identity: tuple[int, int, int, int], home: Path | None = None) -> str:
+    if (not isinstance(expected_identity, tuple) or len(expected_identity) != 4
+            or any(type(value) is not int or value < 0 for value in expected_identity)):
+        return "refused"
+    removed = 0
+
+    def remove_tree(path: Path) -> None:
+        nonlocal removed
+        with os.scandir(path) as entries:
+            for entry in entries:
+                child = path / entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    remove_tree(child)
+                else:
+                    os.unlink(child)
+                    removed += 1
+        os.rmdir(path)
+        removed += 1
+
+    try:
+        identity = inspect_retired_bundle(candidate, home=home)
+        if identity != expected_identity:
+            return "refused"
+        remove_tree(candidate)
+        return "removed"
+    except FileNotFoundError:
+        if removed:
+            return "partial"
+        try:
+            _retired_path(candidate.parent / candidate.name, home)
+        except FileNotFoundError:
+            # Only the bundle itself may be absent; missing parents are unsafe.
+            if candidate.parent.is_dir() and not candidate.exists() and not candidate.is_symlink():
+                return "absent"
+        except (InstallError, OSError):
+            pass
+        return "refused"
+    except InstallError:
+        return "refused"
+    except OSError as exc:
+        if removed:
+            return "partial"
+        return "permission_denied" if exc.errno in (errno.EACCES, errno.EPERM) else "failed"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    inspect = commands.add_parser("inspect-retired-bundle")
+    inspect.add_argument("--path", required=True, type=Path)
+    remove = commands.add_parser("remove-retired-bundle")
+    remove.add_argument("--path", required=True, type=Path)
+    remove.add_argument("--identity", required=True, nargs=4, type=int)
+    args = parser.parse_args()
+    if args.command == "inspect-retired-bundle":
+        try:
+            print(*inspect_retired_bundle(args.path))
+            return 0
+        except (InstallError, OSError) as exc:
+            print(f"Cannot inspect {args.path}: {exc}", file=sys.stderr)
+            return 1
+    identity = tuple(args.identity)
+    status = remove_retired_bundle(args.path, expected_identity=(identity[0], identity[1], identity[2], identity[3]))
+    print(status)
+    if status not in ("removed", "absent"):
+        print(f"Cannot remove {args.path}: {status}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _plist_executable(path: Path) -> Path | None:
@@ -230,3 +333,7 @@ def uninstall_desktop_app(
     if removed_shim:
         result["removed_shim"] = removed_shim
     return result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

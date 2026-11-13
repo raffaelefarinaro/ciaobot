@@ -1267,6 +1267,53 @@ done
 [ -x "$STAT" ] || fail "required command not found: $STAT"
 [ -x "$SHASUM" ] || fail "required command not found: $SHASUM"
 
+inspect_retired_bundle() {
+    retired_identity=
+    [ -n "$migrate_app_bundle" ] || return 0
+    if ! "$uv" run --quiet --no-project --python "$PYTHON_VERSION" \
+        --with "$wheel" python -I -m ciao.desktop_install inspect-retired-bundle \
+        --path "$migrate_app_bundle" > "$tmp/retired-identity" 2>/dev/null; then
+        return
+    fi
+    if [ "$(LC_ALL=C tr -d '0123456789 \n' < "$tmp/retired-identity" | wc -c | tr -d ' ')" = 0 ] &&
+        awk 'NR != 1 || $0 !~ /^[0-9]+ [0-9]+ [0-9]+ [0-9]+$/ { bad = 1 }
+        END { if (NR != 1 || bad) exit 1 }' "$tmp/retired-identity"; then
+        retired_identity=$(cat "$tmp/retired-identity")
+    fi
+}
+
+check_migration_offer() {
+    [ "${migration_offer_approved:-0}" -ne 0 ] || return 0
+    if [ -z "${migration_offer_identity:-}" ]; then
+        retired_identity=
+    elif [ "${migration_offer_bundle:-}" != "$migrate_app_bundle" ] ||
+         [ "$migration_offer_identity" != "$retired_identity" ]; then
+        fail "the retired app changed after the migration offer; the engine and its service were not changed"
+    fi
+}
+
+cleanup_retired_bundle() {
+    if [ -z "$migrate_app_bundle" ]; then
+        echo "The retired Ciaobot.app path was not recorded; cleanup cannot be attempted."
+        return
+    fi
+    if [ -z "$retired_identity" ]; then
+        echo "Cleanup unavailable for $migrate_app_bundle: its identity could not be validated."
+        return
+    fi
+    set -- $retired_identity
+    cleanup_status=$("$uv" run --quiet --no-project --python "$PYTHON_VERSION" \
+        --with "$wheel" python -I -m ciao.desktop_install remove-retired-bundle \
+        --path "$migrate_app_bundle" --identity "$1" "$2" "$3" "$4" 2>/dev/null) || :
+    case "$cleanup_status" in
+        removed) echo "Removed the retired Ciaobot.app. ($migrate_app_bundle)" ;;
+        absent) echo "The retired Ciaobot.app is already absent: $migrate_app_bundle" ;;
+        permission_denied) echo "Permission denied removing $migrate_app_bundle; resolve macOS permissions and retry --migrate." ;;
+        partial) echo "Cleanup partially removed $migrate_app_bundle; remaining files require attention." ;;
+        *) echo "Cleanup of $migrate_app_bundle was not completed ($cleanup_status)." ;;
+    esac
+}
+
 if [ "$native_install" -eq 1 ]; then
     # The public descriptor is open at this point, so these run isolated.
     native_os=$(native_isolated uname -s) || fail "could not determine the operating system"
@@ -2012,6 +2059,12 @@ before = data.get("before")
 if not isinstance(before, dict):
     print("reason=before")
     raise SystemExit(0)
+for value in [phase, kind, *(str(data.get(key) or "") for key in
+              ("version", "started_at", "workspace", "host_url", "app_bundle")),
+              *(str(value) for value in before.values())]:
+    if any(char in value for char in ("\n", "\r", "\0")):
+        print("reason=line-break")
+        raise SystemExit(0)
 
 
 def image(name):
@@ -2147,6 +2200,9 @@ refuse_unusable_receipt() {
             ;;
         schema)
             fail "the migration receipt at $migration_dir/receipt.json was written by a different version of this installer, so its before-images cannot be trusted. Move it aside (mv $migration_dir/receipt.json $migration_dir/receipt.json.bak) and re-run with --migrate"
+            ;;
+        line-break)
+            fail "the migration receipt at $migration_dir/receipt.json contains an unsafe control character in a field and cannot be trusted; preserve the receipt and before-images for recovery"
             ;;
         phase)
             fail "the migration receipt at $migration_dir/receipt.json does not name a phase this installer wrote. Move it aside (mv $migration_dir/receipt.json $migration_dir/receipt.json.bak) and re-run with --migrate"
@@ -2723,10 +2779,11 @@ classify_install() {
         --python "$PYTHON_VERSION" python -c '
 import json, sys
 state = json.load(sys.stdin)
-print(state.get("kind", ""))
-print(state.get("workspace", ""))
-print(state.get("host_url", ""))
-print(state.get("app_bundle", ""))
+fields = [str(state.get(key, "")) for key in ("kind", "workspace", "host_url", "app_bundle")]
+if any(char in value for value in fields for char in ("\n", "\r", "\0")):
+    raise SystemExit("classification contains an unsafe control character")
+for value in fields:
+    print(value)
 ' > "$tmp/classification.txt" || fail "could not classify this install"
     # Read line by line rather than with `set --`: a workspace path with a space
     # in it is one value, not two words.
@@ -2740,7 +2797,7 @@ print(state.get("app_bundle", ""))
             4) migrate_app_bundle=$field ;;
         esac
     done < "$tmp/classification.txt"
-    if [ "$resume_unfinished_host" -ne 0 ]; then
+    if [ "$resume_unfinished_host" -ne 0 ] || [ "$resume_retiring" -ne 0 ]; then
         # A hand-over the receipt says never finished, on a Mac whose plist now
         # looks like an ordinary install. The kind and the workspace come from
         # the transaction, not from what this Mac looks like now, and the
@@ -2754,7 +2811,11 @@ print(state.get("app_bundle", ""))
         # installer-managed engine and named no bundle. A receipt written before
         # the field existed leaves it empty, which the completed hand-over
         # reports rather than acting on.
-        migrate_app_bundle=${migrate_app_bundle:-$receipt_app_bundle}
+        if [ -n "$migrate_app_bundle" ] && [ -n "$receipt_app_bundle" ] &&
+            [ "$migrate_app_bundle" != "$receipt_app_bundle" ]; then
+            fail "the classified app bundle conflicts with the migration receipt; the engine and its service were not changed"
+        fi
+        migrate_app_bundle=$receipt_app_bundle
         migrate_path=host
     else
         case "$migrate_kind" in
@@ -2786,24 +2847,7 @@ print(state.get("app_bundle", ""))
                 fail "could not classify this install: unknown kind: $migrate_kind"
                 ;;
         esac
-        if [ "$resume_retiring" -ne 0 ]; then
-            # The last run stopped while it was retiring the app's own agent, which
-            # means it had already installed the new engine and repointed the engine
-            # plist at it. The classifier reads that as an installer-managed engine -
-            # correctly, on its own - and the ordinary install would leave the app's
-            # agent behind forever, in a receipt that never settles. So this run
-            # finishes the transaction the receipt describes, with the kind and the
-            # workspace that transaction was started with.
-            migrate_kind=$receipt_kind
-            [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
-            # And with the bundle it was started with, for the reason the
-            # classifier cannot name one here: the plist it would read is the one
-            # `ciao setup` already repointed. This run is the one that finishes
-            # the retirement, so it is also the one that has to retire the bundle
-            # with it.
-            migrate_app_bundle=${migrate_app_bundle:-$receipt_app_bundle}
-            migrate_path=host
-        elif [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
+        if [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
             # A live Ciaobot.app was found before verification, and the state it
             # lives in says there is nothing to take over. Installing anyway would
             # be the refusal this script exists to avoid, so it stops here with
@@ -3247,6 +3291,24 @@ if [ "$migrate" -ne 0 ]; then
     refuse_unusable_receipt
     if migration_matches_install; then
         echo "This Mac was already migrated ($receipt_phase); no migration action is needed."
+        if [ "$receipt_phase" = migrated ] && [ "$no_start" -eq 0 ]; then
+            migrate_app_bundle=$receipt_app_bundle
+            inspect_retired_bundle
+            check_migration_offer
+            if [ -n "$retired_identity" ]; then
+                if [ "${migration_offer_approved:-0}" -ne 0 ]; then
+                    cleanup_retired_bundle
+                else
+                    echo "Remove the retired app at $migrate_app_bundle? [y/N]"
+                    answer=
+                    if { read -r answer < /dev/tty; } 2>/dev/null; then
+                        case "$answer" in y|Y|yes|YES|Yes) cleanup_retired_bundle ;; esac
+                    fi
+                fi
+            else
+                cleanup_retired_bundle
+            fi
+        fi
         exit 0
     fi
     # A settled receipt that does not describe this Mac is re-run from the
@@ -3254,6 +3316,8 @@ if [ "$migrate" -ne 0 ]; then
     # quietly starting a second migration.
     [ -z "$settled_mismatch" ] || warn_settled_mismatch
     classify_install
+    inspect_retired_bundle
+    check_migration_offer
 fi
 
 # --- preflight: everything that can be decided without changing anything ----
@@ -3951,38 +4015,7 @@ if [ "$migrate_path" = host ]; then
             migration_active=1
             abort_install "Ciaobot.app's own agent could not be retired: launchctl refused to boot it out or disable it"
         fi
-        # Only now, with the receipt at `migrated` and the app's own agent gone,
-        # is the bundle inert: nothing runs out of it and no launchd job points
-        # at it, so leaving it only invites a double-click that brings the old
-        # PWA back against an engine this Mac no longer has. The `.app` guard
-        # stays - this is an irreversible delete of a path read out of a plist,
-        # not something the user typed. A removal that fails (a /Applications
-        # install the user cannot write) is reported rather than fatal: the
-        # migration itself has already succeeded and must not be rolled back
-        # over a leftover directory.
-        if [ -z "$migrate_app_bundle" ]; then
-            # A hand-over this run cannot name a bundle for - a receipt written
-            # before the field existed, so the transaction that is being
-            # finished never recorded one. Silence is the one answer that is
-            # wrong here: the app is still on disk and still does what it did
-            # before, and a run that says nothing about it is the dead-but-
-            # misleading state this step exists to end.
-            echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
-        elif [ -d "$migrate_app_bundle" ]; then
-            case "$migrate_app_bundle" in
-                *.app)
-                    if rm -rf "$migrate_app_bundle"; then
-                        echo "Removed the retired Ciaobot.app."
-                    else
-                        echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
-                    fi
-                    ;;
-                *)
-                    # Not a bundle: nothing this step is for, and not a path
-                    # this installer is willing to delete either.
-                    ;;
-            esac
-        fi
+        cleanup_retired_bundle
     else
         # --no-start promised no service, and an engine that was never started
         # cannot retire anything. The receipt says so; re-running without

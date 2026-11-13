@@ -387,6 +387,28 @@ case "${1:-}" in
         # resolved out of this checkout instead - and `-I` drops PYTHONPATH, so
         # it goes with it.
         printf '%s\\n' "$*" >> "$HOME/uv-run-calls.log"
+        case "$*" in
+            "-I -m ciao.engine_migration classify "*)
+                if [ -f "$HOME/nul-classification" ]; then
+                    shift
+                    PYTHONPATH="__REPO_ROOT__" "__PYTHON__" "$@" | "__PYTHON__" -c 'import json, sys; data = json.load(sys.stdin); data["app_bundle"] += "\\0"; json.dump(data, sys.stdout)'
+                    exit $?
+                fi ;;
+        esac
+        case "$*" in
+            "-I -m ciao.desktop_install inspect-retired-bundle "*)
+                if [ -f "$HOME/malformed-inspect" ]; then
+                    shift 3
+                    PYTHONPATH="__REPO_ROOT__" "__PYTHON__" -m ciao.desktop_install "$@" || exit $?
+                    case "$(cat "$HOME/malformed-inspect")" in
+                        nul) printf '\\000garbage\\n' ;;
+                        blank) printf '\\n' ;;
+                        cr) printf '\\r\\n' ;;
+                        *) printf 'extra line\\n' ;;
+                    esac
+                    exit 0
+                fi ;;
+        esac
         if [ "${1:-}" = "-c" ]; then
             case "${2:-}" in
                 *migration-receipt-write*)
@@ -573,6 +595,13 @@ case "${1:-}" in
                     ;;
             esac
         fi
+        case "$*" in
+            "-I -m ciao.desktop_install remove-retired-bundle "*)
+                if [ -f "$HOME/cleanup-failure.py" ]; then
+                    shift 3
+                    PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "$HOME/cleanup-failure.py" "$@"
+                fi ;;
+        esac
         if [ "${1:-}" = "-I" ]; then shift; fi
         # The port probe cannot run at all: the wheel would not import, or
         # the interpreter would not start. That says nothing about the port,
@@ -3925,7 +3954,7 @@ def _app_bundle(tmp_path: Path) -> Path:
     classifier reports it as. A real directory, because #672 removes it: an
     install whose bundle is not there is not the state a hand-over is run
     against."""
-    return tmp_path / "Ciaobot.app"
+    return tmp_path / "home" / "Applications" / "Ciaobot.app"
 
 
 def _desktop_install(
@@ -3943,6 +3972,9 @@ def _desktop_install(
     )
     app_engine.parent.mkdir(parents=True)
     _write_exec(app_engine, "#!/bin/sh\nexit 0\n")
+    app_executable = _app_bundle(tmp_path) / "Contents" / "MacOS" / "ciaobot-desktop"
+    app_executable.parent.mkdir(parents=True)
+    _write_exec(app_executable, "#!/bin/sh\nexit 0\n")
     _write_desktop_shim(home, app_engine)
 
     workspace = home / "Ciaobot"
@@ -5167,7 +5199,7 @@ def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
     home: Path = harness["home"]
     _desktop_install(harness, tmp_path)
     app_engine = (
-        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+        _app_bundle(tmp_path) / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
     )
     _knob(harness, "fail-install-receipt")
     shim = home / ".local" / "bin" / "ciao"
@@ -5221,7 +5253,7 @@ def test_tool_env_is_probed_before_the_receipt_is_written(tmp_path: Path) -> Non
     # back, and no install receipt is left naming an engine that is not there.
     assert not _tool_env(harness).exists()
     assert not shim.is_symlink()
-    assert f'exec "{tmp_path / "Ciaobot.app"}' in shim.read_text(encoding="utf-8")
+    assert f'exec "{_app_bundle(tmp_path)}' in shim.read_text(encoding="utf-8")
     assert not (home / ".local/state/ciaobot/install-receipt.json").exists()
     assert _migration_receipt(harness)["phase"] == "rolled_back"
 
@@ -5393,19 +5425,13 @@ def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> No
     # the user at a rollback for a leftover directory.
     harness = _harness(tmp_path)
     _desktop_install(harness, tmp_path)
-    real_rm = shutil.which("rm") or "/bin/rm"
-    # `rm` is a plain command in the script, so the harness reaches it through
-    # PATH: a stub that refuses a `.app` and does everything else for real is
-    # the one case a fake `$HOME` cannot produce by permissions alone.
-    _write_exec(
-        harness["fakebin"] / "rm",
-        '#!/bin/sh\n'
-        'for arg in "$@"; do\n'
-        '    case "$arg" in\n'
-        '        *.app) exit 1 ;;\n'
-        '    esac\n'
-        'done\n'
-        f'exec {real_rm} "$@"\n',
+    (harness["home"] / "cleanup-failure.py").write_text(
+        "import errno, sys\n"
+        "from ciao import desktop_install\n"
+        "def deny(*args, **kwargs): raise PermissionError(errno.EPERM, 'injected')\n"
+        "desktop_install.os.unlink = deny\n"
+        "sys.argv = ['desktop_install', *sys.argv[1:]]\n"
+        "raise SystemExit(desktop_install.main())\n", encoding="utf-8"
     )
 
     result = _run_installer(harness, "--version", VERSION, "--migrate")
@@ -5415,9 +5441,242 @@ def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> No
     # The bundle is still there, and the manual way to remove it is named
     # exactly here and nowhere else in the run.
     assert _app_bundle(tmp_path).is_dir()
-    assert "Ciaobot.app could not be removed automatically" in result.stdout
-    assert f"'{harness['home']}/.local/bin/ciao' desktop uninstall" in result.stdout
+    assert f"Permission denied removing {_app_bundle(tmp_path)}" in result.stdout
+    assert "desktop uninstall" not in result.stdout
     assert "Removed the retired Ciaobot.app." not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("malformed", ["extra", "nul", "blank", "cr"])
+def test_migrate_rejects_multiline_inspection_without_failing_handover(tmp_path: Path, malformed: str) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    _knob(harness, "malformed-inspect")
+    (harness["home"] / "malformed-inspect").write_text(malformed, encoding="utf-8")
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert "Cleanup unavailable" in result.stdout
+    assert _app_bundle(tmp_path).is_dir()
+    assert "remove-retired-bundle" not in _log(harness, "uv-run-calls.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_reports_partial_cleanup_without_rollback(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    bundle = _app_bundle(tmp_path)
+    (bundle / "extra").write_bytes(b"extra")
+    before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    (harness["home"] / "cleanup-failure.py").write_text(
+        "import errno, sys\n"
+        "from ciao import desktop_install\n"
+        "real = desktop_install.os.unlink\n"
+        "count = 0\n"
+        "def deny_second(*args, **kwargs):\n"
+        " global count\n"
+        " count += 1\n"
+        " if count == 2: raise PermissionError(errno.EPERM, 'injected')\n"
+        " return real(*args, **kwargs)\n"
+        "desktop_install.os.unlink = deny_second\n"
+        "sys.argv = ['desktop_install', *sys.argv[1:]]\n"
+        "raise SystemExit(desktop_install.main())\n", encoding="utf-8"
+    )
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert f"Cleanup partially removed {bundle}" in result.stdout
+    assert "Permission denied removing" not in result.stdout
+    assert "Removed the retired Ciaobot.app." not in result.stdout
+    assert "rolled back" not in (result.stdout + result.stderr).lower()
+    after = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    assert after and after.keys() < before.keys()
+    assert all(before[name] == content for name, content in after.items())
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("separator", ["\n", "\r"])
+@pytest.mark.parametrize("source", ["classification", "receipt"])
+def test_migration_rejects_linebreak_bundle_paths_before_inspection(
+    tmp_path: Path, separator: str, source: str,
+) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    prefix = _app_bundle(tmp_path)
+    original = prefix.with_name(prefix.name + separator + "folder") / "Ciaobot.app"
+    original.parent.mkdir()
+    shutil.copytree(prefix, original)
+    if source == "classification":
+        engine = original / "Contents/Resources/ciao-runtime/bin/ciao"
+        _write_desktop_shim(harness["home"], engine)
+        agents = harness["home"] / "Library/LaunchAgents"
+        for name in ("com.ciao.server.plist", "Ciaobot.plist"):
+            path = agents / name
+            data = plistlib.loads(path.read_bytes())
+            data["ProgramArguments"][0] = str(engine)
+            path.write_bytes(plistlib.dumps(data))
+    else:
+        first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+        assert first.returncode == 0, first.stderr
+        receipt = harness["home"] / ".local/state/ciaobot/migration/receipt.json"
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data["app_bundle"] = str(original)
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+    before_log = _log(harness, "uv-run-calls.log")
+    before = {p: p.read_bytes() for root in (prefix, original) for p in root.rglob("*") if p.is_file()}
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert result.returncode != 0
+    assert all(path.read_bytes() == content for path, content in before.items())
+    new_log = _log(harness, "uv-run-calls.log")[len(before_log):]
+    assert "inspect-retired-bundle" not in new_log
+    assert "remove-retired-bundle" not in new_log
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("source", ["classification", "receipt"])
+def test_migration_rejects_nul_bundle_path_before_inspection(tmp_path: Path, source: str) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    bundle = _app_bundle(tmp_path)
+    before = {path: path.read_bytes() for path in bundle.rglob("*") if path.is_file()}
+    if source == "classification":
+        _knob(harness, "nul-classification")
+    else:
+        first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+        assert first.returncode == 0, first.stderr
+        receipt = harness["home"] / ".local/state/ciaobot/migration/receipt.json"
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data["app_bundle"] = str(bundle) + "\0"
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+    before_log = _log(harness, "uv-run-calls.log")
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert result.returncode != 0
+    assert all(path.read_bytes() == content for path, content in before.items())
+    new_log = _log(harness, "uv-run-calls.log")[len(before_log):]
+    assert "inspect-retired-bundle" not in new_log
+    assert "remove-retired-bundle" not in new_log
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_settled_host_receipt_reoffers_cleanup_without_reinstall(tmp_path: Path) -> None:
+    import pty
+    import select
+
+    harness = _harness(tmp_path)
+    workspace = _desktop_install(harness, tmp_path)
+    home = harness["home"]
+    injector = home / "cleanup-failure.py"
+    injector.write_text(
+        "import errno, sys\n"
+        "from ciao import desktop_install\n"
+        "def deny(*args, **kwargs): raise PermissionError(errno.EPERM, 'injected')\n"
+        "desktop_install.os.unlink = deny\n"
+        "sys.argv = ['desktop_install', *sys.argv[1:]]\n"
+        "raise SystemExit(desktop_install.main())\n", encoding="utf-8"
+    )
+    first = _run_installer(harness, "--version", VERSION, "--migrate")
+    bundle = _app_bundle(tmp_path)
+    assert first.returncode == 0, first.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert f"Permission denied removing {bundle}" in first.stdout
+    assert bundle.is_dir()
+    injector.unlink()
+    receipt = (home / ".local/state/ciaobot/migration/receipt.json").read_bytes()
+    workspace_before = (workspace / ".runtime/workspaces.json").read_bytes()
+    uv_calls = _log(harness, "uv-calls.log")
+    launch_calls = _log(harness, "launchctl.log")
+
+    no_tty = subprocess.run(
+        ["sh", str(harness["script"]), "--version", VERSION, "--migrate"],
+        env={**os.environ, **harness["env"]}, input="yes\n", capture_output=True,
+        text=True, start_new_session=True, timeout=30, check=False,
+    )
+    assert no_tty.returncode == 0, no_tty.stderr
+    assert bundle.is_dir()
+
+    def retry(answer: bytes) -> subprocess.CompletedProcess[str]:
+        args = ["sh", str(harness["script"]), "--version", VERSION, "--migrate"]
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execvpe("sh", args, {**os.environ, **harness["env"]})
+        output = b""
+        sent = False
+        deadline = time.monotonic() + 30
+        try:
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 1)[0]:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output += chunk
+                    if not sent and b"Remove the retired app at" in output:
+                        os.write(master, answer)
+                        sent = True
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    return subprocess.CompletedProcess(args, os.waitstatus_to_exitcode(status), output.decode(), "")
+            done, status = os.waitpid(pid, os.WNOHANG)
+            assert done, "retry timed out"
+            return subprocess.CompletedProcess(args, os.waitstatus_to_exitcode(status), output.decode(), "")
+        finally:
+            os.close(master)
+
+    for answer in (b"no\n", b"\x04"):
+        result = retry(answer)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count("Remove the retired app at") == 1
+        assert str(bundle) in result.stdout
+        assert bundle.is_dir()
+    result = retry(b"yes\n")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Remove the retired app at") == 1
+    assert not bundle.exists()
+    assert (home / ".local/state/ciaobot/migration/receipt.json").read_bytes() == receipt
+    assert (workspace / ".runtime/workspaces.json").read_bytes() == workspace_before
+    assert _log(harness, "uv-calls.log") == uv_calls
+    assert _log(harness, "launchctl.log") == launch_calls
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("offer", ["unknown", "changed"])
+def test_migration_preapproval_identity_is_checked(tmp_path: Path, offer: str) -> None:
+    from ciao.desktop_install import inspect_retired_bundle
+
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    bundle = _app_bundle(tmp_path)
+    identity = " ".join(map(str, inspect_retired_bundle(bundle, home=harness["home"])))
+    if offer == "unknown":
+        identity = ""
+    else:
+        identity = "0 " + identity.split(" ", 1)[1]
+    script = harness["script"]
+    source = script.read_text(encoding="utf-8")
+    source = source.replace(
+        "refuse_desktop_engine\nfind_uv\n",
+        f"migration_offer_approved=1\nmigration_offer_bundle={shlex.quote(str(bundle))}\n"
+        f"migration_offer_identity={shlex.quote(identity)}\nrefuse_desktop_engine\nfind_uv\n",
+        1,
+    )
+    script.write_text(source, encoding="utf-8")
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert bundle.is_dir()
+    if offer == "unknown":
+        assert result.returncode == 0, result.stderr
+        assert _migration_receipt(harness)["phase"] == "migrated"
+    else:
+        assert result.returncode != 0
+        assert "changed after the migration offer" in result.stderr
+        assert not _log(harness, "uv-calls.log")
 
 
 @runs_the_sh_installer
@@ -5528,6 +5787,60 @@ def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
 
 @runs_the_sh_installer
 @needs_local_tools
+@pytest.mark.parametrize("phase", ["installed_no_start", "retiring"])
+@pytest.mark.parametrize("recorded", [True, False], ids=["conflicting", "legacy-missing"])
+def test_resume_uses_receipt_bundle_not_other_classified_bundle(
+    tmp_path: Path, phase: str, recorded: bool,
+) -> None:
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+    bundle_a = _app_bundle(tmp_path)
+    bundle_b = home / "Applications" / "other" / "Ciaobot.app"
+    bundle_b.parent.mkdir()
+    shutil.copytree(bundle_a, bundle_b)
+    first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+    assert first.returncode == 0, first.stderr
+    receipt = home / ".local/state/ciaobot/migration/receipt.json"
+    data = json.loads(receipt.read_text(encoding="utf-8"))
+    assert data["app_bundle"] == str(bundle_a)
+    data["phase"] = phase
+    data["retiring_desktop"] = phase == "retiring"
+    if not recorded:
+        del data["app_bundle"]
+    receipt.write_text(json.dumps(data), encoding="utf-8")
+    server = home / "Library/LaunchAgents/com.ciao.server.plist"
+    plist = plistlib.loads(server.read_bytes())
+    plist["ProgramArguments"][0] = str(bundle_b / "Contents/Resources/ciao-runtime/bin/ciao")
+    server.write_bytes(plistlib.dumps(plist))
+    from ciao.engine_migration import classify
+    assert classify(home / "Library/LaunchAgents").app_bundle == str(bundle_b)
+    state = _replaced_state(harness)
+    receipt_before = receipt.read_bytes()
+    workspace_before = {p: p.read_bytes() for p in workspace.rglob("*") if p.is_file()}
+    bundle_before = {p: p.read_bytes() for root in (bundle_a, bundle_b) for p in root.rglob("*") if p.is_file()}
+    launches_before = _log(harness, "launchctl.log")
+    calls_before = _log(harness, "uv-run-calls.log")
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert all(p.read_bytes() == content for p, content in bundle_before.items())
+    new_calls = _log(harness, "uv-run-calls.log")[len(calls_before):]
+    assert "remove-retired-bundle" not in new_calls
+    if recorded:
+        assert result.returncode != 0
+        assert "bundle" in result.stderr.lower() and "receipt" in result.stderr.lower()
+        assert _replaced_state(harness) == state
+        assert receipt.read_bytes() == receipt_before
+        assert {p: p.read_bytes() for p in workspace.rglob("*") if p.is_file()} == workspace_before
+        assert _log(harness, "launchctl.log") == launches_before
+        assert "inspect-retired-bundle" not in new_calls
+    else:
+        assert result.returncode == 0, result.stderr
+        assert _migration_receipt(harness)["phase"] == "migrated"
+        assert "path was not recorded" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_migrate_host_completes_an_unfinished_no_start_handover(tmp_path: Path) -> None:
     # A `--migrate --no-start` run installs the tool, repoints `com.ciao.server`
     # at it and stops, with the app's own agent still in place and a receipt that
@@ -5627,8 +5940,8 @@ def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
     # bundle is still there, which is only honest because the run says so.
     assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
     assert _app_bundle(tmp_path).is_dir()
-    assert "Ciaobot.app could not be removed automatically" in retry.stdout
-    assert f"'{home}/.local/bin/ciao' desktop uninstall" in retry.stdout
+    assert "path was not recorded" in retry.stdout
+    assert "desktop uninstall" not in retry.stdout
     assert "Removed the retired Ciaobot.app." not in retry.stdout
 
 
@@ -6030,8 +6343,7 @@ def _desktop_install_without_a_workspace(
     home: Path = harness["home"]
     _desktop_install(harness, tmp_path)
     app_engine = (
-        tmp_path
-        / "Ciaobot.app"
+        _app_bundle(tmp_path)
         / "Contents"
         / "Resources"
         / "ciao-runtime"
