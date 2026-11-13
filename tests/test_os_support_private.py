@@ -392,3 +392,107 @@ def test_windows_counts_an_inherit_only_grant_on_a_directory(tmp_path: Path) -> 
         check=True,
     )
     assert not is_private(folder)
+
+def _windows_open_for_security(path: Path, directory: bool) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0x80000000, 7, None, 3, 0x02000000 if directory else 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows security descriptors")
+@pytest.mark.parametrize("directory", [False, True])
+def test_windows_strict_requires_protected_dacl(tmp_path: Path, directory: bool) -> None:
+    # The parent grants only the same principals, even after inheritance is enabled.
+    make_private_dir(tmp_path)
+    path = tmp_path / "owned"
+    if directory:
+        path.mkdir()
+        make_private_dir(path)
+    else:
+        path.write_bytes(b"secret")
+        make_private(path)
+    subprocess.run(["icacls", str(path), "/inheritance:e"], capture_output=True, check=True)
+    import ctypes
+    from ctypes import wintypes
+
+    descriptor = private._PSECURITY_DESCRIPTOR()
+    dacl = private._PACL()
+    error = private._GetNamedSecurityInfoW(
+        str(path), private._SE_FILE_OBJECT, private._DACL_SECURITY_INFORMATION,
+        None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+    )
+    assert not error
+    try:
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        assert private._GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision))
+        assert not control.value & private._SE_DACL_PROTECTED
+    finally:
+        private._LocalFree(descriptor)
+    assert private.is_owned_path(path)
+    assert private.is_private(path)
+    assert not private.is_private_strict(path)
+    fd = _windows_open_for_security(path, directory)
+    try:
+        assert private.is_owned_descriptor(fd)
+        assert private.is_private_descriptor(fd)
+        assert not private.is_private_descriptor_strict(fd)
+        (make_private_dir if directory else make_private)(path)
+        assert private.is_private_strict(path)
+        assert private.is_private_descriptor_strict(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows security descriptors")
+def test_windows_control_read_failure_refuses_and_frees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "owned"
+    path.write_bytes(b"")
+    make_private(path)
+    freed = []
+    real_free = private._LocalFree
+    def free(descriptor):
+        freed.append(descriptor.value)
+        return real_free(descriptor)
+    monkeypatch.setattr(private, "_LocalFree", free)
+    monkeypatch.setattr(private, "_GetSecurityDescriptorControl", lambda *args: 0)
+    with pytest.raises(OSError):
+        private.is_private_strict(path)
+    assert freed and all(freed)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        freed.clear()
+        with pytest.raises(OSError):
+            private.is_private_descriptor_strict(fd)
+        assert freed and all(freed)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows handle semantics")
+def test_windows_strict_descriptor_inspects_open_handle_not_replaced_path(tmp_path: Path) -> None:
+    make_private_dir(tmp_path)
+    path = tmp_path / "opened"
+    path.write_bytes(b"original")
+    make_private(path)
+    subprocess.run(["icacls", str(path), "/inheritance:e"], capture_output=True, check=True)
+    fd = _windows_open_for_security(path, False)
+    try:
+        assert private.is_private_descriptor(fd)
+        assert not private.is_private_descriptor_strict(fd)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"replacement")
+        make_private(replacement)
+        os.replace(replacement, path)
+        assert private.is_private_strict(path)
+        assert not private.is_private_descriptor_strict(fd)
+    finally:
+        os.close(fd)
