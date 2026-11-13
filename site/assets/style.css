@@ -110,7 +110,7 @@ pre code { background: none; border: 0; padding: 0; }
   letter-spacing: -0.02em;
   font-size: 18px;
 }
-.brand img { width: 30px; height: 30px; border-radius: 8px; }
+.brand img { display: block; width: 112px; height: auto; }
 .site-nav { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }
 .site-nav a {
   color: var(--muted);

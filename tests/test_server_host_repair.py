@@ -689,3 +689,145 @@ def test_repair_refuses_a_signed_host_when_the_release_is_legacy(
     assert record.read_bytes() == record_before
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
     assert not server_host_install.upgrade_journal_path().exists()
+
+
+class _CodesignDisplay:
+    """Answers every ``codesign`` probe with one fixed display, or fails to start."""
+
+    def __init__(self, *, rc: int = 0, stderr: str = "", raises: bool = False) -> None:
+        self.rc = rc
+        self.stderr = stderr
+        self.raises = raises
+
+    def __call__(
+        self, argv: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if self.raises:
+            raise OSError("codesign cannot start")
+        return subprocess.CompletedProcess(argv, self.rc, "", self.stderr)
+
+
+_ADHOC_DISPLAY = (
+    "Identifier=org.example.host\n"
+    "Format=app bundle with Mach-O universal (x86_64 arm64)\n"
+    "CodeDirectory v=20500 size=400 flags=0x2(adhoc) hashes=7+3 location=embedded\n"
+    "Signature=adhoc\n"
+    "TeamIdentifier=not set\n"
+)
+_DEVELOPER_ID_DISPLAY = (
+    "Identifier=org.example.host\n"
+    "Signature size=9000\n"
+    "Authority=Developer ID Application: Example (TESTTEAM01)\n"
+    "Authority=Developer ID Certification Authority\n"
+    "Authority=Apple Root CA\n"
+    "TeamIdentifier=TESTTEAM01\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rc", "stderr", "raises", "want"),
+    [
+        pytest.param(0, _ADHOC_DISPLAY, False, True, id="real-adhoc"),
+        pytest.param(0, "Identifier=x\nSignature=adhoc\n", False, True, id="minimal-adhoc"),
+        pytest.param(0, _DEVELOPER_ID_DISPLAY, False, False, id="developer-id"),
+        pytest.param(1, "code object is not signed at all\n", False, False, id="unsigned"),
+        pytest.param(0, "", True, False, id="probe-cannot-start"),
+        pytest.param(
+            0, _ADHOC_DISPLAY + "Signature=adhoc\n", False, False, id="repeated-signature"
+        ),
+        pytest.param(
+            0,
+            _ADHOC_DISPLAY + "Authority=Developer ID Application: X\n",
+            False,
+            False,
+            id="adhoc-with-authority",
+        ),
+        pytest.param(
+            0,
+            _ADHOC_DISPLAY.replace("not set", "TESTTEAM01"),
+            False,
+            False,
+            id="adhoc-with-team",
+        ),
+    ],
+)
+def test_is_adhoc_signed_reads_only_a_verified_adhoc_display(
+    tmp_path: Path, rc: int, stderr: str, raises: bool, want: bool
+) -> None:
+    runner = _CodesignDisplay(rc=rc, stderr=stderr, raises=raises)
+
+    assert server_host.is_adhoc_signed(tmp_path / APP_NAME, runner=runner) is want
+
+
+@requires_posix_uid
+def test_repair_refuses_a_recordless_signed_host_when_the_release_is_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2850: a Developer ID host whose record was lost is not proven ours, but it
+    # is not ad-hoc either, so repair refuses it as a signed downgrade and touches
+    # nothing: no swap, no record, no journal, no staging leftovers.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    signed_archive, _bundle, signed_entry = _signed_fixture(tmp_path)
+    server_host_install.install_server_host(
+        signed_archive,
+        signed_entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=_SignedRunner(),
+    )
+    record.unlink()
+    inode = target.stat().st_ino
+    legacy_archive, _bundle, legacy_entry = _fixture(tmp_path)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            legacy_archive,
+            legacy_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert target.stat().st_ino == inode
+    assert not record.exists()
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+    assert not server_host_install.upgrade_journal_path().exists()
+
+
+@requires_posix_uid
+def test_repair_refuses_an_unproven_host_whose_signature_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2850: a recordless bundle whose codesign display fails is not verifiably
+    # ad-hoc, so repair refuses it as a signed downgrade and leaves it in place.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True)
+    (target / "Contents").mkdir(parents=True)
+    legacy_archive, _bundle, legacy_entry = _fixture(tmp_path)
+
+    class _UnreadableRunner(_SignedRunner):
+        def __call__(
+            self, argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if (
+                argv[1:2] == ["-dv"]
+                and "--arch" not in argv
+                and argv[-1] == str(target)
+            ):
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            return super().__call__(argv, **kwargs)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            legacy_archive,
+            legacy_entry,
+            bundle_path=target,
+            ownership_path=target.parent / "records" / "server-host.json",
+            runner=_UnreadableRunner(),
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert (target / "Contents").is_dir()
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]

@@ -513,8 +513,8 @@ LINKS_FAILED = "failed"
 class _CacheEntry:
     """One stored verdict, and the situation it was established for.
 
-    Keyed by the vault path alone, with the runtime root and the receipt's
-    identity inside ``token``: an answer is looked up by what it is about, and
+    Keyed by the vault path alone, with the runtime root and the completion
+    evidence's identity (receipt, link marker, vault directory) inside ``token``: an answer is looked up by what it is about, and
     reused only for the situation it was computed in. One small entry per vault,
     which is bounded by the number of registered vaults rather than by anything
     that grows with the notes in them.
@@ -548,14 +548,16 @@ class _Scope:
     only the evidence is not, and the caller is expected to record that as
     ``LINKS_FAILED``.
 
-    The token is the receipt file's own identity, because the receipt is the
-    completion evidence and its identity changes exactly when that evidence does:
-    a migration writes and archives one, an un-migration replaces it, and a retry
-    of a partial one rewrites it. Every one of those lands a new token, so a
-    stored answer is never reused across a change to the thing it is an answer
-    about. Two installs in one process — a test, a dev checkout beside a real
-    engine — cannot share an answer, because the runtime root and the vault path
-    are in the key.
+    The token covers the completion evidence: the receipt file, the vault's link
+    marker and the vault directory's identity. Completion may come from the
+    marker alone (another runtime migrated this vault), so the marker is in the
+    token; a replaced vault changes the directory identity. A migration writes
+    and archives a receipt, an un-migration replaces it and rewrites the marker,
+    and a retry of a partial one rewrites it. Every one of those lands a new
+    token, so a stored answer is never reused across a change to the thing it is
+    an answer about. Two installs in one process — a test, a dev checkout beside
+    a real engine — cannot share an answer, because the runtime root and the
+    vault path are in the key.
     """
 
     vault: Path | None = None
@@ -564,6 +566,9 @@ class _Scope:
 
 
 def _links_scope(config: Any, runtime_dir: Path | None) -> _Scope:
+    """Whether the notice applies. Completion is this runtime's own current
+    receipt or else the vault link marker's ``migrated`` state; replaced, stale
+    or malformed evidence is ``readable=False``."""
     if runtime_dir is None:
         return _Scope()
     vault_raw = getattr(config, "vault_root", None)
@@ -595,21 +600,14 @@ def _links_scope(config: Any, runtime_dir: Path | None) -> _Scope:
 
 
 def _links_token(runtime_dir: Path, vault: Path) -> str:
-    """The identity of this situation: the install, the vault, the receipt.
+    """The identity of this situation: the install, the vault and the evidence.
 
-    Read through ``receipt_path`` rather than a path spelled out here, so the
-    receipt's layout stays the one thing that decides where it lives. A receipt
-    that cannot be stat'd is as good as absent, which is the situation its
-    absence already describes.
+    Delegated to ``receipt_token``, so the receipt's layout, the vault link
+    marker and the vault directory's identity stay the things that decide it.
     """
-    try:
-        from ciao.vault_migrate_links import receipt_path
+    from ciao.vault_migrate_links import receipt_token
 
-        stat = receipt_path(runtime_dir).stat()
-        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
-    except (ImportError, OSError, TypeError):
-        stamp = "absent"
-    return f"{Path(runtime_dir)}|{vault}|{stamp}"
+    return receipt_token(runtime_dir, vault_root=vault)
 
 
 def _publish(key: str, token: str, state: str, example: str, instant: float) -> None:
@@ -689,6 +687,9 @@ def cached_links(
     found nothing gets no card, which is how the detector reaches zero for a
     reason other than "a migration ran". A ``failed`` answer is silence too, and
     for the same reason it is the silence the audit gets: nothing was established.
+
+    The only vault file it opens is the link marker (read by ``_links_scope``),
+    which is how another runtime's migration or undo reaches this one.
     """
     scope = _links_scope(config, runtime_dir)
     if scope.vault is None:

@@ -3552,6 +3552,29 @@ def test_every_coordinator_deadline_is_finite_and_bounded(
     assert caught.value.failure_code == "internal_error"
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_timeout", "bind_timeout", "wizard_exit_timeout", "term_grace",
+        "reap_timeout", "poll_interval", "readiness_timeout",
+        "readiness_interval", "port_release_timeout", "port_bind_timeout",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    [True, 0, -1, float("nan"), float("inf"), native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1],
+)
+def test_shared_policy_rejects_invalid_values(field: str, value: object) -> None:
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        native._CoordinatorPolicy(**{field: value})  # type: ignore[arg-type]
+    assert caught.value.reason == "invalid_timeout"
+    assert caught.value.failure_code == "internal_error"
+
+
+def test_coordinator_accepts_the_maximum_policy_timeout() -> None:
+    native._CoordinatorPolicy(run_timeout=native.COORDINATOR_MAX_TIMEOUT_SECONDS)
+
+
 def test_an_expired_run_deadline_refuses_before_any_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4037,6 +4060,100 @@ def test_a_raising_bind_probe_refuses_before_activation(
     assert outcome.failure_code == "activation_refused"
     assert outcome.activation_attempted is False
     assert activated == []
+
+
+def test_shared_bind_wait_probe_contract_rejects_non_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path, port_bindable=lambda _port: "yes"  # type: ignore[arg-type]
+    )
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is False
+
+
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [(native._Cancelled(), "cancelled"), (native._TimedOut(), "internal_error")],
+)
+def test_shared_bind_wait_probe_contract_propagates_control_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    failure: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def probe(_port: int) -> bool:
+        raise error
+
+    outcome, events, _raw = _run_coordinator(tmp_path, port_bindable=probe)
+    assert outcome.failure_code == failure
+    assert events[-1]["code"] == failure
+    assert outcome.activation_attempted is False
+
+
+def test_shared_bind_wait_checks_stage_before_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    probes: list[int] = []
+
+    def handoff(run_id: str) -> native_handoff.NativeHandoffResult:
+        result = _handoff(run_id)
+        cancellation.cancel()
+        return result
+
+    def probe(port: int) -> bool:
+        probes.append(port)
+        return True
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        cancellation=cancellation,
+        read_handoff=handoff,
+        port_bindable=probe,
+    )
+    assert outcome.failure_code == "cancelled"
+    assert events[-1]["code"] == "cancelled"
+    assert probes == []
+    assert outcome.activation_attempted is False
+
+
+def test_shared_bind_wait_rechecks_stage_after_wait_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    probes: list[int] = []
+    activations: list[str] = []
+
+    def probe(port: int) -> bool:
+        probes.append(port)
+        return len(probes) > 1
+
+    def wait(_seconds: float, _cancellation: native.NativeCancellation, _poll: float) -> None:
+        if probes:
+            cancellation.cancel()
+
+    def activate(run_id: str, _remaining: float) -> native_handoff.NativeHandoffResult:
+        activations.append(run_id)
+        return _handoff(run_id)
+
+    monkeypatch.setattr(native, "_wait_observing", wait)
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        cancellation=cancellation,
+        port_bindable=probe,
+        activate=activate,
+    )
+    assert probes == [_handoff(RUN_ID).port]
+    assert activations == []
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_attempted is False
+    assert events[-1]["code"] == "cancelled"
 
 
 def test_the_engine_bind_probe_sees_a_held_port_only_until_it_is_closed() -> None:

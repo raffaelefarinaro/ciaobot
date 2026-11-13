@@ -1147,6 +1147,47 @@ def _sub_deadline(run_deadline: _Deadline, seconds: float) -> _Deadline:
     return _Deadline(min(run_deadline.expires_at, time.monotonic() + seconds))
 
 
+def _validate_policy_timeouts(values: tuple[float, ...]) -> None:
+    for value in values:
+        if type(value) not in (int, float):
+            raise NativeCoordinatorError("invalid_timeout", "internal_error")
+        number = float(value)
+        if (
+            not math.isfinite(number)
+            or number <= 0
+            or number > COORDINATOR_MAX_TIMEOUT_SECONDS
+        ):
+            raise NativeCoordinatorError("invalid_timeout", "internal_error")
+
+
+def _await_bindable(
+    probe: Callable[[], bool],
+    port_bind_timeout: float,
+    poll_interval: float,
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+) -> None:
+    """Wait for a service bind probe, refusing invalid answers before activation."""
+    bind = _Deadline.after(port_bind_timeout)
+    while True:
+        _check_stage(deadline, cancellation)
+        try:
+            bindable = probe()
+        except (_Cancelled, _TimedOut):
+            raise
+        except Exception:
+            raise _Refusal("activation_refused") from None
+        if not isinstance(bindable, bool):
+            raise _Refusal("activation_refused")
+        if bindable:
+            return
+        if bind.remaining() <= 0:
+            raise _Refusal("activation_refused")
+        _wait_observing(
+            min(poll_interval, bind.remaining()), cancellation, poll_interval
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _CoordinatorPolicy:
     """Finite, bounded deadlines and child-cleanup allowances for one run.
@@ -1171,28 +1212,18 @@ class _CoordinatorPolicy:
     port_bind_timeout: float = COORDINATOR_PORT_BIND_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        for name in (
-            "run_timeout",
-            "bind_timeout",
-            "wizard_exit_timeout",
-            "term_grace",
-            "reap_timeout",
-            "poll_interval",
-            "readiness_timeout",
-            "readiness_interval",
-            "port_release_timeout",
-            "port_bind_timeout",
-        ):
-            value = getattr(self, name)
-            if type(value) not in (int, float):
-                raise NativeCoordinatorError("invalid_timeout", "internal_error")
-            number = float(value)
-            if (
-                not math.isfinite(number)
-                or number <= 0
-                or number > COORDINATOR_MAX_TIMEOUT_SECONDS
-            ):
-                raise NativeCoordinatorError("invalid_timeout", "internal_error")
+        _validate_policy_timeouts((
+            self.run_timeout,
+            self.bind_timeout,
+            self.wizard_exit_timeout,
+            self.term_grace,
+            self.reap_timeout,
+            self.poll_interval,
+            self.readiness_timeout,
+            self.readiness_interval,
+            self.port_release_timeout,
+            self.port_bind_timeout,
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -3387,42 +3418,6 @@ def _setup_port_listeners(port: int) -> frozenset[int]:
     return frozenset()
 
 
-def _await_service_port_bindable(
-    deps: _CoordinatorDeps,
-    port: int,
-    policy: _CoordinatorPolicy,
-    deadline: _Deadline,
-    cancellation: NativeCancellation,
-) -> None:
-    """Return once the engine's bind probe accepts ``port``; otherwise refuse.
-
-    Polls every ``poll_interval`` for at most ``port_bind_timeout``, observing
-    cancellation and the run deadline. A probe that raises, answers something
-    other than a bool, or never accepts the port refuses with
-    ``activation_refused`` before any activation.
-    """
-    bind = _Deadline.after(policy.port_bind_timeout)
-    while True:
-        _check_stage(deadline, cancellation)
-        try:
-            bindable = deps.port_bindable(port)
-        except (_Cancelled, _TimedOut):
-            raise
-        except Exception:
-            raise _Refusal("activation_refused") from None
-        if not isinstance(bindable, bool):
-            raise _Refusal("activation_refused")
-        if bindable:
-            return
-        if bind.remaining() <= 0:
-            raise _Refusal("activation_refused")
-        _wait_observing(
-            min(policy.poll_interval, bind.remaining()),
-            cancellation,
-            policy.poll_interval,
-        )
-
-
 def _port_listeners_answer(deps: _CoordinatorDeps, port: int) -> frozenset[int]:
     """The setup port's listeners. A query that raises or answers oddly refuses."""
     try:
@@ -3750,8 +3745,12 @@ def _run_native_install(
                 # The engine binds the service port itself. macOS can keep an
                 # address unbindable for a while after the wizard closes, so
                 # activation waits for the engine's own bind probe to accept it.
-                _await_service_port_bindable(
-                    deps, handoff.port, policy, deadline, cancellation
+                _await_bindable(
+                    lambda: deps.port_bindable(handoff.port),
+                    policy.port_bind_timeout,
+                    policy.poll_interval,
+                    deadline,
+                    cancellation,
                 )
 
                 writer.phase("activation")

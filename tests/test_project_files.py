@@ -2,7 +2,7 @@
 
 Covers the manager-level methods (``list_project_files``,
 ``save_project_file_upload``) and the route handlers
-(``GET/POST /api/projects/{id}/files``). The endpoints are scoped to a
+(``GET /api/projects/{id}/files``; uploads arrive as chat attachments). The endpoints are scoped to a
 project's vault folder; they reject manual projects without a vault entry,
 single-file personal projects (the file IS the project), traversal in
 filenames, and oversized or disallowed extensions.
@@ -32,7 +32,6 @@ from ciao.web.routes_api import (
     chat_attachments_upload,
     desktop_drop_import,
     project_files_list,
-    project_files_upload,
 )
 
 
@@ -83,7 +82,6 @@ def _make_client(pcm: ProjectChatManager, config: CiaoConfig) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
-            Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
             Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
             Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         ]
@@ -426,55 +424,6 @@ def test_upload_to_promoted_personal_project_succeeds(tmp_path: Path) -> None:
     assert entry["path"] == "guests.md"
     saved = tmp_path / "memory-vault" / "personal" / "projects" / "active" / "Wedding" / "guests.md"
     assert saved.read_bytes() == b"hello"
-
-
-def test_upload_manual_project_returns_409(tmp_path: Path) -> None:
-    """Manual PWA projects (no vault_folder) genuinely have nowhere to put
-    uploads; the route still returns 409 in that case."""
-    pcm = _make_manager(tmp_path)
-    proj = pcm.create_project(name="Manual", workspace="personal")
-    assert proj.vault_folder == ""
-    config = CiaoConfig(
-        pwa_auth_token="t",
-        workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime" / "s.json",
-        media_root=tmp_path / ".runtime" / "media",
-    )
-    client = _make_client(pcm, config)
-    resp = client.post(
-        f"/api/projects/{proj.project_id}/files",
-        files={"file1": ("x.md", b"hi", "text/markdown")},
-    )
-    assert resp.status_code == 409
-
-
-def test_upload_route_round_trip(tmp_path: Path) -> None:
-    folder = _make_work_project(tmp_path, "2026-q2-foo")
-    pcm = _make_manager(tmp_path)
-    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
-    config = CiaoConfig(
-        pwa_auth_token="t",
-        workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime" / "s.json",
-        media_root=tmp_path / ".runtime" / "media",
-    )
-    client = _make_client(pcm, config)
-    resp = client.post(
-        f"/api/projects/{proj.project_id}/files",
-        files={
-            "file1": ("a.md", b"alpha", "text/markdown"),
-            "file2": ("b.mp4", b"video", "video/mp4"),
-            "file3": (".hidden", b"bad", "application/octet-stream"),
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    saved_paths = {e["path"] for e in body["saved"]}
-    assert {"a.md", "b.mp4"} <= saved_paths
-    assert "absolute_path" not in resp.text
-    assert len(body["errors"]) == 1
-    assert (folder / "b.mp4").read_bytes() == b"video"
-    assert (folder / "a.md").read_bytes() == b"alpha"
 
 
 def test_chat_document_upload_keeps_original_beside_markdown(
