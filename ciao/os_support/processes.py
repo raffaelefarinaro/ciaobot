@@ -133,6 +133,18 @@ if sys.platform == "win32":
             return False
         return code.value != _STILL_ACTIVE
 
+    def pid_alive(pid: int) -> bool:
+        """Conservatively check a PID without sending it a signal."""
+        if pid <= 0 or pid > 0xFFFFFFFF:
+            return True
+        process = _OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not process:
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such PID
+        try:
+            return not _has_exited(process)
+        finally:
+            _CloseHandle(process)
+
     def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -201,6 +213,18 @@ if sys.platform == "win32":
                 self._job = None
 
 else:
+    def pid_alive(pid: int) -> bool:
+        """Conservatively check a PID without sending it a signal."""
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except (OSError, OverflowError):
+            return True
+        return True
+
 
     def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
