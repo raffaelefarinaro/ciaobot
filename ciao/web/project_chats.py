@@ -10,13 +10,14 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import dataclasses
 import time
 import unicodedata
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
@@ -317,6 +318,21 @@ class RecoveryLifecycleConflict(ValueError):
     """A recovery or lifecycle operation is already in flight."""
 
 
+class RecoveryRequestConflict(ValueError):
+    """A recovery request ID was already bound to another intent."""
+
+
+class RecoveryRequestChatNotFound(ValueError):
+    """No persisted chat exists for a new request ID."""
+
+
+_RECOVERY_REQUEST_LIMIT = 4096
+_RECOVERY_REQUEST_TTL_SECONDS = 15 * 60
+_RECOVERY_REQUEST_BYTES = 8 * 1024 * 1024
+_RECOVERY_REQUEST_ENTRY_BYTES = 1800
+_RECOVERY_OWNER_CHECK_LIMIT = 8
+
+
 class RecoveryOutcomeUnknown(OSError):
     """Activation reported an error and its result could not be read back."""
 
@@ -325,6 +341,18 @@ def _load_retry_kind(raw: object) -> str:
     """A persisted retry kind; the retired "quota_terminal" loads as "quota"."""
     kind = str(raw or "")
     return "quota" if kind == "quota_terminal" else kind
+
+
+def _literal_schedule_id(chat_id: str, row: dict[str, Any]) -> str:
+    if row.get("archived") or row.get("retry_status") != "pending" or row.get("retry_recovery", "") != "":
+        return ""
+    stored = row.get("retry_schedule_id")
+    if isinstance(stored, str) and stored:
+        return stored
+    fields = ("retry_prompt", "retry_image_refs", "retry_kind", "retry_interval_seconds",
+              "retry_unattended", "session_id")
+    data = json.dumps([chat_id, *(row.get(key) for key in fields)], sort_keys=True, default=str)
+    return "legacy-" + uuid.uuid5(uuid.NAMESPACE_URL, data).hex
 
 
 def _recovery_state(marker: object) -> str:
@@ -350,6 +378,40 @@ def _recovery_owner_alive(owner: object) -> bool:
         return True
     from ciao.os_support.processes import pid_alive
     return pid_alive(pid)
+
+
+def _process_incarnation(pid: int) -> str:
+    """Return a process creation identity, or an empty string if unverifiable."""
+    try:
+        if os.name == "posix":
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "lstart="],
+                capture_output=True, text=True, encoding="utf-8", timeout=2, check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+_RECOVERY_PROCESS_INCARNATION = _process_incarnation(os.getpid())
+_ABORTED_RECOVERY_CLAIMS: set[str] = set()
+
+
+def _recovery_claim_abandoned(marker: dict[str, Any]) -> bool:
+    claim, owner = marker.get("claim"), marker.get("owner")
+    if owner == restart_resume.PROCESS_TOKEN and claim in _ABORTED_RECOVERY_CLAIMS:
+        return True
+    if not _recovery_owner_alive(owner):
+        return True
+    identity = marker.get("owner_incarnation")
+    if not identity or not isinstance(owner, str) or owner == restart_resume.PROCESS_TOKEN:
+        return False
+    try:
+        current = _process_incarnation(int(owner.split("-", 1)[0]))
+    except ValueError:
+        return False
+    return bool(current and current != identity)
 
 
 def _load_retry_timing(cd: dict) -> tuple[str, int]:
@@ -832,6 +894,7 @@ class ChatInfo:
     # True when the failed turn was an automation run, so the replay runs
     # unattended too (unattended guidance, no attended-turn bookkeeping).
     retry_unattended: bool = False
+    retry_schedule_id: str = ""
     # Reserved for explicitly opted-in recovery; legacy retries have no marker.
     retry_recovery: object = ""
     # Visible messages preserved when the chat is handed to a fresh provider
@@ -1005,6 +1068,7 @@ class ChatInfo:
                 "interval_seconds": self.retry_interval_seconds,
                 "mode": "continue_recovery" if isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" else "literal",
                 "recovery_state": _recovery_state(self.retry_recovery),
+                "schedule_id": self.retry_schedule_id if self.retry_recovery == "" else "",
             } if self.retry_status else None,
         }
         if self.archive_path:
@@ -1441,6 +1505,7 @@ class ProjectChatManager:
                 retry_kind=_load_retry_kind(cd.get("retry_kind", "")),
                 retry_interval_seconds=_load_retry_timing(cd)[1],
                 retry_unattended=bool(cd.get("retry_unattended", False)),
+                retry_schedule_id=_literal_schedule_id(cid, cd),
                 retry_recovery=cd.get("retry_recovery", ""),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
@@ -1569,6 +1634,7 @@ class ProjectChatManager:
                     "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "retry_unattended": c.retry_unattended,
+                    "retry_schedule_id": c.retry_schedule_id,
                     "retry_recovery": c.retry_recovery,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
@@ -1672,6 +1738,7 @@ class ProjectChatManager:
         if not self._path:
             yield
             return
+        self._reconcile_recovery_claim(chat_id)
         token = uuid.uuid4().hex
         def write(payload: dict[str, Any]) -> None:
             assert self._path is not None
@@ -1793,9 +1860,12 @@ class ProjectChatManager:
 
     def _save_checked(self, *, reason: str, _recovery_expected: tuple[str, str, str, int, str] | None = None,
                       _firing_expected: tuple[str, dict[str, Any]] | None = None,
-                      _unrelated_turn: str = "", _reject_claim: str = "", _reject_recovery: bool = False) -> bool:
+                      _unrelated_turn: str = "", _reject_claim: str = "", _reject_recovery: bool = False,
+                      _literal_expected: tuple[str, str] | None = None, _empty_retry: str = "") -> bool:
         if not self._path:
-            return _recovery_expected is None
+            return _recovery_expected is None and _literal_expected is None and not _empty_retry
+        for chat_id in ({_unrelated_turn, _reject_claim} - {"", _empty_retry}):
+            self._reconcile_recovery_claim(chat_id)
         current = self._state_payload()
         baseline = self._last_local_payload
         baseline_projects = baseline.get("projects")
@@ -1814,7 +1884,7 @@ class ProjectChatManager:
         # merge would reproduce the file as it is. Read paths such as
         # list_projects() end in a save; rewriting the multi-megabyte registry
         # there held the event loop for about a second on every sidebar fetch.
-        if not (_unrelated_turn or _reject_claim or _firing_expected or _recovery_expected) and not (
+        if not (_unrelated_turn or _reject_claim or _firing_expected or _recovery_expected or _literal_expected or _empty_retry) and not (
             self._has_mutations(project_mutations)
             or self._has_mutations(chat_mutations)
         ):
@@ -1825,6 +1895,19 @@ class ProjectChatManager:
             latest = self._read_latest_payload()
             latest_projects = latest.get("projects")
             latest_chats = latest.get("chats")
+            if _empty_retry:
+                row = latest_chats.get(_empty_retry) if isinstance(latest_chats, dict) else None
+                marker = row.get("retry_recovery") if isinstance(row, dict) else None
+                lease = row.get("recovery_lifecycle") if isinstance(row, dict) else None
+                if (not isinstance(row, dict) or row.get("archived") or row.get("retry_status") == "pending"
+                        or (isinstance(marker, dict) and marker.get("claim"))
+                        or (isinstance(lease, dict) and _recovery_owner_alive(lease.get("owner")))):
+                    return False
+            if _literal_expected is not None:
+                literal_id, expected_id = _literal_expected
+                row = latest_chats.get(literal_id) if isinstance(latest_chats, dict) else None
+                if not isinstance(row, dict) or not expected_id or _literal_schedule_id(literal_id, row) != expected_id:
+                    return False
             if _reject_claim and isinstance(latest_chats, dict):
                 live_row = latest_chats.get(_reject_claim)
                 live_marker = live_row.get("retry_recovery") if isinstance(live_row, dict) else None
@@ -1875,6 +1958,17 @@ class ProjectChatManager:
                     baseline_chats if isinstance(baseline_chats, dict) else {},
                 ),
             }
+            if _empty_retry:
+                fields = ("retry_status", "retry_prompt", "retry_image_refs", "retry_last_error",
+                          "retry_interval_seconds", "retry_unattended", "retry_recovery",
+                          "retry_next_at", "retry_kind", "retry_attempts", "retry_schedule_id")
+                source = current["chats"][_empty_retry]
+                payload["chats"][_empty_retry].update({key: source[key] for key in fields})
+            if _literal_expected is not None:
+                literal_id, expected_id = _literal_expected
+                result_row = payload["chats"].get(literal_id)
+                if isinstance(result_row, dict) and result_row.get("retry_status") == "pending":
+                    result_row["retry_schedule_id"] = expected_id
             if _unrelated_turn and isinstance(latest_chats, dict):
                 old_row = latest_chats.get(_unrelated_turn)
                 marker = old_row.get("retry_recovery") if isinstance(old_row, dict) else None
@@ -4786,6 +4880,7 @@ class ProjectChatManager:
             clean_model, provider, chat.project_id
         )
 
+        self._stop_persisted_session_recovery(chat_id)
         self._revoke_mcp_chat(chat_id)
 
         old_provider = chat.provider
@@ -5314,6 +5409,7 @@ class ProjectChatManager:
             # continue_archived_chat()'s job — it spawns a fresh chat and
             # leaves the archived one untouched.
             raise ValueError("Cannot start a new session in an archived chat")
+        self._stop_persisted_session_recovery(chat_id)
         self._revoke_mcp_chat(chat_id)
         # Archive existing transcript
         ctx = ChatContext.for_web(chat_id)
@@ -8258,6 +8354,7 @@ class ProjectChatManager:
         """Read the authoritative registry after an uncertain scheduling result."""
         if not self._path:
             return None
+        self._reconcile_recovery_claim(chat_id)
         with _state_file_lock(self._path):
             rows = self._read_latest_payload().get("chats", {})
             row = rows.get(chat_id) if isinstance(rows, dict) else None
@@ -8269,13 +8366,193 @@ class ProjectChatManager:
                 "mode": "continue_recovery" if isinstance(marker, dict) and marker.get("mode") == "continue" else "literal",
                 "recovery_state": _recovery_state(marker),
                 "recovery_id": marker.get("id", "") if isinstance(marker, dict) else "",
+                "schedule_id": _literal_schedule_id(chat_id, row),
                 "next_at": row.get("retry_next_at", ""),
             }
+
+    @contextmanager
+    def _recovery_request_lock(self, slot: int) -> Iterator[None]:
+        """Stable, bounded lock slots: never unlink an inode another opener can hold."""
+        if self._path is None or not 0 <= slot < _RECOVERY_REQUEST_LIMIT:
+            raise ValueError("invalid recovery request lock slot")
+        path = self._path.with_name(f"{self._path.stem}.recovery_request.{slot}.lock")
+        with path.open("a+", encoding="utf-8", newline="") as handle:
+            lock_exclusive(handle.fileno(), blocking=False)
+            try:
+                yield
+            finally:
+                unlock(handle.fileno())
+
+    def recovery_request_record(
+        self, chat_id: str, request_id: str | None, *, intent: dict[str, str] | None = None,
+        result: dict[str, Any] | None = None, outcome_unknown: bool = False,
+        lifetime: ExitStack | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Issue, admit, finish, or cancel a durable, expiring request receipt."""
+        if self._path is None:
+            raise OSError("recovery request storage unavailable")
+        path = self._path.with_name(f"{self._path.stem}.recovery_requests.json")
+        with _state_file_lock(self._path):
+            if path.exists():
+                with path.open("rb") as handle:
+                    raw = handle.read(_RECOVERY_REQUEST_BYTES + 1)
+                if len(raw) > _RECOVERY_REQUEST_BYTES:
+                    raise OSError("recovery request journal too large")
+                journal = json.loads(raw)
+                if (not isinstance(journal, dict) or not isinstance(journal.get("records"), dict)
+                        or not isinstance(journal.get("highwater"), (int, float))):
+                    raise ValueError("invalid recovery request journal")
+            else:
+                journal = {"highwater": 0, "records": {}}
+            records = journal["records"]
+            now = max(time.time(), journal["highwater"])
+            journal["highwater"] = now
+            active = []
+            for key, item in list(records.items()):
+                if (not isinstance(item, dict) or item.get("status") not in
+                        {"issued", "cancelled", "in_progress", "completed", "unknown"}
+                        or not isinstance(item.get("expires"), (int, float))):
+                    raise ValueError("invalid recovery request record")
+                if item["status"] == "in_progress":
+                    active.append(key)
+                elif item["expires"] <= now:
+                    del records[key]
+            cursor = journal.get("owner_cursor", 0)
+            if not isinstance(cursor, int) or cursor < 0:
+                raise ValueError("invalid recovery owner cursor")
+            if active:
+                start = cursor % len(active)
+                count = min(len(active), _RECOVERY_OWNER_CHECK_LIMIT - int(request_id in active))
+                checked = {active[(start + offset) % len(active)] for offset in range(count)}
+                # Always reconcile the requested receipt, even outside the sweep's window.
+                if request_id in active:
+                    checked.add(request_id)
+                for key in checked:
+                    item = records[key]
+                    slot = item.get("slot")
+                    if not isinstance(slot, int):
+                        raise ValueError("invalid recovery request lock slot")
+                    try:
+                        with self._recovery_request_lock(slot):
+                            item["status"] = "unknown"
+                    except BlockingIOError:
+                        continue
+                    if item["expires"] <= now:
+                        del records[key]
+                journal["owner_cursor"] = (start + count) % len(active)
+            rows = self._read_latest_payload().get("chats", {})
+            if not isinstance(rows, dict) or not isinstance(rows.get(chat_id), dict):
+                raise RecoveryRequestChatNotFound("chat no longer exists")
+            def persist() -> None:
+                data = json.dumps(journal).encode("utf-8")
+                if len(data) > _RECOVERY_REQUEST_BYTES:
+                    raise OSError("recovery request journal is full")
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+                try:
+                    with tmp.open("wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    tmp.replace(path)
+                    if os.name == "posix":
+                        fd = os.open(path.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
+                finally:
+                    tmp.unlink(missing_ok=True)
+
+            # Commit the high-water mark and reclamation before rejecting an expired ID.
+            persist()
+            admitted = False
+            if request_id is None:
+                if intent is not None or result is not None or outcome_unknown:
+                    raise ValueError("invalid recovery request")
+                if len(records) >= _RECOVERY_REQUEST_LIMIT:
+                    raise OSError("recovery request journal is full")
+                request_id = uuid.uuid4().hex
+                existing = {"chat_id": chat_id, "status": "issued", "expires": now + _RECOVERY_REQUEST_TTL_SECONDS}
+                records[request_id] = existing
+            else:
+                existing = records.get(request_id)
+                if existing is None:
+                    raise RecoveryOutcomeUnknown("request ID not issued, expired, or outcome unavailable")
+                if existing.get("chat_id") != chat_id:
+                    raise RecoveryRequestConflict("request ID belongs to another chat")
+                if intent is not None and existing.get("intent") not in (None, intent):
+                    raise RecoveryRequestConflict("request ID belongs to a different operation")
+                if existing["status"] == "issued":
+                    if intent is None:
+                        existing["status"] = "cancelled"
+                    elif existing["expires"] > now and result is None:
+                        if lifetime is None:
+                            raise ValueError("admission requires a handler lifetime")
+                        used = {item["slot"] for item in records.values() if item["status"] == "in_progress"}
+                        for slot in range(_RECOVERY_REQUEST_LIMIT):
+                            if slot in used:
+                                continue
+                            try:
+                                lifetime.enter_context(self._recovery_request_lock(slot))
+                                break
+                            except BlockingIOError:
+                                continue
+                        else:
+                            raise OSError("recovery request lock slots are full")
+                        existing.update(status="in_progress", intent=intent, slot=slot)
+                        admitted = True
+                elif existing["status"] == "in_progress" and existing.get("intent") == intent:
+                    if outcome_unknown:
+                        existing["status"] = "unknown"
+                    elif result is not None:
+                        existing.update(status="completed", result=result)
+            worst_case = {**existing, "status": "completed", "result": {"http_status": 999}}
+            if len(json.dumps({request_id: worst_case}).encode("utf-8")) > _RECOVERY_REQUEST_ENTRY_BYTES:
+                raise OSError("recovery request record too large")
+            persist()
+            response = copy.deepcopy(existing)
+            if response["status"] == "issued":
+                response["request_id"] = request_id
+            return response, admitted
+
+    def _reconcile_recovery_claim(self, chat_id: str) -> None:
+        if not self._path:
+            return
+        with _state_file_lock(self._path):
+            rows = self._read_latest_payload().get("chats", {})
+            row = rows.get(chat_id) if isinstance(rows, dict) else None
+            marker = row.get("retry_recovery") if isinstance(row, dict) else None
+            if not isinstance(marker, dict) or not marker.get("claim"):
+                return
+            marker = copy.deepcopy(marker)
+        if _recovery_claim_abandoned(marker):
+            if self.stop_recovery(chat_id, str(marker.get("id", "")), _abandoned_claim=str(marker["claim"])):
+                _ABORTED_RECOVERY_CLAIMS.discard(marker["claim"])
+
+    def _stop_persisted_session_recovery(self, chat_id: str) -> None:
+        if not self._path:
+            return
+        with _state_file_lock(self._path):
+            rows = self._read_latest_payload().get("chats", {})
+            row = rows.get(chat_id) if isinstance(rows, dict) else None
+            if not isinstance(row, dict):
+                return
+            marker = row.get("retry_recovery")
+            if not isinstance(marker, dict) or marker.get("mode") != "continue":
+                return
+            chat = self._chats.get(chat_id)
+            if chat is None or row.get("session_id") != chat.session_id or marker.get("session_id") != chat.session_id:
+                raise RecoveryLifecycleConflict("recovery session changed")
+            recovery_id = marker.get("id")
+        if not isinstance(recovery_id, str) or not recovery_id or not self.stop_recovery(chat_id, recovery_id):
+            raise RecoveryLifecycleConflict("recovery changed while abandoning session")
 
     def stop_recovery(self, chat_id: str, recovery_id: str, *, _abandoned_claim: str = "") -> bool:
         """Stop exactly the observed recovery, unless its attempt is claimed."""
         if not self._path or not recovery_id:
             return False
+        if not _abandoned_claim:
+            self._reconcile_recovery_claim(chat_id)
         with _state_file_lock(self._path):
             payload = self._read_latest_payload()
             rows = payload.get("chats", {})
@@ -8286,7 +8563,7 @@ class ProjectChatManager:
                     or marker.get("id") != recovery_id):
                 return False
             claim = marker.get("claim")
-            if claim and (claim != _abandoned_claim or _recovery_owner_alive(marker.get("owner"))):
+            if claim and (claim != _abandoned_claim or not _recovery_claim_abandoned(marker)):
                 return False
             cleared = {"retry_status": "stopped", "retry_prompt": "", "retry_image_refs": [],
                        "retry_next_at": "", "retry_last_error": "", "retry_attempts": 0,
@@ -8319,6 +8596,7 @@ class ProjectChatManager:
         self, chat_id: str, session_id: str, last_error: str, turn_count: int, failure_id: str = "", *, manual: bool = False,
     ) -> bool:
         """Opt in to an hourly session nudge, without replaying the failed turn."""
+        self._reconcile_recovery_claim(chat_id)
         chat = self._chats.get(chat_id)
         if (chat is None or chat.archived or not session_id or not last_error
                 or chat.session_id != session_id or chat.last_error != last_error
@@ -8328,7 +8606,7 @@ class ProjectChatManager:
             return False
         fields = ("retry_status", "retry_prompt", "retry_image_refs", "retry_last_error",
                   "retry_interval_seconds", "retry_unattended", "retry_next_at", "retry_kind",
-                  "retry_attempts", "retry_recovery")
+                  "retry_attempts", "retry_recovery", "retry_schedule_id")
         before = {name: copy.deepcopy(getattr(chat, name)) for name in fields}
         chat.retry_status = "pending"
         chat.retry_prompt = _RESUME_CONTINUE_PROMPT
@@ -8342,6 +8620,7 @@ class ProjectChatManager:
         chat.retry_recovery = {"mode": "continue", "session_id": session_id,
                                "cadence_seconds": _RETRY_INTERVAL_SECONDS, "id": uuid.uuid4().hex,
                                "state": "active", "manual": manual}
+        chat.retry_schedule_id = ""
         try:
             saved = self._save_checked(reason="continue_recovery", _recovery_expected=(chat_id, session_id, last_error, turn_count, failure_id))
         except Exception:
@@ -8370,6 +8649,7 @@ class ProjectChatManager:
         unattended: bool = False,
         _owner: ChatStream | None = None,
         _network: bool = False,
+        require_empty: bool = False,
     ) -> ChatInfo | None:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
@@ -8377,6 +8657,8 @@ class ProjectChatManager:
         retry on this chat ran on a shorter interval. ``unattended``
         replays the turn as an automation run.
         """
+        if require_empty:
+            self._reconcile_recovery_claim(chat_id)
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
             return None
@@ -8384,7 +8666,7 @@ class ProjectChatManager:
         if not clean_prompt:
             return None
         names = ("retry_status", "retry_prompt", "retry_image_refs", "retry_last_error", "retry_interval_seconds",
-                 "retry_unattended", "retry_recovery", "retry_next_at", "retry_kind", "retry_attempts")
+                 "retry_unattended", "retry_recovery", "retry_next_at", "retry_kind", "retry_attempts", "retry_schedule_id")
         before = {name: copy.deepcopy(getattr(chat, name)) for name in names}
         if _owner is not None:
             if _owner.retry_generation != self._retry_generations.get(chat_id, 0):
@@ -8400,9 +8682,13 @@ class ProjectChatManager:
         chat.retry_interval_seconds = interval_seconds
         chat.retry_unattended = unattended
         chat.retry_recovery = ""
+        chat.retry_schedule_id = uuid.uuid4().hex
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         try:
-            saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id)
+            if require_empty:
+                saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _empty_retry=chat_id)
+            else:
+                saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id)
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8419,11 +8705,13 @@ class ProjectChatManager:
         self._ensure_retry_task(chat_id)
         return chat
 
-    def stop_chat_retry(self, chat_id: str, *, allow_recovery: bool = True) -> ChatInfo | None:
+    def stop_chat_retry(self, chat_id: str, *, allow_recovery: bool = True, schedule_id: str | None = None) -> ChatInfo | None:
         """Stop and clear a pending retry without deleting the chat."""
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        if schedule_id is not None and (not schedule_id or chat.retry_schedule_id != schedule_id or chat.retry_recovery != ""):
+            raise ValueError("retry schedule changed")
         persisted = self.recovery_status(chat_id)
         if persisted and persisted["mode"] == "continue_recovery" and persisted["status"] == "pending":
             if not allow_recovery:
@@ -8434,13 +8722,15 @@ class ProjectChatManager:
                 raise ValueError("recovery is in flight or changed")
             return chat
         names = ("retry_status", "retry_prompt", "retry_image_refs", "retry_next_at", "retry_last_error",
-                 "retry_attempts", "retry_kind", "retry_interval_seconds", "retry_unattended", "retry_recovery")
+                 "retry_attempts", "retry_kind", "retry_interval_seconds", "retry_unattended", "retry_recovery", "retry_schedule_id")
         before = {name: copy.deepcopy(getattr(chat, name)) for name in names}
         chat.retry_status, chat.retry_prompt, chat.retry_image_refs = "stopped", "", []
         chat.retry_next_at, chat.retry_last_error, chat.retry_attempts = "", "", 0
         chat.retry_kind, chat.retry_interval_seconds, chat.retry_unattended, chat.retry_recovery = "", _RETRY_INTERVAL_SECONDS, False, ""
+        chat.retry_schedule_id = ""
         try:
-            saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _reject_recovery=True)
+            saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _reject_recovery=True,
+                                       _literal_expected=(chat_id, schedule_id) if schedule_id is not None else None)
         except Exception:
             for name, value in before.items():
                 setattr(chat, name, value)
@@ -8523,15 +8813,18 @@ class ProjectChatManager:
         if changed:
             publish_automations_changed(self)
 
-    def try_chat_retry_now(self, chat_id: str) -> ChatStream | None:
+    def try_chat_retry_now(self, chat_id: str, *, schedule_id: str | None = None) -> ChatStream | None:
         """Start the saved retry prompt immediately if the chat is idle.
 
         The resend is tagged `retry` so the PWA draws the compact Retry notice
         instead of the prompt (the automation prompt, an unattended network
         retry, or a user-armed hourly retry).
         """
+        self._reconcile_recovery_claim(chat_id)
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived or chat.retry_status != "pending":
+            return None
+        if schedule_id is not None and (not schedule_id or chat.retry_schedule_id != schedule_id or chat.retry_recovery != ""):
             return None
         if not self._valid_recovery_retry(chat):
             return None
@@ -8541,12 +8834,18 @@ class ProjectChatManager:
             return None
         if self._broker.get(chat_id) is not None:
             return None
+        retry_prompt = chat.retry_prompt
+        retry_unattended = chat.retry_unattended
         network = chat.retry_kind == _NETWORK_RETRY_KIND
         if network and chat.retry_attempts >= _MAX_NETWORK_RETRIES:
+            if schedule_id is not None:
+                return None
             self._exhaust_network_retry(chat)
             return None
         cap = None if network else _retry_cap(chat.retry_kind)
         if cap is not None and chat.retry_attempts >= cap:
+            if schedule_id is not None:
+                return None
             logger.warning(
                 "chat %s reached the %s retry cap (%d) before firing; stopping the retry",
                 chat_id, chat.retry_kind, cap,
@@ -8567,34 +8866,43 @@ class ProjectChatManager:
                 "failure_id": chat.failure_id,
                 "retry_attempts": chat.retry_attempts, "retry_next_at": chat.retry_next_at,
             })
-        previous_attempts, previous_next = chat.retry_attempts, chat.retry_next_at
+        previous_attempts, previous_next, previous_interval = chat.retry_attempts, chat.retry_next_at, chat.retry_interval_seconds
         previous_marker = copy.deepcopy(chat.retry_recovery)
+        claim_id = ""
         if firing_expected is not None:
             assert isinstance(chat.retry_recovery, dict)
-            chat.retry_recovery = {**chat.retry_recovery, "claim": uuid.uuid4().hex,
-                                   "owner": restart_resume.PROCESS_TOKEN}
+            claim_id = uuid.uuid4().hex
+            chat.retry_recovery = {**chat.retry_recovery, "claim": claim_id,
+                                   "owner": restart_resume.PROCESS_TOKEN,
+                                   "owner_incarnation": _RECOVERY_PROCESS_INCARNATION}
         chat.retry_attempts += 1
         if network:
             chat.retry_interval_seconds = _network_retry_interval(chat.retry_attempts)
         chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
-        if firing_expected is None:
+        if firing_expected is None and schedule_id is None:
             self._save()
         else:
             try:
-                saved = self._save_checked(reason="continue_recovery_fire", _firing_expected=firing_expected)
+                saved = self._save_checked(
+                    reason="continue_recovery_fire" if firing_expected else "literal_retry_fire",
+                    _firing_expected=firing_expected,
+                    _literal_expected=(chat_id, schedule_id) if schedule_id is not None else None,
+                )
             except Exception:
-                chat.retry_attempts, chat.retry_next_at = previous_attempts, previous_next
+                if claim_id:
+                    _ABORTED_RECOVERY_CLAIMS.add(claim_id)
+                chat.retry_attempts, chat.retry_next_at, chat.retry_interval_seconds = previous_attempts, previous_next, previous_interval
                 chat.retry_recovery = previous_marker
                 raise
             if not saved:
-                chat.retry_attempts, chat.retry_next_at = previous_attempts, previous_next
+                chat.retry_attempts, chat.retry_next_at, chat.retry_interval_seconds = previous_attempts, previous_next, previous_interval
                 chat.retry_recovery = previous_marker
                 return None
         self._publish_retry(chat)
         try:
             return self.start_stream(
-                chat_id, chat.retry_prompt, images=images or None, is_retry=True,
-                unattended=network or chat.retry_unattended, origin="retry",
+                chat_id, retry_prompt, images=images or None, is_retry=True,
+                unattended=network or retry_unattended, origin="retry",
             )
         except Exception:
             if firing_expected is not None:
@@ -8608,14 +8916,16 @@ class ProjectChatManager:
         marker = chat.retry_recovery
         if not marker.get("claim") or marker.get("owner") != restart_resume.PROCESS_TOKEN:
             return
-        chat.retry_recovery = {key: value for key, value in marker.items() if key not in {"claim", "owner"}}
+        chat.retry_recovery = {key: value for key, value in marker.items() if key not in {"claim", "owner", "owner_incarnation"}}
         try:
             saved = self._save_checked(reason="release_recovery_claim",
                                        _firing_expected=(chat_id, {"retry_status": "pending", "retry_recovery": marker}))
         except Exception:
+            _ABORTED_RECOVERY_CLAIMS.add(marker["claim"])
             chat.retry_recovery = marker
             raise
         if not saved:
+            _ABORTED_RECOVERY_CLAIMS.add(marker["claim"])
             chat.retry_recovery = marker
         else:
             self._publish_retry(chat)
@@ -8665,6 +8975,7 @@ class ProjectChatManager:
             "interval_seconds": chat.retry_interval_seconds,
             "mode": "continue_recovery" if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("mode") == "continue" else "literal",
             "recovery_state": _recovery_state(chat.retry_recovery),
+            "schedule_id": chat.retry_schedule_id if chat.retry_recovery == "" else "",
         })
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
@@ -8679,6 +8990,7 @@ class ProjectChatManager:
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
         chat.retry_unattended = False
         chat.retry_recovery = ""
+        chat.retry_schedule_id = ""
         self._save()
         self._publish_retry(chat)
         if status == "stopped" and _has_running_loop():
@@ -8695,7 +9007,7 @@ class ProjectChatManager:
             if chat.retry_status == "pending" and not chat.archived:
                 marker = chat.retry_recovery
                 if isinstance(marker, dict) and marker.get("claim"):
-                    if not _recovery_owner_alive(marker.get("owner")):
+                    if _recovery_claim_abandoned(marker):
                         self.stop_recovery(chat.chat_id, str(marker.get("id", "")),
                                            _abandoned_claim=str(marker["claim"]))
                     continue

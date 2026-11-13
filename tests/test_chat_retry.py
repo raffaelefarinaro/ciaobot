@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import subprocess
+import sys
 from threading import Barrier, Event
 from types import SimpleNamespace
 
@@ -125,6 +127,584 @@ async def _consume(stream) -> list[dict]:
     async for event in stream.subscribe():
         events.append(event)
     return events
+
+
+def test_recovery_request_status_tombstones_delayed_submission(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failed", "error", "failure"
+    owner._save()
+    other = _make_manager(tmp_path)
+    request_id = other.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+
+    def client(manager):
+        app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+        app.state.project_chat_manager = manager
+        return TestClient(app, raise_server_exceptions=False)
+
+    url = f"/chats/{chat.chat_id}/retry"
+    status = client(other).post(url, json={"action": "recovery_request_status", "request_id": request_id})
+    assert status.status_code == 200
+    assert status.json() == {"request_id": request_id, "status": "cancelled"}
+    delayed = client(owner).post(url, json={"action": "continue_recovery", "failure_id": "failure", "request_id": request_id})
+    assert delayed.status_code == 409
+    assert owner._read_latest_payload()["chats"][chat.chat_id]["retry_status"] != "pending"
+
+
+def test_recovery_status_cancels_request_delayed_before_admission(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failed", "error", "failure"
+    owner._save()
+    other = _make_manager(tmp_path)
+    request_id = other.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+    waiting, resume = Event(), Event()
+    original = owner.recovery_request_record
+
+    def delayed(*args, **kwargs):
+        if kwargs.get("intent") and kwargs.get("result") is None:
+            waiting.set()
+            assert resume.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, "recovery_request_record", delayed)
+
+    def client(manager):
+        app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+        app.state.project_chat_manager = manager
+        return TestClient(app, raise_server_exceptions=False)
+
+    url = f"/chats/{chat.chat_id}/retry"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client(owner).post, url, json={
+            "action": "continue_recovery", "failure_id": "failure", "request_id": request_id,
+        })
+        assert waiting.wait(5)
+        try:
+            status = client(other).post(url, json={"action": "recovery_request_status", "request_id": request_id})
+            assert status.json()["status"] == "cancelled"
+        finally:
+            resume.set()
+        assert future.result().status_code == 409
+    assert owner.recovery_status(chat.chat_id)["status"] != "pending"
+
+
+def test_recovery_request_survives_client_disconnect_and_blocks_duplicate(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failed", "error", "failure"
+    owner._save()
+    other = _make_manager(tmp_path)
+    request_id = other.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+    entered, resume = Event(), Event()
+    original = owner.schedule_continue_recovery
+
+    def delayed(*args, **kwargs):
+        entered.set()
+        assert resume.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, "schedule_continue_recovery", delayed)
+
+    def client(manager):
+        app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+        app.state.project_chat_manager = manager
+        return TestClient(app, raise_server_exceptions=False)
+
+    url = f"/chats/{chat.chat_id}/retry"
+    body = {"action": "continue_recovery", "failure_id": "failure", "request_id": request_id}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client(owner).post, url, json=body)
+        assert entered.wait(5)
+        try:
+            status = client(other).post(url, json={"action": "recovery_request_status", "request_id": request_id})
+            assert status.json() == {"request_id": request_id, "status": "in_progress"}
+            assert client(other).post(url, json=body).status_code == 202
+            conflict = client(other).post(url, json={**body, "failure_id": "other"})
+            assert conflict.status_code == 409
+        finally:
+            resume.set()
+        assert future.result().json()["status"] == "completed"
+    restarted = _make_manager(tmp_path)
+    status = client(restarted).post(url, json={"action": "recovery_request_status", "request_id": request_id})
+    assert status.json()["status"] == "completed"
+    assert status.json()["result"]["http_status"] == 200
+    assert restarted.recovery_status(chat.chat_id)["mode"] == "continue_recovery"
+
+
+@pytest.mark.parametrize("stage", ["admission", "completion"])
+def test_recovery_request_ambiguous_journal_write_is_never_absent(tmp_path: Path, monkeypatch, stage: str) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status, chat.failure_id = "session", "failed", "error", "failure"
+    owner._save()
+    other = _make_manager(tmp_path)
+    request_id = other.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+    original = owner.recovery_request_record
+
+    def write_then_fail(*args, **kwargs):
+        record = original(*args, **kwargs)
+        if (kwargs.get("result") is not None) == (stage == "completion"):
+            raise OSError("ambiguous journal write")
+        return record
+
+    monkeypatch.setattr(owner, "recovery_request_record", write_then_fail)
+
+    def client(manager):
+        app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+        app.state.project_chat_manager = manager
+        return TestClient(app, raise_server_exceptions=False)
+
+    url = f"/chats/{chat.chat_id}/retry"
+    body = {"action": "continue_recovery", "failure_id": "failure", "request_id": request_id}
+    response = client(owner).post(url, json=body)
+    assert response.status_code == 503
+    assert response.json()["status"] == "unknown"
+    status = client(other).post(url, json={"action": "recovery_request_status", "request_id": request_id})
+    assert status.json()["status"] == ("unknown" if stage == "admission" else "completed")
+    duplicate = client(other).post(url, json=body)
+    assert duplicate.json()["status"] == ("unknown" if stage == "admission" else "completed")
+
+
+def test_recovery_request_unreadable_journal_returns_unknown(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    path = manager._path.with_name(f"{manager._path.stem}.recovery_requests.json")
+    path.write_text('{"req-4": null}', encoding="utf-8")
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(f"/chats/{chat.chat_id}/retry", json={"action": "recovery_request_status", "request_id": "req-4"})
+    assert response.status_code == 503
+    assert response.json() == {"request_id": "req-4", "status": "unknown"}
+
+
+def test_recovery_request_capacity_fails_closed_without_expiring_tombstones(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import project_chats
+    from ciao.web.routes_api import chat_retry
+
+    monkeypatch.setattr(project_chats, "_RECOVERY_REQUEST_LIMIT", 2)
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    url = f"/chats/{chat.chat_id}/retry"
+    tokens = []
+    for _ in range(2):
+        token = client.post(url, json={"action": "issue_recovery_request"}).json()["request_id"]
+        tokens.append(token)
+        assert client.post(url, json={"action": "recovery_request_status", "request_id": token}).json()["status"] == "cancelled"
+    full = client.post(url, json={"action": "issue_recovery_request"})
+    assert full.status_code == 503
+    delayed = client.post(url, json={"action": "continue_recovery", "failure_id": "failure", "request_id": tokens[0]})
+    assert delayed.status_code == 409 and delayed.json()["status"] == "cancelled"
+
+
+def test_recovery_request_full_journal_still_finishes_admitted_request(tmp_path: Path, monkeypatch, request) -> None:
+    from contextlib import ExitStack
+    from ciao.web import project_chats
+
+    monkeypatch.setattr(project_chats, "_RECOVERY_REQUEST_LIMIT", 32)
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    intent = {"action": "continue_recovery", "failure_id": "failure"}
+    active = manager.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+    lifetime = ExitStack()
+    request.addfinalizer(lifetime.close)
+    _, admitted = manager.recovery_request_record(chat.chat_id, active, intent=intent, lifetime=lifetime)
+    assert admitted
+    tokens = []
+    for _ in range(31):
+        token = manager.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+        tokens.append(token)
+        record, _ = manager.recovery_request_record(chat.chat_id, token)
+        assert record["status"] == "cancelled"
+    with pytest.raises(OSError):
+        manager.recovery_request_record(chat.chat_id, None)
+    finished, _ = manager.recovery_request_record(chat.chat_id, active, intent=intent, result={"http_status": 200})
+    assert finished["status"] == "completed"
+    lifetime.close()
+    old, admitted = manager.recovery_request_record(chat.chat_id, tokens[0], intent=intent)
+    assert old["status"] == "cancelled" and not admitted
+
+
+def test_recovery_request_rejects_missing_chat_and_oversized_failure_without_journal(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    missing = client.post("/chats/missing/retry", json={"action": "recovery_request_status", "request_id": "missing"})
+    assert missing.status_code == 404 and missing.json()["status"] == "unknown"
+    oversized = client.post(f"/chats/{chat.chat_id}/retry", json={
+        "action": "continue_recovery", "failure_id": "x" * 129, "request_id": "too-long",
+    })
+    assert oversized.status_code == 400
+    assert not manager._path.with_name(f"{manager._path.stem}.recovery_requests.json").exists()
+
+
+def test_recovery_request_missing_chat_does_not_change_existing_journal(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    request_id = manager.recovery_request_record(chat.chat_id, None)[0]["request_id"]
+    manager.recovery_request_record(chat.chat_id, request_id)
+    journal = manager._path.with_name(f"{manager._path.stem}.recovery_requests.json")
+    before = journal.read_bytes()
+    payload = manager._read_latest_payload()
+    payload["chats"].pop(chat.chat_id)
+    manager._path.write_text(json.dumps(payload))
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    response = TestClient(app, raise_server_exceptions=False).post(
+        f"/chats/{chat.chat_id}/retry", json={"action": "recovery_request_status", "request_id": request_id},
+    )
+    assert response.status_code == 404 and response.json()["status"] == "unknown"
+    assert journal.read_bytes() == before
+
+
+def test_recovery_request_oversized_journal_returns_unknown(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import project_chats
+    from ciao.web.routes_api import chat_retry
+
+    monkeypatch.setattr(project_chats, "_RECOVERY_REQUEST_BYTES", 64)
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("recovery", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="recovery")
+    path = manager._path.with_name(f"{manager._path.stem}.recovery_requests.json")
+    path.write_bytes(b"x" * 65)
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    response = TestClient(app, raise_server_exceptions=False).post(
+        f"/chats/{chat.chat_id}/retry", json={"action": "recovery_request_status", "request_id": "id"},
+    )
+    assert response.status_code == 503 and response.json()["status"] == "unknown"
+    assert path.stat().st_size == 65
+
+
+@pytest.mark.parametrize("replacement", ["literal", "recovery"])
+def test_guarded_set_does_not_replace_schedule_created_during_confirmation(tmp_path: Path, monkeypatch, replacement: str) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    chat.session_id, chat.last_error, chat.last_response_status = "session", "failed", "error"
+    owner._save()
+    stale = _make_manager(tmp_path)
+    original = stale._save_checked
+    created = False
+
+    def create_before_commit(*args, **kwargs):
+        nonlocal created
+        if kwargs.get("_empty_retry") and not created:
+            created = True
+            if replacement == "literal":
+                assert owner.set_chat_retry(chat.chat_id, "newer prompt")
+            else:
+                assert owner.schedule_continue_recovery(chat.chat_id, "session", "failed", 0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(stale, "_save_checked", create_before_commit)
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = stale
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(f"/chats/{chat.chat_id}/retry", json={
+        "action": "set", "prompt": "older confirmation", "require_empty": True,
+    })
+    assert response.status_code == 409
+    assert created
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["retry_status"] == "pending"
+    assert row["retry_prompt"] == ("newer prompt" if replacement == "literal" else "continue")
+
+
+def test_guarded_set_populates_empty_disk_slot_from_stale_manager(tmp_path: Path) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    owner.set_chat_retry(chat.chat_id, "old prompt")
+    stale = _make_manager(tmp_path)
+    owner.stop_chat_retry(chat.chat_id)
+    assert stale.set_chat_retry(chat.chat_id, "new prompt", require_empty=True)
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["retry_status"] == "pending"
+    assert row["retry_prompt"] == "new prompt"
+    assert row["retry_schedule_id"]
+
+
+def test_guarded_set_route_and_legacy_replacement(tmp_path: Path) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("retry", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="retry")
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    url = f"/chats/{chat.chat_id}/retry"
+    assert client.post(url, json={"action": "set", "prompt": "first", "require_empty": True}).status_code == 200
+    assert client.post(url, json={"action": "set", "prompt": "refused", "require_empty": True}).status_code == 409
+    assert client.post(url, json={"action": "set", "prompt": "legacy"}).status_code == 200
+    assert manager._read_latest_payload()["chats"][chat.chat_id]["retry_prompt"] == "legacy"
+    assert client.post(url, json={"action": "set", "prompt": "x", "require_empty": False}).status_code == 400
+
+
+@pytest.mark.parametrize("action", ["try_now", "stop"])
+def test_guarded_literal_action_cannot_touch_concurrent_replacement(tmp_path: Path, monkeypatch, action: str) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    owner.set_chat_retry(chat.chat_id, "first prompt")
+    stale = _make_manager(tmp_path)
+    observed = stale.get_chat(chat.chat_id).retry_schedule_id
+    started = []
+    monkeypatch.setattr(stale, "start_stream", lambda *args, **kwargs: started.append(args[1]))
+    original = stale._save_checked
+    replaced = False
+
+    def replace_before_cas(*args, **kwargs):
+        nonlocal replaced
+        if kwargs.get("_literal_expected") and not replaced:
+            replaced = True
+            owner.set_chat_retry(chat.chat_id, "replacement prompt")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(stale, "_save_checked", replace_before_cas)
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = stale
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(f"/chats/{chat.chat_id}/retry", json={"action": action, "schedule_id": observed})
+    assert response.status_code == 409
+    assert replaced and not started
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["retry_status"] == "pending"
+    assert row["retry_prompt"] == "replacement prompt"
+    assert row["retry_schedule_id"] != observed
+
+
+@pytest.mark.parametrize("action", ["try_now", "stop"])
+def test_guarded_literal_action_accepts_observed_schedule(tmp_path: Path, monkeypatch, action: str) -> None:
+    from ciao.web.routes_api import chat_retry
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("retry", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="retry")
+    manager.set_chat_retry(chat.chat_id, "literal prompt")
+    started = []
+    monkeypatch.setattr(manager, "start_stream", lambda *args, **kwargs: started.append(args[1]) or object())
+    app = Starlette(routes=[Route("/chats/{chat_id}/retry", chat_retry, methods=["POST"])])
+    app.state.project_chat_manager = manager
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(f"/chats/{chat.chat_id}/retry", json={
+        "action": action, "schedule_id": chat.to_dict(local=True)["retry"]["schedule_id"],
+    })
+    assert response.status_code == 200
+    assert started == (["literal prompt"] if action == "try_now" else [])
+    if action == "stop":
+        assert manager._read_latest_payload()["chats"][chat.chat_id]["retry_status"] == "stopped"
+
+
+def test_legacy_literal_identity_is_stable_and_replacement_gets_new_id(tmp_path: Path) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    owner.set_chat_retry(chat.chat_id, "same prompt")
+    payload = owner._read_latest_payload()
+    payload["chats"][chat.chat_id].pop("retry_schedule_id")
+    owner._path.write_text(json.dumps(payload))
+    first, second = _make_manager(tmp_path), _make_manager(tmp_path)
+    observed = first.get_chat(chat.chat_id).retry_schedule_id
+    assert observed.startswith("legacy-")
+    assert second.get_chat(chat.chat_id).retry_schedule_id == observed
+    second.set_chat_retry(chat.chat_id, "same prompt")
+    with pytest.raises(ValueError):
+        first.stop_chat_retry(chat.chat_id, schedule_id=observed)
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["retry_status"] == "pending"
+    assert row["retry_schedule_id"] != observed
+
+
+def test_guarded_run_dispatches_observed_prompt_after_later_replacement(tmp_path: Path, monkeypatch) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    owner.set_chat_retry(chat.chat_id, "first prompt")
+    runner = _make_manager(tmp_path)
+    observed = runner.get_chat(chat.chat_id).retry_schedule_id
+    original = runner._save_checked
+    sent = []
+
+    def replace_after_cas(*args, **kwargs):
+        saved = original(*args, **kwargs)
+        if kwargs.get("_literal_expected"):
+            owner.set_chat_retry(chat.chat_id, "replacement prompt")
+        return saved
+
+    monkeypatch.setattr(runner, "_save_checked", replace_after_cas)
+    monkeypatch.setattr(runner, "start_stream", lambda *args, **kwargs: sent.append(args[1]) or object())
+    assert runner.try_chat_retry_now(chat.chat_id, schedule_id=observed) is not None
+    assert sent == ["first prompt"]
+    assert owner._read_latest_payload()["chats"][chat.chat_id]["retry_prompt"] == "replacement prompt"
+
+
+@pytest.mark.parametrize("failure", ["claim_write", "release"])
+def test_aborted_claim_reconciles_while_owner_process_alive(tmp_path: Path, monkeypatch, failure: str) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    owner._save()
+    assert owner.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    survivor = _make_manager(tmp_path)
+    original = owner._save_checked
+
+    def save_then_fail(*args, **kwargs):
+        if kwargs.get("reason") == ("continue_recovery_fire" if failure == "claim_write" else "release_recovery_claim"):
+            if failure == "claim_write":
+                original(*args, **kwargs)
+            raise OSError("injected write failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, "_save_checked", save_then_fail)
+    if failure == "claim_write":
+        with pytest.raises(OSError):
+            owner.try_chat_retry_now(chat.chat_id)
+    else:
+        monkeypatch.setattr(owner, "start_stream", lambda *args, **kwargs: object())
+        assert owner.try_chat_retry_now(chat.chat_id) is not None
+        with pytest.raises(OSError):
+            owner._release_recovery_claim(chat.chat_id)
+    assert survivor.recovery_status(chat.chat_id)["status"] == "stopped"
+
+
+def test_surviving_manager_reconciles_only_after_owner_dies(tmp_path: Path) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    owner._save()
+    assert owner.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    survivor = _make_manager(tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        payload = owner._read_latest_payload()
+        marker = payload["chats"][chat.chat_id]["retry_recovery"]
+        marker.update(claim="foreign-claim", owner=f"{process.pid}-foreign")
+        owner._path.write_text(json.dumps(payload))
+        assert survivor.recovery_status(chat.chat_id)["recovery_state"] == "in_flight"
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    assert survivor.recovery_status(chat.chat_id)["status"] == "stopped"
+
+
+def test_reused_pid_does_not_keep_old_claim_alive(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import project_chats
+
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    owner._save()
+    assert owner.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    survivor = _make_manager(tmp_path)
+    payload = owner._read_latest_payload()
+    payload["chats"][chat.chat_id]["retry_recovery"].update(
+        claim="foreign", owner="12345-foreign", owner_incarnation="old-process"
+    )
+    owner._path.write_text(json.dumps(payload))
+    monkeypatch.setattr(project_chats, "_recovery_owner_alive", lambda owner: True)
+    monkeypatch.setattr(project_chats, "_process_incarnation", lambda pid: "new-process")
+    assert survivor.recovery_status(chat.chat_id)["status"] == "stopped"
+
+
+@pytest.mark.parametrize("operation", ["reset", "handover"])
+async def test_session_change_stops_recovery_saved_by_another_manager(tmp_path: Path, monkeypatch, operation: str) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id, chat.last_error, chat.last_response_status = "session-1", "failed", "error"
+    owner._save()
+    stale = _make_manager(tmp_path)
+    assert owner.schedule_continue_recovery(chat.chat_id, "session-1", "failed", 0)
+    if operation == "reset":
+        stale.new_session(chat.chat_id)
+    else:
+        monkeypatch.setattr(stale, "_resolve_and_validate_chat_model", lambda *args: "model")
+        stale.handover_chat(chat.chat_id, provider="claude", model="model")
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["session_id"] == ""
+    assert row["retry_status"] != "pending"
+    assert row["retry_recovery"] == ""
+
+
+@pytest.mark.parametrize("operation", ["reset", "handover"])
+async def test_session_change_preserves_other_managers_literal_retry(tmp_path: Path, monkeypatch, operation: str) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("retry", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="retry")
+    chat.session_id = "session-1"
+    owner._save()
+    stale = _make_manager(tmp_path)
+    owner.set_chat_retry(chat.chat_id, "literal prompt")
+    if operation == "reset":
+        stale.new_session(chat.chat_id)
+    else:
+        monkeypatch.setattr(stale, "_resolve_and_validate_chat_model", lambda *args: "model")
+        stale.handover_chat(chat.chat_id, provider="claude", model="model")
+    row = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert row["retry_status"] == "pending"
+    assert row["retry_prompt"] == "literal prompt"
+    assert row["retry_recovery"] == ""
+
+
+@pytest.mark.parametrize("operation", ["reset", "handover"])
+async def test_stale_session_change_does_not_cancel_new_sessions_recovery(tmp_path: Path, monkeypatch, operation: str) -> None:
+    owner = _make_manager(tmp_path)
+    project = owner.create_project("recovery", workspace="personal")
+    chat = owner.create_chat(project.project_id, title="recovery")
+    chat.session_id = "old-session"
+    owner._save()
+    stale = _make_manager(tmp_path)
+    chat.session_id, chat.last_error, chat.last_response_status = "new-session", "failed", "error"
+    owner._save()
+    assert owner.schedule_continue_recovery(chat.chat_id, "new-session", "failed", 0)
+    before = owner._read_latest_payload()["chats"][chat.chat_id]
+    with pytest.raises(ValueError, match="recovery session changed"):
+        if operation == "reset":
+            stale.new_session(chat.chat_id)
+        else:
+            monkeypatch.setattr(stale, "_resolve_and_validate_chat_model", lambda *args: "model")
+            stale.handover_chat(chat.chat_id, provider="claude", model="model")
+    after = owner._read_latest_payload()["chats"][chat.chat_id]
+    assert after["session_id"] == before["session_id"]
+    assert after["retry_recovery"] == before["retry_recovery"]
 
 
 def test_recovery_opt_in_survives_restart_and_sends_only_continue(tmp_path: Path) -> None:

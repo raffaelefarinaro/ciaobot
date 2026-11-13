@@ -868,8 +868,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # control. Connected PWAs close the matching service-worker notification tag.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, continue_recovery,
-# continue_recovery_now, recovery_status, stop_recovery, try_now, stop}.
+# continue_recovery_now, recovery_status, issue_recovery_request, recovery_request_status, stop_recovery, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
+# To create a literal retry only if the persisted retry slot is empty, send
+# {"action":"set","prompt":"...","require_empty":true}; a pending retry or
+# concurrent lifecycle operation returns 409 without replacing it. Omitting
+# require_empty keeps the legacy replacement behavior.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' \
   -d '{"action":"set","prompt":"retry this turn"}'
@@ -886,10 +890,39 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # A chat exposes `failure_id` (an opaque identity, empty without a current
 # failure), `recovery_eligible`, and `retry.mode` ("continue_recovery" or
 # "literal"). `chat_streaming_done` includes the current failure_id too.
-# Explicitly opt in to hourly recovery with exactly:
+# Explicitly opt in to hourly recovery with:
 # {"action":"continue_recovery","failure_id":"<current failure_id>"}
 # Or send a one-shot continue immediately (or fire an existing hourly recovery) with:
 # {"action":"continue_recovery_now","failure_id":"<current failure_id>"}
+# Both accept an optional server-issued `request_id`. First POST
+# {"action":"issue_recovery_request"} to this chat's retry endpoint; it returns
+# {"request_id":"...","expires":<Unix seconds>}. Use that ID for one intent; with a
+# request ID, `failure_id` is limited to 128 characters. With it,
+# the response is {"request_id":"...","status":"completed",
+# "result":{"http_status":200}}; inspect http_status and then recovery_status.
+# Duplicate admitted requests return 202/in_progress or the completed receipt;
+# reusing an ID for another chat or intent returns 409. An uncertain write or
+# execution returns 503 {"request_id":"...","status":"unknown"}. A handler
+# that finishes with a server error records a terminal unknown outcome until
+# expiry; this does not mean that it had no effects.
+# POST {"action":"recovery_request_status","request_id":"..."} reconciles:
+# it returns in_progress, completed (with result), cancelled, or 503/unknown. For an issued
+# but unsubmitted ID it durably records cancelled, so any delayed submission gets
+# 409 rather than starting later. In_progress/unknown must not be cleared or
+# treated as absent, including after restart. Completed means the handler
+# returned, not that a provider turn completed; query recovery_status for the
+# current recovery. Cancelled refers only to this request, not other schedules.
+# Receipts expire 15 minutes after issuance; expired, unissued and reclaimed IDs
+# return 503/unknown, never permission to assume no execution occurred. Terminal receipts are reclaimed after expiry, while
+# live in-progress receipts are retained. Capacity is 4096 receipts and 8 MiB;
+# when full, new IDs fail closed with 503/unknown; existing records remain usable.
+# Status for a missing chat is 404/unknown and writes nothing.
+# Each admitted handler holds an OS-backed lock through admission and completion,
+# even if its caller is cancelled. Other engine processes probe bounded, rotating
+# lock slots: a released lock makes an unfinished receipt unknown (never replayable),
+# and expiry reclaims its capacity. Lock files are reused, never unlinked.
+# Legacy calls without request_id keep their prior
+# response and behavior.
 # A new one-shot does not opt in to hourly retries. No prompt or images are accepted. A stale failure, missing session, busy chat
 # or conflicting pending retry returns 409; an invalid request returns 400.
 # `stop` cancels a literal retry. Generic `try_now` may send a literal retry:
