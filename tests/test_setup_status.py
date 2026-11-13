@@ -63,6 +63,11 @@ def test_terminal_path_windows_receipt_accepts_copied_executable(tmp_path, monke
     receipt = _path_receipt(executable, tmp_path / "tool" / "python.exe")
     monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
     assert routes_api._resolve_terminal_path_ciao() == str(executable)
+    wrong_name = tmp_path / "ciao"
+    wrong_name.write_text("fixture")
+    wrong_name.chmod(0o755)
+    receipt = _path_receipt(wrong_name, tmp_path / "tool" / "python.exe")
+    assert routes_api._resolve_terminal_path_ciao() is None
 
 
 def test_terminal_path_refuses_stale_receipt_foreign_symlink_and_bootstrap(tmp_path, monkeypatch):
@@ -90,7 +95,16 @@ def test_terminal_path_refuses_stale_receipt_foreign_symlink_and_bootstrap(tmp_p
     shim.unlink()
     shim.symlink_to(installed)
     installed.chmod(0o644)
-    assert routes_api._resolve_terminal_path_ciao() is None
+    if os.name == "posix":
+        assert routes_api._resolve_terminal_path_ciao() is None
+    checked = []
+    def not_executable(path, mode):
+        checked.append((path, mode))
+        return False
+    with monkeypatch.context() as scoped:
+        scoped.setattr(routes_api, "os", SimpleNamespace(access=not_executable, X_OK=os.X_OK))
+        assert routes_api._resolve_terminal_path_ciao() is None
+    assert checked == [(shim, os.X_OK)]
     installed.chmod(0o755)
     for bad in ("ciao", str(tmp_path / "not-ciao"), ""):
         receipt = _path_receipt(Path(bad), tool_bin / "python")
