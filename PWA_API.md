@@ -1113,11 +1113,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # bound and logs at; pwa_host and log_level change only at the next start).
 # resume_after_restart (boolean, default true: at startup a chat whose turn a
 # restart or crash cut off gets one `restart_resume` turn).
+# verify_vault_answers (boolean, default true: a turn that read vault notes gets
+# a one-shot check of its answer's claims against them; see turn_verification).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode, app_repo and resume_after_restart (a non-boolean value is a 400).
+# dev_mode, app_repo, resume_after_restart and verify_vault_answers (a
+# non-boolean value is a 400).
 # The retired insights_enabled key is still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
 # are persisted in .runtime/app_settings.json and applied to the
@@ -1822,6 +1825,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
+- `turn_verification`: the vault answer check for one turn finished. Fields: `{chat_id, turn_index, verification}`, where `verification` is `{supported, unsupported, general, claims: [{text, status: "supported"|"unsupported"|"general", source}], sources}` (`source` is a vault-relative note path, `""` for general). Persisted in `ChatInfo.turn_verification` and overlaid as `verification` on the turn's last assistant row of the chat messages response.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.

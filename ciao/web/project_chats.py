@@ -122,7 +122,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review
+from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -756,6 +756,9 @@ class ChatInfo:
     # ordinary user messages; history reads this back so the PWA draws a notice
     # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → vault answer check result
+    # (ciao.vault_verification.parse_verification shape). Absent = not checked.
+    turn_verification: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
     # instead of starting a second turn, so a recovery resend cannot double a
@@ -1204,6 +1207,8 @@ class ProjectChatManager:
         # AskUserQuestion. The headless CLI auto-cancels with empty answers,
         # so we notify the user so they can answer in the next turn.
         self.notify_question_cb: Optional[Callable[[str, str], None]] = None
+        # Whether a turn that read vault notes gets a claim check (Settings → General).
+        self.verify_vault_answers_enabled: Callable[[], bool] = lambda: True
         # Fired after a read mutation so the macOS companion and remote PWA
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
@@ -1379,6 +1384,7 @@ class ProjectChatManager:
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 user_turn_origin=dict(cd.get("user_turn_origin", {})),
+                turn_verification=dict(cd.get("turn_verification", {})),
                 user_turn_send_ids=dict(cd.get("user_turn_send_ids", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
@@ -1504,6 +1510,7 @@ class ProjectChatManager:
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
                     "user_turn_origin": c.user_turn_origin,
+                    "turn_verification": c.turn_verification,
                     "user_turn_send_ids": c.user_turn_send_ids,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
@@ -5661,6 +5668,17 @@ class ProjectChatManager:
                 return candidate
         return None
 
+    def _vault_root_for_chat(self, chat_id: str) -> Path | None:
+        """The vault folder of a chat's owning workspace, or None when unresolvable."""
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat is not None else None
+        if project is None:
+            return None
+        try:
+            return Path(self._config.workspace_vault_root(project.workspace))
+        except ValueError:
+            return None
+
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
 
@@ -7407,6 +7425,7 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
+                chat.turn_verification.pop(key, None)
                 cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
                 if isinstance(cancelled_send_ids, str):
                     cancelled_send_ids = [cancelled_send_ids]
@@ -8676,6 +8695,53 @@ class ProjectChatManager:
         if isinstance(timing, dict):
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
+
+    async def _verify_turn_and_publish(
+        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
+    ) -> None:
+        """Check a vault-grounded answer against its notes and publish the verdict.
+
+        Advisory: any failure records nothing. Runs as a background task, so the
+        turn's result frame never waits on it.
+        """
+        try:
+            from ciao.insights import resolve_helper_model
+
+            chat = self._chats.get(chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if chat is None or project is None:
+                return
+            workspace = project.workspace
+            provider = chat.provider or "claude"
+            model = resolve_helper_model(
+                self._config, workspace, provider, source_model=chat.model
+            )
+            vault_root = Path(self._config.workspace_vault_root(workspace))
+            result: dict | None = await vault_verification.verify_answer(
+                answer,
+                note_paths,
+                vault_root=vault_root,
+                model=model,
+                provider=provider,
+                cwd=self._agent_root_for_chat(chat_id),
+            )
+        except Exception:  # noqa: BLE001 — the check is advisory
+            logger.info("Vault answer check failed for %s", chat_id, exc_info=True)
+            return
+        if result is None:
+            return
+        # Re-fetch: the chat may have been deleted while the check ran.
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        chat.turn_verification[str(turn_index)] = result
+        self._save()
+        self._events.publish({
+            "type": "turn_verification",
+            "chat_id": chat_id,
+            "turn_index": turn_index,
+            "verification": result,
+        })
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str

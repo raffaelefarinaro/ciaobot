@@ -18,7 +18,7 @@ import {
   toolIcon,
   userMessageIncludesQueuedText,
 } from './chatHistory'
-import type { ChatMessage } from './types'
+import type { ChatMessage, TurnVerification } from './types'
 
 function msg(partial: Partial<ChatMessage> & { role: ChatMessage['role'] }): ChatMessage {
   return { content: '', timestamp: '', ...partial }
@@ -517,5 +517,28 @@ describe('toChatMessage sent_context', () => {
     expect(toChatMessage({ role: 'system', content: 'Handed over from A / a to B / b.', origin: 'handover', sent_context: '<provider-handover>x</provider-handover>' }).sent_context)
       .toBe('<provider-handover>x</provider-handover>')
     expect(toChatMessage({ role: 'system', content: 'Handed over from A / a to B / b.' }).sent_context).toBeUndefined()
+  })
+})
+
+describe('vault answer check', () => {
+  const verification: TurnVerification = {
+    supported: 1,
+    unsupported: 0,
+    general: 0,
+    claims: [{ text: 'Lisbon is the capital', status: 'supported', source: 'notes/geo.md' }],
+    sources: ['notes/geo.md'],
+  }
+
+  test('toChatMessage keeps verification', () => {
+    const msg = toChatMessage({ role: 'assistant', content: 'a', verification })
+    expect(msg.verification).toBe(verification)
+  })
+
+  test('mergeMessageFields keeps a live verification the server row lacks', () => {
+    const server = toChatMessage({ role: 'assistant', content: 'a' }) as ChatMessage
+    const live = { ...server, verification } as ChatMessage
+    expect(mergeMessageFields(server, live).verification).toEqual(verification)
+    const withServer = { ...server, verification: { ...verification, supported: 0 } } as ChatMessage
+    expect(mergeMessageFields(withServer, live).verification?.supported).toBe(0)
   })
 })
