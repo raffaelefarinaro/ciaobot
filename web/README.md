@@ -71,7 +71,8 @@ web/
   index.html              entry HTML, viewport meta, PWA manifest link
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
-    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), wordmark + caret, shared focus utilities
+    App.vue               root component; loads the global stylesheet
+    styles/app.css        global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), wordmark + caret, shared focus utilities
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
                            /memory, /stats, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary, UsageView (the /stats Usage page; data from lib/usageStats.ts),
@@ -245,7 +246,7 @@ additional convenience, not a replacement for browser zoom.
 
 iOS Safari auto-zooms the viewport when an input/textarea/select gets focus
 if its computed `font-size` is below 16px. The global input rule in
-`App.vue` already pins mobile inputs at `16px * var(--font-scale)`, and a
+`src/styles/app.css` already pins mobile inputs at `16px * var(--font-scale)`, and a
 `@media (pointer: coarse)` carve-out re-pins them to a flat `16px` so
 component-level overrides (markdown editor, comment compose) cannot drop
 back below the zoom threshold. The chat composer is the one exception: it is
@@ -411,7 +412,7 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
 - **Flex children with unbreakable content need `min-width: 0`.** Without it, a long unbreakable string (a URL, a model identifier, etc.) forces the flex parent wider than the viewport and breaks horizontal layout.
-- **Tap targets** must hit the `--touch: 44px` minimum (declared in `App.vue`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
+- **Tap targets** must hit the `--touch: 44px` minimum (declared in `src/styles/app.css`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
 - **`position: fixed` popovers clamp through `lib/popoverAnchor.ts`**, against the *visual* viewport (`lib/viewport.ts`), not `window.innerHeight`. Anything a fixed popover pushes off screen is unreachable, because scrolling does not move it. A popover that focuses an input must also clamp *reactively*, via `useViewportHeight()`: the keyboard opens a moment after the box is placed, and a one-time measurement leaves it stranded behind the keyboard. `CommentComposePopover.vue` is the reference.
 
 The app-wide task read keeps delegation and manual links separate: `taskForChat`
@@ -422,7 +423,7 @@ archive, Needs you and closure logic continue to use delegation alone.
 
 ## Design system
 
-CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
+CSS custom properties live in `src/styles/app.css` as `:root` declarations, loaded globally by `App.vue`. The system is opinionated:
 
 - **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), orange accent (`--accent #fb923c`, `--accent-strong #ea580c`; per-workspace presets override it, and `neutral` grey stands in until the workspace's colour is known; labels on accent fills use `--on-accent #1a1a2e`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
 - **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
@@ -432,7 +433,7 @@ CSS custom properties live in `App.vue` as `:root` declarations. The system is o
 - **Caret**: `.caret` is a blinking accent terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body and scroll:** the normal app surface is clean (no CRT grain); startup/update/native surfaces retain the terminal texture. Scrollbars are thin and visible so long files, tables, tabs, and settings panes never hide the fact that more content exists. The chat footer's turn-facts strip is the one exception: it scrolls sideways without a visible bar, because a bar under a reply reads as a rule across the transcript.
 
-Shared utility classes (defined globally in `App.vue`): `.btn-primary`, `.btn-small`, `.btn-icon`, `.btn-chip`, `.badge` (with `--accent|--accent2|--muted|--success|--warn|--error|--dot`), `.page`, `.card`, `.form-grid`, `.form-group`, `.form-actions`, `.hint`, `.checkbox-pill`, `.modal-backdrop`, `.modal-sheet`, `.sr-only`. Modal-like surfaces use `composables/useModalFocus.ts` for initial focus, Tab containment, Escape capture, inert background content, and opener restoration; do not add a second window-level Enter shortcut that can confirm while Cancel is focused.
+Shared utility classes (defined globally in `src/styles/app.css`): `.btn-primary`, `.btn-small`, `.btn-icon`, `.btn-chip`, `.badge` (with `--accent|--accent2|--muted|--success|--warn|--error|--dot`), `.page`, `.card`, `.form-grid`, `.form-group`, `.form-actions`, `.hint`, `.checkbox-pill`, `.modal-backdrop`, `.modal-sheet`, `.sr-only`. Modal-like surfaces use `composables/useModalFocus.ts` for initial focus, Tab containment, Escape capture, inert background content, and opener restoration; do not add a second window-level Enter shortcut that can confirm while Cancel is focused.
 
 Prefer the utility classes over re-inventing the same button/badge/card per component.
 
