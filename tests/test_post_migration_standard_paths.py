@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.operator_actions import DetectionContext, detect_actions
 from ciao.web.agent_assets import repair_workspace_health, workspace_health
@@ -81,6 +83,9 @@ def test_a_vault_moved_out_of_its_root_is_still_reported_as_misplaced(
     it — the audit's notice and the shared predicate the task's detector reads. A
     check that only asserted "no tile" would pass on a vault that is quietly in
     the wrong place with nothing reporting it.
+
+    Since #2845 an adopted per-root vault is not misplaced, so the still-misplaced
+    shape is a registration left at the pre-re-rooting ``memory-vault/<name>``.
     """
     from ciao.migration_notices import (
         RELOCATION_MISPLACED,
@@ -90,9 +95,8 @@ def test_a_vault_moved_out_of_its_root_is_still_reported_as_misplaced(
     from ciao.os_audit import audit_upgrade_notices
 
     config = _install(tmp_path, migrated=True)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    config.workspaces["work"].vault_root = str(elsewhere)
+    (tmp_path / "memory-vault" / "work").mkdir(parents=True)
+    config.workspaces["work"].vault_root = "memory-vault/work"
 
     runtime = tmp_path / ".runtime"
     actions = detect_actions(DetectionContext(config=config, runtime_dir=runtime))
@@ -104,6 +108,55 @@ def test_a_vault_moved_out_of_its_root_is_still_reported_as_misplaced(
         for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
         if n["type"] == VAULT_LOCATION_NOTICE
     ] == ["work"]
+
+
+@pytest.mark.parametrize("shape", ["nested", "clone", "external"])
+def test_an_adopted_vault_is_not_offered_relocation_once_migrated(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, shape: str
+) -> None:
+    """An operator-adopted vault is the workspace's own folder (#2845).
+
+    The standard location is unchanged; only the offer to move the notes out of
+    the adopted folder disappears, on every surface that carries it.
+    """
+    from ciao import update_tasks
+    from ciao.migration_notices import (
+        RELOCATION_ADOPTED,
+        VAULT_LOCATION_NOTICE,
+        relocation_state,
+        vault_location_findings,
+    )
+    from ciao.os_audit import audit_upgrade_notices
+    from ciao.update_task_catalog import load_catalog
+
+    config = _install(tmp_path, migrated=True)
+    if shape == "nested":
+        adopted = tmp_path / "work" / "brain"
+        raw = "work/brain"
+    elif shape == "clone":
+        adopted = tmp_path / "clone" / "work" / "memory-vault"
+        raw = "clone/work/memory-vault"
+    else:
+        adopted = tmp_path_factory.mktemp("external-notes").resolve()
+        raw = str(adopted)
+    adopted.mkdir(parents=True, exist_ok=True)
+    config.workspaces["work"].vault_root = raw
+    runtime = tmp_path / ".runtime"
+
+    assert config.workspace_vault_root("work") == adopted
+    assert config.canonical_workspace_vault_root("work") == tmp_path / "work" / "memory-vault"
+    assert relocation_state(config, "work") == RELOCATION_ADOPTED
+    assert vault_location_findings(config) == []
+    assert [
+        n
+        for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
+        if n["type"] == VAULT_LOCATION_NOTICE
+    ] == []
+    detection = update_tasks.apply_detector(
+        load_catalog().by_id["vault-relocate"], config=config, workspace="work"
+    )
+    assert detection.status == update_tasks.NOT_APPLICABLE
+    assert detection.evidence["reason"] == RELOCATION_ADOPTED
 
 
 # -- health rows belong to the root being checked -----------------------------
