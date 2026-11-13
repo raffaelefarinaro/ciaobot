@@ -42,7 +42,8 @@ carried by the session.
 - `ApiRequestBodyLimitMiddleware` (`ciao/web/request_limits.py`) is inside
   `AuthMiddleware`, so session, origin and loopback-peer refusals never consume
   the body. HTTP `/api/*` gets a 1 MiB default; only exact upload/write
-  method-and-route pairs receive finite exceptions. It rejects both oversized
+  method-and-route pairs receive finite exceptions, plus one read-only exception:
+  `POST /api/chats/{chat_id}/file-paths/resolve` gets 32 KiB (#2118). It rejects both oversized
   declared lengths and actual streamed bytes, spools admitted bodies with a
   1 MiB in-memory threshold and replays them unchanged. `/ws/*`, `/hooks/*` and
   `/share-target` do not pass through it. Malformed or excessively nested JSON
