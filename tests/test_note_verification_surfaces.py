@@ -139,6 +139,23 @@ def _isolated_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CIAO_QUEUE_LOCK_DIR", str(tmp_path / "locks"))
 
 
+class _FrozenDate(date):
+    @classmethod
+    def today(cls) -> date:
+        return TODAY
+
+
+@pytest.fixture(autouse=True)
+def _frozen_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service's own clock reads the same day as TODAY.
+
+    TODAY is taken once at import; a run that crosses midnight otherwise has the
+    service stamp tomorrow while the assertions expect today.
+    """
+    for module in (nv, nep, cp):
+        monkeypatch.setattr(module, "date", _FrozenDate)
+
+
 @pytest.fixture(autouse=True)
 def _executor() -> Any:
     from ciao import async_reads
