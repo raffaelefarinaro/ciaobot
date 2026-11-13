@@ -8,7 +8,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 - Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. **The signed-in session is the terminal's trust boundary:** unlock asks for no secret. It takes no body at all — a request that carries one is 400 `bad_request`, and a body over 4096 bytes is 413 — and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). The grant answers which browser may hold the socket and for how long: it is bound to the session cookie, has a fixed 15-minute lifetime that does not slide, and is revoked when the session behind it is re-keyed. No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate. The consequence is plain: a workspace that denies the agent `Bash` no longer has a host-shell boundary, because a signed-in browser is enough to reach a shell on the engine.
 - The terminal routes answer with two different envelopes, and a client must not assume one of them. A refusal from the terminal's own policy is `{"ok": false, "reason": ..., "error": ...}`; a refusal from the ordinary `AuthMiddleware` origin check — which runs first on a state-changing request and can answer before the terminal handler is reached at all — is `{"error": "forbidden origin"}`, with no `reason` key. The terminal's policy is intentionally stricter than the app's general rule (it also refuses userinfo and a non-bare `Origin`), so the two are not expected to accept the same set of requests.
-- The browser terminal's session routes (`GET`/`POST /api/terminal/sessions`, `DELETE /api/terminal/sessions/{session_id}`) carry the same door, in the same order: the terminal policy, then the signed session, then a fresh grant. A request that is not this engine's own page never has its body read, and a browser that has not unlocked the terminal never reaches a session — no grant is `403 locked` on all three routes. They name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id` (a create may add `location`: `workspace` or `repo`), and the folder comes from the engine's own resolution. Every response is `no-store`, and a session record carries no output bytes and no connection id.
+- The browser terminal's session routes (`GET`/`POST /api/terminal/sessions`, `DELETE /api/terminal/sessions/{session_id}`) carry the same door, in the same order: the terminal policy, then the signed session, then a fresh grant. A request that is not this engine's own page never has its body read, and a browser that has not unlocked the terminal never reaches a session — no grant is `403 locked` on all three routes. They name a *target*, never a folder and never a command: exactly one of `chat_id`, `project_id`, or a registered `workspace`; the folder comes from the engine's own resolution. Route responses are `no-store`, and a session record carries no output bytes and no connection id.
 - The browser terminal's socket (`WS /ws/terminal/{session_id}`) carries the same door, in the same order, and every refusal is a close code rather than a body: `4403` for the terminal policy (a foreign origin, or plain HTTP from a remote browser), `4001` for a missing signed session, `4401` for a missing or revoked terminal grant, `4404` for a session that is gone. A handshake carries no credential in its query string — the signed session and the `ciao_terminal` grant travel in cookies only. The grant is re-checked while the socket is open (at most once a second, and again for every client message), so a revoked or expired grant closes the socket with `4401` rather than leaving a shell open behind it.
 
 - Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the grant is bound to the signed session, and the change re-keys the session behind it, so every browser has to sign in again and ask for a new grant — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
@@ -100,8 +100,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
 | GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
 | POST | `/api/terminal/unlock` | Issues the terminal grant to a signed-in, same-origin browser; no body (a body is 400 bad_request, one over 4096 bytes is 413). 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 401 unsigned session, 403 policy, 429 grant capacity. Never launches a shell. |
-| GET | `/api/terminal/sessions?chat_id=` \| `?project_id=` | The terminal sessions opened for exactly one target: {sessions:[info], locations:[{location:"repo"\|"workspace", folder}]}, where `locations` are the folders a new shell may start in, repo first. `info` is {session_id, folder, cols, rows, seq, attached, exited, exit_code} — no output bytes and no connection id. Exactly one of `chat_id`/`project_id` must be named (400 otherwise), and an unknown target is a 404. |
-| POST | `/api/terminal/sessions` | Open a shell for one target: exactly {"chat_id"} or exactly {"project_id"}, optionally with "location": "workspace" or "repo" (default: the repo when one exists); 200 {session:info}. The body never names a folder or a command — the folder comes from the engine's own resolution, and the window from the manager. 400 bad_request (a body that is not exactly one target, or a target that names nothing), 403 locked (the browser has not unlocked the terminal), 404 not_found, 409 capacity (the manager is full) or folder_missing (also a location the target does not have), 500 spawn_failed. |
+| GET | `/api/terminal/sessions?chat_id=` \| `?project_id=` \| `?workspace=` | Sessions for exactly one target: {sessions:[info], locations:[{location:"repo"\|"workspace", folder}]}. A workspace target has exactly one location, `workspace`, at its registered agent root; duplicate workspace selectors, mixed targets and extra workspace query keys are 400, unknown workspace 404, missing root 409. `info` is {session_id, folder, cols, rows, seq, attached, exited, exit_code} — no output bytes or connection id. |
+| POST | `/api/terminal/sessions` | Open a shell for exactly {"chat_id"}, {"project_id"}, or {"workspace"}; optional `location` is `workspace` or `repo` for chat/project, but only `workspace` for a workspace target (`repo` is 409 folder_missing). Workspace JSON with duplicate keys is refused. No path, command, argv or dimensions are accepted. 200 {session:info}; 400 bad_request, 403 locked, 404 not_found, 409 capacity or folder_missing, 413 too_large, 500 spawn_failed. |
 | DELETE | `/api/terminal/sessions/{session_id}` | End a session: the shell is closed and the record removed; 200 {ok:true}. 400 bad_request (not a session id), 404 not_found, 409 closed. |
 | POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?\|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing / not_applicable (an update action when the provider is not older than the tested version); 400 unknown_action |
 | GET | `/api/welcome` | Is the one-time welcome card pending: {pending:false}, or {pending:true, workspace_root, provider, provider_label, on_host, platform}; never carries the password; `Cache-Control: no-store` |
@@ -345,9 +345,11 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer sa
 
 **Browser terminal sessions**
 
+Use `?workspace=<registered-name>` to list, or `{"workspace":"<registered-name>"}` (optionally `"location":"workspace"`) to create, without a chat or project. The engine resolves the registered workspace's agent root; workspace names group sessions but are **not an authorization boundary**. A removed workspace cannot be listed or used to create a session; existing sessions remain reachable by ID, and recreating the same name exposes them in that group's list. A successful create supplies no command or input: shell startup files may execute, and subsequent commands are manual. Settings integration comes later. The existing four-session limit, 256 KiB in-memory replay per session and 900-second detached lifetime apply; transcripts are not persisted. Grant revocation disconnects the browser, not the shell or its children.
+
 `/api/terminal/sessions` opens, lists and ends the shells the browser terminal runs. The three routes carry the terminal's own door: the request must declare this engine's exact `Origin` (a `curl` sends it explicitly — the terminal's policy, unlike the app's, refuses a request that declares no source at all), it must carry the signed session cookie, and it must carry a live terminal grant. The grant comes from `POST /api/terminal/unlock`, which asks for no secret — the signed-in session is the terminal's trust boundary — and leaves its cookie in the same jar; without it every one of the three routes answers `403 locked`.
 
-The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the engine resolves the folder itself. The list also answers `locations`, the folders a new shell may start in (the workspace, and the linked repository when there is one); a create may pick one with `"location": "workspace"` or `"repo"`. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
+The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id`, `project_id`, or `workspace`, and the engine resolves the folder itself. The list also answers `locations`, the folders a new shell may start in. For a chat or project, these are the workspace and the linked repository when there is one; a create may pick one with `"location": "workspace"` or `"repo"`. For a workspace target, the only location is `"workspace"`, at the registered workspace's agent root; `"repo"` is unavailable. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
 
 ```bash
 # Get the terminal grant. It takes no body: the signed-in session is the
@@ -868,8 +870,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # control. Connected PWAs close the matching service-worker notification tag.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, continue_recovery,
-# continue_recovery_now, try_now, stop}.
+# continue_recovery_now, recovery_status, issue_recovery_request, recovery_request_status, stop_recovery, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
+# To create a literal retry only if the persisted retry slot is empty, send
+# {"action":"set","prompt":"...","require_empty":true}; a pending retry or
+# concurrent lifecycle operation returns 409 without replacing it. Omitting
+# require_empty keeps the legacy replacement behavior.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' \
   -d '{"action":"set","prompt":"retry this turn"}'
@@ -886,16 +892,61 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # A chat exposes `failure_id` (an opaque identity, empty without a current
 # failure), `recovery_eligible`, and `retry.mode` ("continue_recovery" or
 # "literal"). `chat_streaming_done` includes the current failure_id too.
-# Explicitly opt in to hourly recovery with exactly:
+# Explicitly opt in to hourly recovery with:
 # {"action":"continue_recovery","failure_id":"<current failure_id>"}
 # Or send a one-shot continue immediately (or fire an existing hourly recovery) with:
 # {"action":"continue_recovery_now","failure_id":"<current failure_id>"}
+# Both accept an optional server-issued `request_id`. First POST
+# {"action":"issue_recovery_request"} to this chat's retry endpoint; it returns
+# {"request_id":"...","expires":<Unix seconds>}. Use that ID for one intent; with a
+# request ID, `failure_id` is limited to 128 characters. With it,
+# the response is {"request_id":"...","status":"completed",
+# "result":{"http_status":200}}; inspect http_status and then recovery_status.
+# Duplicate admitted requests return 202/in_progress or the completed receipt;
+# reusing an ID for another chat or intent returns 409. An uncertain write or
+# execution returns 503 {"request_id":"...","status":"unknown"}. A handler
+# that finishes with a server error records a terminal unknown outcome until
+# expiry; this does not mean that it had no effects.
+# POST {"action":"recovery_request_status","request_id":"..."} reconciles:
+# it returns in_progress, completed (with result), cancelled, or 503/unknown. For an issued
+# but unsubmitted ID it durably records cancelled, so any delayed submission gets
+# 409 rather than starting later. In_progress/unknown must not be cleared or
+# treated as absent, including after restart. Completed means the handler
+# returned, not that a provider turn completed; query recovery_status for the
+# current recovery. Cancelled refers only to this request, not other schedules.
+# Receipts expire 15 minutes after issuance; expired, unissued and reclaimed IDs
+# return 503/unknown, never permission to assume no execution occurred. Terminal receipts are reclaimed after expiry, while
+# live in-progress receipts are retained. Capacity is 4096 receipts and 8 MiB;
+# when full, new IDs fail closed with 503/unknown; existing records remain usable.
+# Status for a missing chat is 404/unknown and writes nothing.
+# Each admitted handler holds an OS-backed lock through admission and completion,
+# even if its caller is cancelled. Other engine processes probe bounded, rotating
+# lock slots: a released lock makes an unfinished receipt unknown (never replayable),
+# and expiry reclaims its capacity. Lock files are reused, never unlinked.
+# Legacy calls without request_id keep their prior
+# response and behavior.
 # A new one-shot does not opt in to hourly retries. No prompt or images are accepted. A stale failure, missing session, busy chat
 # or conflicting pending retry returns 409; an invalid request returns 400.
-# `stop` cancels a pending retry. Generic `try_now` may send a literal retry:
+# `stop` cancels a literal retry. Generic `try_now` may send a literal retry:
 # clients offering recovery must use `continue_recovery_now` instead. Recovery
 # sends only "continue" without images. The provider may have lost the session,
 # and repeated continues can have effects; this is not exactly-once execution.
+# An unrelated admitted turn stops a pending recovery, but not a literal retry.
+# After an activation error and failed readback, the API returns 503 with
+# `code: "recovery_outcome_unknown"`: the record may already be active. Do not
+# assume it was not scheduled or submit another opt-in blindly. When storage is
+# readable again, POST {"action":"recovery_status"} to read the registry under
+# lock. It returns {"status":"pending","mode":"continue_recovery",
+# "recovery_state":"prepared"|"active"|"in_flight","recovery_id":"...",
+# "next_at":"..."}; other modes and
+# statuses are possible. `prepared` is non-runnable and remains blocked until
+# stopped; `active` means persisted, not proof a timer is running or that no
+# provider action occurred. To stop exactly the recovery observed, POST
+# {"action":"stop_recovery","recovery_id":"<observed recovery_id>"}; a
+# replacement or an in-flight claim returns 409. While claimed, unrelated turn
+# admission also returns a conflict; a claim whose owner process is confirmed
+# dead is stopped at restart. An unknown or reused PID is treated as live. This
+# coordination is not exactly-once execution.
 
 # Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
 # `stop` message; use this when driving a chat over plain HTTP or when a

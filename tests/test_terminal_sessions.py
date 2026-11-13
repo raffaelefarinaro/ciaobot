@@ -219,6 +219,7 @@ class FakeFactory:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.cwds: list[Path] = []
         self.processes: list[FakeProcess] = []
         self.gate: threading.Event | None = None
         #: A gate that every process this factory makes inherits, so a
@@ -230,6 +231,7 @@ class FakeFactory:
     def __call__(self, *, cwd: Path, cols: int = 80, rows: int = 24) -> FakeProcess:
         with self._lock:
             self.calls += 1
+            self.cwds.append(cwd)
             index = self.calls
         if self.gate is not None:
             self.gate.wait(timeout=10)
@@ -327,6 +329,39 @@ def test_the_bounds_are_the_ones_the_contract_states() -> None:
 
 
 # ── capacity ──────────────────────────────────────────────────────────────
+
+
+async def test_workspace_target_is_scoped_and_expires(tmp_path: Path) -> None:
+    clock = FakeClock()
+    factory = FakeFactory()
+    manager = _manager(factory, clock)
+    try:
+        chat = await manager.create(tmp_path, "chat", "same")
+        project = await manager.create(tmp_path, "project", "same")
+        workspace = await manager.create(tmp_path, "workspace", "same")
+        for kind, info in (("chat", chat), ("project", project), ("workspace", workspace)):
+            assert [item.session_id for item in manager.list_for(kind, "same")] == [info.session_id]
+        assert workspace.folder == tmp_path
+        assert factory.cwds[2] == tmp_path
+        clock.advance(899.999)
+        assert await manager.reap_expired() == []
+        clock.advance(0.001)
+        assert workspace.session_id in await manager.reap_expired()
+        await _wait_until(lambda: factory.processes[2].closed)
+    finally:
+        await manager.shutdown()
+
+
+async def test_workspace_shares_global_capacity(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    manager = _manager(factory)
+    try:
+        for kind in ("chat", "project", "workspace", "workspace"):
+            await manager.create(tmp_path, kind, "same")
+        assert await _reason(manager.create, tmp_path, "workspace", "extra") == "capacity"
+        assert factory.calls == 4
+    finally:
+        await manager.shutdown()
 
 
 async def test_create_reserves_capacity_before_spawning_and_refuses_fifth_session(
@@ -2255,11 +2290,11 @@ async def test_terminal_contents_are_not_written_or_logged(
 
 
 async def test_a_target_this_manager_cannot_hold_is_refused(tmp_path: Path) -> None:
-    """Only a chat and a project are targets."""
+    """Only chat, project and workspace are targets."""
     manager = _manager()
 
     assert (
-        await _reason(manager.create, tmp_path, "workspace", "x")
+        await _reason(manager.create, tmp_path, "other", "x")
         == "invalid_target"
     )
     assert await _reason(manager.create, tmp_path, "chat", "  ") == "invalid_target"
