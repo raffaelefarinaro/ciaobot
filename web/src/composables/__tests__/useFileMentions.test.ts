@@ -421,4 +421,84 @@ describe('useFileMentions', () => {
     expect(post).not.toHaveBeenCalled()
     h.scope.stop()
   })
+
+  it('keeps a confirmed link through a turn-end refetch and drops it on an all-null answer', async () => {
+    post.mockImplementation((async (_p: string, body: { paths: string[] }) =>
+      resultsFor(body.paths, { 'docs/one.md': '/r/docs/one.md' })) as never)
+    const h = harness({ rows: [asst('docs/one.md')] })
+    await flushPromises()
+    expect(h.targets.value.get('docs/one.md')).toBe('/r/docs/one.md')
+
+    const refetch = deferred<unknown>()
+    post.mockImplementationOnce(() => refetch.promise as never)
+    h.streaming.value = true
+    await flushPromises()
+    h.streaming.value = false
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(2)
+    // The refetch is pending: the confirmed entry stays on screen.
+    expect(h.targets.value.get('docs/one.md')).toBe('/r/docs/one.md')
+
+    refetch.resolve(resultsFor(['docs/one.md'], {}))
+    await flushPromises()
+    expect(h.targets.value.has('docs/one.md')).toBe(false)
+    expect(h.targets.value.size).toBe(0)
+    h.scope.stop()
+  })
+
+  it('keeps the previous map when a refetch is rejected or malformed, with no extra request', async () => {
+    const failures: Array<[string, () => unknown]> = [
+      ['rejected', () => Promise.reject(new Error('offline'))],
+      ['malformed', () => Promise.resolve({ results: [] })],
+    ]
+    for (const [label, answer] of failures) {
+      post.mockClear()
+      post.mockImplementation((async (_p: string, body: { paths: string[] }) =>
+        resultsFor(body.paths, { 'docs/one.md': '/r/docs/one.md' })) as never)
+      const h = harness({ rows: [asst('docs/one.md')] })
+      await flushPromises()
+      const confirmed = h.targets.value
+      expect(confirmed.get('docs/one.md'), label).toBe('/r/docs/one.md')
+
+      post.mockImplementationOnce(answer as never)
+      h.streaming.value = true
+      await flushPromises()
+      h.streaming.value = false
+      await flushPromises()
+      await flushPromises()
+      expect(post, label).toHaveBeenCalledTimes(2)
+      expect(h.targets.value, label).toBe(confirmed)
+      h.scope.stop()
+    }
+  })
+
+  it('merges a still-present entry with a new positive from the refetch', async () => {
+    post.mockImplementation((async (_p: string, body: { paths: string[] }) =>
+      resultsFor(body.paths, { 'docs/one.md': '/r/docs/one.md' })) as never)
+    const h = harness({ rows: [asst('docs/one.md')] })
+    await flushPromises()
+
+    const refetch = deferred<unknown>()
+    post.mockImplementationOnce(() => refetch.promise as never)
+    h.streaming.value = true
+    await flushPromises()
+    h.rows.value = [...h.rows.value, asst('new docs/two.md')]
+    await flushPromises()
+    h.streaming.value = false
+    await flushPromises()
+    // Pending: the old entry stays, and the new mention is not yet confirmed.
+    expect(h.targets.value.get('docs/one.md')).toBe('/r/docs/one.md')
+    expect(h.targets.value.has('docs/two.md')).toBe(false)
+
+    refetch.resolve(resultsFor(['docs/two.md', 'docs/one.md'], {
+      'docs/two.md': '/r/docs/two.md',
+      'docs/one.md': '/r/moved/one.md',
+    }))
+    await flushPromises()
+    expect(Object.fromEntries(h.targets.value)).toEqual({
+      'docs/two.md': '/r/docs/two.md',
+      'docs/one.md': '/r/moved/one.md',
+    })
+    h.scope.stop()
+  })
 })

@@ -229,15 +229,19 @@ describe('ChatPanel checked file mentions', () => {
     await flushPromises()
     expect(wrapper.find('.message.assistant .message-content a.file-link').exists()).toBe(true)
 
-    post.mockImplementation((async (path: string, body?: unknown) => {
-      if (!path.endsWith('/file-paths/resolve')) return {}
-      return { results: (body as { paths: string[] }).paths.map(input => ({ input, path: null })) }
-    }) as never)
+    let releaseRefetch!: (value: unknown) => void
+    post.mockImplementationOnce((() => new Promise(resolve => { releaseRefetch = resolve })) as never)
     store.streaming['chat-1'] = true
     await flushPromises()
     store.streaming['chat-1'] = false
     await flushPromises()
 
+    // The new generation's POST is pending: the confirmed link stays on screen.
+    expect(resolveCalls(post)).toHaveLength(2)
+    expect(wrapper.find('.message.assistant .message-content a.file-link').exists()).toBe(true)
+
+    releaseRefetch({ results: [{ input: 'docs/guide.md', path: null }] })
+    await flushPromises()
     expect(wrapper.find('.message.assistant .message-content a.file-link').exists()).toBe(false)
     expect(wrapper.get('.message.assistant .message-content').text()).toContain('docs/guide.md')
     expect(openLink).not.toHaveBeenCalled()
