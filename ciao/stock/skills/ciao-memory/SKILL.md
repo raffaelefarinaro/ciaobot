@@ -5,9 +5,11 @@ description: "Use for writing or curating Ciaobot's durable vault memory: updati
 
 # Durable memory and vault care
 
-Use the configured vault root as the durable memory source. The `<ciao-context>` block names it as `vault=<path>` — write under **that** path and nowhere else. Do not infer the location from where existing notes happen to sit: an older single-workspace curator may have filed notes under a different workspace.
+Write only under the `vault=<path>` root in `<ciao-context>`. Existing notes may have been misfiled by an older curator; their location never overrides the configured vault.
 
 Read-only recall is handled inline by the system prompt (`ciao vault search`, answer from vault evidence only). This skill covers writes and curation. The nightly Workspace care schedule owns its own lease, worklist, budget, and unattended rules; follow that prompt for the run. Perform mutating vault passes sequentially.
+
+Before document writes or bounded-region edits, read [Writing documents and regions](references/writing.md) for file placement, frontmatter, canonical paths and region syntax.
 
 ## Destinations and categories
 

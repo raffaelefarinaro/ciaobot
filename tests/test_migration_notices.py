@@ -13,8 +13,8 @@ copies of. The contracts under test, one per acceptance item in #816:
    hand-written wikilink, which is the diagnostic the audit must not lose;
 4. the wikilink notice is not an update-task catalog row, because it has no
    honest completion receipt — its receipt is per install, not per vault;
-5. a Home poll opens no file under the vault, at any vault size, and the scan
-   that establishes the verdict runs off the event loop.
+5. a Home poll opens no file under the vault except its link marker, at any
+   vault size, and the scan that establishes the verdict runs off the event loop.
 
 The vault-location notice became a catalog row in #800's last slice, which is why
 item 4 is one notice rather than two. Its own parity is pinned in
@@ -27,7 +27,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import io
 import json
+import os
+import shutil
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +61,7 @@ from ciao.migration_notices import (
     vault_location_findings,
 )
 from ciao.operator_actions import DetectionContext, detect_actions, dismiss_action
+from ciao.vault_migrate_links import MARKER_NAME, migrate_links, receipt_path, receipt_token, unmigrate_links
 from ciao.os_audit import audit_upgrade_notices
 
 
@@ -718,8 +722,21 @@ def _vault_reads_under(root: Path, call: Any) -> list[str]:
 
         return _wrapped
 
-    with patch.multiple(
-        Path, **{name: _record(name, fn) for name, fn in original.items()}
+    def _record_open(name: str, original_fn: Any) -> Any:
+        # `abspath`, not `resolve`: no filesystem call, so the wrapper cannot recurse.
+        def _wrapped(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if not isinstance(file, int):
+                absolute = Path(os.path.abspath(os.fsdecode(file)))
+                if absolute == root or root in absolute.parents:
+                    accesses.append(f"{absolute}:{name}")
+            return original_fn(file, *args, **kwargs)
+
+        return _wrapped
+
+    with (
+        patch.multiple(Path, **{name: _record(name, fn) for name, fn in original.items()}),
+        patch.object(io, "open", _record_open("io.open", io.open)),
+        patch.object(os, "open", _record_open("os.open", os.open)),
     ):
         call()
     return accesses
@@ -751,8 +768,9 @@ def test_a_home_poll_opens_nothing_under_the_vault(tmp_path: Path) -> None:
 
     The wikilink notice is the one condition whose accurate answer needs a walk,
     so this is where the poll would have paid for it — with a card in the strip,
-    without one, and after a scan established one. A registry value, a receipt
-    and a stored verdict are the only things a pass may read. The small and large
+    without one, after a scan established one, once migrated, and while adopting a
+    legacy receipt. A registry value, a receipt, the vault's link marker and a
+    stored verdict are the only things a pass may read. The small and large
     vaults are both checked because "cheap" has to mean independent of the vault,
     not merely small enough to measure.
     """
@@ -760,17 +778,101 @@ def test_a_home_poll_opens_nothing_under_the_vault(tmp_path: Path) -> None:
         root = tmp_path / f"vault-{count}"
         config = _install_at(root, count, wikilink="People/Peter")
         runtime = _runtime(root)
-        vault = config.vault_root / "personal"
+        vault = config.vault_root.resolve()
+        marker = str(vault / MARKER_NAME)
+        allowed = {f"{marker}:{name}" for name in ("read_bytes", "open", "io.open")}
         context = DetectionContext(config=config, runtime_dir=runtime)
-        resolve_links(config, runtime)
 
         def _poll() -> None:
             # One pass per poll tick, plus the window-focus pass on top of it.
             for _ in range(3):
                 detect_actions(context)
 
+        def _opened() -> list[str]:
+            return [a for a in _vault_reads_under(vault, _poll) if a not in allowed]
+
         # Before a scan as well: the cold path must be as cheap as the warm one.
-        assert _vault_reads_under(vault, _poll) == [], count
+        assert _opened() == [], (count, "cold")
+        resolve_links(config, runtime)
+        assert _opened() == [], (count, "warm")
+        assert migrate_links(config.vault_root, runtime, apply=True)["complete"]
+        assert _opened() == [], (count, "migrated")
+
+        path = receipt_path(runtime)
+        legacy = json.loads(path.read_bytes())
+        for key in ("operation", "files", "legacy_rewrites", "vault_inode", "operation_id", "base_marker"):
+            legacy.pop(key, None)
+        path.write_text(json.dumps({**legacy, "schema_version": 1, "status": "migrated"}), encoding="utf-8")
+        (vault / MARKER_NAME).unlink()
+        assert _opened() == [], (count, "legacy")
+        assert json.loads(path.read_bytes())["schema_version"] == 3
+        assert len(list(path.parent.glob("vault-links-legacy-*.json"))) == 1
+
+        def _snapshot() -> dict[str, tuple[int, bytes]]:
+            return {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in path.parent.iterdir() if p.is_file()}
+
+        settled = _snapshot()
+        assert _opened() == [], (count, "settled")
+        assert _snapshot() == settled, "repeated polls write nothing"
+
+
+def test_shared_undo_invalidates_observer_without_local_receipt_change(tmp_path: Path) -> None:
+    config = _install_at(tmp_path, 1, wikilink="People/Peter")
+    a, b = _runtime(tmp_path / "a"), _runtime(tmp_path / "b")
+    assert migrate_links(config.vault_root, a, apply=True)["complete"]
+
+    assert migration_notices._links_scope(config, b).vault is None
+    assert not (b / "migration" / "vault-links.json").exists()
+    listing = sorted(b.rglob("*"))
+
+    assert unmigrate_links(config.vault_root, a, apply=True)["files_restored"] == 1
+    assert migration_notices._links_scope(config, b).vault == config.vault_root
+    assert links_scan_is_stale(config, b) is True
+    assert sorted(b.rglob("*")) == listing
+
+
+def test_vault_replacement_invalidates_cached_completion(tmp_path: Path) -> None:
+    config = _install_at(tmp_path, 1, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    vault = config.vault_root
+    assert migrate_links(vault, runtime, apply=True)["complete"]
+    assert migration_notices._links_scope(config, runtime).vault is None
+    before = receipt_token(runtime, vault_root=vault)
+
+    original = tmp_path / "original-vault"
+    vault.rename(original)
+    vault.mkdir()
+    shutil.copytree(original, vault, dirs_exist_ok=True)
+
+    scope = migration_notices._links_scope(config, runtime)
+    assert scope.readable is False and scope.token != before
+    with patch("ciao.vault_migrate_links.has_unmigrated_links", side_effect=AssertionError("scanned")) as scan:
+        assert resolve_links(config, runtime) is None
+    scan.assert_not_called()
+    assert _stored_state(vault) == LINKS_FAILED
+
+
+def test_receipt_token_tracks_receipt_marker_and_directory(tmp_path: Path) -> None:
+    config = _install_at(tmp_path, 1, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    vault = config.vault_root
+    assert migrate_links(vault, runtime, apply=True)["complete"]
+    t0 = receipt_token(runtime, vault_root=vault)
+    assert receipt_token(runtime, vault_root=vault) == t0
+
+    marker = json.loads((vault / MARKER_NAME).read_bytes())
+    (vault / MARKER_NAME).write_text(json.dumps({**marker, "state": "unmigrated"}), encoding="utf-8")
+    t1 = receipt_token(runtime, vault_root=vault)
+    assert t1 != t0
+
+    (vault / "personal" / "late.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    assert migrate_links(vault, runtime, apply=True, force=True)["complete"]
+    t2 = receipt_token(runtime, vault_root=vault)
+    assert t2 != t1
+
+    with patch("ciao.vault_migrate_links._vault_inode", lambda root: -1):
+        t3 = receipt_token(runtime, vault_root=vault)
+    assert t3 != t2 and t3.endswith("|-1")
 
 
 def test_the_scan_runs_on_another_thread_and_through_the_bounded_executor(

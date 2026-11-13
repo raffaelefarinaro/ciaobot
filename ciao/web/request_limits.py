@@ -130,10 +130,17 @@ class ApiRequestBodyLimitMiddleware:
             # Non-JSON bodies need the same rewind as parsed JSON bodies before
             # a handler starts consuming the replay stream.
             spool.seek(0)
+            terminal_delivered = False
 
             async def replay() -> dict[str, Any]:
+                nonlocal terminal_delivered
+                if terminal_delivered:
+                    message: dict[str, Any] = await receive()
+                    return message
                 data = spool.read(REPLAY_CHUNK_SIZE)
-                return {"type": "http.request", "body": data, "more_body": bool(data) or spool.tell() < size}
+                more_body = spool.tell() < size
+                terminal_delivered = not more_body
+                return {"type": "http.request", "body": data, "more_body": more_body}
 
             await self.app(scope, replay, send)
         finally:
