@@ -145,8 +145,7 @@ describe('ChatRepoSection', () => {
     // section carries the checkout facts alone.
     const wrapper = mountSection(repo, {})
     await flushPromises()
-    const terminal = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
-    expect(terminal).toHaveLength(0)
+    expect(wrapper.find('.terminal-row').exists()).toBe(false)
     expect(wrapper.find('.chat-repo-terminal').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -154,8 +153,7 @@ describe('ChatRepoSection', () => {
   it('carries no terminal button when the folder is missing either', async () => {
     const wrapper = mountSection({ ...repo, missing: true }, {})
     await flushPromises()
-    const terminal = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
-    expect(terminal).toHaveLength(0)
+    expect(wrapper.find('.terminal-row').exists()).toBe(false)
     wrapper.unmount()
   })
 })
