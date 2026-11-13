@@ -499,6 +499,7 @@
                 <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group" v-html="formatTokenUsage(item.meta.usage)"></span>
               </div>
             </div>
+            <TurnVerificationBadge v-if="item.meta?.verification" :verification="item.meta.verification" />
           </div>
         </div>
         <!-- System message (errors, etc) -->
@@ -1510,7 +1511,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1529,6 +1530,7 @@ import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
 import ChatRetryState from './ChatRetryState.vue'
+import TurnVerificationBadge from './TurnVerificationBadge.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'
@@ -1609,6 +1611,7 @@ type TurnMeta = {
   duration_ms?: number
   effective_model?: string
   usage?: Record<string, string>
+  verification?: TurnVerification
 }
 
 type RenderItemInput =
@@ -4286,6 +4289,7 @@ function turnMetaFrom(buffer: ChatMessage[], base: TurnMeta | null = null): Turn
     if (m.duration_ms) meta.duration_ms = m.duration_ms
     if (m.effective_model) meta.effective_model = m.effective_model
     if (m.usage) meta.usage = m.usage
+    if (m.verification) meta.verification = m.verification
   }
   return Object.keys(meta).length ? meta : null
 }
@@ -6669,9 +6673,6 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(tbody tr:nth-child(even) > td) {
   background: color-mix(in srgb, var(--fg) 2.5%, transparent);
-}
-.message-content :deep(tr > :first-child) {
-  white-space: nowrap;
 }
 .message-content :deep(tbody tr > td:first-child) {
   font-weight: 600;
