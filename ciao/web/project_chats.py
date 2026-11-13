@@ -8571,19 +8571,21 @@ class ProjectChatManager:
                 response["request_id"] = request_id
             return response, admitted
 
-    def _reconcile_recovery_claim(self, chat_id: str) -> None:
+    def _reconcile_recovery_claim(self, chat_id: str) -> str:
         if not self._path:
-            return
+            return ""
         with _state_file_lock(self._path):
             rows = self._read_latest_payload().get("chats", {})
             row = rows.get(chat_id) if isinstance(rows, dict) else None
             marker = row.get("retry_recovery") if isinstance(row, dict) else None
             if not isinstance(marker, dict) or not marker.get("claim"):
-                return
+                return ""
             marker = copy.deepcopy(marker)
         if _recovery_claim_abandoned(marker):
             if self.stop_recovery(chat_id, str(marker.get("id", "")), _abandoned_claim=str(marker["claim"])):
                 _ABORTED_RECOVERY_CLAIMS.discard(marker["claim"])
+                return str(marker["id"])
+        return ""
 
     def _stop_persisted_session_recovery(self, chat_id: str) -> None:
         if not self._path:
@@ -8608,7 +8610,8 @@ class ProjectChatManager:
         if not self._path or not recovery_id:
             return False
         if not _abandoned_claim:
-            self._reconcile_recovery_claim(chat_id)
+            if self._reconcile_recovery_claim(chat_id) == recovery_id:
+                return True
         with _state_file_lock(self._path):
             payload = self._read_latest_payload()
             rows = payload.get("chats", {})
@@ -9045,9 +9048,42 @@ class ProjectChatManager:
         })
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
+        marker = copy.deepcopy(chat.retry_recovery) if isinstance(chat.retry_recovery, dict) else {}
+        claimed = bool(marker.get("claim"))
+        if claimed and marker.get("owner") != restart_resume.PROCESS_TOKEN:
+            raise RecoveryLifecycleConflict("recovery is in flight")
+        before = {
+            name: copy.deepcopy(getattr(chat, name))
+            for name in (
+                "retry_status", "retry_prompt", "retry_image_refs", "retry_next_at",
+                "retry_last_error", "retry_attempts", "retry_kind", "retry_interval_seconds",
+                "retry_unattended", "retry_recovery", "retry_schedule_id",
+            )
+        } if claimed else {}
         self._advance_retry_generation(chat.chat_id)
         self._reset_chat_retry_fields(chat, status=status)
-        self._save()
+        try:
+            if claimed:
+                saved = self._save_checked(
+                    reason="clear_recovery_claim",
+                    _firing_expected=(chat.chat_id, {"retry_status": "pending", "retry_recovery": marker}),
+                )
+                if not saved:
+                    _ABORTED_RECOVERY_CLAIMS.add(marker["claim"])
+                    for name, value in before.items():
+                        setattr(chat, name, value)
+                    return
+            else:
+                self._save()
+        except _RegistryCommittedError:
+            pass
+        except Exception:
+            if claimed:
+                # The attempt ended, even if its terminal state could not reach disk.
+                _ABORTED_RECOVERY_CLAIMS.add(marker["claim"])
+                for name, value in before.items():
+                    setattr(chat, name, value)
+            raise
         self._finish_chat_retry_clear(chat, status=status)
 
     def _reset_chat_retry_fields(self, chat: ChatInfo, *, status: str = "") -> None:
