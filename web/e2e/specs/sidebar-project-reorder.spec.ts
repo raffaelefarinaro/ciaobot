@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate, quiesce, releasePointerInSameTask } from '../support/app'
+import { boot, isolate, quiesce } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -84,7 +84,7 @@ test.describe('sidebar project reordering', () => {
     expect(await rowOrder(page)).toEqual(['alpha-general', ...order])
   })
 
-  test('a fast release above a project lands before it when the drawn placeholder is stale', async ({ page }) => {
+  for (const scroll of [0, 45]) test(`a fast release above a project lands before it when the drawn placeholder is stale (scroll ${scroll}px)`, async ({ page }) => {
     const requests: Array<Record<string, unknown>> = []
     page.on('request', (request) => {
       if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) {
@@ -97,18 +97,45 @@ test.describe('sidebar project reordering', () => {
     const from = (await name.boundingBox())!
     await page.mouse.move(from.x + 4, from.y + from.height / 2)
     await page.mouse.down()
-    // Activate at the source slot, so the preview has drawn its placeholder there.
+    // Activate the drag before moving to the target.
     await page.mouse.move(from.x + 4, from.y + from.height / 2 + 12, { steps: 3 })
     await expect(page.locator('.drag-overlay')).toBeVisible()
     await expect(page.locator('.project-list > .drag-placeholder')).toHaveCount(1)
 
-    // Move above Notes and release in one task: the drawn placeholder is still
-    // at the old slot while targetAt recomputes for the new one.
-    const notes = (await page.locator(`[data-project-id="${NOTES}"]`).boundingBox())!
-    await releasePointerInSameTask(page.locator('.project-list'), {
-      x: notes.x + notes.width / 2,
-      y: notes.y + 8,
-    })
+    // Measure and release in one task: auto-scroll cannot move Notes between them.
+    await page.locator('.project-list').evaluate((list, { notesId, scroll }) => {
+      const notes = list.querySelector<HTMLElement>(`[data-project-id="${notesId}"]`)
+      const placeholder = list.querySelector<HTMLElement>('.drag-placeholder')
+      let scroller = list.parentElement
+      while (scroller) {
+        const overflow = getComputedStyle(scroller).overflowY
+        if ((overflow === 'auto' || overflow === 'scroll') && scroller.scrollHeight > scroller.clientHeight) break
+        scroller = scroller.parentElement
+      }
+      if (!notes || !placeholder || !scroller) throw new Error('Missing drag target, placeholder, or scroller')
+      const before = notes.getBoundingClientRect()
+      scroller.scrollTop += scroll
+      const target = notes.getBoundingClientRect()
+      if (scroll && (Math.abs(before.top - target.top - scroll) > 0.1 || before.top + 8 <= target.top + target.height / 2)) {
+        throw new Error('Forced scroll did not move the old point below the target midpoint')
+      }
+      if (!(notes.compareDocumentPosition(placeholder) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+        throw new Error('The drawn placeholder is not after Notes')
+      }
+      const x = target.x + target.width / 2
+      const y = target.y + 8
+      const bounds = scroller.getBoundingClientRect()
+      const hit = document.elementsFromPoint(x, y)[0]
+      if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom || !hit || !notes.contains(hit)) {
+        throw new Error('The release point is not visible and hit-testable on Notes')
+      }
+      const init: PointerEventInit = {
+        pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 1,
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+      }
+      list.dispatchEvent(new PointerEvent('pointermove', init))
+      list.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
+    }, { notesId: NOTES, scroll })
     await page.mouse.up()
 
     await expect.poll(() => requests.length).toBe(1)
