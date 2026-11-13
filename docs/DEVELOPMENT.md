@@ -521,7 +521,10 @@ same fact as a job launchd still holds) — or, for a client,
 disables the local engine and installs no service at all, leaving the user to
 sign in at the remote host. A client failure undoes the same state and never
 claims an engine was restored, because there was none. `--as-host` /
-`--as-client URL` are required when the node state cannot be read or trusted;
+`--as-client URL` are required when a live app's node state is missing,
+undecodable, unreadable or otherwise untrusted. A fresh host or client role
+requires an explicit recorded role (and a valid host URL for a client); neither
+a workspace nor a missing file proves a host. The stale-app path is unchanged;
 the URL is checked with the classifier's own rule (scheme, host name, no
 credentials or whitespace), so an override like `https://` is refused before a
 single label or file is touched rather than after this Mac has given up its own
@@ -547,7 +550,10 @@ is finished the same way: by the time those phases are on disk, `ciao setup` has
 usually already repointed `com.ciao.server` at the tool this script installed, and
 an engine outside a `.app` is exactly what the classifier calls an ordinary
 install — so the kind and the workspace come from the receipt, which is the only
-thing left that knows what the run was doing, and taking the host path from them
+thing left that knows what the run was doing. A validated unfinished host receipt,
+including a legacy host decision or an explicit `--as-host` decision, preserves
+that prior decision and its original before-images; it is not fresh role proof.
+Taking the host path from the receipt
 is what stops the app's own agent from staying loaded next to the engine that
 replaced it. That path also settles the workspace before it takes any
 before-image or asks the app to quit, and only ever hands over the one the

@@ -70,7 +70,7 @@ class Classification:
     workspace: str = ""
     runtime_root: str = ""
     port: int = DEFAULT_PORT
-    node_role: str = ""  # "host" | "client" | "" (absent) | "invalid"
+    node_role: str = ""  # "host" | "client" | "" (not classified) | "invalid"
     host_url: str = ""
     app_bundle: str = ""
     plist_program: str = ""
@@ -174,11 +174,8 @@ def check_client_url(value: str) -> str:
 def _runtime_is_readable(root: str) -> bool:
     """Whether `root` is a directory this process can list and enter.
 
-    A runtime root that is missing is not the same thing as an absent
-    `node_state.json` inside it: the first means nothing on this Mac can be
-    accounted for, while the second is what a host looks like before it has
-    written one. So the root is checked before its state is read, or "no state
-    file" would be read as "this Mac is a host" on a Mac with no state at all.
+    A missing runtime root and an absent node state are both insufficient
+    evidence to select a role.
     """
     return Path(root).is_dir() and os.access(root, os.R_OK | os.X_OK)
 
@@ -186,18 +183,14 @@ def _runtime_is_readable(root: str) -> bool:
 def _classify_node_state(runtime_root: str) -> tuple[str, str]:
     """(node_role, host_url) from `node_state.json`, read raw.
 
-    Missing file means "no state yet", which the desktop shell treats as a
-    host that has not finished onboarding, so the role stays empty and the
-    caller maps that to the host path. A file that cannot be read is a
-    different thing entirely: nobody may know what this Mac writes, so it is
-    reported as invalid rather than guessed.
+    Missing, unreadable or undecodable state cannot prove a role.
     """
     node_path = Path(runtime_root) / "node_state.json"
     try:
         if not node_path.exists():
-            return "", ""
+            return "invalid", ""
         raw = node_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return "invalid", ""
     try:
         state = json.loads(raw)
@@ -311,14 +304,12 @@ def _classify(agents: Path) -> Classification:
         return _unreadable(runtime.workspace, program)
 
     node_role, host_url = _classify_node_state(runtime.runtime_root)
-    if node_role == "invalid":
-        kind = "desktop_invalid"
-    elif node_role == "client":
+    if node_role == "client":
         kind = "desktop_client"
-    else:
-        # An empty role means the node file is absent, which the desktop shell
-        # treats as a host: the workspace is the host's own.
+    elif node_role == "host":
         kind = "desktop_host"
+    else:
+        kind = "desktop_invalid"
     return Classification(
         kind=kind,
         workspace=runtime.workspace,

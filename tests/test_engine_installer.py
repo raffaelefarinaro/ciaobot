@@ -3929,13 +3929,12 @@ def _app_bundle(tmp_path: Path) -> Path:
 
 
 def _desktop_install(
-    harness: dict[str, Any], tmp_path: Path, node_state: object = None
+    harness: dict[str, Any], tmp_path: Path, node_state: object = ...
 ) -> Path:
     """Put a live Ciaobot.app engine on the fake Mac and return its workspace.
 
-    `node_state` is what the runtime root holds: None (nothing) is the host
-    case, a dict is a node role, and a string is written verbatim so an
-    unreadable state can be reproduced.
+    The default is an explicit host; None omits the state file. A string is
+    written verbatim to reproduce unreadable state.
     """
     home: Path = harness["home"]
     app_engine = (
@@ -3949,6 +3948,8 @@ def _desktop_install(
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
     (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    if node_state is ...:
+        node_state = {"role": "host"}
     if node_state is not None:
         text = node_state if isinstance(node_state, str) else json.dumps(node_state)
         (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
@@ -3981,6 +3982,103 @@ def migration_before(harness: dict[str, Any]) -> Path:
 def _install_receipt(harness: dict[str, Any]) -> dict[str, Any]:
     path: Path = harness["home"] / ".local/state/ciaobot/install-receipt.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _snapshot_path(path: Path) -> object:
+    if not path.exists():
+        return "absent"
+    if path.is_file():
+        return path.read_bytes()
+    return {str(p.relative_to(path)): p.read_bytes() if p.is_file() else None
+            for p in path.rglob("*")}
+
+
+def _migration_snapshot(harness: dict[str, Any], workspace: Path) -> object:
+    home: Path = harness["home"]
+    return (
+        _snapshot_path(workspace),
+        _snapshot_path(home / "Library/LaunchAgents"),
+        _snapshot_path(home / ".local/state/ciaobot/migration"),
+        _snapshot_path(home / ".local/state/ciaobot/install-receipt.json"),
+        _replaced_state(harness),
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_missing_node_state_requires_explicit_role(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    workspace = _desktop_install(harness, tmp_path, None)
+    before = _migration_snapshot(harness, workspace)
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert result.returncode == 1
+    assert "--as-host" in result.stderr and "--as-client" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert _log(harness, "ciao-calls.log") == ""
+    assert _migration_snapshot(harness, workspace) == before
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_missing_node_state_explicit_host(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path, None)
+    original = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--as-host", "--no-start")
+    assert result.returncode == 0, result.stderr
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "installed_no_start"
+    assert receipt["kind"] == "desktop_invalid"
+    assert receipt["host_url"] == ""
+    assert receipt["workspace"] == str(workspace)
+    assert receipt["app_bundle"] == str(_app_bundle(tmp_path))
+    calls = _log(harness, "ciao-calls.log")
+    assert f"setup --workspace {workspace} --python {home}/.local/bin/ciao --yes\n" in calls
+    assert "--load-launchd" not in calls and "service start" not in calls
+    assert "com.ciao.server" not in _log(harness, "launchctl.log")
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert _app_bundle(tmp_path).is_dir()
+    assert (migration_before(harness) / "com.ciao.server.plist").read_bytes() == original
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_missing_node_state_explicit_client(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path, None)
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--as-client", "https://h.example")
+    assert result.returncode == 0, result.stderr
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "migrated_client"
+    assert receipt["kind"] == "desktop_invalid"
+    assert receipt["host_url"] == "https://h.example"
+    assert _install_receipt(harness)["service_backend"] == "none"
+    calls = _log(harness, "ciao-calls.log")
+    assert "setup" not in calls and "service start" not in calls
+    log = _log(harness, "launchctl.log")
+    for label in ("com.ciao.server", "Ciaobot"):
+        assert f"bootout gui/{os.getuid()}/{label}" in log
+        assert f"disable gui/{os.getuid()}/{label}" in log
+    assert ("This Mac was a client of https://h.example. Open that address in your browser and sign in there; this Mac no longer runs its own engine.") in result.stdout.splitlines()
+    assert _app_bundle(tmp_path).is_dir()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_missing_node_state_rejects_credential_url(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    workspace = _desktop_install(harness, tmp_path, None)
+    before = _migration_snapshot(harness, workspace)
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--as-client", "https://user:secret@h.example")
+    assert result.returncode == 1
+    assert "--as-client takes an address" in result.stderr
+    assert "no longer runs its own engine" not in result.stdout
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert _log(harness, "ciao-calls.log") == ""
+    assert _migration_snapshot(harness, workspace) == before
 
 
 @runs_the_sh_installer
@@ -5524,6 +5622,56 @@ def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
     # retires the bundle with it.
     assert not _app_bundle(tmp_path).exists()
     assert "Removed the retired Ciaobot.app." in result.stdout
+
+
+def _check_missing_state_resume(tmp_path: Path, *, legacy: bool) -> None:
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path, {"role": "host"} if legacy else None)
+    args = ("--no-start",) if legacy else ("--as-host", "--no-start")
+    first = _run_installer(harness, "--version", VERSION, "--migrate", *args)
+    assert first.returncode == 0, first.stderr
+    receipt = _migration_receipt(harness)
+    kind = "desktop_host" if legacy else "desktop_invalid"
+    assert receipt["schema"] == 1
+    assert receipt["phase"] == "installed_no_start"
+    assert receipt["kind"] == kind
+    assert receipt["workspace"] == str(workspace)
+    assert receipt["host_url"] == ""
+    before = receipt["before"]
+    images = {name: _snapshot_path(Path(path)) for name, path in before.items()}
+    assert _snapshot_path(migration_before(harness)) != "absent"
+    if legacy:
+        (workspace / ".runtime/node_state.json").unlink()
+    with (home / "Library/LaunchAgents/com.ciao.server.plist").open("rb") as handle:
+        assert plistlib.load(handle)["ProgramArguments"][0] == str(home / ".local/bin/ciao")
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+    assert retry.returncode == 0, retry.stderr
+    settled = _migration_receipt(harness)
+    assert settled["phase"] == "migrated"
+    assert settled["kind"] == kind
+    assert settled["workspace"] == str(workspace)
+    assert settled["host_url"] == ""
+    assert settled["before"] == before
+    assert {name: _snapshot_path(Path(path)) for name, path in before.items()} == images
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    log = _log(harness, "launchctl.log")
+    assert f"bootout gui/{os.getuid()}/Ciaobot" in log
+    assert f"disable gui/{os.getuid()}/Ciaobot" in log
+    assert f"setup --workspace {workspace} --python {home}/.local/bin/ciao --yes --load-launchd\n" in _log(harness, "ciao-calls.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_resume_legacy_desktop_host_receipt_with_missing_node_state(tmp_path: Path) -> None:
+    _check_missing_state_resume(tmp_path, legacy=True)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_resume_explicit_host_invalid_receipt_with_missing_node_state(tmp_path: Path) -> None:
+    _check_missing_state_resume(tmp_path, legacy=False)
 
 
 @runs_the_sh_installer

@@ -90,6 +90,21 @@ def _write_node_state(workspace: Path, state: object) -> None:
     (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
 
 
+def _tree(root: Path) -> dict[str, bytes | None]:
+    return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None for p in root.rglob("*")}
+
+
+def _assert_invalid_evidence(result: Classification, tmp_path: Path, workspace: Path) -> None:
+    assert result.kind == "desktop_invalid"
+    assert result.node_role == "invalid"
+    assert result.workspace == str(workspace)
+    assert result.runtime_root == str(workspace / ".runtime")
+    assert result.port == PORT
+    assert result.app_bundle == str(tmp_path / "Ciaobot.app")
+    assert result.plist_program == str(tmp_path / "Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao")
+    assert result.host_url == ""
+
+
 def test_classify_none_without_plist(tmp_path: Path) -> None:
     agents, _ = _fixture(tmp_path, write_plist=False)
 
@@ -178,17 +193,22 @@ def test_classify_never_names_the_server_host_bundle_as_an_app_to_retire(
 
 @macos_app_layout
 def test_classify_desktop_host_when_node_state_absent(tmp_path: Path) -> None:
-    # No node state at all is the host path: the desktop shell writes one as
-    # soon as it knows, and its absence means nobody else is using this Mac's
-    # runtime root.
-    agents, _ = _fixture(tmp_path)
-
+    agents, workspace = _fixture(tmp_path)
+    before = _tree(tmp_path)
     result = classify(agents)
+    _assert_invalid_evidence(result, tmp_path, workspace)
+    assert _tree(tmp_path) == before
+    assert not (workspace / ".runtime/node_state.json").exists()
 
-    assert result.kind == "desktop_host"
-    assert result.node_role == ""
-    assert result.app_bundle.endswith("Ciaobot.app")
-    assert result.port == PORT
+
+@macos_app_layout
+def test_classify_invalid_utf8_preserves_live_desktop_evidence(tmp_path: Path) -> None:
+    agents, workspace = _fixture(tmp_path)
+    (workspace / ".runtime/node_state.json").write_bytes(b"\xff")
+    before = _tree(tmp_path)
+    result = classify(agents)
+    _assert_invalid_evidence(result, tmp_path, workspace)
+    assert _tree(tmp_path) == before
 
 
 @macos_app_layout
@@ -280,7 +300,8 @@ def test_classify_defaults_to_the_users_own_launch_agents(
 ) -> None:
     # The installer passes the directory explicitly, but the module is also run
     # by hand, and the default has to be the one the engine itself uses.
-    agents, _ = _fixture(tmp_path)
+    agents, workspace = _fixture(tmp_path)
+    _write_node_state(workspace, {"role": "host"})
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
 
     assert classify().kind == "desktop_host"
@@ -465,7 +486,7 @@ def test_classify_never_writes(tmp_path: Path) -> None:
     before = sorted(p.name for p in workspace.rglob("*"))
     node = workspace / ".runtime" / "node_state.json"
 
-    assert classify(agents).kind == "desktop_host"
+    assert classify(agents).kind == "desktop_invalid"
 
     assert sorted(p.name for p in workspace.rglob("*")) == before
     assert not node.exists()
@@ -483,7 +504,8 @@ def test_classify_never_writes(tmp_path: Path) -> None:
 
 @macos_app_layout
 def test_main_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    agents, _ = _fixture(tmp_path)
+    agents, workspace = _fixture(tmp_path)
+    _write_node_state(workspace, {"role": "host"})
 
     assert main(["classify", "--json", "--launch-agents-dir", str(agents)]) == 0
 
@@ -500,6 +522,7 @@ def test_main_readable_line(
     # The one-line form is for a person reading a terminal, so the kind comes
     # first and the workspace second - the two things anyone asks it for.
     agents, workspace = _fixture(tmp_path)
+    _write_node_state(workspace, {"role": "host"})
 
     assert main(["classify", "--launch-agents-dir", str(agents)]) == 0
 
