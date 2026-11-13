@@ -609,11 +609,6 @@ class MemoryPassCoordinator:
         self._pump_retry_handles.pop(workspace, None)
         if self._closed:
             return
-        if self._host.restart_draining:
-            states = [self._helper(chat).get("state") for chat in self._passes_in(workspace)]
-            if "queued" in states and "running" not in states:
-                self._schedule_pump_retry(workspace)
-            return
         self.pump(workspace)
 
     # ── the system project ──────────────────────────────────────────────
@@ -894,7 +889,9 @@ class MemoryPassCoordinator:
             self._cancel_pump_retry(workspace)
             return
         if host.restart_draining:
-            # Retain a failed admission's wakeup until the drain is cancelled.
+            # A running pass may finish during the drain; completion must leave
+            # a wakeup even if an earlier retry yielded its slot to that pass.
+            self._schedule_pump_retry(workspace)
             return
 
         chat = min(queued, key=lambda candidate: candidate.created_at)

@@ -118,6 +118,7 @@ def _admission_pass(tmp_path, *, state="attention", count=1):
         pairs.append((chat, source))
     manager._save()
     manager._restart_draining = False
+    manager._memory_pass._cancel_pump_retry("work")  # discard setup-only drain deferral
     return manager, pairs, tmp_path / ".runtime" / "web_projects.json"
 
 
@@ -309,6 +310,84 @@ async def test_recovery_defers_during_restart_drain_and_resumes_after_cancel(
     await consume(stream)
 
 
+@pytest.mark.parametrize("finish", ["normal", "drain", "shutdown"])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_running_pass_completion_during_drain_retains_queued_recovery(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock,
+    monkeypatch, finish, is_error,
+):
+    manager, [(queued, source), (running, _)], registry = _admission_pass(
+        tmp_path, state="queued", count=2,
+    )
+    manager._memory_pass._set_state(running, "attention")
+    _stub_archive(manager, monkeypatch)
+    handles = pump_retry_clock(manager)
+    probe = driver_probe(manager, running)
+    real_stream_chat = manager.stream_chat
+
+    async def stream_chat(chat_id, *args, **kwargs):
+        async for event in real_stream_chat(chat_id, *args, **kwargs):
+            if chat_id == running.chat_id and is_error:
+                yield ResultEvent(type="result", result="synthetic pass failure", is_error=True,
+                                  session_id="", effective_model=running.model, usage={}, quota={})
+            else:
+                yield event
+
+    monkeypatch.setattr(manager, "stream_chat", stream_chat)
+    admitted = []
+
+    def observe(chat_id, stream):
+        if chat_id == queued.chat_id:
+            task = manager._streaming.drive_task(chat_id, stream)
+            assert task is not None and not task.done()
+            admitted.append(stream)
+
+    manager.on_turn_started(observe)
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    fault.armed = False
+    running_stream = manager.start_stream(running.chat_id, "continue the other pass")
+    await asyncio.wait_for(probe.entered.wait(), 5)
+    assert not handles[0].cancelled()
+    if finish != "normal":
+        manager.begin_restart_drain()
+    handles[0].fire()
+    assert not manager._memory_pass._pump_retry_handles
+    assert queued.helper["state"] == "queued" and not admitted
+
+    probe.release.set()
+    await consume(running_stream)
+    await asyncio.wait_for(_await_detached(manager), 5)
+    assert running.helper["state"] == ("attention" if is_error else "done")
+    if finish == "normal":
+        assert len(admitted) == 1 and len(handles) == 1
+        await consume(admitted[0])
+    else:
+        assert not admitted and queued.helper["state"] == "queued"
+        assert source.postprocess["steps"]["memory_pass"]["status"] == "queued"
+        assert len(handles) == 2 and handles[1].delay == 30
+        assert manager._memory_pass._pump_retry_handles["work"] is handles[1]
+        if finish == "shutdown":
+            before, checkpoint = registry.read_bytes(), state_checkpoint(queued)
+            manager.begin_shutdown()
+            assert handles[1].cancelled()
+            assert manager.cancel_restart_drain()
+            handles[1].fire(force=True)
+            manager._memory_pass.pump("work")
+            assert registry.read_bytes() == before
+            assert_restored(queued, checkpoint)
+            assert not admitted and len(handles) == 2
+        else:
+            assert manager.cancel_restart_drain()
+            handles[1].fire()
+            assert len(admitted) == 1 and queued.helper["state"] == "running"
+            await consume(admitted[0])
+    await asyncio.wait_for(_await_detached(manager), 5)
+    assert not manager._memory_pass._pump_retry_handles
+    assert len([chat_id for chat_id, _ in probe.calls if chat_id == queued.chat_id]) == (0 if finish == "shutdown" else 1)
+
+
 async def test_shutdown_cancels_pump_recovery_without_mutating_queue(
     tmp_path, passes_enabled, storage_fault, pump_retry_clock,
 ):
@@ -318,6 +397,7 @@ async def test_shutdown_cancels_pump_recovery_without_mutating_queue(
     personal_id = manager.enqueue_memory_pass(personal_source, None, _archive_file(tmp_path), "")
     pairs.append((manager.get_chat(personal_id), personal_source))
     manager._restart_draining = False
+    manager._memory_pass._cancel_pump_retry("personal")  # capture only fault-induced timers below
     handles = pump_retry_clock(manager)
     storage_fault(manager, registry)
     manager._memory_pass.pump("work")
