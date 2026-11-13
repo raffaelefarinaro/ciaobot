@@ -2753,7 +2753,20 @@ async def chat_retry(request: Request) -> JSONResponse:
     body = await request.json()
     action = str(body.get("action", "try_now"))
     if action == "stop":
-        chat = pcm.stop_chat_retry(chat_id)
+        status = pcm.recovery_status(chat_id)
+        if status and status["mode"] == "continue_recovery" and status["status"] == "pending":
+            return JSONResponse({"error": "use stop_recovery with the observed recovery_id"}, status_code=409)
+        try:
+            chat = pcm.stop_chat_retry(chat_id, allow_recovery=False)
+        except ValueError:
+            return JSONResponse({"error": "recovery is in flight or changed"}, status_code=409)
+    elif action == "stop_recovery":
+        recovery_id = body.get("recovery_id")
+        if set(body) != {"action", "recovery_id"} or not isinstance(recovery_id, str) or not recovery_id:
+            return JSONResponse({"error": "only action and recovery_id are accepted"}, status_code=400)
+        if not pcm.stop_recovery(chat_id, recovery_id):
+            return JSONResponse({"error": "recovery is in flight, changed, or not pending"}, status_code=409)
+        return JSONResponse({"stopped": True})
     elif action == "recovery_status":
         if set(body) != {"action"}:
             return JSONResponse({"error": "only action is accepted"}, status_code=400)

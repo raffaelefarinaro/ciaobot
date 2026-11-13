@@ -267,6 +267,8 @@ class ChatStreamingHost(Protocol):
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+
+    def _release_recovery_claim(self, chat_id: str) -> None: ...
     def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool: ...
     def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
@@ -1434,6 +1436,17 @@ class ChatStreaming:
                     if recovery == "" or (isinstance(recovery, dict) and recovery.get("manual") is True):
                         logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
                         self._host._clear_chat_retry(chat_unsettled, status="stopped")
+            if is_retry and owns_retry:
+                current_chat = self._host._chats.get(chat_id)
+                marker = current_chat.retry_recovery if current_chat is not None else ""
+                if current_chat is not None and isinstance(marker, dict) and marker.get("claim"):
+                    if had_error:
+                        try:
+                            self._host._release_recovery_claim(chat_id)
+                        except Exception:
+                            logger.exception("Could not release recovery claim for %s", chat_id)
+                    else:
+                        self._host._clear_chat_retry(current_chat, status="stopped")
             if (stream.network_retry_turn or is_retry) and not began_compact and owns_retry:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())

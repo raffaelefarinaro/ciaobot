@@ -328,9 +328,28 @@ def _recovery_state(marker: object) -> str:
         return ""
     if isinstance(marker, dict) and marker.get("mode") == "continue":
         state = marker.get("state")
+        if state == "active" and marker.get("claim"):
+            return "in_flight"
         if state in ("prepared", "active"):
             return str(state)
     return "invalid"
+
+
+def _recovery_owner_alive(owner: object) -> bool:
+    if owner == restart_resume.PROCESS_TOKEN:
+        return True
+    if not isinstance(owner, str):
+        return True
+    try:
+        pid = int(owner.split("-", 1)[0])
+        if pid <= 0:
+            return True
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (ValueError, OverflowError, OSError):
+        return True
+    return True
 
 
 def _load_retry_timing(cd: dict) -> tuple[str, int]:
@@ -1736,7 +1755,7 @@ class ProjectChatManager:
 
     def _save_checked(self, *, reason: str, _recovery_expected: tuple[str, str, str, int, str] | None = None,
                       _firing_expected: tuple[str, dict[str, Any]] | None = None,
-                      _unrelated_turn: str = "") -> bool:
+                      _unrelated_turn: str = "", _reject_claim: str = "", _reject_recovery: bool = False) -> bool:
         if not self._path:
             return _recovery_expected is None
         current = self._state_payload()
@@ -1757,7 +1776,7 @@ class ProjectChatManager:
         # merge would reproduce the file as it is. Read paths such as
         # list_projects() end in a save; rewriting the multi-megabyte registry
         # there held the event loop for about a second on every sidebar fetch.
-        if not (
+        if not (_unrelated_turn or _reject_claim or _firing_expected or _recovery_expected) and not (
             self._has_mutations(project_mutations)
             or self._has_mutations(chat_mutations)
         ):
@@ -1768,6 +1787,19 @@ class ProjectChatManager:
             latest = self._read_latest_payload()
             latest_projects = latest.get("projects")
             latest_chats = latest.get("chats")
+            if _reject_claim and isinstance(latest_chats, dict):
+                live_row = latest_chats.get(_reject_claim)
+                live_marker = live_row.get("retry_recovery") if isinstance(live_row, dict) else None
+                if (isinstance(live_row, dict) and live_row.get("retry_status") == "pending"
+                        and isinstance(live_marker, dict) and
+                        (live_marker.get("claim") or (_reject_recovery and live_marker.get("mode") == "continue"))):
+                    return False
+            if _unrelated_turn and isinstance(latest_chats, dict):
+                live_row = latest_chats.get(_unrelated_turn)
+                live_marker = live_row.get("retry_recovery") if isinstance(live_row, dict) else None
+                if (isinstance(live_row, dict) and live_row.get("retry_status") == "pending"
+                        and isinstance(live_marker, dict) and live_marker.get("claim")):
+                    return False
             if _firing_expected is not None:
                 firing_id, expected = _firing_expected
                 row = latest_chats.get(firing_id) if isinstance(latest_chats, dict) else None
@@ -8171,8 +8203,52 @@ class ProjectChatManager:
                 "status": row.get("retry_status", ""),
                 "mode": "continue_recovery" if isinstance(marker, dict) and marker.get("mode") == "continue" else "literal",
                 "recovery_state": _recovery_state(marker),
+                "recovery_id": marker.get("id", "") if isinstance(marker, dict) else "",
                 "next_at": row.get("retry_next_at", ""),
             }
+
+    def stop_recovery(self, chat_id: str, recovery_id: str, *, _abandoned_claim: str = "") -> bool:
+        """Stop exactly the observed recovery, unless its attempt is claimed."""
+        if not self._path or not recovery_id:
+            return False
+        with _state_file_lock(self._path):
+            payload = self._read_latest_payload()
+            rows = payload.get("chats", {})
+            row = rows.get(chat_id) if isinstance(rows, dict) else None
+            marker = row.get("retry_recovery") if isinstance(row, dict) else None
+            if (not isinstance(row, dict) or row.get("retry_status") != "pending"
+                    or not isinstance(marker, dict) or marker.get("mode") != "continue"
+                    or marker.get("id") != recovery_id):
+                return False
+            claim = marker.get("claim")
+            if claim and (claim != _abandoned_claim or _recovery_owner_alive(marker.get("owner"))):
+                return False
+            cleared = {"retry_status": "stopped", "retry_prompt": "", "retry_image_refs": [],
+                       "retry_next_at": "", "retry_last_error": "", "retry_attempts": 0,
+                       "retry_kind": "", "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
+                       "retry_unattended": False, "retry_recovery": ""}
+            row.update(cleared)
+            payload["revision"] = int(payload.get("revision", 0) or 0) + 1
+            tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
+                tmp.replace(self._path)
+                self._append_registry_audit(revision=payload["revision"], reason="stop_recovery",
+                    project_mutations={}, chat_mutations={"added": [], "updated": [chat_id], "deleted": []})
+            finally:
+                tmp.unlink(missing_ok=True)
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            baseline = self._last_local_payload.get("chats", {}).get(chat_id, {})
+            for key, value in cleared.items():
+                setattr(chat, key, value)
+                if isinstance(baseline, dict):
+                    baseline[key] = copy.deepcopy(value)
+            self._advance_retry_generation(chat_id)
+            self._publish_retry(chat)
+            if _has_running_loop():
+                self._spawn_detached(self._memory_pass_turn_finished(chat_id), f"memory-pass-{chat_id}")
+        return True
 
     def schedule_continue_recovery(
         self, chat_id: str, session_id: str, last_error: str, turn_count: int, failure_id: str = "", *, manual: bool = False,
@@ -8242,11 +8318,13 @@ class ProjectChatManager:
         clean_prompt = (prompt or "").strip()
         if not clean_prompt:
             return None
+        names = ("retry_status", "retry_prompt", "retry_image_refs", "retry_last_error", "retry_interval_seconds",
+                 "retry_unattended", "retry_recovery", "retry_next_at", "retry_kind", "retry_attempts")
+        before = {name: copy.deepcopy(getattr(chat, name)) for name in names}
         if _owner is not None:
             if _owner.retry_generation != self._retry_generations.get(chat_id, 0):
                 return None
         else:
-            self._advance_retry_generation(chat_id)
             if not _network:
                 chat.retry_kind = ""
                 chat.retry_attempts = 0
@@ -8258,19 +8336,58 @@ class ProjectChatManager:
         chat.retry_unattended = unattended
         chat.retry_recovery = ""
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
-        self._save()
+        try:
+            saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id)
+        except Exception:
+            for name, value in before.items():
+                setattr(chat, name, value)
+            raise
+        if not saved:
+            for name, value in before.items():
+                setattr(chat, name, value)
+            return None
+        if _owner is None:
+            self._advance_retry_generation(chat_id)
         self._publish_retry(chat)
         if _owner is not None:
             self._cancel_retry_task(chat_id, keep_current=True)
         self._ensure_retry_task(chat_id)
         return chat
 
-    def stop_chat_retry(self, chat_id: str) -> ChatInfo | None:
+    def stop_chat_retry(self, chat_id: str, *, allow_recovery: bool = True) -> ChatInfo | None:
         """Stop and clear a pending retry without deleting the chat."""
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
-        self._clear_chat_retry(chat, status="stopped")
+        persisted = self.recovery_status(chat_id)
+        if persisted and persisted["mode"] == "continue_recovery" and persisted["status"] == "pending":
+            if not allow_recovery:
+                raise ValueError("recovery requires its observed ID")
+            marker = chat.retry_recovery
+            observed_id = marker.get("id", "") if isinstance(marker, dict) else ""
+            if not observed_id or not self.stop_recovery(chat_id, observed_id):
+                raise ValueError("recovery is in flight or changed")
+            return chat
+        names = ("retry_status", "retry_prompt", "retry_image_refs", "retry_next_at", "retry_last_error",
+                 "retry_attempts", "retry_kind", "retry_interval_seconds", "retry_unattended", "retry_recovery")
+        before = {name: copy.deepcopy(getattr(chat, name)) for name in names}
+        chat.retry_status, chat.retry_prompt, chat.retry_image_refs = "stopped", "", []
+        chat.retry_next_at, chat.retry_last_error, chat.retry_attempts = "", "", 0
+        chat.retry_kind, chat.retry_interval_seconds, chat.retry_unattended, chat.retry_recovery = "", _RETRY_INTERVAL_SECONDS, False, ""
+        try:
+            saved = self._save_checked(reason="registry_mutation", _reject_claim=chat_id, _reject_recovery=True)
+        except Exception:
+            for name, value in before.items():
+                setattr(chat, name, value)
+            raise
+        if not saved:
+            for name, value in before.items():
+                setattr(chat, name, value)
+            raise ValueError("recovery is in flight or changed")
+        self._advance_retry_generation(chat_id)
+        self._publish_retry(chat)
+        if _has_running_loop():
+            self._spawn_detached(self._memory_pass_turn_finished(chat_id), f"memory-pass-{chat_id}")
         self._settle_schedule_retry(chat_id, succeeded=False)
         return chat
 
@@ -8353,6 +8470,8 @@ class ProjectChatManager:
             return None
         if not self._valid_recovery_retry(chat):
             return None
+        if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("claim"):
+            return None
         if chat.retry_recovery != "" and (not chat.last_error or chat.last_response_status != "error"):
             return None
         if self._broker.get(chat_id) is not None:
@@ -8374,7 +8493,7 @@ class ProjectChatManager:
         firing_expected = None
         if chat.retry_recovery != "":
             firing_expected = (chat_id, {
-                "retry_status": "pending", "retry_recovery": chat.retry_recovery,
+                "retry_status": "pending", "retry_recovery": copy.deepcopy(chat.retry_recovery),
                 "archived": False,
                 "retry_prompt": _RESUME_CONTINUE_PROMPT, "retry_image_refs": [],
                 "retry_interval_seconds": _RETRY_INTERVAL_SECONDS,
@@ -8384,6 +8503,11 @@ class ProjectChatManager:
                 "retry_attempts": chat.retry_attempts, "retry_next_at": chat.retry_next_at,
             })
         previous_attempts, previous_next = chat.retry_attempts, chat.retry_next_at
+        previous_marker = copy.deepcopy(chat.retry_recovery)
+        if firing_expected is not None:
+            assert isinstance(chat.retry_recovery, dict)
+            chat.retry_recovery = {**chat.retry_recovery, "claim": uuid.uuid4().hex,
+                                   "owner": restart_resume.PROCESS_TOKEN}
         chat.retry_attempts += 1
         if network:
             chat.retry_interval_seconds = _network_retry_interval(chat.retry_attempts)
@@ -8395,19 +8519,41 @@ class ProjectChatManager:
                 saved = self._save_checked(reason="continue_recovery_fire", _firing_expected=firing_expected)
             except Exception:
                 chat.retry_attempts, chat.retry_next_at = previous_attempts, previous_next
+                chat.retry_recovery = previous_marker
                 raise
             if not saved:
                 chat.retry_attempts, chat.retry_next_at = previous_attempts, previous_next
+                chat.retry_recovery = previous_marker
                 return None
         self._publish_retry(chat)
-        return self.start_stream(
-            chat_id,
-            chat.retry_prompt,
-            images=images or None,
-            is_retry=True,
-            unattended=network or chat.retry_unattended,
-            origin="retry",
-        )
+        try:
+            return self.start_stream(
+                chat_id, chat.retry_prompt, images=images or None, is_retry=True,
+                unattended=network or chat.retry_unattended, origin="retry",
+            )
+        except Exception:
+            if firing_expected is not None:
+                self._release_recovery_claim(chat_id)
+            raise
+
+    def _release_recovery_claim(self, chat_id: str) -> None:
+        chat = self._chats.get(chat_id)
+        if chat is None or not isinstance(chat.retry_recovery, dict):
+            return
+        marker = chat.retry_recovery
+        if not marker.get("claim") or marker.get("owner") != restart_resume.PROCESS_TOKEN:
+            return
+        chat.retry_recovery = {key: value for key, value in marker.items() if key not in {"claim", "owner"}}
+        try:
+            saved = self._save_checked(reason="release_recovery_claim",
+                                       _firing_expected=(chat_id, {"retry_status": "pending", "retry_recovery": marker}))
+        except Exception:
+            chat.retry_recovery = marker
+            raise
+        if not saved:
+            chat.retry_recovery = marker
+        else:
+            self._publish_retry(chat)
 
     def _resolve_retry_images(self, chat: ChatInfo) -> list[ImageAttachment]:
         images: list[ImageAttachment] = []
@@ -8482,6 +8628,12 @@ class ProjectChatManager:
     def _ensure_retry_tasks(self) -> None:
         for chat in self._chats.values():
             if chat.retry_status == "pending" and not chat.archived:
+                marker = chat.retry_recovery
+                if isinstance(marker, dict) and marker.get("claim"):
+                    if not _recovery_owner_alive(marker.get("owner")):
+                        self.stop_recovery(chat.chat_id, str(marker.get("id", "")),
+                                           _abandoned_claim=str(marker["claim"]))
+                    continue
                 if (isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("manual") is True
                         and chat.turn_owner != restart_resume.PROCESS_TOKEN):
                     self._clear_chat_retry(chat, status="stopped")
@@ -8748,6 +8900,12 @@ class ProjectChatManager:
                 image_refs.append(str(ref))
 
         chat_meta = self._chats.get(chat_id)
+        admission_fields = ("pending_question", "pending_permission", "last_error", "failure_id",
+                            "user_turn_count", "turn_owner", "user_turn_images", "last_activity_at",
+                            "last_read_at", "user_turn_timings", "user_turn_unattended",
+                            "user_turn_origin", "user_turn_send_ids")
+        admission_before = ({name: copy.deepcopy(getattr(chat_meta, name)) for name in admission_fields}
+                            if chat_meta is not None and not is_retry and not compact else {})
         project_id = chat_meta.project_id if chat_meta else ""
         # Stamp activity on send so the sidebar Recent list orders by latest
         # interaction (not just created_at). Also record image refs keyed by
@@ -8862,7 +9020,14 @@ class ProjectChatManager:
         if chat_meta is not None:
             if not is_retry and not compact:
                 generation = self._retry_generations.get(chat_id, 0)
-                self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id)
+                if not self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id):
+                    for name, value in admission_before.items():
+                        setattr(chat_meta, name, value)
+                    if turn_index is not None:
+                        self._streaming.discard_turn_perf(chat_id, turn_index)
+                    self._broker.clear(chat_id, stream)
+                    stream.finish()
+                    raise ValueError("recovery is in flight")
                 if self._retry_generations.get(chat_id, 0) != generation:
                     stream.retry_generation = self._retry_generations[chat_id]
             else:

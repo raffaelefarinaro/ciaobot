@@ -868,7 +868,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # control. Connected PWAs close the matching service-worker notification tag.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, continue_recovery,
-# continue_recovery_now, recovery_status, try_now, stop}.
+# continue_recovery_now, recovery_status, stop_recovery, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' \
@@ -892,7 +892,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # {"action":"continue_recovery_now","failure_id":"<current failure_id>"}
 # A new one-shot does not opt in to hourly retries. No prompt or images are accepted. A stale failure, missing session, busy chat
 # or conflicting pending retry returns 409; an invalid request returns 400.
-# `stop` cancels a pending retry. Generic `try_now` may send a literal retry:
+# `stop` cancels a literal retry. Generic `try_now` may send a literal retry:
 # clients offering recovery must use `continue_recovery_now` instead. Recovery
 # sends only "continue" without images. The provider may have lost the session,
 # and repeated continues can have effects; this is not exactly-once execution.
@@ -902,11 +902,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # assume it was not scheduled or submit another opt-in blindly. When storage is
 # readable again, POST {"action":"recovery_status"} to read the registry under
 # lock. It returns {"status":"pending","mode":"continue_recovery",
-# "recovery_state":"prepared"|"active","next_at":"..."}; other modes and
+# "recovery_state":"prepared"|"active"|"in_flight","recovery_id":"...",
+# "next_at":"..."}; other modes and
 # statuses are possible. `prepared` is non-runnable and remains blocked until
 # stopped; `active` means persisted, not proof a timer is running or that no
-# provider action occurred. The generic `stop` action stops whichever retry is
-# current, so check status and account for a possible concurrent replacement.
+# provider action occurred. To stop exactly the recovery observed, POST
+# {"action":"stop_recovery","recovery_id":"<observed recovery_id>"}; a
+# replacement or an in-flight claim returns 409. While claimed, unrelated turn
+# admission also returns a conflict; a claim whose owner process is confirmed
+# dead is stopped at restart. An unknown or reused PID is treated as live. This
+# coordination is not exactly-once execution.
 
 # Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
 # `stop` message; use this when driving a chat over plain HTTP or when a
