@@ -2119,7 +2119,9 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
-def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
+def read_decisions(
+    proposals_path: Path, *, include_history_only: bool = True
+) -> list[dict[str, Any]]:
     """Every recorded decision for one workspace's proposal queue, newest last.
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
@@ -2132,7 +2134,9 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
     ``learning_id``/``finding`` are empty for every decision about a whole row
     rather than one derived finding. This is the read side of the decision
     history the review page's History tab renders; :func:`record_dismissal`
-    and :func:`record_promotion` are the write side.
+    and :func:`record_promotion` are the write side. ``include_history_only``
+    defaults to the full history; false omits ledger-only rows from consumers
+    that need actual operator decisions.
 
     ``seq`` is the row's position *within its own* append-only sidecar, and
     ``log`` names that sidecar. Together they let :func:`history_row_id` tell
@@ -2148,6 +2152,10 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
         for entry in _sidecar_entries(proposals_path.with_suffix(suffix)):
             text = _one_line(str(entry.get("text", "")))
             if not text:
+                continue
+            row_seq = seq
+            seq += 1
+            if not include_history_only and entry.get("history_only"):
                 continue
             if "promoted_at" in entry:
                 ts, action = str(entry["promoted_at"]), "accepted"
@@ -2174,10 +2182,9 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "finding": str(entry.get("finding", "")),
                     "reason": str(entry.get("reason", "")),
                     "log": suffix,
-                    "seq": seq,
+                    "seq": row_seq,
                 }
             )
-            seq += 1
     return rows
 
 

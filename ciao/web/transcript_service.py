@@ -682,16 +682,7 @@ def _overlay_assistant_timings(
     """
     if not timings:
         return
-    current_turn: int | None = None
-    last_assistant_idx_in_turn: dict[int, int] = {}
-    for i, entry in enumerate(entries):
-        role = entry.get("role")
-        if role == "user":
-            ti = entry.get("turn_index")
-            current_turn = ti if isinstance(ti, int) else None
-        elif role == "assistant" and current_turn is not None:
-            last_assistant_idx_in_turn[current_turn] = i
-    for turn, idx in last_assistant_idx_in_turn.items():
+    for turn, idx in _last_assistant_index_per_turn(entries).items():
         rec = timings.get(str(turn)) or timings.get(turn)
         if not isinstance(rec, dict):
             continue
@@ -701,6 +692,34 @@ def _overlay_assistant_timings(
         duration = rec.get("duration_ms")
         if isinstance(duration, (int, float)):
             entries[idx]["duration_ms"] = int(duration)
+
+
+def _last_assistant_index_per_turn(entries: list[dict]) -> dict[int, int]:
+    """Index of the last assistant row of each user turn, in list order."""
+    current_turn: int | None = None
+    last_assistant_idx_in_turn: dict[int, int] = {}
+    for i, entry in enumerate(entries):
+        role = entry.get("role")
+        if role == "user":
+            ti = entry.get("turn_index")
+            current_turn = ti if isinstance(ti, int) else None
+        elif role == "assistant" and current_turn is not None:
+            last_assistant_idx_in_turn[current_turn] = i
+    return last_assistant_idx_in_turn
+
+
+def _overlay_turn_verification(entries: list[dict], verification: dict) -> None:
+    """Attach the vault answer check to the LAST assistant row per turn.
+
+    ``verification`` is ``ChatInfo.turn_verification`` keyed by turn_index (as
+    str). A turn with no recorded check leaves its rows untouched.
+    """
+    if not verification:
+        return
+    for turn, idx in _last_assistant_index_per_turn(entries).items():
+        rec = verification.get(str(turn)) or verification.get(turn)
+        if isinstance(rec, dict):
+            entries[idx]["verification"] = rec
 
 
 def _mark_preceding_answer(rows: list[dict]) -> None:
@@ -903,6 +922,9 @@ def _render_opencode_thread(
     flush_notice()
     if metadata:
         _overlay_assistant_timings(result, chat.user_turn_timings)
+        _overlay_turn_verification(
+            result, getattr(chat, "turn_verification", None) or {}
+        )
     return result
 
 
@@ -1402,6 +1424,9 @@ def _messages_from_archived_transcript(
             parsed_entry["sent_at"] = parsed_entry["timestamp"]
     _stamp_archive_turn_indices(parsed, chat)
     _overlay_assistant_timings(parsed, chat.user_turn_timings)
+    _overlay_turn_verification(
+        parsed, getattr(chat, "turn_verification", None) or {}
+    )
     return parsed
 
 
@@ -1504,6 +1529,9 @@ async def _assemble_chat_messages(
         )
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
+            _overlay_turn_verification(
+                current, getattr(chat, "turn_verification", None) or {}
+            )
             return [*handover_messages, *current]
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
@@ -1576,6 +1604,9 @@ async def _assemble_chat_messages(
             return [*handover_messages, *rendered]
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
+            _overlay_turn_verification(
+                current, getattr(chat, "turn_verification", None) or {}
+            )
             return [*handover_messages, *current]
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
@@ -1847,4 +1878,7 @@ async def _assemble_chat_messages(
         else:
             _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
+    _overlay_turn_verification(
+        result, getattr(chat, "turn_verification", None) or {}
+    )
     return [*handover_messages, *result]

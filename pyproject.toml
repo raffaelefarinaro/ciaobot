@@ -34,7 +34,7 @@ dependencies = [
   "opentelemetry-api>=1.45.2",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.30.0,<2.0",
-  "starlette==1.7.0",
+  "starlette==1.10.0",
   "uvicorn[standard]==0.54.0",
   "itsdangerous==2.2.0",
   "python-dotenv==1.2.4",
@@ -113,6 +113,11 @@ namespaces = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# A coroutine a test created and never ran fails the test that dropped it (#2842).
+filterwarnings = [
+    "error:coroutine .* was never awaited:RuntimeWarning",
+    "error:Exception ignored.*<coroutine object:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.mypy]
 python_version = "3.12"

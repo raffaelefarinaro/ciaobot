@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { activeWorkspaceButton, boot, horizontalOverflow, isolate } from '../support/app'
+import { activeWorkspaceButton, boot, fixtureWrites, horizontalOverflow, isolate } from '../support/app'
 
 /**
  * Why this is a browser test: the Overview page lives under a container-query
@@ -72,40 +72,40 @@ test.describe('workspace overview', () => {
 
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    // The fixture persists neither the workspace PATCH nor the handover, so
-    // the save would silently revert and the second arrow would have nothing
-    // to move from. Keep the chosen value here and answer both routes from it.
-    let handover = 'off'
-    await page.route('**/api/proposals/handover*', async (route) => {
-      const real = await (await page.request.get(route.request().url())).json()
-      await route.fulfill({ json: { ...real, handover } })
-    })
-    await page.route('**/api/workspaces/*', async (route) => {
-      if (route.request().method() === 'PATCH') {
-        const body = route.request().postDataJSON() as { memory_handover?: string } | null
-        if (body?.memory_handover) handover = body.memory_handover
-        // Answer with the registry itself: the store replaces its list from the reply.
-        await route.fulfill({ json: await (await page.request.get('/api/workspaces')).json() })
-        return
-      }
-      await route.fallback()
-    })
+    // The fixture keeps the saved handover per session (the workspace PATCH and
+    // /api/proposals/handover both read it), so no page.route stands in for
+    // the engine here: a route handler still fetching when the test ends fails
+    // the test after it passed (#2851).
     await boot(page, OVERVIEW, READY)
 
     const group = page.getByRole('radiogroup', { name: 'Memory handover' })
+    const card = page.locator('.card').filter({ has: group })
+    const refresh = card.getByRole('button', { name: 'Refresh', exact: true })
     await group.scrollIntoViewIfNeeded()
     const off = group.getByRole('radio', { name: 'Off' })
+    const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
+    // A save is settled once the group takes arrows again and the card has
+    // re-read the saved value (Refresh is disabled while that read runs).
+    const settled = async () => {
+      await expect(group.locator('[aria-disabled="true"]')).toHaveCount(0)
+      await expect(refresh).toBeEnabled()
+    }
+
     await off.focus()
     await expect(off).toHaveAttribute('aria-checked', 'true')
     await page.keyboard.press('ArrowRight')
-    const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
-    await expect(dismiss).toBeFocused()
     // Focus moves at once; the save is still in flight, and the group ignores
-    // arrows until it settles (no second write mid-save). Wait for the save,
-    // then the next arrow moves on with focus intact.
-    await expect(dismiss).not.toHaveAttribute('aria-disabled', 'true')
+    // arrows until it settles (no second write mid-save).
+    await expect(dismiss).toBeFocused()
+    await expect(dismiss).toHaveAttribute('aria-checked', 'true')
+    await settled()
     await page.keyboard.press('ArrowLeft')
     await expect(off).toBeFocused()
+    await expect(off).toHaveAttribute('aria-checked', 'true')
+    // Both arrows saved, and nothing is still in flight when the test ends.
+    await settled()
+    const saves = (await fixtureWrites(page)).filter(w => w.method === 'PATCH' && w.path.startsWith('/api/workspaces/'))
+    expect(saves).toHaveLength(2)
   })
 
   test('the All workspaces card ends the page and Settings \u2191 returns to the top', async ({ page }) => {

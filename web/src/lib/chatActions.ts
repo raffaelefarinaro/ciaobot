@@ -24,6 +24,9 @@ export interface ActionCopy {
 /** The steps of an MCP sign-in, shown while the card is waiting. */
 export const MCP_AUTH_STEPS: readonly string[] = ['Sign-in page opened', 'Sign in in the browser', 'Ciao picks up the tools']
 
+/** Step 1 until this card has opened the page: nothing was opened yet, so it is the step to do. */
+export const MCP_AUTH_OPEN_STEP = 'Open the sign-in page'
+
 export function isChatAction(value: unknown): value is ChatAction {
   if (typeof value !== 'object' || value === null) return false
   const v = value as Record<string, unknown>
@@ -42,8 +45,13 @@ export function normalizeChatActions(value: unknown): ChatAction[] {
     : []
 }
 
+/** A server's name for people: Claude names a plugin's server `plugin:<plugin>:<server>`. */
+export function mcpServerName(server: string): string {
+  return /^plugin:[^:]+:(.+)$/.exec(server)?.[1] ?? server
+}
+
 function mcpAuthCopy(action: ChatAction): ActionCopy {
-  const server = action.params.server ?? ''
+  const server = mcpServerName(action.params.server ?? '')
   const meta = `${action.params.provider ?? ''} · MCP`
   // Claude's sign-in runs in an engine helper terminal: the URL arrives a poll later.
   const claude = action.params.provider === 'claude'

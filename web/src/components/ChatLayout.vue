@@ -9,9 +9,11 @@
       @toggle="sidebarCollapsed = !sidebarCollapsed"
       @chat-selected="onChatSelected"
       :can-open-beside="splitFits && !!activePinKey && !subagentRoute"
+      :focused-beside-chat-id="besideInTile && focusedPane === 'beside' ? besideChat?.chat_id ?? '' : ''"
       @new-schedule="showNewSchedule = true"
       @new-task="taskBoardRef?.openCreate?.()"
       @open-beside="openBeside"
+      @select-beside="selectInBesidePane"
     />
     <div
       v-if="!sidebarCollapsed && !isMobile"
@@ -59,7 +61,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -162,7 +164,7 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <template v-else-if="store.activeChat">
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
               <template #below-header>
                 <!-- Narrow shared pin: a compact native opener for the chat's
                      server-owned pin, not a forced split pane and never an
@@ -277,10 +279,9 @@
           :key="`beside-${besideChat.chat_id}`"
           :chat-id="besideChat.chat_id"
           beside
-          split
-          plain-header
           :inactive="focusedPane !== 'beside'"
           @close="closeBeside"
+          @select-chat="selectInBesidePane"
           @open-sidebar="sidebarCollapsed = false"
         />
         <PinnedFilePanel v-if="fileInTile" ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
@@ -960,6 +961,14 @@ async function openBeside(chatId: string): Promise<void> {
   focusedPane.value = 'beside'
   setBeside(chatId)
 }
+/** A chat picked for the second pane (a sidebar row while it has the keyboard, or its own
+ *  title rail): that pane shows it. The main pane's chat takes the keyboard back instead of
+ *  being shown twice. */
+function selectInBesidePane(chatId: string): void {
+  if (chatId === activePinKey.value) focusPane('main', true)
+  else if (chatId === besideChat.value?.chat_id) focusPane('beside', true)
+  else setBeside(chatId)
+}
 function closeBeside(): void {
   setBeside('')
   void nextTick(() => chatPanelRef.value?.focusComposer?.())
@@ -1580,13 +1589,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
   }
 
   // Previous / next chat in the header rail's order (Home's order, this workspace).
-  // The main pane's ChatPanel owns the rail. While a second chat sits beside it
-  // the rail is replaced by a plain header, so the chord does nothing.
+  // Each pane has its own rail; the chord steps the pane with the keyboard.
   const chatStep = matchesShortcut(e, 'previousChat') ? -1 : matchesShortcut(e, 'nextChat') ? 1 : 0
   if (chatStep) {
-    if (!store.activeChat || subagentRoute.value || besideInTile.value) return
+    if (!store.activeChat || subagentRoute.value) return
     e.preventDefault()
-    if (chatPanelRef.value?.selectAdjacentChat?.(chatStep)) invalidatePull()
+    if (focusedPanel.value?.selectAdjacentChat?.(chatStep)) invalidatePull()
     return
   }
 

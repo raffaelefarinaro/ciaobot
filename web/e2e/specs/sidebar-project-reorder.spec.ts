@@ -235,10 +235,12 @@ test.describe('sidebar project reordering', () => {
     let patched: Record<string, unknown> | null = null
     await page.route('**/api/chats/alpha-chat-2', async (route) => {
       if (route.request().method() !== 'PATCH') return route.fallback()
-      patched = route.request().postDataJSON()
       const chats = await (await page.request.get('/api/chats')).json()
       const chat = chats.find((c: { chat_id: string }) => c.chat_id === 'alpha-chat-2')
-      return route.fulfill({ json: { ...chat, project_id: 'filler-01' } })
+      await route.fulfill({ json: { ...chat, project_id: 'filler-01' } })
+      // Recorded only once the handler is done, so the test cannot end while
+      // it is still fetching (#2851).
+      patched = route.request().postDataJSON()
     })
     const chat = page.locator(`[data-project-id="${NOTES}"] .chat-item`)
     const target = page.locator('[data-project-id="filler-01"] .project-header')

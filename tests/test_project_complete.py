@@ -20,10 +20,17 @@ import pytest
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.memory_pass import MemoryPassCoordinator
 from ciao.web.project_chats import ProjectChatManager
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_memory_pass_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests run without an event loop, so a queued closure pass must not start its turn."""
+    monkeypatch.setattr(MemoryPassCoordinator, "pump", lambda self, workspace: None)
 
 
 def _make_manager(tmp_path: Path, config: CiaoConfig | None = None) -> ProjectChatManager:

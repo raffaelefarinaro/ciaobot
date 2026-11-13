@@ -1041,8 +1041,14 @@ def _provider_config_payload(config) -> dict:
     }
 
 
+_CONNECT_NOT_ON_HOST = "This browser cannot open a terminal window on the computer running Ciaobot."
+
+
 def _connect_hint(command: str) -> str:
-    return f"Run this in a terminal on the computer running Ciaobot: {command}"
+    return (
+        "Run this in the Ciaobot terminal (Terminal on any chat or project) or another "
+        f"shell on the computer running Ciaobot, as the account Ciaobot runs as: {command}"
+    )
 
 
 async def provider_connection_action(request: Request) -> JSONResponse:
@@ -1071,7 +1077,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                     "ok": False,
                     "reason": "not_on_host",
                     "command": command,
-                    "error": f"{host_terminal.REASON_MESSAGES['not_on_host']} {_connect_hint(command)}",
+                    "error": f"{_CONNECT_NOT_ON_HOST} {_connect_hint(command)}",
                 },
                 status_code=403,
             )
@@ -1961,61 +1967,6 @@ async def project_files_list(request: Request) -> JSONResponse:
     files = pcm.list_project_files(project_id)
     return JSONResponse(files)
 
-
-async def project_files_upload(request: Request) -> JSONResponse:
-    """Upload one or more files into a project's vault folder."""
-    pcm = request.app.state.project_chat_manager
-    project_id = request.path_params["project_id"]
-    project = pcm.get_project(project_id)
-    if project is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    form = await request.form()
-    saved: list[dict] = []
-    errors: list[dict[str, str]] = []
-    upload_count = 0
-    total_bytes = 0
-    for key in form:
-        upload = form[key]
-        if not hasattr(upload, "read"):
-            continue
-        upload_count += 1
-        filename = getattr(upload, "filename", "") or ""
-        display_name = _drop_display_name(Path(filename))
-        if upload_count > _DESKTOP_DROP_MAX_FILES:
-            errors.append({"filename": "file", "error": "too many files"})
-            break
-        try:
-            data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
-            total_bytes += len(data)
-            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
-                errors.append({"filename": display_name, "error": "upload is too large"})
-                continue
-            entry = pcm.save_project_file_upload(project_id, data, filename)
-            relative_path = Path(str(entry.get("path", "")))
-            safe_path = (
-                ""
-                if relative_path.is_absolute() or ".." in relative_path.parts
-                else relative_path.as_posix()
-            )
-            saved.append(
-                {
-                    "path": safe_path,
-                    "kind": str(entry.get("kind", "binary"))[:32],
-                    "size": int(entry.get("size", 0) or 0),
-                    "mtime": str(entry.get("mtime", ""))[:64],
-                }
-            )
-        except LookupError as exc:
-            # Project has no vault folder to upload into. Same status across
-            # all uploads in this request — return 409 immediately.
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        except (OSError, ValueError) as exc:
-            errors.append({
-                "filename": display_name,
-                "error": _safe_desktop_drop_error(Path(filename), exc),
-            })
-    return JSONResponse({"saved": saved, "errors": errors})
 
 async def chat_attachments_upload(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
@@ -3861,7 +3812,13 @@ def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
     Shared by the folder listing and folder pins, so the tile can never pin a
     folder the browser would refuse to list.
     """
-    workspace = pcm._workspace_for_chat(chat.chat_id)
+    return _dir_root_candidates(
+        config, pcm._workspace_for_chat(chat.chat_id), pcm.get_project(chat.project_id)
+    )
+
+
+def _dir_root_candidates(config, workspace: str, project) -> list[tuple[str, Path]]:
+    """A workspace's agent root and vault, plus the project's linked repo."""
     try:
         agent_root = config.agent_root(workspace)
     except ValueError:  # no registered workspace name
@@ -3871,30 +3828,48 @@ def _chat_dir_root_candidates(config, pcm, chat) -> list[tuple[str, Path]]:
         candidates.append(("vault", config.workspace_vault_root(workspace)))
     except ValueError:  # unresolvable vault: browse without it
         pass
-    project = pcm.get_project(chat.project_id)
     if project is not None and project.repo_path:
         candidates.append(("repo", Path(project.repo_path)))
     return candidates
 
 
 async def workspace_dir(request: Request) -> Response:
-    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`)."""
+    """Read-only folder listing for the PWA folder browser (`GET /api/workspace-dir`).
+
+    With a chat or project, an empty path starts in the project's vault folder
+    (where its work lives) rather than the workspace root.
+    """
     config = request.app.state.config
     chat_id = request.query_params.get("chat_id", "").strip()
+    project_id = request.query_params.get("project_id", "").strip()
+    raw = request.query_params.get("path", "")
     candidates: list[tuple[str, Path]]
-    if chat_id:
+    home: Path | None = None
+    if chat_id or project_id:
         pcm = request.app.state.project_chat_manager
+    if chat_id:
         chat = pcm.get_chat(chat_id)
         if chat is None:
             return JSONResponse({"error": "chat not found"}, status_code=404)
         candidates = _chat_dir_root_candidates(config, pcm, chat)
+        if chat.project_id:
+            home = pcm.active_project_vault_dir(chat.project_id)
+    elif project_id:
+        project = pcm.get_project(project_id)
+        if project is None:
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        workspace = project.workspace
+        if not pcm._is_known_workspace(workspace):
+            workspace = config.primary_workspace()
+        candidates = _dir_root_candidates(config, workspace, project)
+        home = pcm.active_project_vault_dir(project_id)
     else:
         allowed = _allowed_roots(config)
         candidates = [("workspace", allowed[0])] + [("vault", r) for r in allowed[1:2]]
     roots = _distinct_dir_roots(candidates)
-    result = await asyncio.to_thread(
-        _list_workspace_dir, roots, request.query_params.get("path", "")
-    )
+    if not raw.strip() and home is not None:
+        raw = home.as_posix()
+    result = await asyncio.to_thread(_list_workspace_dir, roots, raw)
     if isinstance(result, Response):
         return result
     return JSONResponse(result)
@@ -6249,6 +6224,7 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "dev_mode",
     "app_repo",
     "resume_after_restart",
+    "verify_vault_answers",
 })
 
 
@@ -6281,6 +6257,8 @@ def _routines_payload(config, app_settings) -> dict:
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
+        # Settings → General: check a vault-grounded answer's claims against its notes.
+        "verify_vault_answers": s.verify_vault_answers,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
@@ -6938,7 +6916,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             {"error": f"unknown provider '{default_provider}'"}, status_code=400
         )
 
-    from ciao.cli import detect_vault_mode, setup_workspace
+    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace
 
     # The wizard no longer asks scratch-vs-existing: when the request does
     # not pin a mode, inspect the folder — empty starts from scratch, one
@@ -6980,6 +6958,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if native_context is None:
         resolved_workspace = resolved_workspace.resolve()
     tracker = getattr(request.app.state, "startup_tracker", None)
+    vault_root_arg = str(body.get("vault_root", "")).strip() or None
+
+    if native_context is not None and getattr(
+        request.app.state, "native_finish_claimed", False
+    ):
+        return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
+    # Read-only preflight: the same selection inspection reported. An ambiguous
+    # or unusable location is refused here, before any claim, write or exit.
+    # Nothing between this call and the claim below awaits, so the claim stays
+    # single-flight.
+    try:
+        selection = select_setup_vault(
+            resolved_workspace, vault_mode=vault_mode, vault_root=vault_root_arg
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     if native_context is not None:
         # Single flight: claimed synchronously before the first await in the
@@ -6987,8 +6981,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         # after a refusal, is refused rather than racing the non-exclusive
         # workspace writes. Refusals before this line take no claim and exit
         # nothing; every path after it ends in the failure exit or an ok.
-        if getattr(request.app.state, "native_finish_claimed", False):
-            return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
         request.app.state.native_finish_claimed = True
 
     # setup_workspace only writes workspace files and the bundled-engine
@@ -6996,11 +6988,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # responsive and never reaches out to GitHub.
     setup_kwargs: dict[str, Any] = {
         "auth_token": password,
-        "vault_root": str(body.get("vault_root", "")).strip() or None,
+        "vault_root": vault_root_arg,
         "vault_mode": vault_mode,
         "workspace_name": workspace_name,
         "default_provider": default_provider,
         "port": port,
+        "_vault_selection": selection,
     }
     if native_context is None:
         setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
@@ -7055,6 +7048,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             )
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
@@ -7211,7 +7206,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     name that will be assigned to the selected folder.
     """
     from ciao import cli
-    from ciao.cli import detect_vault_mode
+    from ciao.cli import detect_vault_mode, select_setup_vault
     from ciao.setup_status import (
         cloud_sync_warning,
         detect_nested_workspaces,
@@ -7227,16 +7222,19 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     target = _resolve_setup_dir(raw)
     if target is None:
         return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
-    # Reuse the same "scratch vs existing" rule the setup/finish endpoint
-    # applies, so the wizard and the server agree before the user clicks
-    # Finish. The vault root mirrors setup_workspace's logic: an existing
-    # notes folder (no prior scaffold) is the vault itself; otherwise the
-    # vault lives under memory-vault/.
+    # The same read-only selection finish and direct setup use, so the wizard
+    # reports the location the finish will write. An ambiguous or unusable
+    # location is refused here, with the same message finish returns.
     mode = detect_vault_mode(target)
-    vault_root = target / "memory-vault"
-    if mode == "existing" and not vault_root.is_dir():
-        vault_root = target
-    nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
+    try:
+        selection = select_setup_vault(target, vault_mode=mode)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    vault_root = selection.vault_path
+    if selection.registered_vaults is not None:
+        nested = [name for name, _ in selection.registered_vaults]
+    else:
+        nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
     return JSONResponse({
         "path": str(target),
         "mode": mode,

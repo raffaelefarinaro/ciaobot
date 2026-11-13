@@ -58,6 +58,31 @@ describe('OnboardingLocationStage', () => {
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false, error: expect.stringContaining('Could not inspect') })
   })
 
+  it('allows_retry_with_the_nested_vault_folder_after_inspection_refusal', async () => {
+    // Answered by path, not by call order: a folder change may inspect twice.
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url.includes(encodeURIComponent('/home/clone/work/memory-vault'))) return { mode: 'existing', ok: true }
+      throw new Error('400: more than one existing vault')
+    })
+    const wrapper = mount(OnboardingLocationStage, { props: { context, busy: false } })
+    await wrapper.find('input[name="name"]').setValue('Personal')
+
+    await chooseFolder(wrapper, '/home/clone')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Could not inspect this folder'))
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+
+    // The refused path stays editable; the chosen nested vault is inspected next.
+    const folderInput = wrapper.find('input[name="folder"]')
+    expect((folderInput.element as HTMLInputElement).value).toBe('/home/clone')
+    expect(folderInput.attributes('disabled')).toBeUndefined()
+    await chooseFolder(wrapper, '/home/clone/work/memory-vault')
+
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true }))
+    expect(api.get).toHaveBeenLastCalledWith(
+      expect.stringContaining(encodeURIComponent('/home/clone/work/memory-vault')),
+    )
+  })
+
   it('accepts an existing notes folder and says files stay where they are', async () => {
     vi.mocked(api.get).mockResolvedValue({ mode: 'existing', ok: true })
     const wrapper = mount(OnboardingLocationStage, { props: { context, busy: false } })
