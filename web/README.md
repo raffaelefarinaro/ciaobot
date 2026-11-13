@@ -28,6 +28,22 @@ with click, Enter, or Space to inspect the complete scrolling timeline; the
 expanded choice is preserved at turn completion. New activity slides within
 the preview, except when reduced motion is requested.
 
+Failure recovery sends a server-guarded “continue”, not the request or its
+attachments. Controls wait for matching fresh chat metadata and indexed history;
+an unavailable or stale snapshot stays disabled. A conflicting saved retry is
+shown separately and is never automatically stopped or replaced. An uncertain
+outcome is retained across reloads, requires a disk-backed check of each exact
+server-issued receipt ID and explicit reconciliation, and is never automatically
+resubmitted. The receipt is saved locally before dispatch; a status check cancels
+an issued but unsubmitted request before its marker can be cleared.
+Creating a literal schedule from the sidebar requires the server to atomically
+verify an empty slot; a conflict refreshes the displayed schedule. Running or
+stopping a literal schedule requires confirmation and its observed server
+identity; a conflict refreshes the schedule without acting again. If no identity
+is available, these controls are disabled and it can still run on schedule.
+Recovery rejects model and thinking changes until the server can atomically
+guard them against a newer failure, and rejects provider handovers.
+
 A running background subagent stays visible while its chat is idle. The engine's
 `chat_subagents_ready` count and the `/api/subagents/running` list are separate
 sources and the store never writes one into the other. When the list names a
