@@ -379,6 +379,7 @@ def test_absolute_home_parent_and_native_path_policy(tmp_path, monkeypatch):
     chat = _chat(manager, "work")
     client = _client(manager, config)
     monkeypatch.setenv("HOME", str(vault))
+    monkeypatch.setenv("USERPROFILE", str(vault))  # what expanduser reads on Windows
     accepted = _results(_post(client, chat.chat_id, [str(note), "~/notes/a.md", "./notes/a.md", "notes/../notes/a.md"]))
     assert accepted == [_canon(note)] * 4
     assert _results(_post(client, chat.chat_id, [
