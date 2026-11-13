@@ -435,11 +435,6 @@ class ChatStreaming:
         unattended: bool,
         compact: bool = False,
     ) -> None:
-        # The one place a turn begins, so it is the one place a subscriber hears
-        # about it. Announced before the task exists: the drive loop is the turn,
-        # and a watcher that subscribes after it would miss the whole of it.
-        if not unattended:
-            self._host.notify_turn_started(chat_id, stream)
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,
@@ -462,6 +457,11 @@ class ChatStreaming:
                 self._drive_tasks.pop(chat_id, None)
 
         task.add_done_callback(_clear)
+        if not unattended:
+            try:
+                self._host.notify_turn_started(chat_id, stream)
+            except Exception:
+                logger.exception("Turn-start notification failed for chat %s", chat_id)
 
     def _save_at_turn_end(self, chat_id: str) -> None:
         """Persist the registry at turn end without letting a failed write skip teardown.

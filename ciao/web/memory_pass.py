@@ -863,24 +863,13 @@ class MemoryPassCoordinator:
             return
 
         chat = min(queued, key=lambda candidate: candidate.created_at)
-        self._set_state(chat, "running")
-        self._set_source_step(
-            str(self._helper(chat).get("source_chat_id") or ""), "running", chat.chat_id
-        )
         try:
             # Attended on purpose: `unattended=True` injects the "defer new
             # facts" capsule and auto-denies cards, and the experiment measured
             # attended behaviour.
-            host.start_stream(chat.chat_id, self._prompt_for(chat))
-        except Exception:  # noqa: BLE001 — the pass stays open for the owner
+            host.start_stream(chat.chat_id, self._prompt_for(chat), _memory_pass_dispatch=True)
+        except Exception:  # noqa: BLE001 — no turn was admitted; leave it queued
             logger.exception("Memory pass %s could not start", chat.chat_id)
-            self._set_state(chat, "attention")
-            self._set_source_step(
-                str(self._helper(chat).get("source_chat_id") or ""),
-                "attention",
-                chat.chat_id,
-            )
-            self.pump(workspace)
 
     def update_idle_reasons(self) -> list[str]:
         """Why the memory-pass queue is not idle, empty when it is.
@@ -912,7 +901,9 @@ class MemoryPassCoordinator:
                 reasons.append(f"memory pass {state} in chat {chat.chat_id}")
         return reasons
 
-    def on_turn_started(self, chat: ChatInfo) -> None:
+    def prepare_turn_start(
+        self, chat: ChatInfo, *, allow_queued: bool = False
+    ) -> ChatInfo | None:
         """Reclaim the workspace slot when the owner continues a stopped pass.
 
         Only an ``attention`` pass is reclaimed: its prompt already ran and was
@@ -921,16 +912,21 @@ class MemoryPassCoordinator:
         the pump for the same vault. Other states are left untouched.
         """
         helper = self._helper(chat)
+        if allow_queued and (
+            chat.archived or helper.get("kind") != MEMORY_PASS_KIND
+            or helper.get("state") != "queued"
+        ):
+            raise ValueError("Only a queued memory pass may be dispatched")
         if chat.archived or helper.get("kind") != MEMORY_PASS_KIND:
-            return
+            return None
         state = helper.get("state")
-        if state == "queued":
+        if state == "queued" and not allow_queued:
             raise ValueError(
                 "This memory pass is queued and starts on its own when the "
                 "workspace is free. Try again after it runs."
             )
-        if state not in {"attention", "running"}:
-            return
+        if state not in {"attention", "running", "queued"}:
+            return None
         workspace = self._workspace_of(chat)
         if any(
             other.chat_id != chat.chat_id
@@ -942,10 +938,11 @@ class MemoryPassCoordinator:
                 "Try again when it finishes."
             )
         if state != "running":
-            self._set_state(chat, "running")
-            self._set_source_step(
+            self._set_state_fields(chat, "running")
+            return self._set_source_step_fields(
                 str(helper.get("source_chat_id") or ""), "running", chat.chat_id
             )
+        return None
 
     async def on_turn_finished(self, chat_id: str) -> bool:
         """Settle one memory pass whose turn ended. True when it archived."""
@@ -1112,10 +1109,13 @@ class MemoryPassCoordinator:
         ]
 
     def _set_state(self, chat: ChatInfo, state: str) -> None:
+        self._set_state_fields(chat, state)
+        self._host._save()
+
+    def _set_state_fields(self, chat: ChatInfo, state: str) -> None:
         helper = dict(self._helper(chat))
         helper["state"] = state
         chat.helper = helper
-        self._host._save()
 
     def _prompt_for(self, chat: ChatInfo) -> str:
         helper = self._helper(chat)
@@ -1350,12 +1350,20 @@ class MemoryPassCoordinator:
     def _set_source_step(
         self, source_chat_id: str, status: str, memory_chat_id: str
     ) -> None:
+        source = self._set_source_step_fields(source_chat_id, status, memory_chat_id)
+        if source is not None:
+            self._host._save()
+            self._host._publish_postprocess(source)
+
+    def _set_source_step_fields(
+        self, source_chat_id: str, status: str, memory_chat_id: str
+    ) -> ChatInfo | None:
         """Record the pass on the archived chat's own postprocess record."""
         if not source_chat_id:
-            return
+            return None
         source = self._host._chats.get(source_chat_id)
         if source is None:
-            return
+            return None
         state = dict(source.postprocess or {})
         steps = dict(state.get("steps") or {})
         steps["memory_pass"] = {
@@ -1365,5 +1373,4 @@ class MemoryPassCoordinator:
         state["steps"] = steps
         state["updated_at"] = chat_service._now_iso()
         source.postprocess = state
-        self._host._save()
-        self._host._publish_postprocess(source)
+        return source
