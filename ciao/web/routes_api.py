@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from ciao.native_installer import NativeBootstrapContext
 
 from urllib.parse import parse_qsl, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
@@ -11296,6 +11296,42 @@ async def list_update_tasks(request: Request) -> JSONResponse:
     return JSONResponse(
         {"tasks": rows, "coverage_gap": gap} if gap else {"tasks": rows}
     )
+
+
+async def preview_update_task(request: Request) -> JSONResponse:
+    """Prepare an observational, read-only task plan off the event loop."""
+    from ciao import __version__, update_task_preview
+    from ciao.web import update_task_launch
+
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    fresh = request.query_params.get("fresh", "0")
+    if fresh not in ("0", "1"):
+        return JSONResponse({"error": "fresh must be 0 or 1"}, status_code=400)
+    config = request.app.state.config
+    try:
+        task = update_task_launch.resolve_task(
+            request.path_params["task_id"], installed_version=__version__
+        )
+        key = f"update-task-preview:{config.state_path.parent}:{workspace}:{task.id}@{task.revision}"
+        if fresh == "1":
+            key += f":{uuid4().hex}"
+
+        def scan() -> dict[str, Any]:
+            checked_at = datetime.now(UTC).isoformat()
+            return {
+                **update_task_preview.prepare(task, config=config, workspace=workspace),
+                "checked_at": checked_at,
+            }
+
+        result = await run_read(key, scan)
+    except ValueError:
+        return JSONResponse(
+            {"error": "This update task cannot be previewed for this workspace."},
+            status_code=409,
+        )
+    return JSONResponse(result)
 
 
 async def start_update_task(request: Request) -> JSONResponse:
