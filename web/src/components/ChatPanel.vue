@@ -533,6 +533,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :recovery-ready="!!readyRecovery && readyRecovery.chatId === chat.chat_id && readyRecovery.failureId === chat.failure_id && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[chat.chat_id]"
               :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"

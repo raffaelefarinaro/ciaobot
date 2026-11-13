@@ -209,6 +209,19 @@ describe('ChatPanel retry from error bubble', () => {
     localStorage.clear()
   })
 
+  it('disables continuation actions until the displayed failure is verified, without blocking stop', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].retry = { status: 'pending', mode: 'continue_recovery', next_at: '', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    store.messages['chat-1'] = []
+    await flushPromises()
+    const card = wrapper.get('.injected-card--retry_scheduled')
+    const buttons = card.findAll('.retry-state-actions button')
+    expect(buttons[0].attributes('disabled')).toBeDefined()
+    expect(buttons[1].attributes('disabled')).toBeDefined()
+    expect(buttons[2].attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('uses the verified failure identity without resending the task or images', async () => {
     const failed = makeChat('chat-1', { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
     const { wrapper, store, sendMessage } = await mountPanel({ chat: failed })

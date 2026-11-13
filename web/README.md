@@ -30,7 +30,8 @@ the preview, except when reduced motion is requested.
 
 Failure recovery sends a server-guarded “continue”, not the request or its
 attachments. Controls wait for matching fresh chat metadata and indexed history;
-an unavailable or stale snapshot stays disabled. A conflicting saved retry is
+an unavailable or stale snapshot disables continuation actions but still allows
+the observed schedule to be stopped. A conflicting saved retry is
 shown separately and is never automatically stopped or replaced. An uncertain
 outcome is retained across reloads, requires a disk-backed check of each exact
 server-issued receipt ID and explicit reconciliation, and is never automatically
