@@ -2016,6 +2016,11 @@ class CiaoControlPlane:
         false provenance line: the unattended schedule gets ``curation``, an
         attended chat gets ``chat``.
 
+        ``attended`` is "not an unattended turn", the same signal, so an
+        unattributable principal counts as attended. An attended verification is
+        not held off by an earlier unattended ``unverified`` check; the cooldown
+        still holds for everything else.
+
         The caps are refusals shaped as ``unverified``, not as ``applied``: a
         payload or a note too large to be the thing the caller says it read is
         an input we cannot settle, and reporting it as a completed verification
@@ -2054,6 +2059,7 @@ class CiaoControlPlane:
         vault_root = Path(self.config.workspace_vault_root(workspace))
         today = date.today()
         source = "curation" if self._unattended_turn(principal) else "chat"
+        attended = not self._unattended_turn(principal)
 
         def _run() -> dict[str, Any]:
             """Verify, then file the proposal a refused verdict becomes.
@@ -2073,6 +2079,7 @@ class CiaoControlPlane:
                 actor="agent",
                 source=source,
                 today=today,
+                attended=attended,
             )
             if result.status != nv.NEEDS_REVIEW:
                 return _verification_reply(
@@ -2157,6 +2164,7 @@ class CiaoControlPlane:
         vault_root = Path(self.config.workspace_vault_root(workspace))
         today = date.today()
         source = "curation" if self._unattended_turn(principal) else "chat"
+        attended = not self._unattended_turn(principal)
 
         def _run() -> dict[str, Any]:
             try:
@@ -2173,6 +2181,7 @@ class CiaoControlPlane:
                 actor="agent",
                 source=source,
                 today=today,
+                attended=attended,
             )
             if result.status != ev.NEEDS_REVIEW:
                 return _entry_verification_reply(

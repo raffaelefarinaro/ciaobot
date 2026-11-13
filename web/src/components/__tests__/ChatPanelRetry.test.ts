@@ -188,6 +188,107 @@ describe('ChatPanel retry from error bubble', () => {
     localStorage.clear()
   })
 
+  it.each(['manual', 'mcp', '', '  '])('shows a neutral standalone retry for %j', async reason => {
+    const { wrapper, store } = await mountPanel({ chat: { last_error: 'unrelated newer failure' } })
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: reason, attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const card = wrapper.get('.injected-card--retry_scheduled')
+    expect(card.attributes('aria-label')).toBe('Retry scheduled')
+    expect(card.text()).not.toMatch(/Unknown error|manual|mcp|unrelated newer failure/)
+    expect(card.get('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(card.findAll('.retry-state-actions .btn-small').map(b => b.text())).toEqual(['Continue with...', 'Try now', 'Stop trying'])
+    await card.get('.injected-card-toggle').trigger('click')
+    expect(card.text()).toContain('A retry is scheduled.')
+    expect(card.text()).not.toMatch(/Unknown error|manual|mcp|unrelated newer failure/)
+    wrapper.unmount()
+  })
+
+  it('keeps a standalone provider failure classified and visible', async () => {
+    const { wrapper, store } = await mountPanel()
+    const error = 'you have reached your weekly usage limit, upgrade for higher limits'
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: error, attempts: 1, interval_seconds: 3600 }
+    await flushPromises()
+    const card = wrapper.get('.injected-card--error')
+    expect(card.text()).toContain('Usage limit reached')
+    expect(card.text()).toContain(error)
+    wrapper.unmount()
+  })
+
+  it.each(['manual', 'mcp', '', ' \n '])('keeps an unrelated final error separate from a %j retry', async reason => {
+    const { wrapper, store } = await mountPanel({ chat: { last_error: 'unrelated newer failure' } })
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: unrelated provider failure', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: reason, attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const error = wrapper.get('.injected-card--error')
+    const retry = wrapper.get('.injected-card--retry_scheduled')
+    expect(error.text()).toContain('unrelated provider failure')
+    expect(error.find('.retry-state-title').exists()).toBe(false)
+    expect(retry.text()).toContain('Retrying this turn every hour')
+    expect(retry.text()).not.toMatch(/unrelated|Unknown error|manual|mcp/)
+    await retry.get('.injected-card-toggle').trigger('click')
+    expect(retry.text()).toContain('A retry is scheduled.')
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Error: strange failure 42', 'Fix this error'],
+    ['Error: this model does not support image input', 'Switch model'],
+    ['Not logged in · Please run /login', 'Retry'],
+    ['you have reached your weekly usage limit', 'Retry every hour'],
+  ])('suppresses error resend actions while a manual retry is pending: %s', async (content, action) => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content, timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const error = wrapper.get('.injected-card--error')
+    expect(error.findAll('button').map(b => b.text())).not.toContain('Retry')
+    if (action === 'Fix this error') expect(error.text()).toContain(action)
+    else expect(error.text()).not.toContain(action)
+    expect(error.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
+    expect(wrapper.get('.injected-card--retry_scheduled').text()).toContain('Try now')
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('refuses stale error resend and hourly scheduling handlers when a retry is pending', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const schedule = vi.spyOn(store, 'setChatRetry').mockResolvedValue(undefined as never)
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: failure', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const panel = wrapper.vm as unknown as { retryFromError: (i: number) => void; retryHourlyFromError: (i: number) => Promise<void> }
+    panel.retryFromError(1)
+    await panel.retryHourlyFromError(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(schedule).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('retains standalone retry actions', async () => {
+    const { wrapper, store } = await mountPanel()
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const stop = vi.spyOn(store, 'stopChatRetry').mockResolvedValue(undefined as never)
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const buttons = wrapper.findAll('.retry-state-actions .btn-small')
+    await buttons[0].trigger('click')
+    expect(wrapper.text()).toContain('Choose a model to retry immediately')
+    await buttons[1].trigger('click')
+    await buttons[2].trigger('click')
+    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    expect(stop).toHaveBeenCalledWith('chat-1')
+    wrapper.unmount()
+  })
+
   it('resends the prior turn text plus its images', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
@@ -399,7 +500,7 @@ describe('ChatPanel retry from error bubble', () => {
     await flushPromises()
     expect(setRetry).toHaveBeenCalledWith('chat-1', 'Tidy my memory', [])
 
-    // Once the retry is armed the error card carries its state and actions.
+    // A manual schedule has no proven relation to the error, so it gets its own card.
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-12T11:00:00Z',
@@ -409,14 +510,14 @@ describe('ChatPanel retry from error bubble', () => {
     }
     await flushPromises()
     expect(wrapper.findAll('.injected-card--error')).toHaveLength(1)
+    expect(wrapper.findAll('.injected-card--retry_scheduled')).toHaveLength(1)
     expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every hour')
     expect(wrapper.findAll('.retry-state-actions .btn-small').map(b => b.text()))
       .toEqual(['Continue with...', 'Try now', 'Stop trying'])
-    expect(wrapper.findAll('.retry-btn')).toHaveLength(0)
     wrapper.unmount()
   })
 
-  it('shows one card for a failed retry: no Retry started row, retry state inside', async () => {
+  it('shows a failed retry and its pending schedule as separate cards', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
@@ -439,9 +540,10 @@ describe('ChatPanel retry from error bubble', () => {
 
     expect(wrapper.text()).not.toContain('Retry started')
     const cards = wrapper.findAll('.injected-card')
-    expect(cards).toHaveLength(1)
+    expect(cards).toHaveLength(2)
     expect(cards[0].find('.injected-card-facts').text()).toContain('Retry failed')
-    expect(cards[0].find('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
+    expect(cards[1].find('.retry-state-title').text()).toBe('Retrying this turn every hour')
     expect(wrapper.find('.retry-card').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -465,23 +567,31 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('keeps one card when the retry reason differs from the row text', async () => {
+  it.each([
+    ['network unreachable', 'Error: you have reached your weekly usage limit', 'Usage limit reached'],
+    ['you have reached your weekly usage limit', 'Error: connection refused', 'Unknown error'],
+  ])('keeps provider reason %s separate from unrelated error %s', async (reason, error, errorLabel) => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
-      { role: 'assistant', content: 'Error: could not reach the provider', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      { role: 'assistant', content: error, timestamp: '2026-10-11T18:01:01Z', is_error: true },
     ]
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-11T23:00:00Z',
-      last_error: 'network unreachable',
+      last_error: reason,
       attempts: 1,
       interval_seconds: 30,
     }
     await flushPromises()
     const cards = wrapper.findAll('.injected-card')
-    expect(cards).toHaveLength(1)
-    expect(cards[0].find('.retry-state-title').exists()).toBe(true)
+    expect(cards).toHaveLength(2)
+    expect(cards[0].text()).toContain(errorLabel)
+    expect(cards[0].text()).toContain(error.replace('Error: ', ''))
+    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
+    expect(cards[1].text()).toContain(reason)
+    expect(cards[1].find('.retry-state-title').exists()).toBe(true)
+    expect(cards[1].findAll('.retry-state-actions button').map(b => b.text())).toEqual(['Continue with...', 'Try now', 'Stop trying'])
     wrapper.unmount()
   })
 
@@ -892,6 +1002,22 @@ describe('ChatPanel recovery model picker', () => {
     const stub = wrapper.getComponent({ name: 'ModelSelectorStub' })
     expect(stub.attributes('aria-labelledby')).toBe('model-picker-recovery-title')
     expect(stub.attributes('aria-describedby')).toBe('model-picker-recovery-note')
+    wrapper.unmount()
+  })
+
+  it('does not apply an error recovery model or resend if a retry becomes pending while the picker is open', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const update = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    await pickModel(wrapper, 'opus')
+    expect(update).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

@@ -32,7 +32,8 @@ writes nothing, so the worklist pass and the proposal writer can both ask what
 * ``unverified`` — no mutation and no proposal. A missing, unavailable or
   unreadable source (a connector that is down) is this outcome, not a failure:
   it is recorded with a cooldown so the next pass does not re-ask for
-  :data:`CHECK_COOLDOWN_DAYS`.
+  :data:`CHECK_COOLDOWN_DAYS`. An attended chat that has the source is not held
+  off by that cooldown and may settle it.
 
 Two absences are load-bearing. A missing citation is *not* a failure, and a
 retire is *not* an update: an unattended pass must never turn "I could not
@@ -999,6 +1000,32 @@ def _check_settles(check: NoteCheck, current_revision: str, *, today: date) -> b
     return today < check.retry_after
 
 
+def reopens_unverified(check: Any, *, attended: bool) -> bool:
+    """An attended caller may settle what an unattended pass could not reach.
+
+    Only an ``unverified`` check with no pending proposal. A proposal stays pinned,
+    and an applied check keeps its cooldown.
+    """
+    return attended and check.outcome == UNVERIFIED and not check.proposal_id
+
+
+def already_checked_message(subject: str, check: Any) -> str:
+    """The reply for a verdict the cooldown holds off, saying why and what to do."""
+    text = (
+        f"{subject} was already checked as {check.outcome} on "
+        f"{check.checked_at.isoformat()}; nothing was asked or written"
+    )
+    if check.reason:
+        text += f". Its reason: {check.reason}"
+    text += "."
+    if check.outcome == UNVERIFIED and not check.proposal_id:
+        text += (
+            " An attended chat can re-verify it; an unattended run waits out the "
+            f"cooldown until {check.retry_after.isoformat()}."
+        )
+    return text
+
+
 def should_check(
     vault_root: Path | str,
     relative_path: str,
@@ -1137,8 +1164,12 @@ def verify_note(
     actor: str = "agent",
     source: str = "curation",
     today: date | None = None,
+    attended: bool = False,
 ) -> VerificationResult:
     """Record one note's verdict, applying the edit only when the rule allows it.
+
+    With ``attended=True`` a prior ``unverified`` check that has no pending
+    proposal does not short-circuit: the new verdict replaces it.
 
     The whole operation in order: refuse a vault that is not this workspace's,
     read the note's exact bytes, skip the work if a check for *this* revision
@@ -1164,7 +1195,8 @@ def verify_note(
       can re-read and decide again.
     * ``already_checked`` — a check for this exact revision is in its cooldown or
       awaiting a proposal. A no-op: nothing written, no receipt, and the check
-      left exactly as it was.
+      left exactly as it was. The reply names the check's reason. An attended
+      caller is not held off by an ``unverified`` check with no proposal.
     * ``failed`` — the note could not be used at all (unreadable, not a writable
       note in this vault, the journal could not record it, or the outcome was not
       one of the four). Distinct from ``unverified`` on purpose: an unavailable
@@ -1204,7 +1236,11 @@ def verify_note(
         return VerificationResult(status=FAILED, message=unknown)
 
     existing = read_note_checks(root).get(key)
-    if existing is not None and _check_settles(existing, current, today=day):
+    if (
+        existing is not None
+        and not reopens_unverified(existing, attended=attended)
+        and _check_settles(existing, current, today=day)
+    ):
         # First, and deliberately ahead of the revision check below: this
         # short-circuit writes and records nothing, so the note keeps the verdict
         # it already has for the revision it is in. A caller re-sending the same
@@ -1212,10 +1248,7 @@ def verify_note(
         return VerificationResult(
             status=ALREADY_CHECKED,
             check=existing,
-            message=(
-                f"{key} was already checked as {existing.outcome} on "
-                f"{existing.checked_at.isoformat()}; nothing was asked or written"
-            ),
+            message=already_checked_message(key, existing),
         )
 
     # The revision is checked before the verdict is decided, not only before the

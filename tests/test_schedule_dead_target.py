@@ -488,10 +488,11 @@ async def _switched_kind_turn(tmp_path: Path, *, error: bool) -> tuple[object, o
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         if error:
-            # Simulates the cap: the retry is gone by the time the turn ends.
-            pcm._clear_chat_retry(chat, status="stopped")
+            from ciao.web.project_chats import _MAX_CONNECTION_DROP_RETRIES
+
+            chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
         yield ResultEvent(
-            type="result", result="boom" if error else "done", session_id="s",
+            type="result", result="API Error: Connection closed mid-response." if error else "done", session_id="s",
             is_error=error, effective_model=chat.model, usage={}, quota={},
             cost_usd=0.0,
         )

@@ -40,6 +40,139 @@ from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import SEND_ID_HISTORY_TURNS, ProjectChatManager
 from ciao.web.routes_chat import ws_chat
 from tests.session import signed_in
+from tests.test_start_stream_enospc_repro import admission_case, storage_fault
+
+
+def _storage_app(manager):
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+def _bounded_frame(ws):
+    async def receive():
+        return await asyncio.wait_for(ws._send_rx.receive(), 5)
+    frame = ws.portal.call(receive)
+    assert frame["type"] == "websocket.send", frame
+    return json.loads(frame.get("text") or frame["bytes"])
+
+
+def _frames_until(ws, predicate):
+    frames = []
+    for _ in range(40):
+        frame = _bounded_frame(ws)
+        frames.append(frame)
+        if predicate(frames):
+            return frames
+    pytest.fail(f"Expected frame not received; types: {[frame['type'] for frame in frames]}")
+
+
+def _socket_probe(manager, chat, monkeypatch):
+    probe = SimpleNamespace(calls=[], entered=asyncio.Event(), release=asyncio.Event())
+    async def stream_chat(chat_id, prompt, images=None, **kwargs):
+        probe.calls.append(prompt)
+        probe.entered.set()
+        await probe.release.wait()
+        yield ResultEvent(type="result", result="ok", session_id="", is_error=False,
+                          effective_model=chat.model, usage={}, quota={})
+    monkeypatch.setattr(manager, "stream_chat", stream_chat)
+    return probe
+
+
+def _finish_socket_probe(ws, manager, probe):
+    async def finish():
+        probe.release.set()
+        tasks = [task for _, task in list(manager._streaming._drive_tasks.values())]
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    ws.portal.call(finish)
+
+
+def test_storage_failure_reports_error_without_active_turn(admission_case, storage_fault, monkeypatch):
+    from ciao.control_plane import CiaoControlPlane
+
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry)
+    before = registry.read_bytes()
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        ws.send_json({"type": "message", "text": "synthetic", "send_id": "storage-send"})
+        frames = _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        assert not any(frame["type"] == "user_echo" or frame.get("message") == "thinking" for frame in frames)
+    assert not probe.calls and manager.get_active_stream(chat.chat_id) is None
+    assert CiaoControlPlane._chat_state_fields(SimpleNamespace(pcm=manager), chat)["active_turn"] is False
+    assert registry.read_bytes() == before and chat.user_turn_count == 0
+    fault.armed = False
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        ws.send_text("{")  # deterministic reply, not a timeout-based silence assertion
+        frames = _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        assert not any(frame["type"] == "user_echo" for frame in frames)
+    assert manager.find_turn_by_send_id(chat.chat_id, "storage-send") is None
+
+
+def test_storage_recovery_accepts_same_send_id(admission_case, storage_fault, monkeypatch):
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry)
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        message = {"type": "message", "text": "synthetic", "send_id": "storage-send"}
+        ws.send_json(message)
+        _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        fault.armed = False
+        try:
+            ws.send_json(message)
+            frames = _frames_until(ws, lambda frames:
+                any(frame.get("message") == "thinking" for frame in frames)
+                and any(frame["type"] == "user_echo" for frame in frames))
+            assert not any(frame["type"] == "error" for frame in frames)
+            async def entered():
+                await asyncio.wait_for(probe.entered.wait(), 5)
+            ws.portal.call(entered)
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+            _finish_socket_probe(ws, manager, probe)
+            terminal = _frames_until(ws, lambda frames: frames[-1]["type"] == "result")
+            assert not any(frame["type"] == "error" for frame in terminal)
+        finally:
+            _finish_socket_probe(ws, manager, probe)
+
+
+def test_postcommit_failure_does_not_report_rejected_send(admission_case, storage_fault, monkeypatch):
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry, "audit")
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        message = {"type": "message", "text": "synthetic", "send_id": "committed-send"}
+        try:
+            ws.send_json(message)
+            frames = _frames_until(ws, lambda frames:
+                any(frame.get("message") == "thinking" for frame in frames)
+                and any(frame["type"] == "user_echo" for frame in frames))
+            fault.armed = False
+            assert not any(frame["type"] == "error" for frame in frames)
+            assert manager._streaming.drive_task(chat.chat_id) is not None
+            ws.send_json(message)
+            duplicate = _frames_until(ws, lambda frames: frames[-1].get("duplicate") is True)
+            assert not any(frame["type"] == "error" for frame in duplicate)
+            assert duplicate[-1]["type"] == "user_echo"
+            async def entered():
+                await asyncio.wait_for(probe.entered.wait(), 5)
+            ws.portal.call(entered)
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+            _finish_socket_probe(ws, manager, probe)
+            _frames_until(ws, lambda frames: frames[-1]["type"] == "result")
+            # Replay after completion must still deduplicate, not just reuse a live stream.
+            ws.send_json(message)
+            replay = _frames_until(ws, lambda frames: frames[-1].get("duplicate") is True)
+            assert replay[-1]["turn_index"] == 0
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+        finally:
+            fault.armed = False
+            _finish_socket_probe(ws, manager, probe)
 
 
 def _app(started: list[tuple[str, str]]) -> Starlette:
