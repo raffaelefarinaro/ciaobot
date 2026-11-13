@@ -94,7 +94,7 @@ from ciao.execution_modes import (
     opencode_credential_deny_rules,
 )
 from ciao.fs_sandbox import node_tool_read_roots, opencode_sandbox_prefix
-from ciao.os_support.processes import ProcessTree, tree_spawn_options
+from ciao.os_support.processes import ProcessTree, bounded_output, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
 
@@ -5240,7 +5240,8 @@ class _EphemeralServer:
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_CREDENTIAL_COUNT_RE = re.compile(r"(\d+)\s+credentials?\b", re.IGNORECASE)
+_CREDENTIAL_WORD_RE = re.compile(r"credentials?\b", re.IGNORECASE)
+_AUTH_LIST_MAX_STDOUT = 1024 * 1024
 
 
 def _credential_count(binary: str, *, timeout: float) -> int | None:
@@ -5260,32 +5261,52 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     reads (or starts) the shared background service, which can be an older
     opencode than the installed one.
     """
-    import subprocess
-
-    try:
-        listed = subprocess.run(
-            [binary, "auth", "list", "--format", "json", "--standalone"],
-            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
+    listed = bounded_output(
+        [binary, "auth", "list", "--format", "json", "--standalone"],
+        timeout=timeout, max_stdout=_AUTH_LIST_MAX_STDOUT,
+    )
+    if listed is None:
         return None
     try:
-        providers = json.loads(listed.stdout)
-    except (TypeError, ValueError):
+        text = listed[1].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        providers = json.loads(text)
+    except (ValueError, RecursionError):
         providers = None
     if isinstance(providers, list):
         return sum(
             1 for item in providers
             if isinstance(item, dict) and item.get("connections")
         )
-    try:
-        listed = subprocess.run(
-            [binary, "auth", "list", "--standalone"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
-    except (OSError, subprocess.SubprocessError):
+    listed = bounded_output(
+        [binary, "auth", "list", "--standalone"],
+        timeout=timeout, max_stdout=_AUTH_LIST_MAX_STDOUT,
+    )
+    if listed is None:
         return None
-    match = _CREDENTIAL_COUNT_RE.search(_ANSI_RE.sub("", listed.stdout))
-    return int(match.group(1)) if match else None
+    try:
+        text = _ANSI_RE.sub("", listed[1].decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    i = 0
+    while i < len(text):
+        if not text[i].isdecimal():
+            i += 1
+            continue
+        start = i
+        while i < len(text) and text[i].isdecimal():
+            i += 1
+        end = i
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i > end and _CREDENTIAL_WORD_RE.match(text, i):
+            try:
+                return int(text[start:end])
+            except ValueError:
+                return None
+    return None
 
 
 _InventoryRows = tuple[
@@ -5467,6 +5488,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         )
     version = ""
     try:
+        # Unlike auth-list, this version probe still captures unbounded output.
         result = subprocess.run(
             [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
