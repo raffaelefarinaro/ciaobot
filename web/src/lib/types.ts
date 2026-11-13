@@ -285,6 +285,9 @@ export interface ChatInfo {
   // One-line snippet of the error that ended the last turn. Empty or absent
   // when the last turn did not fail; cleared when a new turn starts.
   last_error?: string
+  failure_id?: string
+  recovery_eligible?: boolean
+  user_turn_count?: number
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
@@ -414,6 +417,8 @@ export interface ChatRetryInfo {
   last_error: string
   attempts: number
   interval_seconds: number
+  mode?: 'continue_recovery' | 'literal'
+  schedule_id?: string
 }
 
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
@@ -662,7 +667,7 @@ export type WsEvent =
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
-  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   // Idle heartbeat from the broker / events hub. Clients treat it as a
   // liveness signal only and must not mutate chat UI state.
   | { type: 'keepalive' }
@@ -677,7 +682,7 @@ export type EventsWsMessage =
   | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
@@ -689,7 +694,7 @@ export type EventsWsMessage =
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
-  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }

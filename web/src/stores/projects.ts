@@ -175,6 +175,28 @@ export const useProjectStore = defineStore('projects', () => {
     if (bootstrapped.value) reloadTaskSignals()
   })
   const messages = ref<Record<string, ChatMessage[]>>({})
+  const unknownRecoveryOutcomes = ref<Record<string, boolean>>({})
+  const recoveryOutcomeStorageUnavailable = ref(false)
+  const recoveryKeyPrefix = 'ciao-unknown-recovery:'
+  function recoveryKeys(chatId?: string) {
+    const prefix = chatId === undefined ? recoveryKeyPrefix : `${recoveryKeyPrefix}${encodeURIComponent(chatId)}:`
+    return Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+      .filter((key): key is string => key !== null && key.startsWith(prefix))
+  }
+  function refreshRecoveryOutcomes() {
+    const ids = recoveryKeys().map(key => decodeURIComponent(key.slice(recoveryKeyPrefix.length).split(':')[0]))
+    unknownRecoveryOutcomes.value = Object.fromEntries(ids.map(id => [id, true]))
+  }
+  try {
+    refreshRecoveryOutcomes()
+  } catch { recoveryOutcomeStorageUnavailable.value = true }
+  const onRecoveryStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key.startsWith(recoveryKeyPrefix)) {
+      try { refreshRecoveryOutcomes() } catch { recoveryOutcomeStorageUnavailable.value = true }
+    }
+  }
+  window.addEventListener('storage', onRecoveryStorage)
+  onScopeDispose(() => window.removeEventListener('storage', onRecoveryStorage))
   // History is loaded independently after a chat becomes active. Keep this
   // separate from `messages` so cached text can render immediately while the
   // authoritative session history is still on the way.
@@ -3370,30 +3392,162 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
+  async function refreshRetryAfterConflict(chatId: string) {
+    try {
+      const observed = chats.value.find(chat => chat.chat_id === chatId)?.retry
+      const fresh = await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`)
+      const current = chats.value.find(chat => chat.chat_id === chatId)
+      if (current && current.retry === observed) current.retry = fresh.retry
+    } catch { /* The failed refresh must not mask the conflict. */ }
+  }
+
   async function setChatRetry(chatId: string, prompt: string, images?: string[]) {
     const readStart = chatReadStart()
-    const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, {
-      action: 'set',
-      prompt,
-      images: images || [],
+    try {
+      const c = await api.post<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}/retry`, {
+        action: 'set', prompt, images: images || [], require_empty: true,
+      })
+      replaceChat(c, readStart)
+      return c
+    } catch (e) {
+      if ((e as { status?: number })?.status === 409) await refreshRetryAfterConflict(chatId)
+      throw e
+    }
+  }
+
+  async function literalRetryAction(chatId: string, scheduleId: string, action: 'stop' | 'try_now') {
+    if (!scheduleId) throw new Error('The saved schedule has no verified identity.')
+    const readStart = chatReadStart()
+    try {
+      const c = await api.post<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}/retry`, { action, schedule_id: scheduleId })
+      replaceChat(c, readStart)
+      if (action === 'try_now') reattachActiveChatSocket(chatId)
+      return c
+    } catch (e) {
+      if ((e as { status?: number })?.status === 409) {
+        await refreshRetryAfterConflict(chatId)
+      }
+      throw e
+    }
+  }
+
+  async function stopChatRetry(chatId: string, scheduleId: string) { return literalRetryAction(chatId, scheduleId, 'stop') }
+  async function tryChatRetryNow(chatId: string, scheduleId: string) { return literalRetryAction(chatId, scheduleId, 'try_now') }
+
+  async function withRecoveryLock<T>(chatId: string, action: () => Promise<T>): Promise<T> {
+    if (!navigator.locks?.request) throw new Error('Recovery is unavailable because cross-tab coordination is not supported.')
+    return navigator.locks.request(`ciao-recovery:${chatId}`, { ifAvailable: true }, async lock => {
+      if (!lock) throw new Error('A recovery request or reconciliation is already in progress in another tab.')
+      return action()
     })
-    replaceChat(c, readStart)
-    return c
   }
 
-  async function stopChatRetry(chatId: string) {
-    const readStart = chatReadStart()
-    const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'stop' })
-    replaceChat(c, readStart)
-    return c
+  async function continueRecovery(chatId: string, failureId: string, now: boolean) {
+    return withRecoveryLock(chatId, () => continueRecoveryLocked(chatId, failureId, now))
   }
 
-  async function tryChatRetryNow(chatId: string) {
+  async function continueRecoveryLocked(chatId: string, failureId: string, now: boolean) {
+    if (recoveryOutcomeStorageUnavailable.value) throw new Error('Recovery outcome is unknown. Check recovery status before trying again.')
+    let marker: string
+    try {
+      refreshRecoveryOutcomes()
+      if (unknownRecoveryOutcomes.value[chatId]) throw new Error('Recovery outcome is unknown. Check recovery status before trying again.')
+    } catch {
+      if (unknownRecoveryOutcomes.value[chatId]) throw new Error('Recovery outcome is unknown. Check recovery status before trying again.')
+      recoveryOutcomeStorageUnavailable.value = true
+      throw new Error('Recovery is unavailable because its safety state cannot be read.')
+    }
+    const receipt = await api.post<{ request_id: string; expires: number }>(`/api/chats/${encodeURIComponent(chatId)}/retry`, {
+      action: 'issue_recovery_request',
+    })
+    const requestId = receipt?.request_id
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) ||
+        typeof receipt.expires !== 'number' || !Number.isFinite(receipt.expires) || receipt.expires * 1000 <= Date.now()) {
+      throw new Error('The recovery receipt is invalid or expired. No recovery was submitted.')
+    }
+    try {
+      marker = `${recoveryKeyPrefix}${encodeURIComponent(chatId)}:${requestId}`
+      localStorage.setItem(marker, '1')
+      refreshRecoveryOutcomes()
+    } catch {
+      if (unknownRecoveryOutcomes.value[chatId]) throw new Error('Recovery outcome is unknown. Check recovery status before trying again.')
+      recoveryOutcomeStorageUnavailable.value = true
+      throw new Error('Recovery is unavailable because its safety state cannot be saved.')
+    }
     const readStart = chatReadStart()
-    const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'try_now' })
-    replaceChat(c, readStart)
-    reattachActiveChatSocket(chatId)
-    return c
+    let completed = false
+    try {
+      const response = await api.post<{ request_id: string; status: string; result?: { http_status?: number } }>(`/api/chats/${encodeURIComponent(chatId)}/retry`, {
+        action: now ? 'continue_recovery_now' : 'continue_recovery',
+        failure_id: failureId,
+        request_id: requestId,
+      })
+      if (response.request_id !== requestId || response.status !== 'completed' || typeof response.result?.http_status !== 'number') {
+        throw new Error('Recovery outcome is unknown. Check recovery status before trying again.')
+      }
+      completed = true
+      if (response.result.http_status < 200 || response.result.http_status >= 300) {
+        throw Object.assign(new Error('Recovery was not accepted; the failure or schedule may have changed.'), { status: response.result.http_status })
+      }
+      const c = await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`)
+      replaceChat(c, readStart)
+      if (now) reattachActiveChatSocket(chatId)
+      return c
+    } catch (e) {
+      if ((e as { status?: number })?.status === 409) {
+        try {
+          const observedRetry = chats.value.find(chat => chat.chat_id === chatId)?.retry
+          const fresh = await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`)
+          const current = chats.value.find(chat => chat.chat_id === chatId)
+          if (current?.failure_id === failureId && current.retry === observedRetry && fresh.failure_id === failureId) current.retry = fresh.retry
+        } catch { /* Preserve the conflict if the follow-up read fails. */ }
+      }
+      throw e
+    } finally {
+      if (completed) {
+        try {
+          localStorage.removeItem(marker)
+          refreshRecoveryOutcomes()
+        } catch { recoveryOutcomeStorageUnavailable.value = true }
+      }
+    }
+  }
+
+  async function checkRecoveryStatus(chatId: string) {
+    return api.post<{ status: string; mode: string; recovery_state?: string; recovery_id?: string; next_at?: string }>(
+      `/api/chats/${chatId}/retry`, { action: 'recovery_status' },
+    )
+  }
+
+  async function stopRecovery(chatId: string, recoveryId: string) {
+    const observed = chats.value.find(chat => chat.chat_id === chatId)?.retry
+    await api.post(`/api/chats/${chatId}/retry`, { action: 'stop_recovery', recovery_id: recoveryId })
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat && chat.retry === observed) chat.retry = null
+  }
+
+  async function acknowledgeRecoveryReconciled(chatId: string) {
+    return withRecoveryLock(chatId, () => acknowledgeRecoveryReconciledLocked(chatId))
+  }
+
+  async function acknowledgeRecoveryReconciledLocked(chatId: string) {
+    const observedKeys = recoveryKeys(chatId)
+    for (const key of observedKeys) {
+      const requestId = key.slice(`${recoveryKeyPrefix}${encodeURIComponent(chatId)}:`.length)
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) throw new Error('Invalid recovery request identity; the warning cannot be cleared.')
+      const request = await api.post<{ request_id: string; status: string }>(`/api/chats/${encodeURIComponent(chatId)}/retry`, {
+        action: 'recovery_request_status', request_id: requestId,
+      })
+      if (request.request_id !== requestId || !['cancelled', 'completed'].includes(request.status)) {
+        throw new Error('The recovery request is still in progress or its outcome is unknown.')
+      }
+    }
+    const status = await checkRecoveryStatus(chatId)
+    if (!['', 'stopped'].includes(status.status) || status.recovery_state !== '') {
+      throw new Error('A recovery is still pending. Inspect and stop it before clearing this warning.')
+    }
+    for (const key of observedKeys) localStorage.removeItem(key)
+    refreshRecoveryOutcomes()
   }
 
   // If this tab is already on the chat, reconnect so the per-chat WS attaches
@@ -5060,6 +5214,10 @@ export const useProjectStore = defineStore('projects', () => {
         cancelServerRestart()
         break
       case 'chat_streaming_started':
+        {
+          const startedChat = chats.value.find(c => c.chat_id === msg.chat_id)
+          if (startedChat) { startedChat.failure_id = ''; startedChat.recovery_eligible = false }
+        }
         projectStreaming.value[msg.chat_id] = true
         if (msg.background) wakeStreaming.value[msg.chat_id] = true
         else delete wakeStreaming.value[msg.chat_id]
@@ -5079,7 +5237,11 @@ export const useProjectStore = defineStore('projects', () => {
         delete projectStreaming.value[msg.chat_id]
         delete wakeStreaming.value[msg.chat_id]
         const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
-        if (doneChat) doneChat.last_error = msg.last_error || ''
+        if (doneChat) {
+          doneChat.last_error = msg.last_error || ''
+          doneChat.failure_id = msg.failure_id || ''
+          doneChat.recovery_eligible = false
+        }
         if (doneChat && msg.repo_location) doneChat.repo_location = msg.repo_location
         // The per-chat WS may have missed the `result` event for this
         // turn (WS flap mid-stream, or the broker stream finished and
@@ -5262,6 +5424,8 @@ export const useProjectStore = defineStore('projects', () => {
             last_error: msg.last_error || '',
             attempts: msg.attempts || 0,
             interval_seconds: msg.interval_seconds || 3600,
+            mode: msg.mode,
+            schedule_id: msg.schedule_id,
           } : null
         }
         break
@@ -7141,6 +7305,8 @@ export const useProjectStore = defineStore('projects', () => {
             last_error: event.last_error || '',
             attempts: event.attempts || 0,
             interval_seconds: event.interval_seconds || 3600,
+            mode: event.mode,
+            schedule_id: event.schedule_id,
           } : null
         }
         break
@@ -7325,7 +7491,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
-    setChatRetry, stopChatRetry, tryChatRetryNow,
+    setChatRetry, stopChatRetry, stopRecovery, tryChatRetryNow, continueRecovery, checkRecoveryStatus, acknowledgeRecoveryReconciled, unknownRecoveryOutcomes, recoveryOutcomeStorageUnavailable,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, compactState, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
