@@ -45,7 +45,6 @@
  * that disagrees with itself is **flagged with what disagrees and the controls
  * that resolve it** rather than silently rewritten.
  */
-import SkeletonLoader from './SkeletonLoader.vue'
 import TaskNoteFeed from './TaskNoteFeed.vue'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
@@ -144,37 +143,7 @@ const fileViewer = useFileViewerStore()
 const itemPeek = useItemPeekStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
-/**
- * Where the skeleton switches from column rows to card rows.
- *
- * Only the loading placeholder reads this. The lanes stay side by side at every
- * width and scroll inside the board, so no gesture is gated on it. The pane root is
- * a block that fills the `chat-pane` container, so observing it measures the pane;
- * the window keeps a listener off this component entirely, since the pane resizes
- * when the sidebar drags.
- */
-const NARROW_PANE_PX = 940
 const paneEl = ref<HTMLElement | null>(null)
-const paneWidth = ref<number | null>(null)
-const isNarrow = computed(() => paneWidth.value !== null && paneWidth.value <= NARROW_PANE_PX)
-
-let paneObserver: ResizeObserver | null = null
-onMounted(() => {
-  const node = paneEl.value
-  if (!node) return
-  // jsdom has no ResizeObserver; the width stays null and the board draws its
-  // columns, which is what a test reads.
-  if (typeof ResizeObserver === 'undefined') return
-  paneObserver = new ResizeObserver((entries) => {
-    const entry = entries[entries.length - 1]
-    if (entry) paneWidth.value = entry.contentRect.width
-  })
-  paneObserver.observe(node)
-})
-onBeforeUnmount(() => {
-  paneObserver?.disconnect()
-  paneObserver = null
-})
 
 // ── Load states ───────────────────────────────────────────────────────────
 //
@@ -3184,7 +3153,29 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
         </div>
 
         <!-- 1 · first load in flight -->
-        <SkeletonLoader v-if="firstLoad" label="Loading tasks" :variant="isNarrow ? 'cards' : 'board'" :count="3" />
+        <div v-if="firstLoad" class="task-loading" role="status" aria-label="Loading tasks">
+          <div
+            class="task-lanes"
+            :class="columnsShown ? 'task-lanes--columns' : 'task-lanes--list'"
+            aria-hidden="true"
+          >
+            <section v-for="lane in boardLanes" :key="lane.status || 'all'" class="task-lane">
+              <h3 class="task-lane-head">
+                <span class="task-lane-label">{{ lane.label }}</span>
+                <span class="task-loading-bar task-loading-bar--count"></span>
+              </h3>
+              <ul class="task-cards">
+                <li v-for="index in 2" :key="index" class="task-card">
+                  <span class="task-loading-bar"></span>
+                  <span class="task-loading-bar task-loading-bar--short"></span>
+                </li>
+              </ul>
+            </section>
+            <div v-if="columnsShown && !doneShown" class="task-done-toggle">
+              <span class="task-done-toggle-label">Done</span>
+            </div>
+          </div>
+        </div>
 
         <!-- 2 · first load failed: the server's sentence and a Retry. Never an
              "empty board" claim, which is what a failed GET would be read as. -->
@@ -4314,9 +4305,6 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 <style scoped src="./headerFold.css"></style>
 
 <style scoped>
-/* The pane root. It is also the element `NARROW_PANE_PX` observes: a block
-   filling the `chat-pane` container, so its inline size IS the container's, and
-   the one number both the JS lanes and the CSS breakpoint agree on. */
 .task-view {
   display: flex;
   flex-direction: column;
@@ -4484,6 +4472,18 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 .task-unreadable-msg { color: var(--fg2); min-width: 0; }
 
 /* ── Board ─────────────────────────────────────────────────────────────── */
+.task-loading { display: flex; flex: 1 1 auto; min-width: 0; }
+.task-loading .task-card,
+.task-loading .task-done-toggle { pointer-events: none; cursor: default; }
+.task-loading-bar {
+  display: block;
+  width: 80%;
+  height: var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--border);
+}
+.task-loading-bar--short { width: 45%; }
+.task-loading-bar--count { width: var(--space-6); }
 .task-lanes {
   display: flex;
   /* Every lane fills the board: a short lane stretches to the tallest one, and
