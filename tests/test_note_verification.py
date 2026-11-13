@@ -1146,3 +1146,23 @@ def test_a_proposal_pinned_to_text_the_note_has_left_asks_again(
     assert state["pending"] is False
     assert "unverified" in row.signals
     assert row.as_dict()["pending_verification"] is None
+
+
+def test_attended_flag_reopens_only_an_unverified_check_without_a_proposal() -> None:
+    """Only the attended exception to the cooldown: an unverified row with no pending
+    proposal. A pending proposal, an applied check, or an unattended caller all keep it."""
+
+    def check(outcome: str, proposal_id: str = "") -> nv.NoteCheck:
+        return nv.NoteCheck(
+            relative_path=NOTE,
+            content_revision="a" * 64,
+            outcome=outcome,
+            checked_at=TODAY,
+            retry_after=TODAY + timedelta(days=30),
+            proposal_id=proposal_id,
+        )
+
+    assert nv.reopens_unverified(check(nv.UNVERIFIED), attended=True) is True
+    assert nv.reopens_unverified(check(nv.UNVERIFIED), attended=False) is False
+    assert nv.reopens_unverified(check(nv.UNVERIFIED, "p1"), attended=True) is False
+    assert nv.reopens_unverified(check(nv.STILL_VALID), attended=True) is False
