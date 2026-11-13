@@ -60,6 +60,13 @@ npm run test:e2e     # Playwright browser suite (see Testing below)
 
 Type-checking runs via `vue-tsc --noEmit` as part of `npm run build`. PR-blocking minimum: `npm run build` passes.
 
+The component workshop runs without an engine: `npm run storybook` serves it at
+`http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
+`web/dist/storybook` output. It imports production components and CSS directly,
+starting with TabBar; it does not load the app bootstrap or public assets.
+`npm test` remains the separate application suite. Broader component inventory
+and automated Storybook browser interactions are follow-up work.
+
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 
 ## Layout
