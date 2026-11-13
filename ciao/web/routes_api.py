@@ -21,9 +21,10 @@ import tempfile
 import time
 import unicodedata
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
+from stat import S_ISREG
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
@@ -53,8 +54,9 @@ from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
 from ciao import repo_link
+from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
-from ciao.jsonio import write_private_text
+from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
@@ -71,6 +73,7 @@ from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
     MAX_IMAGE_SIZE_BYTES,
+    CiaoConfig,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
     default_agent_fs_scope,
@@ -157,7 +160,7 @@ from ciao.web.routes_helpers import (
 # its own module; the handlers below keep request parsing and response mapping.
 # Imported as a module, not by name, so a test can patch one helper and have the
 # handlers see the patch.
-from ciao.web import proposal_service
+from ciao.web import proposal_service, request_limits
 # Same arrangement for the chat workflow's domain rules (upload policy, handover
 # trimming, title derivation, scheduled-run grading), which ProjectChatManager
 # and these handlers share.
@@ -3707,6 +3710,316 @@ async def chat_file_path(request: Request) -> Response:
     return JSONResponse({"path": result.as_posix()})
 
 
+# Browser-only discovery of files a completed reply mentions (#2118). Exact
+# lookups inside the owning workspace's own roots: no fuzzy search, no content
+# read, and no fallback to the primary workspace or the install root.
+FILE_MENTION_MAX_BODY_BYTES = request_limits.FILE_MENTION_BODY_LIMIT
+FILE_MENTION_MAX_PATHS = 50
+FILE_MENTION_MAX_PATH_CHARS = 4096
+_FILE_MENTION_MAX_LINE = 2147483647
+_FILE_MENTION_LINE_RE = re.compile(r"(.+):([0-9]+)")
+_FILE_MENTION_LOCATION_KEYS = ("path", "exists", "is_worktree", "branch")
+
+
+@dataclass(frozen=True)
+class _FileMentionContext:
+    """The roots one batch may search, and the layout they were derived from.
+
+    A batch's rows are returned only when a fresh snapshot compares equal, so any
+    change to membership, roots, layout or repo state during the lookup nulls them.
+    """
+
+    roots: tuple[Path, ...]
+    identity: tuple[object, ...]
+
+
+def _no_store_json(content: object, status: int = 200) -> JSONResponse:
+    return JSONResponse(content, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+def _valid_mention_string(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > FILE_MENTION_MAX_PATH_CHARS:
+        return False
+    # Printable means "no control character or lone surrogate". str.isprintable()
+    # would also refuse U+202F, which macOS puts in screenshot names.
+    return all(
+        not 0xD800 <= ord(char) <= 0xDFFF and unicodedata.category(char) != "Cc"
+        for char in value
+    )
+
+
+async def _read_file_mention_request(request: Request) -> list[str] | Response:
+    """The validated `paths` list, or the error response for the whole body."""
+    body = await request.body()
+    if len(body) > FILE_MENTION_MAX_BODY_BYTES:
+        return _no_store_json({"error": "request body too large"}, 413)
+    try:
+        payload = loads_untrusted(body)
+    except (ValueError, RecursionError):
+        return _no_store_json({"error": "bad json"}, 400)
+    if not isinstance(payload, dict) or set(payload) != {"paths"}:
+        return _no_store_json({"error": "invalid request"}, 400)
+    paths = payload["paths"]
+    if not isinstance(paths, list) or not all(_valid_mention_string(item) for item in paths):
+        return _no_store_json({"error": "invalid request"}, 400)
+    if len(paths) > FILE_MENTION_MAX_PATHS:
+        return _no_store_json({"error": "too many paths"}, 413)
+    return paths
+
+
+def _owning_mention_roots(config: CiaoConfig, name: str) -> tuple[Path, ...] | None:
+    """The canonical roots one registered workspace may search, or None (fail closed).
+
+    Before the re-rooting the agent root is the shared install root, so only the
+    workspace's vault counts. After it, the agent root and the nested vault both do.
+    """
+    try:
+        rerooted = config._rerooted()
+        vault = config.workspace_vault_root(name)
+        agent = config.agent_root(name)
+        if rerooted and agent != config.workspace_root / name:
+            return None
+        roots: list[Path] = []
+        for raw in ([agent, vault] if rerooted else [vault]):
+            if raw.is_symlink():
+                return None
+            canon = raw.resolve(strict=True)
+            if not canon.is_dir() or canon == Path(canon.anchor):
+                return None
+            roots.append(canon)
+        install = config.workspace_root.resolve(strict=True)
+        vault_canon = roots[-1]
+        if not rerooted and (vault_canon == install or install.is_relative_to(vault_canon)):
+            return None
+        for other in config.workspaces:
+            if other == name:
+                continue
+            other_vault = config.workspace_vault_root(other).resolve(strict=True)
+            other_agent = config.agent_root(other).resolve(strict=True)
+            for root in roots:
+                if root == other_vault or other_vault.is_relative_to(root):
+                    return None
+                if root in (other_agent, other_vault):
+                    return None
+        return tuple(dict.fromkeys(roots))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _mention_protected_roots(config: CiaoConfig) -> tuple[Path, ...] | None:
+    """The install root and every registered workspace's agent root and vault.
+
+    A linked repo may not equal or contain any of them. None when one cannot be
+    resolved, which fails the repo closed.
+    """
+    try:
+        protected = [config.workspace_root.resolve(strict=True)]
+        for name in config.workspaces:
+            protected.append(config.agent_root(name).resolve(strict=True))
+            protected.append(config.workspace_vault_root(name).resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return tuple(protected)
+
+
+def _mention_repo_root(
+    repo_path: str,
+    recorded: bool,
+    repo_now: dict[str, Any],
+    protected: tuple[Path, ...] | None,
+) -> Path | None:
+    """The linked repo's root for this batch, or None when it is unavailable."""
+    if not repo_path or protected is None:
+        return None
+    if recorded:
+        # A recorded worktree that is gone or belongs elsewhere is unavailable.
+        # Never substitute the main checkout for it.
+        if not repo_now.get("exists"):
+            return None
+        raw = str(repo_now.get("path") or "")
+    else:
+        raw = repo_path
+    path = Path(raw)
+    if not raw or not path.is_dir():
+        return None
+    canon = path.resolve()
+    if canon == Path(canon.anchor):
+        return None
+    # A repo that equals or contains another root would expose that root's files.
+    if any(item.is_relative_to(canon) for item in protected):
+        return None
+    return canon
+
+
+def _file_mention_identity(
+    config: CiaoConfig,
+    chat_id: str,
+    workspace: str | None,
+    repo_path: str,
+    recorded: bool,
+    location: tuple[object, ...],
+    repo_now: dict[str, Any],
+) -> _FileMentionContext:
+    registered = tuple(sorted((name, item.vault_root) for name, item in config.workspaces.items()))
+    head: tuple[object, ...] = (
+        chat_id,
+        workspace,
+        registered,
+        str(config.workspace_root),
+        str(config.vault_root),
+        str(config.state_path.parent),
+        config._rerooted(),
+        repo_path,
+        location,
+        tuple(repo_now.get(key) for key in _FILE_MENTION_LOCATION_KEYS),
+    )
+    if not workspace or config.workspace(workspace) is None:
+        return _FileMentionContext((), (*head, "unavailable"))
+    owning = _owning_mention_roots(config, workspace)
+    if owning is None:
+        return _FileMentionContext((), (*head, "unavailable"))
+    repo = _mention_repo_root(repo_path, recorded, repo_now, _mention_protected_roots(config))
+    roots = tuple(dict.fromkeys([*owning, *([repo] if repo is not None else [])]))
+    return _FileMentionContext(roots, (*head, roots))
+
+
+async def _snapshot_file_mention_context(request: Request, chat_id: str) -> _FileMentionContext | None:
+    """The batch's roots and layout, or None when the chat does not exist."""
+    pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return None
+    project = pcm.get_project(chat.project_id)
+    # The repo's is_dir/resolve are filesystem work, so they stay off the event loop.
+    repo_path = await asyncio.to_thread(pcm.linked_repo_for_chat, chat)
+    location = dict(chat.repo_location or {})
+    recorded = bool(location.get("path"))
+    repo_now: dict[str, Any] = {}
+    if repo_path and recorded:
+        # One repo-identity check per snapshot. Its git common-dir match is enforced inside.
+        repo_now = await resolve_chat_location(repo_path=repo_path, hints=[], previous=location)
+    return await asyncio.to_thread(
+        _file_mention_identity,
+        config,
+        chat.chat_id,
+        project.workspace if project is not None else None,
+        repo_path,
+        recorded,
+        tuple(location.get(key) for key in _FILE_MENTION_LOCATION_KEYS),
+        dict(repo_now),
+    )
+
+
+def _strip_mention_line(raw: str) -> str | None:
+    """`raw` without a final valid `:line`; None when a `:line` suffix is malformed."""
+    match = _FILE_MENTION_LINE_RE.fullmatch(raw)
+    # A bare drive letter ("C:17") is a drive, not a line suffix.
+    if match is None or re.fullmatch(r"[A-Za-z]", match.group(1)):
+        return raw
+    digits = match.group(2)
+    if digits[0] == "0" or not 1 <= int(digits) <= _FILE_MENTION_MAX_LINE:
+        return None
+    return match.group(1)
+
+
+def _absolute_mention_candidate(roots: tuple[Path, ...], path: Path) -> set[Path]:
+    try:
+        canon = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return set()
+    return {canon} if any(canon.is_relative_to(root) for root in roots) else set()
+
+
+def _mention_candidates(roots: tuple[Path, ...], target: str) -> set[Path]:
+    """Canonical paths `target` names exactly, one per root that confines them."""
+    if target == "~" or target.startswith(("~/", "~\\")):
+        return _absolute_mention_candidate(roots, Path.home() / target[2:])
+    if target.startswith(("~", "\\\\", "//")):
+        # `~otheruser`, UNC, device and network-share forms are never looked up.
+        return set()
+    if re.match(r"[A-Za-z]:([\\/]|$)", target):
+        # A drive path is native only on Windows; elsewhere it is foreign.
+        path = Path(target)
+        return _absolute_mention_candidate(roots, path) if os.name == "nt" and path.is_absolute() else set()
+    path = Path(target)
+    if path.is_absolute():
+        return _absolute_mention_candidate(roots, path)
+    found: set[Path] = set()
+    for root in roots:
+        try:
+            canon = (root / path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if canon.is_relative_to(root):
+            found.add(canon)
+    return found
+
+
+def _mention_file_path(canon: Path) -> str | None:
+    """The canonical path if it is a regular file the viewers serve, within its size cap."""
+    suffix = canon.suffix.lower()
+    if suffix in _WORKSPACE_FILE_EXTS:
+        cap = _WORKSPACE_FILE_MAX_BYTES
+    elif suffix in _WORKSPACE_IMAGE_EXTS:
+        cap = _WORKSPACE_IMAGE_MAX_BYTES
+    elif suffix in _WORKSPACE_BINARY_EXTS:
+        cap = _WORKSPACE_BINARY_MAX_BYTES
+    else:
+        return None
+    info = canon.stat()
+    if not S_ISREG(info.st_mode) or info.st_size > cap:
+        return None
+    return canon.as_posix()
+
+
+def _resolve_one_file_mention(roots: tuple[Path, ...], raw: str) -> str | None:
+    try:
+        target = _strip_mention_line(raw)
+        if target is None:
+            return None
+        found = _mention_candidates(roots, target)
+        if len(found) != 1:
+            # No match, or distinct exact targets (ambiguous): both are null.
+            return None
+        (canon,) = found
+        return _mention_file_path(canon)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _resolve_file_mention_batch(roots: tuple[Path, ...], paths: list[str]) -> list[dict[str, str | None]]:
+    resolved: dict[str, str | None] = {}
+    rows: list[dict[str, str | None]] = []
+    for raw in paths:
+        if raw not in resolved:
+            resolved[raw] = _resolve_one_file_mention(roots, raw)
+        rows.append({"input": raw, "path": resolved[raw]})
+    return rows
+
+
+async def resolve_chat_file_paths(request: Request) -> Response:
+    """Exact canonical paths for the files a completed chat reply mentions (#2118).
+
+    Browser-only and read-only: each input gets its canonical path or null. A
+    response never carries content, reasons, stat data or possible matches.
+    """
+    chat_id = request.path_params["chat_id"]
+    paths = await _read_file_mention_request(request)
+    if isinstance(paths, Response):
+        return paths
+    snapshot = await _snapshot_file_mention_context(request, chat_id)
+    if snapshot is None:
+        return _no_store_json({"error": "chat not found"}, 404)
+    rows = await asyncio.to_thread(_resolve_file_mention_batch, snapshot.roots, paths)
+    fresh = await _snapshot_file_mention_context(request, chat_id)
+    if fresh is None:
+        return _no_store_json({"error": "chat not found"}, 404)
+    if fresh != snapshot:
+        rows = [{"input": raw, "path": None} for raw in paths]
+    return _no_store_json({"results": rows})
+
+
 # The folder browser's listing. Unlike the file viewers above, browsing is
 # confined to named roots: a listing route that followed any absolute path
 # would let a session walk the whole disk one folder at a time.
@@ -6224,6 +6537,7 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "dev_mode",
     "app_repo",
     "resume_after_restart",
+    "verify_vault_answers",
 })
 
 
@@ -6256,6 +6570,8 @@ def _routines_payload(config, app_settings) -> dict:
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
+        # Settings → General: check a vault-grounded answer's claims against its notes.
+        "verify_vault_answers": s.verify_vault_answers,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,

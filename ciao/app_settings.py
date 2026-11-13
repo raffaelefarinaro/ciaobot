@@ -105,6 +105,7 @@ _BOOLEAN_FIELDS = {
     "font_scale_migrated",
     "legacy_env_imported",
     "resume_after_restart",
+    "verify_vault_answers",
 }
 # Bookkeeping the store owns; a PATCH never sets it.
 _INTERNAL_FIELDS = {"font_scale_migrated", "legacy_env_imported"}
@@ -268,6 +269,9 @@ class AppSettings:
     # Whether a chat whose turn a restart or crash cut off gets one "Continue
     # after restart" turn at the next start (#2128). Settings → General.
     resume_after_restart: bool = True
+    # Whether a turn that read vault notes gets a one-shot check of its answer's
+    # claims against those notes (Settings → General).
+    verify_vault_answers: bool = True
 
     # Appearance preferences are engine-wide so every device agrees. "" and
     # 0.0 mean "never stored": the first browser to load seeds theme from its

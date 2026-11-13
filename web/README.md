@@ -120,6 +120,8 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
+    components/settings/SettingsVaultCheck.vue  the Check vault answers switch card (engine-wide, stored as verify_vault_answers)
+    components/TurnVerificationBadge.vue  the always-visible Vault n/m toggle under a turn's footer, with its claim list (ChatPanel renders it on the closing bubble; the pure helpers are lib/turnVerification.ts)
     components/TitleRail.vue  the swipeable title rail of an open chat's, automation's or project's header (ChatPanel's `plainHeader` prop turns it off);
                            railMotion.css is the lean/arrival motion of the body under it
     components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and

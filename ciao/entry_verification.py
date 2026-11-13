@@ -1043,6 +1043,7 @@ def verify_entry(
     actor: str = "agent",
     source: str = "curation",
     today: date | None = None,
+    attended: bool = False,
 ) -> EntryVerificationResult:
     """Record one entry's verdict, applying its edit only when the rule allows it.
 
@@ -1062,6 +1063,10 @@ def verify_entry(
     two refinements: ``conflict`` additionally covers an identity the note no
     longer holds, and a ``still_valid`` re-stamp describes the fingerprint the
     re-stamp left behind, which is the *same* fingerprint by construction.
+
+    With ``attended=True`` an earlier unattended ``unverified`` check with no
+    proposal does not hold this entry off: the new verdict replaces it, as
+    :func:`ciao.note_verification.verify_note` does for a note.
 
     ``config`` is required, exactly as it is on 726-B's
     :func:`ciao.note_verification.verify_note`, and for the same reason: the
@@ -1128,16 +1133,16 @@ def verify_entry(
         )
 
     existing = read_entry_checks(root).get(entry.identity)
-    if existing is not None and _check_settles(
-        existing, entry.fingerprint, today=day
+    if (
+        existing is not None
+        and not nv.reopens_unverified(existing, attended=attended)
+        and _check_settles(existing, entry.fingerprint, today=day)
     ):
         return EntryVerificationResult(
             ALREADY_CHECKED,
             check=existing,
-            message=(
-                f"{entry.identity[:12]} in {key} was already checked as "
-                f"{existing.outcome} on {existing.checked_at.isoformat()}; nothing was "
-                "asked or written"
+            message=nv.already_checked_message(
+                f"{entry.identity[:12]} in {key}", existing
             ),
         )
 

@@ -951,16 +951,30 @@ class CiaoConfig:
         exception: its registered root is its vault (notes ownership), so an
         adopted folder such as ``work/brain`` or ``.`` owns its own aggregates.
         """
-        if self._rerooted() and self.workspace(name) is not None:
-            # A registered per-root workspace owns the vault its notes resolve
-            # to, which may be an explicitly adopted folder rather than the
-            # standard one under its agent root. A registration still pointing
-            # at the pre-rerooting shared subfolder is the superseded standard,
-            # not an adoption, so it keeps the derived location.
-            registered = self.workspace_vault_root(name)
-            if registered != self.vault_root / name:
-                return registered
+        if self.adopted_workspace_vault(name):
+            return self.workspace_vault_root(name)
         return self.agent_root(name) / self.vault_root.name
+
+    def adopted_workspace_vault(self, name: str) -> bool:
+        """Whether a re-rooted workspace's registered vault is an explicit adoption.
+
+        The registry is the evidence: a registered root that is neither the
+        per-root standard (``<agent root>/<vault folder name>``) nor the
+        superseded pre-re-rooting shared subfolder (``<vault root>/<name>``)
+        was chosen by setup or by the operator, such as ``work/brain``, a
+        nested clone vault, ``.`` or an absolute external folder. Ownership
+        (:meth:`agent_vault_root`) and the relocation offer
+        (``migration_notices.relocation_state``) both read this, so the
+        folder a workspace owns is never the folder it is told to leave.
+        Always ``False`` before the re-rooting and for an unregistered name.
+        """
+        if not self._rerooted() or self.workspace(name) is None:
+            return False
+        registered = self.workspace_vault_root(name)
+        return registered not in (
+            self.vault_root / name,
+            self.agent_root(name) / self.vault_root.name,
+        )
 
     @property
     def logs_root(self) -> Path:

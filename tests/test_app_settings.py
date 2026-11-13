@@ -137,6 +137,7 @@ def test_update_persists_and_roundtrips(tmp_path):
         "backup_enabled": True,
         "backup_paused": False,
         "resume_after_restart": True,
+        "verify_vault_answers": True,
     }
     # Fresh instance sees the persisted value.
     assert AppSettingsStore(path).settings.dev_mode is True
@@ -153,6 +154,19 @@ def test_resume_after_restart_defaults_on_and_round_trips(tmp_path):
 
     with pytest.raises(ValueError, match="must be a boolean"):
         store.update({"resume_after_restart": "no"})
+
+
+def test_verify_vault_answers_defaults_on_and_round_trips(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.settings.verify_vault_answers is True
+
+    store.update({"verify_vault_answers": False})
+    assert json.loads(path.read_text())["verify_vault_answers"] is False
+    assert AppSettingsStore(path).settings.verify_vault_answers is False
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"verify_vault_answers": "no"})
 
 
 def test_auto_update_default_enabled_and_explicit_off_roundtrips(tmp_path):
@@ -297,6 +311,7 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
         "backup_enabled": True,
         "backup_paused": False,
         "resume_after_restart": True,
+        "verify_vault_answers": True,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }

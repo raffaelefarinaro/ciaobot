@@ -74,6 +74,151 @@ async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
     pcm.stop_chat_retry(chat.chat_id)
 
 
+CLAUDE_FIVE_HOUR_BANNER = "You've hit your 5-hour limit · resets 7:20pm (Europe/Zurich)"
+CLAUDE_FIVE_HOUR_QUOTA = {
+    "status": "rejected",
+    "rateLimitType": "five_hour",
+    "resetsAt": "1794507600",
+}
+
+
+@pytest.mark.parametrize(
+    "quota",
+    [{}, CLAUDE_FIVE_HOUR_QUOTA],
+    ids=["without-quota", "with-rejected-five-hour-quota"],
+)
+async def test_claude_five_hour_limit_arms_retry(
+    tmp_path: Path, quota: dict[str, str]
+) -> None:
+    """The five-hour exhaustion banner is a usage limit, with or without quota
+    telemetry: the text is the admission gate and the retry must be armed."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result=CLAUDE_FIVE_HOUR_BANNER,
+            session_id="sess-five-hour",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota=quota,
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "quota"
+    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_last_error == CLAUDE_FIVE_HOUR_BANNER
+    assert updated.retry_interval_seconds == 3600
+    assert any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_claude_five_hour_limit_after_progress_continues(tmp_path: Path) -> None:
+    """A five-hour limit that lands after output streamed resumes the live
+    session with "continue" instead of replaying the prompt."""
+    from ciao.models import AssistantTextDelta
+    from ciao.web.project_chats import _RESUME_CONTINUE_PROMPT
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-live"
+    pcm._save()
+    prompts: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            yield AssistantTextDelta(type="assistant", text="sending the email… ")
+            yield ResultEvent(
+                type="result",
+                result=CLAUDE_FIVE_HOUR_BANNER,
+                session_id="sess-live",
+                is_error=True,
+                effective_model=chat.model,
+                usage={},
+                quota=CLAUDE_FIVE_HOUR_QUOTA,
+                cost_usd=0.0,
+            )
+            return
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-live",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "send the email then reply")
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == _RESUME_CONTINUE_PROMPT
+    assert updated.retry_image_refs == []
+    assert updated.retry_interval_seconds == 3600
+
+    retried = pcm.try_chat_retry_now(chat.chat_id)
+    assert retried is not None
+    await asyncio.wait_for(_consume(retried), timeout=10.0)
+
+    assert prompts == ["send the email then reply", _RESUME_CONTINUE_PROMPT]
+    finished = pcm.get_chat(chat.chat_id)
+    assert finished is not None
+    assert finished.retry_status == ""
+
+
+async def test_unrelated_error_with_rejected_quota_does_not_retry(tmp_path: Path) -> None:
+    """Rejected quota telemetry can accompany an unrelated failure; only the
+    error text arms a retry."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="Error: the tool crashed while reading the log file",
+            session_id="sess-crash",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota=CLAUDE_FIVE_HOUR_QUOTA,
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+
+
 def test_manual_retry_can_be_set_and_stopped(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
@@ -667,8 +812,8 @@ async def test_non_billing_rate_limit_with_progress_resumes_continue(tmp_path: P
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: Path) -> None:
-    """With progress but no session to resume, replay the prompt, not "continue"."""
+async def test_midresponse_drop_without_session_does_not_replay(tmp_path: Path) -> None:
+    """Partial work cannot safely be replayed without a resumable session."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
@@ -696,9 +841,125 @@ async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: P
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
-    assert updated.retry_interval_seconds == 30
+    assert updated.retry_status != "pending"
+
+
+@pytest.mark.parametrize("result", ["success", "error", "connection"])
+@pytest.mark.parametrize("replacement", ["literal", "network", "recreate"])
+async def test_retry_stream_cannot_change_replacement_slot(
+    tmp_path: Path, result: str, replacement: str
+) -> None:
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        started.set()
+        await release.wait()
+        if result == "connection":
+            yield AssistantTextDelta(type="assistant", text="partial")
+        yield ResultEvent(
+            type="result", result={"success": "done", "error": "unexpected failure",
+                                   "connection": "API Error: Connection closed mid-response."}[result],
+            session_id="", is_error=result != "success", effective_model=chat.model,
+            usage={}, quota={}, cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    pcm.set_chat_retry(chat.chat_id, "original")
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(started.wait(), 10)
+    if replacement == "recreate":
+        pcm.stop_chat_retry(chat.chat_id)
+    if replacement == "network":
+        assert pcm.arm_network_retry(chat.chat_id, "replacement") == "armed"
+    else:
+        pcm.set_chat_retry(chat.chat_id, "replacement")
+    before = (chat.retry_status, chat.retry_prompt, chat.retry_kind, chat.retry_attempts,
+              chat.retry_next_at, chat.retry_last_error, chat.retry_interval_seconds)
+    release.set()
+    await asyncio.wait_for(_consume(stream), 10)
+    assert (chat.retry_status, chat.retry_prompt, chat.retry_kind, chat.retry_attempts,
+            chat.retry_next_at, chat.retry_last_error, chat.retry_interval_seconds) == before
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_missing_session_stops_owned_retry_after_partial_work(tmp_path: Path) -> None:
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    calls = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append((prompt, images))
+        yield AssistantTextDelta(type="assistant", text="partial")
+        yield ResultEvent(type="result", result="API Error: Connection closed mid-response.",
+                          session_id="", is_error=True, effective_model=chat.model,
+                          usage={}, quota={}, cost_usd=0.0)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    pcm.set_chat_retry(chat.chat_id, "original")
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), 10)
+    assert calls == [("original", None)]
+    assert chat.retry_status == "stopped"
+    assert chat.retry_prompt == ""
+
+
+async def test_replacement_timer_survives_old_timer_cleanup(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "first")
+    old = pcm._retry_tasks[chat.chat_id]
+    await asyncio.sleep(0)
+    pcm.set_chat_retry(chat.chat_id, "replacement")
+    new = pcm._retry_tasks[chat.chat_id]
+    assert new is not old
+    await asyncio.gather(old, return_exceptions=True)
+    assert pcm._retry_tasks[chat.chat_id] is new
+    assert not new.cancelled()
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_literal_replacement_does_not_inherit_network_budget(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    assert pcm.arm_network_retry(chat.chat_id, "network") == "armed"
+    chat.retry_attempts = 3
+    pcm.set_chat_retry(chat.chat_id, "literal")
+    assert chat.retry_kind == ""
+    assert chat.retry_attempts == 0
+    assert chat.retry_interval_seconds == 3600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_unrelated_turn_does_not_replace_pending_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "scheduled")
+    before = (chat.retry_prompt, chat.retry_next_at, chat.retry_attempts)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(type="result", result="API Error: Connection closed mid-response.",
+                          session_id="", is_error=True, effective_model=chat.model,
+                          usage={}, quota={}, cost_usd=0.0)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "unrelated")
+    await asyncio.wait_for(_consume(stream), 10)
+    assert chat.retry_status == "pending"
+    assert (chat.retry_prompt, chat.retry_next_at, chat.retry_attempts) == before
     pcm.stop_chat_retry(chat.chat_id)
 
 
@@ -750,6 +1011,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-billing"
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
@@ -772,7 +1034,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_prompt == "continue"
     assert any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
@@ -783,14 +1045,13 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
     """A plain rate-limit 429 must auto-retry after progress too, same as a
     billing/spend-limit error — the earlier carve-out that skipped arming
     for non-billing quota errors once anything had streamed left users with
-    a bare error and no retry affordance for the common "usage limit" case.
-    Without a session to resume it falls back to replaying the prompt, same
-    as the no-session connection-drop case."""
+    a bare error and no retry affordance for the common "usage limit" case."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-rate"
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
@@ -813,7 +1074,7 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_prompt == "continue"
     assert any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
@@ -907,17 +1168,56 @@ def test_session_limit_and_capacity_stay_retryable() -> None:
         assert _is_retryable_quota_error(text) is True
 
 
+def test_claude_five_hour_limit_classification_is_narrow() -> None:
+    """The standalone five-hour banner counts; a tool quoting it, a bare limit
+    noun, and a negated sentence do not."""
+    from ciao.web.chat_service import _is_retryable_quota_error
+
+    for text in (
+        "You've hit your 5-hour limit",
+        "You’ve hit your 5-hour limit",
+        "You've hit your 5-hour limit · resets 7:20pm (Europe/Zurich)",
+        "You've hit your 5-hour limit · resets 6am (UTC)",
+        "You’ve hit your 5-hour limit · resets 7:20pm (Europe/Zurich)",
+        "Error: You've hit your 5-hour limit",
+        "Error: You've hit your 5-hour limit · resets 7:20pm (Europe/Zurich)",
+        "  You've hit your 5-hour limit  ",
+        # The other quota matchers still apply when their own trigger is there.
+        "You've hit your 5-hour limit, upgrade for higher limits",
+    ):
+        assert _is_retryable_quota_error(text) is True
+
+    for text in (
+        "Google API: You've hit your 5-hour limit",
+        "You've hit your 5-hour limit for the Google API",
+        "You've hit your 5-hour limit, ask your admin",
+        "You've hit your 5-hour limit · resets 7:20pm\n...and the tool printed more output",
+        "You haven't hit your 5-hour limit",
+        "5-hour limit",
+        "you can hit your 5-hour limit after a long session",
+        "OSError: [Errno 122] Disk quota exceeded",
+        "storage quota reached",
+        "You have exceeded your daily request quota for this API",
+    ):
+        assert _is_retryable_quota_error(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "You've hit your 5-hour limit · resets",
+    "You've hit your 5-hour limit · resets 7:20pm for the Google API",
+])
+def test_claude_five_hour_limit_rejects_invalid_reset_details(text: str) -> None:
+    assert not chat_service._is_retryable_quota_error(text)
+
+
 @pytest.mark.parametrize("limit_text", [OLLAMA_SESSION_LIMIT, OLLAMA_WEEKLY_LIMIT])
 async def test_ollama_limit_error_arms_hourly_quota_retry(tmp_path: Path, limit_text: str) -> None:
     """Ollama session and weekly limits both arm the ordinary hourly quota retry."""
-    from ciao.models import AssistantTextDelta
-
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        yield AssistantTextDelta(type="assistant", text="partial… ")
         yield ResultEvent(
             type="result",
             result=limit_text,
@@ -1018,6 +1318,75 @@ def test_quota_reset_at_uses_claude_five_hour_bucket_for_session_limits(tmp_path
     assert pcm._quota_reset_at(chat, "quota") == expected.isoformat().replace("+00:00", "Z")
     # Other kinds read no bucket at all.
     assert pcm._quota_reset_at(chat, "connection") is None
+
+
+async def test_five_hour_retry_uses_existing_reset_snapshot(tmp_path: Path) -> None:
+    """A five-hour banner waits for the rejected bucket's reset when the rate
+    limit store knows it, and keeps the hourly fallback when it does not. The
+    terminal's quota telemetry is not that store."""
+    import json
+    import time
+    from datetime import UTC, datetime
+
+    from ciao.rate_limits import default_store_path
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    store = default_store_path(pcm._runtime_root)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    resets_at = int(time.time()) + 2 * 3600
+    far_future = int(time.time()) + 30 * 86400
+    quota = {**CLAUDE_FIVE_HOUR_QUOTA, "resetsAt": str(far_future)}
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result=CLAUDE_FIVE_HOUR_BANNER,
+            session_id="sess-five-hour",
+            is_error=True,
+            effective_model="claude-sonnet-4-5",
+            usage={},
+            quota=quota,
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    chat = pcm.create_chat(project.project_id, title="retry-test", provider="claude")
+    store.write_text(
+        json.dumps({
+            "buckets": {"five_hour": {"status": "rejected", "resets_at": resets_at}},
+        }),
+        encoding="utf-8",
+    )
+    await asyncio.wait_for(
+        _consume(pcm.start_stream(chat.chat_id, "do the thing")), timeout=10.0
+    )
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_interval_seconds == 3600
+    expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
+    assert updated.retry_next_at == expected.isoformat().replace("+00:00", "Z")
+    pcm.stop_chat_retry(chat.chat_id)
+
+    store.unlink()
+    other = pcm.create_chat(project.project_id, title="retry-test-2", provider="claude")
+    await asyncio.wait_for(
+        _consume(pcm.start_stream(other.chat_id, "do the thing")), timeout=10.0
+    )
+
+    updated = pcm.get_chat(other.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_interval_seconds == 3600
+    due = chat_service._parse_iso(updated.retry_next_at)
+    now = chat_service._parse_iso(chat_service._iso_after(0))
+    assert due is not None and now is not None
+    # The hourly fallback, not the terminal's fake 30-day quota resetsAt.
+    assert 3500 <= (due - now).total_seconds() <= 3700
+    pcm.stop_chat_retry(other.chat_id)
 
 
 async def test_consecutive_quota_retries_stay_hourly(tmp_path: Path) -> None:
@@ -1811,8 +2180,8 @@ async def test_try_now_past_the_quota_cap_stops_instead_of_firing(tmp_path: Path
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="quota")
-    chat.retry_kind = "quota"
     pcm.set_chat_retry(chat.chat_id, "job", reason="usage limit")
+    chat.retry_kind = "quota"
     chat.retry_attempts = _MAX_QUOTA_RETRIES
     calls: list[str] = []
 

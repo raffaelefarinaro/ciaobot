@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { formatChatComments } from './commentContext'
 import * as loopback from './loopback'
-import { renderFileMarkdown, renderMarkdown, renderUserMarkdown } from './safeMarkdown'
+import { DEAD_LINK_OPENABLE_CLASS, DEAD_LINK_PATH_ATTR } from './openWorkspaceFile'
+import { collectAssistantFileMentions, renderFileMarkdown, renderMarkdown, renderUserMarkdown } from './safeMarkdown'
 
 describe('safe markdown rendering', () => {
   it('removes raw HTML event handlers before v-html rendering', () => {
@@ -892,5 +893,104 @@ describe('links the sanitizer refuses', () => {
     expect(html).toContain('href="/tasks"')
     expect(html).toContain('data-file-path="notes.md"')
     expect(html).not.toContain('markdown-dead-link')
+  })
+})
+
+describe('assistant file mentions', () => {
+  const NO_CHATS = new Map<string, string>()
+
+  it('collects untouched filenames and whole inline paths only', () => {
+    const text = [
+      'Updated README.md and docs/a.md, plus ./notes/b.txt and ../up.py.',
+      'Home is ~/src/c.ts and native C:\\repo\\d.md, line src/e.ts:17.',
+      'Inline `memory-vault/Plan Q1.md` and `/abs/path/x y/z.json`.',
+      'Prose words: changelog, Makefile, the .env and example.env file, Dockerfile.',
+      'Ignored: https://example.com/q.md, mail a@b.co/x.md, [note](notes/linked.md), [folder](exports/sloth-v5), ![img](assets/p.png), `npm test` and `cat docs/x.md`.',
+    ].join('\n')
+
+    expect(collectAssistantFileMentions(text)).toEqual([
+      'README.md',
+      'docs/a.md',
+      './notes/b.txt',
+      '../up.py',
+      '~/src/c.ts',
+      'C:\\repo\\d.md',
+      'src/e.ts:17',
+      'memory-vault/Plan Q1.md',
+      '/abs/path/x y/z.json',
+    ])
+  })
+
+  it('ignores paths inside comment reference blocks', () => {
+    const block = formatChatComments([{ selection: 'notes/a.md', comment: 'check this' }])
+    const text = `${block}\n\nPlease also look at docs/after.md.`
+    expect(collectAssistantFileMentions(text)).toEqual(['docs/after.md'])
+
+    const html = renderMarkdown(text, [], NO_CHATS, {
+      fileMentionTargets: new Map([
+        ['notes/a.md', '/w/notes/a.md'],
+        ['docs/after.md', '/w/docs/after.md'],
+      ]),
+    })
+    expect(html).toContain('data-file-path="/w/docs/after.md"')
+    expect(html).not.toContain('data-file-path="/w/notes/a.md"')
+  })
+
+  it('bounds collection without truncating path tokens', () => {
+    // Over the cap: nothing, rather than a message cut in the middle of a path.
+    expect(collectAssistantFileMentions(`${'x '.repeat(17000)}docs/tail.md`)).toEqual([])
+
+    const many = Array.from({ length: 300 }, (_, i) => `docs/f${i}.md`).join(' ')
+    const found = collectAssistantFileMentions(many)
+    expect(found).toHaveLength(200)
+    expect(found[0]).toBe('docs/f0.md')
+    expect(collectAssistantFileMentions('docs/a.md docs/a.md docs/b.md')).toEqual(['docs/a.md', 'docs/b.md'])
+  })
+
+  it('checked assistant rendering leaves explicit and other surfaces unchanged', () => {
+    const text = 'Saved docs/a.md, see [spec](specs/s.md), [dir](exports/sloth-v5) and ![pic](memory/p.png)'
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown(text, [], NO_CHATS, { chatId: 'chat-1', fileMentionTargets: new Map() })
+
+    // Automatic links need a confirmed target; explicit ones are unchanged.
+    expect(host.querySelector('[data-file-path="docs/a.md"]')).toBeNull()
+    expect(host.querySelector('[data-file-path="specs/s.md"]')).not.toBeNull()
+    expect(host.querySelector('[data-file-path="exports/sloth-v5"]')).not.toBeNull()
+    expect(host.querySelector('img')?.getAttribute('src'))
+      .toBe('/api/workspace-image?path=memory%2Fp.png&chat_id=chat-1')
+
+    // The default surfaces keep their prior behaviour.
+    expect(renderMarkdown(text)).toContain('data-file-path="docs/a.md"')
+    expect(renderUserMarkdown('Saved docs/a.md')).toContain('data-file-path="docs/a.md"')
+
+    // An openable dead link still becomes a button on the opted-in surface.
+    const spy = vi.spyOn(loopback, 'isLoopbackPage').mockReturnValue(true)
+    try {
+      const local = renderMarkdown('[l](file:///tmp/x.md)', [], NO_CHATS, { openLocal: true, fileMentionTargets: new Map() })
+      expect(local).toContain(DEAD_LINK_OPENABLE_CLASS)
+      expect(local).toContain(`${DEAD_LINK_PATH_ATTR}="/tmp/x.md"`)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('collector and checked renderer share decoding and line boundaries', () => {
+    const text = 'Open docs/Q&amp;A.md:17 now'
+    const [mention] = collectAssistantFileMentions(text)
+    expect(mention).toBe('docs/Q&A.md:17')
+
+    const html = renderMarkdown(text, [], NO_CHATS, { fileMentionTargets: new Map([[mention, '/w/docs/Q&A.md']]) })
+    expect(html).toContain('data-file-path="/w/docs/Q&amp;A.md"')
+    expect(html).toContain('data-line="17"')
+    expect(html).toContain('>docs/Q&amp;A.md:17</a>')
+    expect(html).not.toContain('&amp;amp;')
+  })
+
+  it('collection leaves render globals reset', () => {
+    collectAssistantFileMentions('![shot](memory/shot.png) docs/a.md')
+    const html = renderMarkdown('![shot](memory/shot.png) [l](file:///tmp/x.md)')
+
+    expect(html).toContain('src="memory/shot.png"')
+    expect(html).not.toContain('<button')
   })
 })

@@ -122,7 +122,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review
+from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -756,6 +756,9 @@ class ChatInfo:
     # ordinary user messages; history reads this back so the PWA draws a notice
     # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → vault answer check result
+    # (ciao.vault_verification.parse_verification shape). Absent = not checked.
+    turn_verification: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
     # instead of starting a second turn, so a recovery resend cannot double a
@@ -1204,6 +1207,8 @@ class ProjectChatManager:
         # AskUserQuestion. The headless CLI auto-cancels with empty answers,
         # so we notify the user so they can answer in the next turn.
         self.notify_question_cb: Optional[Callable[[str, str], None]] = None
+        # Whether a turn that read vault notes gets a claim check (Settings → General).
+        self.verify_vault_answers_enabled: Callable[[], bool] = lambda: True
         # Fired after a read mutation so the macOS companion and remote PWA
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
@@ -1280,6 +1285,7 @@ class ProjectChatManager:
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
         self._retry_tasks: dict[str, asyncio.Task] = {}
+        self._retry_generations: dict[str, int] = {}
         # Strong references to detached background tasks. asyncio keeps only a
         # weak reference to a running task, so a fire-and-forget
         # ``create_task(...)`` whose result nobody holds can be collected
@@ -1379,6 +1385,7 @@ class ProjectChatManager:
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 user_turn_origin=dict(cd.get("user_turn_origin", {})),
+                turn_verification=dict(cd.get("turn_verification", {})),
                 user_turn_send_ids=dict(cd.get("user_turn_send_ids", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
@@ -1504,6 +1511,7 @@ class ProjectChatManager:
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
                     "user_turn_origin": c.user_turn_origin,
+                    "turn_verification": c.turn_verification,
                     "user_turn_send_ids": c.user_turn_send_ids,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
@@ -4791,9 +4799,7 @@ class ProjectChatManager:
         self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
-        task = self._retry_tasks.pop(chat_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+        self._advance_retry_generation(chat_id)
         self._cancel_between_turns_drain(chat_id)
         self._streaming.discard_drain_result(chat_id)
         provider = self._pop_provider(chat_id)
@@ -5660,6 +5666,17 @@ class ProjectChatManager:
             if candidate.is_file() and under_a_root(candidate):
                 return candidate
         return None
+
+    def _vault_root_for_chat(self, chat_id: str) -> Path | None:
+        """The vault folder of a chat's owning workspace, or None when unresolvable."""
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat is not None else None
+        if project is None:
+            return None
+        try:
+            return Path(self._config.workspace_vault_root(project.workspace))
+        except ValueError:
+            return None
 
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
@@ -7407,6 +7424,7 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
+                chat.turn_verification.pop(key, None)
                 cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
                 if isinstance(cancelled_send_ids, str):
                     cancelled_send_ids = [cancelled_send_ids]
@@ -7940,14 +7958,17 @@ class ProjectChatManager:
         Returns True if a retry was armed.
         """
         chat = self._chats.get(chat_id)
+        if stream.retry_generation != self._retry_generations.get(chat_id, 0):
+            return False
+        if had_progress and (chat is None or not chat.session_id):
+            logger.warning("chat %s cannot safely retry partial work without a session", chat_id)
+            return False
         # Replaying the prompt after output already streamed re-runs any tool
         # calls the partial turn executed — true for a quota/usage-limit error
         # that lands mid-turn just as much as for a connection drop. So once
         # there's progress and a live session to resume, nudge with "continue"
         # instead of replaying, regardless of kind. Resume-continue needs a
-        # session to resume; without one (never expected once output streamed,
-        # but be safe) "continue" would seed a useless fresh session, so we
-        # fall back to replaying the prompt.
+        # session to resume; without one neither replay nor continue is safe.
         resume_continue = (
             had_progress
             and chat is not None
@@ -7975,6 +7996,7 @@ class ProjectChatManager:
             )
             if chat is not None and chat.retry_status == "pending":
                 self._clear_chat_retry(chat, status="stopped")
+                stream.retry_generation = self._retry_generations[chat_id]
             return False
         if resume_continue:
             prompt = _RESUME_CONTINUE_PROMPT
@@ -7994,6 +8016,7 @@ class ProjectChatManager:
             next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
             unattended=unattended,
+            _owner=stream,
         )
         if armed is None:
             return False
@@ -8046,6 +8069,8 @@ class ProjectChatManager:
         next_at: str | None = None,
         interval_seconds: int = _RETRY_INTERVAL_SECONDS,
         unattended: bool = False,
+        _owner: ChatStream | None = None,
+        _network: bool = False,
     ) -> ChatInfo | None:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
@@ -8059,6 +8084,14 @@ class ProjectChatManager:
         clean_prompt = (prompt or "").strip()
         if not clean_prompt:
             return None
+        if _owner is not None:
+            if _owner.retry_generation != self._retry_generations.get(chat_id, 0):
+                return None
+        else:
+            self._advance_retry_generation(chat_id)
+            if not _network:
+                chat.retry_kind = ""
+                chat.retry_attempts = 0
         chat.retry_status = "pending"
         chat.retry_prompt = clean_prompt
         chat.retry_image_refs = list(image_refs or [])
@@ -8068,6 +8101,8 @@ class ProjectChatManager:
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
+        if _owner is not None:
+            self._cancel_retry_task(chat_id, keep_current=True)
         self._ensure_retry_task(chat_id)
         return chat
 
@@ -8110,6 +8145,7 @@ class ProjectChatManager:
             text,
             reason=_NETWORK_RETRY_REASON,
             interval_seconds=_network_retry_interval(chat.retry_attempts),
+            _network=True,
         )
         if armed is None:
             return "no_prompt"
@@ -8217,6 +8253,7 @@ class ProjectChatManager:
         })
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
+        self._advance_retry_generation(chat.chat_id)
         chat.retry_status = status
         chat.retry_prompt = ""
         chat.retry_image_refs = []
@@ -8228,10 +8265,6 @@ class ProjectChatManager:
         chat.retry_unattended = False
         self._save()
         self._publish_retry(chat)
-        task = self._retry_tasks.pop(chat.chat_id, None)
-        current = asyncio.current_task() if _has_running_loop() else None
-        if task is not None and not task.done() and task is not current:
-            task.cancel()
         if status == "stopped" and _has_running_loop():
             # A memory pass keeps its workspace slot while a retry is pending
             # (MemoryPassService.on_turn_finished). A retry that ends without a
@@ -8246,17 +8279,35 @@ class ProjectChatManager:
             if chat.retry_status == "pending" and not chat.archived:
                 self._ensure_retry_task(chat.chat_id)
 
+    def _advance_retry_generation(self, chat_id: str) -> None:
+        self._retry_generations[chat_id] = self._retry_generations.get(chat_id, 0) + 1
+        self._cancel_retry_task(chat_id)
+
+    def _cancel_retry_task(self, chat_id: str, *, keep_current: bool = False) -> None:
+        task = self._retry_tasks.pop(chat_id, None)
+        current = asyncio.current_task() if _has_running_loop() else None
+        if task is not None and task is current and keep_current:
+            self._retry_tasks[chat_id] = task
+        elif task is not None and task is not current and not task.done():
+            task.cancel()
+
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool:
+        return stream.retry_generation == self._retry_generations.get(chat_id, 0)
+
     def _ensure_retry_task(self, chat_id: str) -> None:
         if not _has_running_loop():
             return
         existing = self._retry_tasks.get(chat_id)
         if existing is not None and not existing.done():
             return
-        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id))
+        generation = self._retry_generations.get(chat_id, 0)
+        self._retry_tasks[chat_id] = asyncio.create_task(self._retry_loop(chat_id, generation))
 
-    async def _retry_loop(self, chat_id: str) -> None:
+    async def _retry_loop(self, chat_id: str, generation: int) -> None:
         try:
             while True:
+                if generation != self._retry_generations.get(chat_id, 0):
+                    return
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
@@ -8266,9 +8317,14 @@ class ProjectChatManager:
                     delay = max(0.0, (due - datetime.now(UTC)).total_seconds())
                 if delay > 0:
                     await asyncio.sleep(delay)
+                if generation != self._retry_generations.get(chat_id, 0):
+                    return
                 chat = self._chats.get(chat_id)
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
+                due = chat_service._parse_iso(chat.retry_next_at)
+                if due is not None and due > datetime.now(UTC):
+                    continue
                 if self._broker.get(chat_id) is not None:
                     chat.retry_next_at = chat_service._iso_after(_RETRY_BUSY_DEFER_SECONDS)
                     self._save()
@@ -8459,13 +8515,10 @@ class ProjectChatManager:
             and chat_for_retry.retry_status == "pending"
             and chat_for_retry.retry_kind == _NETWORK_RETRY_KIND
         )
-        # A compaction is not the user's next attempt, so it leaves a deferred
-        # retry of their failed prompt armed.
-        if not is_retry and not compact:
-            if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
-                self._clear_chat_retry(chat_for_retry)
-
         stream = ChatStream(prompt_text=prompt)
+        stream.retry_generation = self._retry_generations.get(chat_id, 0)
+        if not is_retry and chat_for_retry is not None and chat_for_retry.retry_status == "pending":
+            stream.retry_generation = -1
         stream.network_retry_turn = network_retry_turn
         self._broker.register(chat_id, stream)
         image_refs: list[str] = []
@@ -8676,6 +8729,53 @@ class ProjectChatManager:
         if isinstance(timing, dict):
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
+
+    async def _verify_turn_and_publish(
+        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
+    ) -> None:
+        """Check a vault-grounded answer against its notes and publish the verdict.
+
+        Advisory: any failure records nothing. Runs as a background task, so the
+        turn's result frame never waits on it.
+        """
+        try:
+            from ciao.insights import resolve_helper_model
+
+            chat = self._chats.get(chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if chat is None or project is None:
+                return
+            workspace = project.workspace
+            provider = chat.provider or "claude"
+            model = resolve_helper_model(
+                self._config, workspace, provider, source_model=chat.model
+            )
+            vault_root = Path(self._config.workspace_vault_root(workspace))
+            result: dict | None = await vault_verification.verify_answer(
+                answer,
+                note_paths,
+                vault_root=vault_root,
+                model=model,
+                provider=provider,
+                cwd=self._agent_root_for_chat(chat_id),
+            )
+        except Exception:  # noqa: BLE001 — the check is advisory
+            logger.info("Vault answer check failed for %s", chat_id, exc_info=True)
+            return
+        if result is None:
+            return
+        # Re-fetch: the chat may have been deleted while the check ran.
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        chat.turn_verification[str(turn_index)] = result
+        self._save()
+        self._events.publish({
+            "type": "turn_verification",
+            "chat_id": chat_id,
+            "turn_index": turn_index,
+            "verification": result,
+        })
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
@@ -9131,9 +9231,11 @@ class ProjectChatManager:
             # The provider is refusing turns until the retry fires. A turn now would
             # fail and overwrite the pending retry's prompt, losing the original
             # request and every earlier wake. Ride along on the retry instead.
+            self._advance_retry_generation(chat.chat_id)
             chat.retry_prompt = f"{chat.retry_prompt}\n\n{prompt}" if chat.retry_prompt else prompt
             self._save()
             self._publish_retry(chat)
+            self._ensure_retry_task(chat.chat_id)
             delivery = "deferred"
         else:
             # Deliberately NOT unattended: that flag forces bypass mode, and a
