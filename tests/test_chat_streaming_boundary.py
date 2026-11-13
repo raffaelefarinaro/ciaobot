@@ -70,8 +70,8 @@ async def test_start_drive_notification_failure_cannot_orphan_committed_turn(
     assert len(probe.calls) == 1
 
 
-@pytest.mark.parametrize("event_type", ["chat_retry", "chat_postprocess", "chat_streaming_started"])
-async def test_postcommit_publication_failure_does_not_skip_driver_or_retry_cancellation(
+@pytest.mark.parametrize("event_type", ["chat_postprocess", "chat_streaming_started"])
+async def test_postcommit_publication_failure_does_not_skip_driver_or_change_pending_retry(
     tmp_path, passes_enabled, driver_probe, monkeypatch, event_type,
 ):
     manager, [(chat, source)], registry = _admission_pass(tmp_path)
@@ -92,20 +92,49 @@ async def test_postcommit_publication_failure_does_not_skip_driver_or_retry_canc
     monkeypatch.setattr(manager._events, "publish", fail_one)
     try:
         stream = manager.start_stream(chat.chat_id, "continue")
-        assert task.cancelling() == 1 and chat.chat_id not in manager._retry_tasks
-        assert attempted == ["chat_retry", "chat_postprocess", "chat_streaming_started"]
+        assert task.cancelling() == 0 and manager._retry_tasks[chat.chat_id] is task
+        assert stream.retry_generation == -1
+        assert chat.retry_status == "pending" and chat.retry_prompt == "previous"
+        assert attempted == ["chat_postprocess", "chat_streaming_started"]
         assert chat.helper["state"] == "running" and chat.user_turn_count == 1
         assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
         assert json.loads(registry.read_bytes())["chats"][chat.chat_id]["user_turn_count"] == 1
         monkeypatch.setattr(manager._events, "publish", publish)
-        with suppress(asyncio.CancelledError):
-            await task
         probe.release.set()
         events = await consume(stream)
         assert any(event["type"] == "queue_state" for event in events)
         assert len(probe.calls) == 1
+        assert task.cancelling() == 0 and manager._retry_tasks[chat.chat_id] is task
+        assert chat.retry_status == "pending" and chat.retry_prompt == "previous"
     finally:
         monkeypatch.setattr(manager._events, "publish", publish)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_explicit_retry_clear_publication_failure_still_invalidates_owner_and_cancels_timer(
+    admission_case, monkeypatch,
+):
+    manager, chat, _ = admission_case
+    chat.retry_status, chat.retry_prompt = "pending", "previous"
+    manager._save()
+    task = asyncio.create_task(asyncio.Event().wait())
+    manager._retry_tasks[chat.chat_id] = task
+    generation = manager._retry_generations.get(chat.chat_id, 0)
+
+    def fail_publish(event):
+        assert event["type"] == "chat_retry"
+        raise RuntimeError("synthetic retry publication failure")
+
+    monkeypatch.setattr(manager._events, "publish", fail_publish)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic retry publication failure"):
+            manager._clear_chat_retry(chat)
+        assert manager._retry_generations[chat.chat_id] == generation + 1
+        assert task.cancelling() == 1 and chat.chat_id not in manager._retry_tasks
+        assert chat.retry_status == "" and chat.retry_prompt == ""
+    finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
@@ -204,6 +233,9 @@ async def test_provider_pass_keeps_stream_events_and_terminal_outcome() -> None:
 
 
 class _DriveHost:
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool:
+        return True
+
     def __init__(
         self,
         events: list[StreamEvent],

@@ -812,8 +812,8 @@ async def test_non_billing_rate_limit_with_progress_resumes_continue(tmp_path: P
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: Path) -> None:
-    """With progress but no session to resume, replay the prompt, not "continue"."""
+async def test_midresponse_drop_without_session_does_not_replay(tmp_path: Path) -> None:
+    """Partial work cannot safely be replayed without a resumable session."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
@@ -841,9 +841,125 @@ async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: P
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
-    assert updated.retry_interval_seconds == 30
+    assert updated.retry_status != "pending"
+
+
+@pytest.mark.parametrize("result", ["success", "error", "connection"])
+@pytest.mark.parametrize("replacement", ["literal", "network", "recreate"])
+async def test_retry_stream_cannot_change_replacement_slot(
+    tmp_path: Path, result: str, replacement: str
+) -> None:
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        started.set()
+        await release.wait()
+        if result == "connection":
+            yield AssistantTextDelta(type="assistant", text="partial")
+        yield ResultEvent(
+            type="result", result={"success": "done", "error": "unexpected failure",
+                                   "connection": "API Error: Connection closed mid-response."}[result],
+            session_id="", is_error=result != "success", effective_model=chat.model,
+            usage={}, quota={}, cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    pcm.set_chat_retry(chat.chat_id, "original")
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(started.wait(), 10)
+    if replacement == "recreate":
+        pcm.stop_chat_retry(chat.chat_id)
+    if replacement == "network":
+        assert pcm.arm_network_retry(chat.chat_id, "replacement") == "armed"
+    else:
+        pcm.set_chat_retry(chat.chat_id, "replacement")
+    before = (chat.retry_status, chat.retry_prompt, chat.retry_kind, chat.retry_attempts,
+              chat.retry_next_at, chat.retry_last_error, chat.retry_interval_seconds)
+    release.set()
+    await asyncio.wait_for(_consume(stream), 10)
+    assert (chat.retry_status, chat.retry_prompt, chat.retry_kind, chat.retry_attempts,
+            chat.retry_next_at, chat.retry_last_error, chat.retry_interval_seconds) == before
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_missing_session_stops_owned_retry_after_partial_work(tmp_path: Path) -> None:
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    calls = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append((prompt, images))
+        yield AssistantTextDelta(type="assistant", text="partial")
+        yield ResultEvent(type="result", result="API Error: Connection closed mid-response.",
+                          session_id="", is_error=True, effective_model=chat.model,
+                          usage={}, quota={}, cost_usd=0.0)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    pcm.set_chat_retry(chat.chat_id, "original")
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), 10)
+    assert calls == [("original", None)]
+    assert chat.retry_status == "stopped"
+    assert chat.retry_prompt == ""
+
+
+async def test_replacement_timer_survives_old_timer_cleanup(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "first")
+    old = pcm._retry_tasks[chat.chat_id]
+    await asyncio.sleep(0)
+    pcm.set_chat_retry(chat.chat_id, "replacement")
+    new = pcm._retry_tasks[chat.chat_id]
+    assert new is not old
+    await asyncio.gather(old, return_exceptions=True)
+    assert pcm._retry_tasks[chat.chat_id] is new
+    assert not new.cancelled()
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_literal_replacement_does_not_inherit_network_budget(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    assert pcm.arm_network_retry(chat.chat_id, "network") == "armed"
+    chat.retry_attempts = 3
+    pcm.set_chat_retry(chat.chat_id, "literal")
+    assert chat.retry_kind == ""
+    assert chat.retry_attempts == 0
+    assert chat.retry_interval_seconds == 3600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_unrelated_turn_does_not_replace_pending_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "scheduled")
+    before = (chat.retry_prompt, chat.retry_next_at, chat.retry_attempts)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(type="result", result="API Error: Connection closed mid-response.",
+                          session_id="", is_error=True, effective_model=chat.model,
+                          usage={}, quota={}, cost_usd=0.0)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "unrelated")
+    await asyncio.wait_for(_consume(stream), 10)
+    assert chat.retry_status == "pending"
+    assert (chat.retry_prompt, chat.retry_next_at, chat.retry_attempts) == before
     pcm.stop_chat_retry(chat.chat_id)
 
 
@@ -895,6 +1011,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-billing"
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
@@ -917,7 +1034,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_prompt == "continue"
     assert any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
@@ -928,14 +1045,13 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
     """A plain rate-limit 429 must auto-retry after progress too, same as a
     billing/spend-limit error — the earlier carve-out that skipped arming
     for non-billing quota errors once anything had streamed left users with
-    a bare error and no retry affordance for the common "usage limit" case.
-    Without a session to resume it falls back to replaying the prompt, same
-    as the no-session connection-drop case."""
+    a bare error and no retry affordance for the common "usage limit" case."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-rate"
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
@@ -958,7 +1074,7 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
-    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_prompt == "continue"
     assert any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
@@ -1097,14 +1213,11 @@ def test_claude_five_hour_limit_rejects_invalid_reset_details(text: str) -> None
 @pytest.mark.parametrize("limit_text", [OLLAMA_SESSION_LIMIT, OLLAMA_WEEKLY_LIMIT])
 async def test_ollama_limit_error_arms_hourly_quota_retry(tmp_path: Path, limit_text: str) -> None:
     """Ollama session and weekly limits both arm the ordinary hourly quota retry."""
-    from ciao.models import AssistantTextDelta
-
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        yield AssistantTextDelta(type="assistant", text="partial… ")
         yield ResultEvent(
             type="result",
             result=limit_text,
@@ -2067,8 +2180,8 @@ async def test_try_now_past_the_quota_cap_stops_instead_of_firing(tmp_path: Path
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="quota")
-    chat.retry_kind = "quota"
     pcm.set_chat_retry(chat.chat_id, "job", reason="usage limit")
+    chat.retry_kind = "quota"
     chat.retry_attempts = _MAX_QUOTA_RETRIES
     calls: list[str] = []
 

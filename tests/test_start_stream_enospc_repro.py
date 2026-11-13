@@ -291,6 +291,8 @@ async def test_failed_admission_preserves_retry_fields_task_and_events(admission
     seed_state(manager, chat)
     checkpoint, before = state_checkpoint(chat), registry.read_bytes()
     entered, release = asyncio.Event(), asyncio.Event()
+    generation = manager._retry_generations.get(chat.chat_id, 0)
+    retry_fields = {name: value for name, value in checkpoint[0].items() if name.startswith("retry_")}
     async def retry():
         entered.set()
         await release.wait()
@@ -307,16 +309,24 @@ async def test_failed_admission_preserves_retry_fields_task_and_events(admission
         assert registry.read_bytes() == before
         assert manager._retry_tasks[chat.chat_id] is task
         assert not task.done() and task.cancelling() == 0
+        assert manager._retry_generations.get(chat.chat_id, 0) == generation
         publish.assert_not_called()
         fault.armed = False
         probe = driver_probe(manager, chat)
         stream = manager.start_stream(chat.chat_id, "new")
-        assert task.cancelling() == 1
-        with suppress(asyncio.CancelledError):
-            await task
-        assert chat.chat_id not in manager._retry_tasks
+        assert manager._retry_tasks[chat.chat_id] is task
+        assert not task.done() and task.cancelling() == 0
+        assert stream.retry_generation == -1
+        assert manager._retry_generations.get(chat.chat_id, 0) == generation
+        assert {name: getattr(chat, name) for name in retry_fields} == retry_fields
+        assert chat.retry_image_refs is checkpoint[1]["retry_image_refs"]
+        publish.assert_not_called()
         probe.release.set()
         await consume(stream)
+        assert manager._retry_tasks[chat.chat_id] is task
+        assert not task.done() and task.cancelling() == 0
+        assert {name: getattr(chat, name) for name in retry_fields} == retry_fields
+        publish.assert_not_called()
     finally:
         release.set()
         with suppress(asyncio.CancelledError):
@@ -330,8 +340,12 @@ async def test_retry_clear_does_not_cancel_current_task(admission_case, driver_p
     probe = driver_probe(manager, chat)
     async def retry():
         manager._retry_tasks[chat.chat_id] = asyncio.current_task()
+        generation = manager._retry_generations.get(chat.chat_id, 0)
+        manager._clear_chat_retry(chat)
         stream = manager.start_stream(chat.chat_id, "manual retry")
         assert asyncio.current_task().cancelling() == 0
+        assert manager._retry_generations[chat.chat_id] == generation + 1
+        assert chat.retry_status == ""
         probe.release.set()
         await consume(stream)
     await asyncio.wait_for(asyncio.create_task(retry()), 5)
