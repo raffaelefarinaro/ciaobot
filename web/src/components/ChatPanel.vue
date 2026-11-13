@@ -423,7 +423,7 @@
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
           <div class="message-row">
             <div class="message assistant" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
-              <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div class="message-content" v-html="renderAssistantMarkdown(item.msg.content)"></div>
             </div>
             <!-- The reply's own footer: Outputs, Copy, Fork, and the turn's
                  facts. The row always takes its height; Copy, Fork and the
@@ -1522,6 +1522,7 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
+import { useFileMentions, type FileMentionContext } from '../composables/useFileMentions'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
@@ -1539,7 +1540,7 @@ import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
-import { linkifyText } from '../lib/filePaths'
+import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
@@ -2120,6 +2121,28 @@ onMounted(() => {
 })
 
 const project = computed(() => view.project)
+
+// The layout a checked mention is confirmed against. Code mode is a project
+// linked to a repo, so the repo path is empty outside it; the sidebar's
+// workspace is never consulted.
+const fileMentionContext = computed<FileMentionContext | null>(() => {
+  const c = view.chat
+  const p = view.project
+  if (!c || !p || p.project_id !== c.project_id) return null
+  const location = c.repo_location ?? {}
+  return {
+    chatId: c.chat_id,
+    projectId: c.project_id,
+    workspace: p.workspace,
+    repoPath: p.repo?.path ?? '',
+    repoLocation: {
+      path: location.path ?? '',
+      exists: location.exists ?? false,
+      isWorktree: location.is_worktree ?? false,
+      branch: location.branch ?? '',
+    },
+  }
+})
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -4065,6 +4088,10 @@ const mdCache = new Map<string, string>()
 // User bubbles render through a different pipeline (raw HTML is escaped, see
 // lib/safeMarkdown.ts), so the two renderings cannot share one text-keyed cache.
 const userMdCache = new Map<string, string>()
+// The final reply bubble alone takes the confirmed file mentions, so its
+// rendering has its own cache, keyed by the identity of the target map.
+const assistantMdCache = new Map<string, string>()
+let assistantCacheTargets: FileMentionTargets | null = null
 const MAX_MD_CACHE_SIZE = 500
 // Rendered output depends on the known-file-path set (for linkification), so
 // drop the cache whenever that set actually changes — keying on text alone is
@@ -4072,10 +4099,12 @@ const MAX_MD_CACHE_SIZE = 500
 watch(() => knownFilePaths.value.join('|'), () => {
   mdCache.clear()
   userMdCache.clear()
+  assistantMdCache.clear()
 })
 watch(knownChatLinksKey, () => {
   mdCache.clear()
   userMdCache.clear()
+  assistantMdCache.clear()
 })
 
 function renderMarkdown(text: string): string {
@@ -4090,6 +4119,26 @@ function renderMarkdown(text: string): string {
     if (firstKey !== undefined) mdCache.delete(firstKey)
   }
   mdCache.set(text, rendered)
+  return rendered
+}
+
+function renderAssistantMarkdown(text: string): string {
+  if (!text) return ''
+  // Read before the cache lookup so a confirmed target re-renders the text.
+  const targets = fileMentions.targets.value
+  if (targets !== assistantCacheTargets) {
+    assistantMdCache.clear()
+    assistantCacheTargets = targets
+  }
+  const cached = assistantMdCache.get(text)
+  if (cached !== undefined) return cached
+
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true, chatId: props.chatId, fileMentionTargets: targets })
+  if (assistantMdCache.size >= MAX_MD_CACHE_SIZE) {
+    const firstKey = assistantMdCache.keys().next().value
+    if (firstKey !== undefined) assistantMdCache.delete(firstKey)
+  }
+  assistantMdCache.set(text, rendered)
   return rendered
 }
 
@@ -4547,6 +4596,12 @@ const renderData = computed<{
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
+// Completed final reply bubbles are the only discovery input; the trace,
+// system rows and an errored reply are never scanned for mentions.
+const assistantBubbleMessages = computed(() => renderItems.value
+  .filter((i): i is RenderItem & { kind: 'assistant' } => i.kind === 'assistant' && !i.msg.is_error)
+  .map(i => i.msg))
+const fileMentions = useFileMentions(() => fileMentionContext.value, () => assistantBubbleMessages.value, () => view.isStreaming)
 const transcriptEmpty = computed(() => renderItems.value.length === 0)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 

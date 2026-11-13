@@ -12,6 +12,7 @@ for (const mobile of [false, true]) {
       { role: 'user', content: 'Write a draft', turn_index: 0 },
       { role: 'assistant', content: 'Open `memory-vault/Workspace/draft.md`.', turn_index: 0 },
     ] }))
+    await page.route('**/api/chats/alpha-chat-1/file-paths/resolve', route => route.fulfill({ json: { results: route.request().postDataJSON().paths.map((input: string) => ({ input, path: input === 'memory-vault/Workspace/draft.md' ? canonical : null })) } }))
     await page.route('**/api/chats/alpha-chat-1/file-path?*', route => route.fulfill({ json: { path: canonical } }))
     await page.route('**/api/workspace-file?*', route => route.fulfill({ body: '# Workspace draft\n\nCorrect source workspace.', contentType: 'text/plain' }))
     let pinAttempts = 0
@@ -24,7 +25,7 @@ for (const mobile of [false, true]) {
     })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     await expect(page.locator('.startup-overlay')).toHaveCount(0)
-    const fileLink = page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]')
+    const fileLink = page.locator(`a[data-file-path="${canonical}"]`)
     await fileLink.click()
     const viewer = page.locator('.fv-modal')
     await expect(viewer).toBeVisible()
@@ -67,11 +68,12 @@ test('Back closes the file viewer and leaves the chat where it was', async ({ br
       { role: 'user', content: 'Write a draft', turn_index: 0 },
       { role: 'assistant', content: 'Open `memory-vault/Workspace/draft.md`.', turn_index: 0 },
     ] }))
+    await page.route('**/api/chats/alpha-chat-1/file-paths/resolve', route => route.fulfill({ json: { results: route.request().postDataJSON().paths.map((input: string) => ({ input, path: input === 'memory-vault/Workspace/draft.md' ? canonical : null })) } }))
     await page.route('**/api/chats/alpha-chat-1/file-path?*', route => route.fulfill({ json: { path: canonical } }))
     await page.route('**/api/workspace-file?*', route => route.fulfill({ body: '# Workspace draft\n\nCorrect source workspace.', contentType: 'text/plain' }))
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     await expect(page.locator('.startup-overlay')).toHaveCount(0)
-    const fileLink = page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]')
+    const fileLink = page.locator(`a[data-file-path="${canonical}"]`)
     const viewer = page.locator('.fv-modal')
     const marker = () => page.evaluate(() => (history.state?.ciaoOverlay ?? null) as string | null)
 
