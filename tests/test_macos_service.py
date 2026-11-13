@@ -887,7 +887,7 @@ def test_migration_classify_reports_a_live_desktop_host(
     # come back as `desktop_host` with the workspace the installer will keep.
     from ciao import cli
 
-    agents = _desktop_host_agents(tmp_path)
+    agents = _desktop_host_agents(tmp_path, node_state={"role": "host"})
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
     monkeypatch.setattr(sys, "platform", "darwin")
 
