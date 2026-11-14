@@ -1462,7 +1462,10 @@ def test_safe_credential_inventory_deep_json_and_missing_binary(monkeypatch, cap
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
     monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, b"[" * 100000 + b"]" * 100000))
-    assert mod.opencode_credential_inventory() == {"status": "unknown", "providers": []}
+    result = mod.opencode_credential_inventory()
+    # Python's JSON decoder may either reject the nesting or decode a non-row.
+    assert result["status"] in {"unknown", "partial"}
+    assert result["providers"] == []
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: None)
     monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: pytest.fail("unexpected probe"))
     assert mod.opencode_credential_inventory() == {"status": "unknown", "providers": []}
@@ -1600,7 +1603,9 @@ async def test_startup_queue_fifo_and_cancelled_waiter(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("termination_fails", [False, True])
-async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, tmp_path, termination_fails):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, tmp_path, termination_fails, platform):
+    from types import SimpleNamespace
     import ciao.providers.opencode as mod
 
     started = asyncio.Event()
@@ -1622,6 +1627,8 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
             if termination_fails:
                 raise OSError("secret injected")
 
+        kill_checked = terminate
+
         def close_checked(self):
             pass
 
@@ -1641,9 +1648,11 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
         return Process(), Tree()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+    waiter = None
     try:
         await asyncio.wait_for(started.wait(), 2)
         owner.cancel()
@@ -1669,13 +1678,18 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
         allow_cleanup.set()
         if not owner.done():
             owner.cancel()
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(owner, *([waiter] if waiter is not None else []), return_exceptions=True)
         # Test-only cleanup of permanent quarantine, after all tasks are drained.
         with mod._SERVER_START_GUARD:
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
 
 
 @pytest.mark.asyncio
-async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_path):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_path, platform):
+    from types import SimpleNamespace
     import ciao.providers.opencode as mod
 
     spawned, allow_spawn, cleanup, allow_cleanup = (asyncio.Event() for _ in range(4))
@@ -1693,6 +1707,9 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
     class Tree:
         def terminate(self):
             calls.append("terminate")
+
+        def kill_checked(self):
+            calls.append("kill")
 
         def close_checked(self):
             calls.append("close")
@@ -1714,6 +1731,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
             pass
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
@@ -1728,7 +1746,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
         await asyncio.wait_for(cleanup.wait(), 2)
         owner.cancel()
         await asyncio.sleep(0.1)
-        assert calls == ["spawn", "terminate"]
+        assert calls == ["spawn", "kill" if platform == "win32" else "terminate"]
         allow_cleanup.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(owner, 2)
@@ -1911,7 +1929,8 @@ async def test_ephemeral_missing_or_broken_binary_never_spawns(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("termination_fails", [False, True])
-def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_path, termination_fails):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_path, termination_fails, platform):
     import threading
     from types import SimpleNamespace
     import ciao.providers.opencode as mod
@@ -1932,6 +1951,8 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
         def terminate(self):
             if termination_fails:
                 raise OSError("termination-secret")
+
+        kill_checked = terminate
 
         def close_checked(self):
             pass
@@ -1961,6 +1982,7 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
         asyncio.run(run())
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner, waiter = threading.Thread(target=worker), threading.Thread(target=worker)
@@ -4995,8 +5017,12 @@ def _no_op_trees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
-async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, platform):
     """A server we could not validate must not outlive the attempt."""
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
     provider = _provider(tmp_path)
     terminated: list[str] = []
 
@@ -5013,13 +5039,15 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
             terminated.append("terminate")
             FakeProcess.returncode = 0
 
-        def kill(self):  # pragma: no cover - only on a hung process
+        def kill_checked(self):
             terminated.append("kill")
+            FakeProcess.returncode = 0
 
     async def fake_exec(*_args, **_kwargs):
         return FakeProcess()
 
     monkeypatch.setattr("ciao.providers.opencode.ProcessTree", FakeTree)
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
 
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
@@ -5042,7 +5070,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
 
-    assert terminated == ["terminate"]
+    assert terminated == ["kill" if platform == "win32" else "terminate"]
     assert provider._process is None
     assert provider._client is None
     FakeProcess.returncode = None
