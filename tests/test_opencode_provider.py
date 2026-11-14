@@ -445,6 +445,162 @@ async def test_cancellation_during_failed_startup_cleanup_has_no_raw_context(
 
 
 @pytest.mark.asyncio
+async def test_chat_cancellation_while_waiting_for_exited_server_stderr(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    reader_started = asyncio.Event()
+    closed = []
+
+    class Stderr:
+        async def readline(self):
+            reader_started.set()
+            await asyncio.Event().wait()
+
+    class Process:
+        returncode = 1
+        stderr = Stderr()
+
+        async def wait(self):
+            return 1
+
+    class Tree:
+        def kill_checked(self):
+            pass
+
+        def close_checked(self):
+            closed.append("tree")
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            closed.append("client")
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    provider = OpencodeProvider(tmp_path)
+    task = asyncio.create_task(provider._ensure_server_locked(Request()))
+    try:
+        await asyncio.wait_for(reader_started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as error:
+            await asyncio.wait_for(task, 2)
+        assert error.value.__context__ is None and error.value.__cause__ is None
+        assert set(closed) == {"client", "tree"}
+        assert provider._process is None and provider._stderr_task is None
+        assert str(tmp_path.resolve()) not in mod._SERVER_START_LOCKS
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("mode", ["chat", "ephemeral"])
+@pytest.mark.parametrize("phase", ["spawn", "health"])
+def test_forcibly_closed_loop_quarantines_real_startup_owner(monkeypatch, tmp_path, mode, phase):
+    import contextlib
+    import warnings
+    import ciao.providers.opencode as mod
+
+    started = asyncio.Event()
+
+    class Process:
+        returncode = None
+        stderr = None
+
+    class Tree:
+        pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def spawn(*args, **kwargs):
+        if phase == "spawn":
+            started.set()
+            await asyncio.Event().wait()
+        return Process(), Tree()
+
+    async def health(self):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", health)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    task = loop.create_task(
+        OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+        if mode == "chat" else mod._EphemeralServer(tmp_path).__aenter__()
+    )
+    pending = {task}
+    try:
+        loop.run_until_complete(asyncio.wait_for(started.wait(), 2))
+        pending = asyncio.all_tasks(loop)
+        loop.close()
+        asyncio.set_event_loop(None)
+        async def check():
+            with pytest.raises(mod.SanitizedStartupError, match="quarantined"):
+                async with mod._server_start_lock(tmp_path):
+                    pytest.fail("abandoned owner was unlocked")
+            async with mod._server_start_lock(tmp_path / "other"):
+                pass
+
+        # A retained but undrained task must not make later starts hang.
+        asyncio.run(asyncio.wait_for(check(), 1))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with contextlib.suppress(RuntimeError, GeneratorExit):
+                task.get_coro().close()
+            for other in pending - {task}:
+                with contextlib.suppress(RuntimeError, GeneratorExit):
+                    other.get_coro().close()
+                other._log_destroy_pending = False
+        task._log_destroy_pending = False
+
+        asyncio.run(check())
+    finally:
+        asyncio.set_event_loop(None)
+        if not loop.is_closed():
+            loop.close()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for pending_task in pending:
+                with contextlib.suppress(RuntimeError, GeneratorExit):
+                    pending_task.get_coro().close()
+                pending_task._log_destroy_pending = False
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["chat", "ephemeral"])
 @pytest.mark.parametrize("uncertain", [False, True])
 async def test_cancellation_during_failing_spawn_has_no_raw_context(monkeypatch, tmp_path, mode, uncertain):

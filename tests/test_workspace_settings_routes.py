@@ -301,35 +301,36 @@ def test_startup_exception_chain_never_leaks_in_response_or_logs(
         while not server.started:
             assert thread.is_alive() and time.monotonic() < deadline
             time.sleep(0.01)
-        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-            expected_errors = ("cleanup failed", "quarantined") if cleanup_fails else ("startup failed", "startup failed")
-            for index, expected in enumerate(expected_errors):
+        expected_errors = ("cleanup failed", "quarantined") if cleanup_fails else ("startup failed", "startup failed")
+        for index, expected in enumerate(expected_errors):
+            # Uvicorn closes the connection after an unhandled ASGI exception.
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
                 response = client.get("/api/models" if mode == "catalog" else "/api/test-chat-start", headers=headers)
-                assert response.status_code == 500
-                assert b"startup-secret-sentinel" not in response.content
-                assert b"cleanup-secret-sentinel" not in response.content
-                deadline = time.monotonic() + 5
-                while True:
-                    records = [r for r in caplog.records if r.name == "uvicorn.error" and r.exc_info]
-                    if len(records) > index and expected in str(records[-1].exc_info[1]):
-                        break
-                    assert time.monotonic() < deadline
-                    time.sleep(0.01)
-                pending = [records[-1].exc_info[1]]
-                seen = set()
-                while pending:
-                    exc = pending.pop()
-                    if id(exc) in seen:
-                        continue
-                    seen.add(id(exc))
-                    assert exc is not raw_startup and exc is not raw_cleanup
-                    assert "startup-secret-sentinel" not in str(exc)
-                    assert "cleanup-secret-sentinel" not in str(exc)
-                    pending.extend(item for item in (exc.__cause__, exc.__context__) if item is not None)
-                    if isinstance(exc, BaseExceptionGroup):
-                        pending.extend(exc.exceptions)
-                if expected == "cleanup failed":
-                    assert classification in str(records[-1].exc_info[1])
+            assert response.status_code == 500
+            assert b"startup-secret-sentinel" not in response.content
+            assert b"cleanup-secret-sentinel" not in response.content
+            deadline = time.monotonic() + 5
+            while True:
+                records = [r for r in caplog.records if r.name == "uvicorn.error" and r.exc_info]
+                if len(records) > index and expected in str(records[-1].exc_info[1]):
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            pending = [records[-1].exc_info[1]]
+            seen = set()
+            while pending:
+                exc = pending.pop()
+                if id(exc) in seen:
+                    continue
+                seen.add(id(exc))
+                assert exc is not raw_startup and exc is not raw_cleanup
+                assert "startup-secret-sentinel" not in str(exc)
+                assert "cleanup-secret-sentinel" not in str(exc)
+                pending.extend(item for item in (exc.__cause__, exc.__context__) if item is not None)
+                if isinstance(exc, BaseExceptionGroup):
+                    pending.extend(exc.exceptions)
+            if expected == "cleanup failed":
+                assert classification in str(records[-1].exc_info[1])
         assert "startup-secret-sentinel" not in caplog.text
         assert "cleanup-secret-sentinel" not in caplog.text
     finally:

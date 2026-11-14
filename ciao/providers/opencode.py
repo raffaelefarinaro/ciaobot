@@ -532,6 +532,8 @@ async def _spawn_server_owned(
 @dataclass
 class _StartupState:
     owner: object | None = None
+    # A weak reference detects a closed owner loop without retaining it.
+    owner_loop: weakref.ReferenceType[asyncio.AbstractEventLoop] | None = None
     waiters: deque[object] = field(default_factory=deque)
     quarantined: bool = False
     retained_job_handles: list[int] = field(default_factory=list)
@@ -703,26 +705,39 @@ async def _server_start_lock(workspace_root: Path) -> AsyncGenerator[None, None]
     """
     key = str(workspace_root.resolve())
     token = object()
+    loop = asyncio.get_running_loop()
+    abandoned = False
     try:
         with _SERVER_START_GUARD:
             state = _SERVER_START_LOCKS.setdefault(key, _StartupState())
             state.waiters.append(token)
         while True:
             with _SERVER_START_GUARD:
+                if state.owner is not None and state.owner_loop is not None:
+                    owner_loop = state.owner_loop()
+                    if owner_loop is None or owner_loop.is_closed():
+                        state.quarantined = True
                 if state.quarantined:
                     raise SanitizedStartupError("OpenCode startup is quarantined for this workspace")
                 if state.owner is None and state.waiters[0] is token:
                     state.waiters.popleft()
                     state.owner = token
+                    state.owner_loop = weakref.ref(loop)
                     break
             await asyncio.sleep(0.05)
         yield
+    except GeneratorExit:
+        abandoned = True
+        raise
     finally:
         with _SERVER_START_GUARD:
             current = _SERVER_START_LOCKS.get(key)
             if current is not None:
                 if current.owner is token:
+                    if abandoned or loop.is_closed():
+                        current.quarantined = True
                     current.owner = None
+                    current.owner_loop = None
                 else:
                     with contextlib.suppress(ValueError):
                         current.waiters.remove(token)
@@ -3018,6 +3033,8 @@ class OpencodeProvider(BaseSDKProvider):
             )
             await self._await_health()
             await self._verify_contract()
+        except GeneratorExit:
+            raise
         except BaseException as exc:
             classification = _startup_failure_classification(exc)
             try:
@@ -3086,7 +3103,7 @@ class OpencodeProvider(BaseSDKProvider):
         if reader is not None and not reader.done():
             try:
                 await asyncio.wait_for(asyncio.shield(reader), timeout=1.0)
-            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.TimeoutError):
                 pass
         return self._stderr_tail[-1] if self._stderr_tail else ""
 
@@ -5480,6 +5497,8 @@ class _EphemeralServer:
             pending_cancel = False
             try:
                 client = await self._enter_unlocked()
+            except GeneratorExit:
+                raise
             except BaseException as exc:
                 startup_failed = True
                 classification = _startup_failure_classification(exc)
