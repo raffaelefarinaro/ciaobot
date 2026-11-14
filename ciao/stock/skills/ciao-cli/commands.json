@@ -2,6 +2,7 @@
   "memory status": "memory_status",
   "memory update": "memory_update",
   "vault search": "vault_search",
+  "vault recall-check": "vault_recall_check",
   "vault review list": "vault_review",
   "vault review show": "vault_review",
   "vault review keep": "vault_review",
