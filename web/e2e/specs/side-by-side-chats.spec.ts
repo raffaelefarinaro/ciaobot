@@ -1,5 +1,5 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
-import { COMPOSER, boot, fixtureWrites, isolate, settled } from '../support/app'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
+import { COMPOSER, boot, fixtureWrites, isolate, quiesce, settled } from '../support/app'
 
 /**
  * Two chats side by side, in a real browser.
@@ -149,6 +149,11 @@ test('the pane with the keyboard is the selected chat in the sidebar', async ({ 
 
 test('renaming the side chat fills its title column and selects the title', async ({ page }) => {
   await boot(page, CHAT_PATH, COMPOSER)
+  await expect(page.locator(COMPOSER)).toBeFocused()
+  // Hold the side panel's startup work until the user is already renaming.
+  let holdAssets!: (route: Route) => void
+  const assets = new Promise<Route>(resolve => { holdAssets = resolve })
+  await page.route('**/api/agent-assets', holdAssets)
   const row = page.locator('.chat-item', { hasText: SECOND_TITLE })
   await row.hover()
   await row.locator('.chat-beside-btn').click()
@@ -158,6 +163,11 @@ test('renaming the side chat fills its title column and selects the title', asyn
   await tile.locator('.chat-title').dblclick()
 
   const input = tile.locator('input.title-input')
+  await expect(input).toBeFocused()
+  const response = page.waitForResponse('**/api/agent-assets')
+  await (await assets).continue()
+  await (await response).finished()
+  await quiesce(page)
   await expect(input).toBeFocused()
   await expect(input).toHaveValue(SECOND_TITLE)
   const m = await tile.evaluate(el => {

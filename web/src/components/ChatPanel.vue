@@ -3999,6 +3999,16 @@ if (typeof document !== 'undefined') {
 //     every chat you tap into, and iOS zooms the page on focus besides.
 const COMPOSER_FOCUS_MIN_WIDTH = 768
 
+// Startup may await slow assets; a newer interaction owns focus from then on.
+const startupFocusEvents = ['pointerdown', 'keydown', 'focusin'] as const
+let startupFocusCancelled = false
+function cancelStartupFocus(): void {
+  startupFocusCancelled = true
+  for (const event of startupFocusEvents) {
+    document.removeEventListener(event, cancelStartupFocus, true)
+  }
+}
+
 function focusComposerOnOpen(): void {
   if (props.inactive) return
   if (detailsTarget.value === 'mcp' && (railShown.value || drawerShown.value)) return
@@ -4038,6 +4048,9 @@ async function loadModels(): Promise<void> {
 }
 
 onMounted(async () => {
+  for (const event of startupFocusEvents) {
+    document.addEventListener(event, cancelStartupFocus, true)
+  }
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
@@ -4064,11 +4077,15 @@ onMounted(async () => {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       pinToBottom()
     }
-    focusComposerOnOpen()
+    if (!startupFocusCancelled) {
+      cancelStartupFocus()
+      focusComposerOnOpen()
+    }
   })
 })
 
 onBeforeUnmount(() => {
+  cancelStartupFocus()
   composer.persistDraft()
   window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
