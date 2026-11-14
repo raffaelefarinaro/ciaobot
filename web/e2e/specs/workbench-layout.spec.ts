@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, COMPOSER, isolate, quiesce } from '../support/app'
+import { boot, COMPOSER, horizontalOverflow, isolate, quiesce, seedInbox } from '../support/app'
 
 /**
  * #2274: the Chat details rail is docked from a ResizeObserver on
@@ -513,5 +513,184 @@ test.describe('pane header at a narrow desktop window', () => {
         ).toBe(false)
       }
     }
+  })
+})
+
+test.describe('expanded-sidebar page chrome', () => {
+  test.use({ viewport: { width: 1280, height: 900 } })
+
+  const taskId = '8'.repeat(32)
+  const pages = [
+    { path: '/', ready: '.home-intake-form', name: 'Home' },
+    { path: '/settings/appearance', ready: '.settings-main', name: 'Appearance' },
+    { path: '/stats', ready: '.usage-view', name: 'Usage' },
+    { path: '/memory/categories', ready: '.memory-map', name: 'Memory · Categories' },
+    { path: '/schedules', ready: '.overview-body .ov-item', name: 'Automations' },
+    { path: '/tasks', ready: '.task-card[data-task-id]', name: 'Tasks' },
+  ]
+
+  test.beforeEach(async ({ page }, ti) => {
+    await isolate(page, `page-chrome-${ti.workerIndex}-${ti.title}`)
+    await seedInbox(page, { tasks: { alpha: [{
+      id: taskId, title: 'Prepare the offsite', status: 'backlog', project_id: '',
+      due: '', assignee: 'user', chat_id: '', attempt_id: '', linked_chats: [],
+      relative_path: 'Workspace/Tasks/offsite.md', revision: 'a'.repeat(64),
+      created_at: '2026-01-01T09:00:00+00:00', updated_at: '2026-01-01T09:00:00+00:00',
+    }] } })
+  })
+
+  for (const view of pages) {
+    test(`${view.name} keeps its heading without a redundant desktop strip`, async ({ page }) => {
+      await boot(page, view.path, view.ready)
+      await expect(page.locator('.chat-layout')).toHaveClass(/sidebar-open/)
+      const header = page.locator('.pane-header').first()
+      // Role lookup excludes aria-hidden/display:none ancestors: this is still
+      // the pane's semantic heading, not merely text left in the DOM.
+      await expect(header.getByRole('heading', { level: 2, name: view.name, exact: true })).toHaveCount(1)
+      await quiesce(page)
+      const geometry = await header.evaluate(el => {
+        const heading = el.querySelector('.page-tag')!
+        const tag = heading.getBoundingClientRect()
+        const css = getComputedStyle(heading)
+        return {
+          height: el.getBoundingClientRect().height, border: getComputedStyle(el).borderBottomWidth,
+          tagWidth: tag.width, tagHeight: tag.height, position: css.position, clip: css.clip,
+          paneWidth: el.parentElement!.getBoundingClientRect().width,
+        }
+      })
+      expect(geometry.paneWidth).toBeGreaterThanOrEqual(600)
+      expect(geometry).toMatchObject({
+        border: '0px', tagWidth: 1, tagHeight: 1, position: 'absolute', clip: 'rect(0px, 0px, 0px, 0px)',
+      })
+      if (view.name === 'Tasks') {
+        const action = header.getByRole('button', { name: 'New task', exact: true })
+        expect(geometry.height).toBeGreaterThan(0)
+        expect(geometry.height).toBeLessThan(61)
+        const inset = await header.evaluate(el => Number.parseFloat(getComputedStyle(el).paddingRight))
+        const box = (await header.boundingBox())!
+        const button = (await action.boundingBox())!
+        expect(box.x + box.width - button.x - button.width).toBeCloseTo(inset, 0)
+        await action.focus()
+        await expect(action).toBeFocused()
+        await page.keyboard.press('Enter')
+        await expect(page.getByRole('dialog', { name: 'New task', exact: true })).toBeVisible()
+        await page.keyboard.press('Escape')
+        await expect(page.getByRole('dialog', { name: 'New task', exact: true })).toBeHidden()
+      } else {
+        expect(geometry.height).toBe(0)
+      }
+      await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+      await quiesce(page)
+      expect((await header.boundingBox())!.height).toBe(61)
+      await expect(header.locator('.page-tag')).toHaveCSS('position', 'static')
+      await page.getByRole('button', { name: 'Open sidebar', exact: true }).first().click()
+      await quiesce(page)
+      expect((await header.boundingBox())!.height).toBe(geometry.height)
+      expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+    })
+  }
+
+  test('item titles and actions retain their geometry when the sidebar toggles', async ({ page }) => {
+    for (const [path, pane] of [
+      ['/chat/alpha-chat-2', '.chat-panel'],
+      ['/project/alpha-general', '.project-view'],
+      ['/schedules/alpha-daily-brief', '.schedule-panel'],
+      [`/tasks/${taskId}`, '.task-detail-page'],
+    ]) {
+      await boot(page, path, pane === '.task-detail-page' ? '#task-detail-name' : `${pane} .title-rail-item[aria-current="page"]`)
+      const header = page.locator(`${pane} .pane-header`)
+      await expect(header).not.toHaveClass(/pane-header--compact-page/)
+      const read = () => header.evaluate(el => {
+        const head = el.getBoundingClientRect()
+        return ['.header-title', '.header-trail'].map(sel => {
+          const r = el.querySelector(sel)!.getBoundingClientRect()
+          return { y: r.y - head.y, height: r.height, right: head.right - r.right, inset: Number.parseFloat(getComputedStyle(el).paddingRight) }
+        })
+      })
+      await quiesce(page)
+      const before = await read()
+      expect((await header.boundingBox())!.height).toBe(61)
+      await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+      await quiesce(page)
+      const after = await read()
+      expect(after.map(r => ({ y: r.y, height: r.height }))).toEqual(before.map(r => ({ y: r.y, height: r.height })))
+      // Chat details may dock when collapse widens the pane; that existing
+      // layout changes the right inset from the page gutter to the rail inset.
+      expect(before[1].right).toBeCloseTo(before[1].inset, 0)
+      expect(after[1].right).toBeCloseTo(after[1].inset, 0)
+      await expect(header.locator('.header-title')).toBeVisible()
+      await expect(header.locator('.header-actions')).toBeVisible()
+      await page.getByRole('button', { name: 'Open sidebar', exact: true }).first().click()
+    }
+  })
+
+  test('an expanded sidebar still replaces the label in a narrow desktop pane', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 700 })
+    await boot(page, '/', '.home-intake-form')
+    await quiesce(page)
+    await expect(page.locator('.chat-layout')).toHaveClass(/sidebar-open/)
+    const header = page.locator('.pane-header')
+    const box = (await header.boundingBox())!
+    expect(box.width).toBeLessThan(600)
+    expect(box.height).toBe(0)
+    await expect(header.getByRole('heading', { name: 'Home', exact: true })).toHaveCount(1)
+    expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+  })
+
+  test('phone, intermediate and exact breakpoint controls keep the existing split', async ({ page }) => {
+    await boot(page, '/', '.home-intake-form')
+    // In-app navigation provides real Back history on the destination.
+    await page.locator('.nav-links a[href="/tasks"]').click()
+    await expect(page.locator('.task-card[data-task-id]')).toBeVisible()
+    const header = page.locator('.task-view > .pane-header')
+    for (const width of [390, 700, 767, 768, 769]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
+      await quiesce(page)
+      const menu = header.getByRole('button', { name: 'Open sidebar', exact: true })
+      if (width <= 768) {
+        await expect(menu).toBeVisible()
+        await expect(header.locator('.header-back')).toBeVisible()
+        expect((await header.boundingBox())!.height).toBeGreaterThan(0)
+      } else {
+        await expect(menu).toBeHidden()
+        await expect(header.locator('.header-back')).toBeHidden()
+      }
+      if (width <= 767) await expect(header.locator('.notif-bell')).toBeVisible()
+      else await expect(header.locator('.notif-bell')).toBeHidden()
+      await expect(header.getByRole('heading', { name: 'Tasks', exact: true })).toHaveCount(1)
+      await expect(header.getByRole('button', { name: 'New task', exact: true })).toBeVisible()
+      expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+    }
+  })
+
+  test('the Tasks action survives 200% equivalent reflow and large text', async ({ page }) => {
+    await boot(page, '/tasks', '.task-card[data-task-id]')
+    await page.request.patch('/api/settings/appearance', { data: { font_scale: 1.5 } })
+    await page.reload()
+    await expect(page.locator('.task-card[data-task-id]')).toBeVisible()
+    // CSS viewport reflow, not a claim of native Chrome page zoom.
+    await page.setViewportSize({ width: 640, height: 450 })
+    await quiesce(page)
+    const action = page.locator('.pane-header .task-new')
+    await action.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('dialog', { name: 'New task', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'New task', exact: true })).toBeHidden()
+    expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+  })
+})
+
+test.describe('compact page toolbar on a coarse pointer', () => {
+  test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true })
+
+  test('New task keeps its 44px target on expanded desktop', async ({ page }, ti) => {
+    await isolate(page, `page-chrome-touch-${ti.workerIndex}`)
+    await boot(page, '/tasks', '.task-filters')
+    await quiesce(page)
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+    const button = (await page.locator('.pane-header .task-new').boundingBox())!
+    expect(button.width).toBeGreaterThanOrEqual(44)
+    expect(button.height).toBeGreaterThanOrEqual(44)
   })
 })

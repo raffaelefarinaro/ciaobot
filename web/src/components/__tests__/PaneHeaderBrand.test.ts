@@ -165,6 +165,54 @@ describe('PaneHeader page tag, title and controls', () => {
   })
 })
 
+describe('PaneHeader compact page contract', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('marks a page-only header while retaining its dynamic semantic heading', async () => {
+    const wrapper = mount(PaneHeader, { props: { pageTag: 'Appearance' } })
+    expect(wrapper.classes()).toContain('pane-header--compact-page')
+    expect(wrapper.classes()).not.toContain('pane-header--page-actions')
+    expect(wrapper.get('h2.page-tag').text()).toBe('Appearance')
+    expect(wrapper.find('.header-title').exists()).toBe(false)
+    expect(wrapper.attributes('aria-hidden')).toBeUndefined()
+    await wrapper.setProps({ pageTag: 'Overview' })
+    expect(wrapper.get('h2.page-tag').text()).toBe('Overview')
+    await wrapper.get('button[aria-label="Open sidebar"]').trigger('click')
+    expect(wrapper.emitted('open-sidebar')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('marks the actions slot without replacing the page heading or its button', async () => {
+    const action = vi.fn()
+    const wrapper = mount(PaneHeader, {
+      props: { pageTag: 'Tasks' },
+      slots: { actions: () => h('button', { onClick: action }, 'New task') },
+    })
+    expect(wrapper.classes()).toContain('pane-header--compact-page')
+    expect(wrapper.classes()).toContain('pane-header--page-actions')
+    expect(wrapper.get('h2.page-tag').text()).toBe('Tasks')
+    await wrapper.get('.header-actions button').trigger('click')
+    expect(action).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it('never compacts an item title or an untagged header', () => {
+    const titled = mount(PaneHeader, {
+      props: { pageTag: 'Project' },
+      slots: { title: '<h2>Offsite</h2>', actions: '<button>Close project</button>' },
+    })
+    expect(titled.classes()).not.toContain('pane-header--compact-page')
+    expect(titled.get('.page-tag').element.tagName).toBe('SPAN')
+    expect(titled.get('h2').text()).toBe('Offsite')
+    titled.unmount()
+    const untagged = mount(PaneHeader)
+    expect(untagged.classes()).not.toContain('pane-header--compact-page')
+    untagged.unmount()
+  })
+})
+
 describe('page tag per view', () => {
   const seen: { pageTag: string }[] = []
 

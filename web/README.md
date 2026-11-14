@@ -409,6 +409,18 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 
 ### Layout traps
 
+`PaneHeader.vue` owns the shared page-chrome rule: at viewport widths ≥769px,
+`.chat-layout.sidebar-open` compacts page-tag headers that have no item-title
+slot. Their h2 stays in the accessibility tree using visually hidden CSS,
+never `display:none` or an `aria-hidden` ancestor. Actionless headers have no
+layout footprint; an actions slot retains a compact trailing toolbar with the
+page inset (Tasks' New task), including 44px coarse-pointer targets. Closing
+the sidebar restores the full desktop header. Widths ≤768px keep the existing
+mobile grid/lead/Back, with the bell still limited to ≤767px; item titles,
+detail actions and automation forms are unchanged. Wrap the entire
+ancestor/root/descendant selector in `:global(...)` inside scoped CSS: partial
+global selectors can lose their descendants during Vue compilation.
+
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
 - **Flex children with unbreakable content need `min-width: 0`.** Without it, a long unbreakable string (a URL, a model identifier, etc.) forces the flex parent wider than the viewport and breaks horizontal layout.
 - **Tap targets** must hit the `--touch: 44px` minimum (declared in `App.vue`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
