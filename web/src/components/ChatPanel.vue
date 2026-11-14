@@ -83,11 +83,12 @@
           class="btn-icon work-inspector-trigger work-inspector-trigger--header"
           :aria-expanded="inspectorOpen"
           :aria-controls="domId('chat-work-rail')"
-          aria-label="Show chat details"
+          :aria-label="detailsTriggerLabel"
           title="Show chat details"
           @click="toggleWorkDetails"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+          <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
         </button>
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details opens from the info tab and hides from its own heading. -->
@@ -109,6 +110,7 @@
           ref="moreMenu"
           class="chat-more"
           :can-archive="!chat.archived"
+          :mcp-problems="closedMcpProblemCount"
           @details="showDetailsFromMenu"
           @archive="doArchive"
         />
@@ -132,11 +134,12 @@
       class="btn-icon work-inspector-trigger"
       :aria-expanded="false"
       :aria-controls="domId('chat-work-rail')"
-      aria-label="Show chat details"
+      :aria-label="detailsTriggerLabel"
       title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+      <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
     </button>
     <div
       ref="chatColumnEl"
@@ -1155,6 +1158,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
+          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP connections — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1240,7 +1244,7 @@
               :stop-errors="store.stopTaskErrors[chat.chat_id]"
               @open-details="openRunDetails"
             />
-            <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
+            <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
               v-if="showMoveToBackground"
               ref="moveBtnEl"
@@ -1254,6 +1258,14 @@
               <span class="composer-move-bg-long">Move to background</span>
               <span class="composer-move-bg-short" aria-hidden="true">Background</span>
             </button>
+            <button
+              v-if="view.isStreaming && isMcpToken"
+              type="button"
+              class="btn-small"
+              :aria-label="mcpActionLabel"
+              :aria-describedby="domId('mcp-shortcut-hint')"
+              @click="send"
+            >{{ mcpActionLabel }}</button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -1261,6 +1273,7 @@
               :disabled="!showStopAction && !canSend"
               :title="primaryActionTitle"
               :aria-label="primaryActionLabel"
+              :aria-describedby="isMcpToken && !showStopAction ? domId('mcp-shortcut-hint') : undefined"
               @click="primaryAction"
             >
               <svg v-if="showStopAction" class="stop-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
@@ -1352,6 +1365,7 @@
       </section>
       <ChatMcpConnections
         v-if="!chat.archived && chatMcpProvider"
+        ref="mcpConnections"
         :chat-id="chat.chat_id"
         :provider="chatMcpProvider"
         :controller="chatMcp"
@@ -1741,10 +1755,11 @@ const hasComposerContent = computed(() =>
 // Send waits for every upload in flight to settle, so a file is never sent
 // before the server has it.
 const uploadsInFlight = computed(() => uploads.value.length > 0)
-const canSend = computed(() => hasComposerContent.value && !uploadsInFlight.value)
+const isMcpToken = computed(() => inputText.value.trim().toLowerCase() === '/mcp')
+const canSend = computed(() => isMcpToken.value || (hasComposerContent.value && !uploadsInFlight.value))
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value && !uploadsInFlight.value)
+const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
@@ -1782,12 +1797,14 @@ async function moveToBackground() {
 }
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
+  if (isMcpToken.value) return mcpActionLabel.value
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
+  if (isMcpToken.value) return mcpActionLabel.value
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
   return 'Send message'
@@ -1815,6 +1832,12 @@ const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
   const provider = chat.value?.provider
   return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
 })
+const mcpUnavailableReason = computed(() => {
+  if (!chatMcpProvider.value) return "MCP details are unavailable for this chat's provider."
+  if (!store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace?.trim()) return "This chat's workspace is not available yet. Try again after it loads."
+  return ''
+})
+const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP details are unavailable' : 'Open MCP connections')
 const chatMcp = useChatMcpConnections({
   workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
   provider: () => chat.value?.provider ?? '',
@@ -2324,6 +2347,10 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
+const closedMcpProblemCount = computed(() => railShown.value || drawerShown.value ? 0 : chatMcp.problemCount.value)
+const detailsTriggerLabel = computed(() => closedMcpProblemCount.value
+  ? `Show chat details, ${closedMcpProblemCount.value} MCP connections need attention`
+  : 'Show chat details')
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2355,6 +2382,7 @@ const railRunningEl = ref<HTMLElement | null>(null)
 type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
 const mcpHeadingPriority = ref(false)
+const mcpConnections = ref<InstanceType<typeof ChatMcpConnections> | null>(null)
 let mcpHeadingEpoch = 0
 function clearMcpHeadingPriority() {
   mcpHeadingEpoch++
@@ -2407,7 +2435,18 @@ function closeDetails() {
   if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
-  showDetails()
+  const marked = closedMcpProblemCount.value > 0
+  showDetails(marked ? 'mcp' : 'close')
+  if (marked && !isWidePane.value) {
+    const epoch = mcpHeadingEpoch
+    void nextTick(async () => {
+      await nextTick()
+      if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
+      clearMcpHeadingPriority()
+      await nextTick()
+      mcpConnections.value?.revealDrawerAction()
+    })
+  }
 }
 // The composer bar's activity cluster opens Chat details at Running; a finished
 // run's notice can outlive the section it points at.
@@ -4872,6 +4911,15 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
+  if (isMcpToken.value) {
+    if (mcpUnavailableReason.value) return
+    composer.clearDraft(chat.value.chat_id)
+    slash.dismiss()
+    mentionPicker.dismiss()
+    showDetails('mcp')
+    nextTick(autoResize)
+    return
+  }
   if (uploadsInFlight.value) return
   const text = inputText.value.trim()
   const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
@@ -5751,7 +5799,7 @@ onMounted(() => {
 /* The header's own button rules set `position: relative`, which would let the
    floating trigger's `top` push this one below the header's centre line. */
 .work-inspector-trigger--header {
-  position: static;
+  position: relative;
   top: auto;
   right: auto;
   flex: none;
@@ -5759,6 +5807,17 @@ onMounted(() => {
   border-color: transparent;
   background: transparent;
   color: var(--fg2);
+}
+.work-inspector-trigger .chat-mcp-indicator {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--accent);
+  transform: rotate(45deg);
+  pointer-events: none;
 }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
@@ -5785,6 +5844,7 @@ onMounted(() => {
   padding: 7px;
   color: var(--fg2);
 }
+.chat-rail--drawer .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 @media (pointer: coarse) {
   .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 }

@@ -71,7 +71,7 @@ function seedUnread(count: number) {
 
 let wrapper: VueWrapper | null = null
 
-async function mountMenu(opts: { canArchive?: boolean; unread?: number } = {}) {
+async function mountMenu(opts: { canArchive?: boolean; unread?: number; mcpProblems?: number } = {}) {
   setActivePinia(createPinia())
   seedUnread(opts.unread ?? 0)
   const router = createRouter({
@@ -80,7 +80,7 @@ async function mountMenu(opts: { canArchive?: boolean; unread?: number } = {}) {
   })
   await router.push('/')
   wrapper = mount(ChatHeaderMoreMenu, {
-    props: { canArchive: opts.canArchive ?? true },
+    props: { canArchive: opts.canArchive ?? true, mcpProblems: opts.mcpProblems ?? 0 },
     attachTo: document.body,
     global: { plugins: [router] },
   })
@@ -154,6 +154,39 @@ describe('ChatHeaderMoreMenu', () => {
     await mountMenu({ unread: 0 })
     expect(wrapper!.find('.chat-more-dot').exists()).toBe(false)
     expect(trigger().getAttribute('aria-label')).toBe('More chat actions')
+  })
+
+  it.each([
+    { unread: 0, mcpProblems: 0, label: 'More chat actions', dot: false, marker: false },
+    { unread: 3, mcpProblems: 0, label: 'More chat actions, 3 unread notifications', dot: true, marker: false },
+    { unread: 0, mcpProblems: 2, label: 'More chat actions, 2 MCP connections need attention', dot: false, marker: true },
+    { unread: 3, mcpProblems: 2, label: 'More chat actions, 3 unread notifications, 2 MCP connections need attention', dot: true, marker: true },
+  ])('keeps independent signals: $unread unread, $mcpProblems MCP', async ({ unread, mcpProblems, label, dot, marker }) => {
+    await mountMenu({ unread, mcpProblems })
+    expect(trigger().getAttribute('aria-label')).toBe(label)
+    expect(wrapper!.find('.chat-more-dot').exists()).toBe(dot)
+    expect(wrapper!.find('.chat-mcp-indicator').exists()).toBe(marker)
+    expect(useNotificationInboxStore().count).toBe(unread)
+    await openMenu()
+    const details = itemNamed('Chat details')!
+    expect(details.querySelector('span')?.textContent).toBe('Chat details')
+    if (marker) {
+      const described = details.getAttribute('aria-describedby')!
+      expect(document.getElementById(described)?.textContent?.trim()).toBe(`${mcpProblems} MCP connections need attention`)
+      expect(details.querySelector('.chat-mcp-count')?.getAttribute('aria-hidden')).toBe('true')
+    } else expect(details.getAttribute('aria-describedby')).toBeNull()
+  })
+
+  it('marked Chat details retains its exact accessible name and returns menu focus', async () => {
+    const { wrapper: w } = await mountMenu({ mcpProblems: 2 })
+    await openMenu()
+    const details = itemNamed('Chat details')!
+    expect(details.querySelector('[aria-hidden="true"].chat-mcp-count')).not.toBeNull()
+    expect(details.getAttribute('aria-label')).toBeNull()
+    details.click()
+    await settle()
+    expect(w.emitted('details')).toHaveLength(1)
+    expect(document.activeElement).toBe(trigger())
   })
 
   it('Back goes back in app history', async () => {

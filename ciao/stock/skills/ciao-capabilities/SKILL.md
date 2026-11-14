@@ -32,14 +32,13 @@ in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
 for current commands; do not invent version-sensitive install or login syntax.
 
-When a user has to sign in, install a CLI, or set up an MCP server, read
-`references/install-and-settings.md`: it carries the current verified commands
-and the exact places in the app. The agent hands over a command to review and
-run — `ciao chat needs-action command --command-file FILE` puts one in the chat as a card that types it into the chat's terminal for the user to run — and
-never runs a sign-in, an install or an MCP setup on the user's behalf.
-When the user asks for that setup in a chat, offer the command in that chat
-straight away rather than pointing them to a Settings page, and link any
-Settings page you do mention by its in-app path (`[MCP servers](/settings/mcp)`).
+For provider login or installation prefer the existing Settings flow. For chat MCP
+authentication use **Chat details → MCP → Sign in**; [MCP servers](/settings/mcp)
+also leads to chat recovery. Read `references/install-and-settings.md` for setup,
+manual fallback and `ciao chat needs-action` details. For an operator-run command,
+offer a reviewed `ciao chat needs-action command --command-file FILE` suggestion
+or point to **Chat details → Open → Terminal**; the user runs it. See
+`references/terminal.md` for the shell's boundaries.
 
 ## Capability areas
 

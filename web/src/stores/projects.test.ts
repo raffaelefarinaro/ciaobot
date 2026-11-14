@@ -11,7 +11,685 @@ import {
   useProjectStore,
 } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
-import { nextTick } from 'vue'
+import { nextTick, watch } from 'vue'
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+describe('workspace registry evidence', () => {
+  it('retains legacy rename handling for a missing registry in a successful response', async () => {
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+    const read = deferred<unknown>()
+    apiGet.mockReturnValueOnce(read.promise)
+    const response = { renamed: { from: 'personal', to: 'renamed' }, active: 'renamed', provider_options: [{ value: 'custom', label: 'Custom' }] }
+    apiPatch.mockResolvedValueOnce(response)
+    expect(await store.updateWorkspace('personal', { name: 'renamed' })).toBe(response)
+    expect(store.workspaces).toEqual([])
+    expect(store.activeWorkspace).toBe('renamed')
+    expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    read.resolve({})
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.activeWorkspace).toBe('renamed')
+  })
+
+  it('keeps legacy fetchWorkspaces updates on a missing list without certifying it', async () => {
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+    const response = { active: 'work', provider_options: [{ value: 'custom', label: 'Custom' }] }
+    apiGet.mockResolvedValueOnce(response)
+    expect(await store.fetchWorkspaces()).toBe(response)
+    expect(store.workspaces).toEqual([])
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+    expect(store.workspaceRegistryStatus).toBe('error')
+  })
+
+  it.each(['create', 'archive', 'restore', 'reorder'] as const)(
+    'retains legacy empty-list handling for successful %s with missing workspaces',
+    async operation => {
+      const store = useProjectStore()
+      store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+      const read = deferred<unknown>()
+      apiGet.mockReturnValueOnce(read.promise)
+      const response = { active: 'work', provider_options: [{ value: 'custom', label: 'Custom' }] }
+      apiPost.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'archive' ? await store.archiveWorkspace('personal')
+          : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+            : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaces).toEqual([])
+      if (operation !== 'reorder') expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+      if (operation === 'archive') expect(store.activeWorkspace).toBe('work')
+      read.resolve({})
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    },
+  )
+
+  it('follows a concurrent rename even when a newer mutation invalidated its list', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    const rename = deferred<unknown>()
+    const create = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPatch.mockReturnValueOnce(rename.promise)
+    apiPost.mockReturnValueOnce(create.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    const renameAction = store.updateWorkspace('personal', { name: 'renamed' })
+    const createAction = store.createWorkspace({ name: 'new' })
+    rename.resolve({ workspaces: [{ name: 'renamed' }, { name: 'work' }], renamed: { from: 'personal', to: 'renamed' } })
+    await renameAction
+    expect(store.activeWorkspace).toBe('renamed')
+    create.resolve({ workspaces: [{ name: 'renamed' }, { name: 'work' }, { name: 'new' }] })
+    await createAction
+    read.resolve({ workspaces: [{ name: 'work' }, { name: 'renamed' }, { name: 'new' }], active: 'work' })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('renamed')
+    expect(localStorage.getItem('ciao-active-workspace')).toBe('renamed')
+  })
+
+  it('does not follow a stale rename after the selection changes away and back', async () => {
+    const store = useProjectStore()
+    const rename = deferred<unknown>()
+    const create = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPatch.mockReturnValueOnce(rename.promise)
+    apiPost.mockReturnValueOnce(create.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    const renameAction = store.updateWorkspace('personal', { name: 'renamed' })
+    const createAction = store.createWorkspace({ name: 'new' })
+    store.activeWorkspace = 'work'
+    store.activeWorkspace = 'personal'
+    rename.resolve({ workspaces: [{ name: 'renamed' }], renamed: { from: 'personal', to: 'renamed' } })
+    await renameAction
+    expect(store.activeWorkspace).toBe('personal')
+    create.resolve({ workspaces: [{ name: 'personal' }] })
+    await createAction
+    read.resolve({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
+  it('keeps the restored selection until bootstrap projects establish fallback options', async () => {
+    localStorage.setItem('ciao-active-workspace', 'custom')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal' })
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('custom')
+    projects.resolve([{ project_id: 'custom-project', name: 'General', workspace: 'custom', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('custom')
+  })
+
+  it('applies bootstrap project fallback after a malformed workspace success without certifying it', async () => {
+    localStorage.setItem('ciao-active-workspace', 'old')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ active: 'work' })
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.activeWorkspace).toBe('old')
+    projects.resolve([{ project_id: 'work-project', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaceRegistryError).toBeTruthy()
+  })
+
+  it('does not apply an obsolete malformed bootstrap fallback after a newer registry read', async () => {
+    localStorage.setItem('ciao-active-workspace', 'old')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    let workspaceReads = 0
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        workspaceReads++
+        return Promise.resolve(workspaceReads === 1 ? { active: 'work' } : { workspaces: [{ name: 'new' }], active: 'new' })
+      }
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    await store.fetchWorkspaces()
+    expect(store.activeWorkspace).toBe('new')
+    projects.resolve([{ project_id: 'work-project', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('new')
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it('does not apply an older optimistic reorder after a loading watcher starts a newer reorder', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    const first = deferred<unknown>()
+    const second = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPost.mockReturnValueOnce(second.promise).mockReturnValueOnce(first.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    let newer: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'loading' && !newer) newer = store.reorderWorkspaces(['personal', 'work'])
+    }, { flush: 'sync' })
+    const older = store.reorderWorkspaces(['work', 'personal'])
+    stop()
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work'])
+    second.resolve({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await newer
+    first.resolve({ workspaces: [{ name: 'work' }, { name: 'personal' }] })
+    await older
+    read.resolve({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+
+  it('distinguishes fabricated options from a validated empty registry', async () => {
+    const store = useProjectStore()
+    expect(store.workspaceOptions.length).toBeGreaterThan(0)
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    apiGet.mockResolvedValueOnce({ workspaces: [] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaces).toEqual([])
+  })
+
+  it.each([undefined, null, {}, [{ name: '' }], [{ name: 'a' }, { name: 'a' }]])(
+    'does not certify malformed registry %j',
+    async workspaces => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces })
+      await store.fetchWorkspaces()
+      expect(store.workspaceRegistryStatus).toBe('error')
+      expect(store.workspaceRegistryError).toBeTruthy()
+    },
+  )
+
+  it('waits for every concurrent mutation and a fresh read before certifying', async () => {
+    const store = useProjectStore()
+    let finishFirst!: (value: unknown) => void
+    let finishSecond!: (value: unknown) => void
+    let finishRead!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve }))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    const first = store.createWorkspace({ name: 'a' })
+    const second = store.createWorkspace({ name: 'b' })
+    finishSecond({ workspaces: [{ name: 'b' }] })
+    await second
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(apiGet).not.toHaveBeenCalled()
+    finishFirst({ workspaces: [{ name: 'a' }] })
+    await first
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(apiGet).toHaveBeenCalledWith('/api/workspaces')
+    finishRead({ workspaces: [{ name: 'a' }, { name: 'b' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['a', 'b'])
+  })
+
+  it.each([
+    [['a', 'b'], ['a', 'b']],
+    [['a', 'b'], ['b', 'a']],
+    [['b', 'a'], ['a', 'b']],
+    [['b', 'a'], ['b', 'a']],
+  ] as const)(
+    'certifies server commit order %j only after response order %j and a fresh GET',
+    async (commits, responses) => {
+      const store = useProjectStore()
+      const requests = { a: deferred<unknown>(), b: deferred<unknown>() }
+      const finalRead = deferred<unknown>()
+      let server = ['personal']
+      const snapshots: Record<string, { workspaces: { name: string }[] }> = {}
+      apiPost.mockImplementation((_path: string, payload: { name: 'a' | 'b' }) => requests[payload.name].promise)
+      apiGet.mockImplementation((path: string) => {
+        expect(path).toBe('/api/workspaces')
+        expect(server).toEqual(['personal', ...commits])
+        return finalRead.promise
+      })
+      const operations = {
+        a: store.createWorkspace({ name: 'a' }),
+        b: store.createWorkspace({ name: 'b' }),
+      }
+      for (const name of commits) {
+        server = [...server, name]
+        snapshots[name] = { workspaces: server.map(name => ({ name })) }
+      }
+      requests[responses[0]].resolve(snapshots[responses[0]])
+      expect(await operations[responses[0]]).toBe(snapshots[responses[0]])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(apiGet).not.toHaveBeenCalled()
+      requests[responses[1]].resolve(snapshots[responses[1]])
+      expect(await operations[responses[1]]).toBe(snapshots[responses[1]])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(apiGet).toHaveBeenCalledTimes(1)
+      finalRead.resolve({ workspaces: server.map(name => ({ name })) })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(server)
+    },
+  )
+
+  it('ignores an older read after a newer read fails, then recovers', async () => {
+    const store = useProjectStore()
+    let finishOld!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    apiGet.mockRejectedValueOnce(new Error('private details'))
+    const old = store.fetchWorkspaces()
+    await expect(store.fetchWorkspaces()).rejects.toThrow('private details')
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaceRegistryError).not.toContain('private details')
+    finishOld({ workspaces: [{ name: 'stale' }] })
+    await old
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaces).toEqual([])
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaceRegistryError).toBe('')
+  })
+
+  it('ignores an older failure after a newer read succeeds', async () => {
+    const store = useProjectStore()
+    let rejectOld!: (error: Error) => void
+    apiGet.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectOld = reject }))
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    const old = store.fetchWorkspaces()
+    await store.fetchWorkspaces()
+    rejectOld(new Error('old failure'))
+    await expect(old).rejects.toThrow('old failure')
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaceRegistryError).toBe('')
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+  })
+
+  it('keeps a good registry ready when an invalid reorder is rejected locally', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    expect(await store.reorderWorkspaces(['personal', 'personal'])).toBeNull()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('reports a failed post-mutation reread until a later read recovers', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    apiGet.mockRejectedValueOnce(new Error('private network detail'))
+    await store.createWorkspace({ name: 'new' })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.workspaceRegistryError).not.toContain('private network detail')
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'new' }] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('invalidates a post-settlement read when another mutation begins', async () => {
+    const store = useProjectStore()
+    let finishOld!: (value: unknown) => void
+    let finishNew!: (value: unknown) => void
+    apiPost.mockResolvedValue({ workspaces: [{ name: 'personal' }] })
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishNew = resolve }))
+    await store.createWorkspace({ name: 'a' })
+    await store.createWorkspace({ name: 'b' })
+    finishOld({ workspaces: [{ name: 'old' }] })
+    await Promise.resolve()
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishNew({ workspaces: [{ name: 'new' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it('coalesces reads requested during a mutation into its post-settlement read', async () => {
+    const store = useProjectStore()
+    let finishMutation!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishMutation = resolve }))
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    const mutation = store.createWorkspace({ name: 'new' })
+    const first = store.fetchWorkspaces()
+    const second = store.fetchWorkspaces()
+    expect(apiGet).not.toHaveBeenCalled()
+    finishMutation({ workspaces: [{ name: 'personal' }] })
+    await mutation
+    await Promise.all([first, second])
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('records registry success independently of a failed bootstrap project request', async () => {
+    const store = useProjectStore()
+    let finishRegistry!: (value: unknown) => void
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return new Promise(resolve => { finishRegistry = resolve })
+      if (path === '/api/projects') return Promise.reject(new Error('projects failed'))
+      return Promise.resolve([])
+    })
+    await expect(store.fetchAll()).rejects.toThrow('projects failed')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishRegistry({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.chatsHealth.status).toBe('unavailable')
+  })
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'publishes a delayed workspace success after bootstrap %s fails',
+    async failedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unrelated = deferred<unknown>()
+      const unhandled = vi.fn()
+      window.addEventListener('unhandledrejection', unhandled)
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === failedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith(failedPath))
+      unrelated.reject(new Error('unrelated failure'))
+      await expect(bootstrap).rejects.toThrow('unrelated failure')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      workspace.resolve({ workspaces: [{ name: 'personal' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+      expect(store.chatsHealth.status).toBe('unavailable')
+      expect(unhandled).not.toHaveBeenCalled()
+      window.removeEventListener('unhandledrejection', unhandled)
+    },
+  )
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'publishes workspace success while bootstrap %s is still pending',
+    async delayedPath => {
+      const store = useProjectStore()
+      const unrelated = deferred<unknown>()
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] })
+        if (path === delayedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.activeWorkspace).toBe('personal')
+      unrelated.reject(new Error('later failure'))
+      await expect(bootstrap).rejects.toThrow('later failure')
+      expect(store.workspaceRegistryStatus).toBe('ready')
+      expect(store.chatsHealth.status).toBe('unavailable')
+    },
+  )
+
+  it('keeps workspace readiness independent of a failed refresh projects request', async () => {
+    const store = useProjectStore()
+    const workspace = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return workspace.promise
+      if (path === '/api/projects') return Promise.reject(new Error('projects unavailable'))
+      return Promise.resolve([])
+    })
+    await expect(store.refreshWorkspaceRegistry()).rejects.toThrow('projects unavailable')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(store.workspaceRegistryRevision).toBe(0)
+    workspace.resolve({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaceRegistryRevision).toBe(0)
+    expect(store.workspaceRegistryError).toBe('')
+  })
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'handles a late workspace rejection after bootstrap %s fails first',
+    async failedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unhandled = vi.fn()
+      window.addEventListener('unhandledrejection', unhandled)
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === failedPath) return Promise.reject(new Error('unrelated failure'))
+        return Promise.resolve([])
+      })
+      await expect(store.fetchAll()).rejects.toThrow('unrelated failure')
+      workspace.reject(new Error('private workspace error'))
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+      expect(store.workspaceRegistryError).not.toContain('private workspace error')
+      expect(store.chatsHealth.status).toBe('unavailable')
+      expect(unhandled).not.toHaveBeenCalled()
+      window.removeEventListener('unhandledrejection', unhandled)
+    },
+  )
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'records a workspace failure while unrelated bootstrap %s succeeds later',
+    async delayedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unrelated = deferred<unknown>()
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === delayedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith(delayedPath))
+      workspace.reject(new Error('workspace failure'))
+      await expect(bootstrap).rejects.toThrow('workspace failure')
+      expect(store.workspaceRegistryStatus).toBe('error')
+      expect(store.chatsHealth.status).toBe('unavailable')
+      unrelated.resolve([])
+      await Promise.resolve()
+      expect(store.workspaceRegistryStatus).toBe('error')
+    },
+  )
+
+  it('rereads after an ambiguous mutation failure and preserves its rejection', async () => {
+    const store = useProjectStore()
+    let finishRead!: (value: unknown) => void
+    apiPost.mockRejectedValueOnce(new Error('mutation failed'))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    await expect(store.createWorkspace({ name: 'new' })).rejects.toThrow('mutation failed')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishRead({ workspaces: [{ name: 'new' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'rereads after a malformed %s response without changing its return value',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      let finishRead!: (value: unknown) => void
+      apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+      const response = { workspaces: null }
+      apiPost.mockResolvedValueOnce(response)
+      apiPatch.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? await store.updateWorkspace('personal', {})
+          : operation === 'archive' ? await store.archiveWorkspace('personal')
+            : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+              : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      finishRead({ workspaces: [{ name: 'personal' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    },
+  )
+
+  it.each(['rename', 'archive'] as const)(
+    'fences an older GET across a successful %s and publishes the reconciled selection',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+      await store.fetchWorkspaces()
+      const old = deferred<unknown>()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(old.promise)
+      apiGet.mockReturnValueOnce(fresh.promise)
+      const oldRead = store.fetchWorkspaces()
+      const response = operation === 'rename'
+        ? { workspaces: [{ name: 'renamed' }, { name: 'work' }], renamed: { from: 'personal', to: 'renamed' } }
+        : { workspaces: [{ name: 'work' }], active: 'work', archived: { path: '/archive' } }
+      if (operation === 'rename') apiPatch.mockResolvedValueOnce(response)
+      else apiPost.mockResolvedValueOnce(response)
+      const result = operation === 'rename'
+        ? await store.updateWorkspace('personal', { name: 'renamed' })
+        : await store.archiveWorkspace('personal')
+      expect(result).toBe(response)
+      const active = operation === 'rename' ? 'renamed' : 'work'
+      expect(store.activeWorkspace).toBe(active)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      old.resolve({ workspaces: [{ name: 'personal' }], active: 'personal' })
+      await oldRead
+      expect(store.activeWorkspace).toBe(active)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      const ready: Array<[string, string[]]> = []
+      const stop = watch(() => store.workspaceRegistryStatus, status => {
+        if (status === 'ready') ready.push([store.activeWorkspace, store.workspaces.map(w => w.name)])
+      }, { flush: 'sync' })
+      fresh.resolve(response)
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(ready).toEqual([[active, response.workspaces.map(w => w.name)]])
+      stop()
+    },
+  )
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'keeps a failed %s non-authoritative until its post-settlement GET',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(fresh.promise)
+      apiPost.mockRejectedValueOnce(new Error('ambiguous failure'))
+      apiPatch.mockRejectedValueOnce(new Error('ambiguous failure'))
+      const result = operation === 'create' ? store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? store.updateWorkspace('personal', {})
+          : operation === 'archive' ? store.archiveWorkspace('personal')
+            : operation === 'restore' ? store.restoreArchivedWorkspace('id')
+              : store.reorderWorkspaces(['personal'])
+      await expect(result).rejects.toThrow('ambiguous failure')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      fresh.resolve({ workspaces: [{ name: 'committed' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['committed'])
+    },
+  )
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'returns a successful %s response without certifying it',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(fresh.promise)
+      const response = { workspaces: [{ name: 'personal' }, { name: 'response-only' }] }
+      apiPost.mockResolvedValueOnce(response)
+      apiPatch.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? await store.updateWorkspace('personal', {})
+          : operation === 'archive' ? await store.archiveWorkspace('personal')
+            : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+              : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      fresh.resolve({ workspaces: [{ name: 'final' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['final'])
+    },
+  )
+
+  it('publishes ready only after reconciling the active name', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'outdated'
+    const ready: Array<[string, string[]]> = []
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'ready') ready.push([store.activeWorkspace, store.workspaces.map(w => w.name)])
+    }, { flush: 'sync' })
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }], active: 'personal' })
+    await store.fetchWorkspaces()
+    expect(ready).toEqual([['personal', ['personal']]])
+    stop()
+  })
+
+  it('does not adjust selection if a synchronous subscriber starts a newer mutation', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    let finishMutation!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishMutation = resolve }))
+    let mutation: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaces, () => {
+      if (!mutation) mutation = store.createWorkspace({ name: 'new' })
+    }, { flush: 'sync' })
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'old' }], active: 'old' })
+    await store.fetchWorkspaces()
+    expect(store.activeWorkspace).toBe('personal')
+    stop()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    finishMutation({ workspaces: [{ name: 'personal' }] })
+    await mutation
+  })
+
+  it('does not roll an old failed reorder back over a newer mutation', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    let rejectReorder!: (error: Error) => void
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectReorder = reject }))
+    apiPost.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }, { name: 'new' }] })
+    const reorder = store.reorderWorkspaces(['work', 'personal'])
+    await store.createWorkspace({ name: 'new' })
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work', 'new'])
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }, { name: 'new' }] })
+    rejectReorder(new Error('failed'))
+    await expect(reorder).rejects.toThrow('failed')
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work', 'new'])
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+
+  it('fences a mutation started synchronously by a loading subscriber', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    let finishFirst!: (value: unknown) => void
+    let finishSecond!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve }))
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+    let second: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'loading' && !second) second = store.createWorkspace({ name: 'second' })
+    }, { flush: 'sync' })
+    const first = store.createWorkspace({ name: 'first' })
+    stop()
+    finishSecond({ workspaces: [{ name: 'second' }] })
+    await second
+    finishFirst({ workspaces: [{ name: 'stale' }] })
+    let finishRead!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    await first
+    expect(store.workspaces.map(w => w.name)).not.toContain('stale')
+    finishRead({ workspaces: [{ name: 'final' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+})
 
 describe('continue recovery transport', () => {
   it('persists a server-issued receipt before submitting recovery', async () => {
@@ -462,6 +1140,285 @@ beforeEach(() => {
     configurable: true,
   })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+describe('chat mutation ordering', () => {
+  function fullChat(chatId: string, fields: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'project',
+      title: 'Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'normal',
+      session_id: 'session',
+      created_at: '2026-11-14T00:00:00Z',
+      archived: false,
+      ...fields,
+    }
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  it.each([
+    ['mode first', { mode: 'plan' }, { thinking_level: 'high' }],
+    ['thinking first', { thinking_level: 'high' }, { mode: 'bypass' }],
+  ] as const)('serializes mode and thinking updates for the same chat (%s)', async (_name, firstUpdate, secondUpdate) => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'same' } as ChatInfo]
+    const firstResponse = deferred<ChatInfo>()
+    const firstMode = 'mode' in firstUpdate ? firstUpdate.mode : undefined
+    const secondMode = 'mode' in secondUpdate ? secondUpdate.mode : undefined
+    const firstThinking = 'thinking_level' in firstUpdate ? firstUpdate.thinking_level : undefined
+    const secondThinking = 'thinking_level' in secondUpdate ? secondUpdate.thinking_level : undefined
+    const laterMode = secondMode || firstMode || 'normal'
+    const laterThinking = secondThinking || firstThinking || 'medium'
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockResolvedValueOnce(fullChat('same', {
+      mode: laterMode, thinking_level: laterThinking,
+    }))
+    const first = store.updateChat('same', firstUpdate)
+    const second = store.updateChat('same', secondUpdate)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(apiPatch).toHaveBeenNthCalledWith(1, '/api/chats/same', firstUpdate)
+    firstResponse.resolve(fullChat('same', {
+      mode: firstMode || 'normal',
+      thinking_level: firstThinking || 'medium',
+    }))
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    expect(apiPatch).toHaveBeenNthCalledWith(2, '/api/chats/same', secondUpdate)
+    await Promise.all([first, second])
+    expect(store.chats.find(chat => chat.chat_id === 'same')).toMatchObject({
+      mode: laterMode, thinking_level: laterThinking, provider: 'claude', model: 'sonnet',
+    })
+  })
+
+  it('updates different chats independently', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'chat-a' } as ChatInfo, { chat_id: 'chat-b' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('chat-b', { mode: 'plan' }))
+    const a = store.updateChat('chat-a', { mode: 'normal' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    const b = store.updateChat('chat-b', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    await b
+    expect(store.chats.find(chat => chat.chat_id === 'chat-b')?.mode).toBe('plan')
+    held.resolve(fullChat('chat-a', { mode: 'normal' }))
+    await a
+  })
+
+  it('continues queued updates after a rejected update', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'failure' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('failure', { mode: 'plan' }))
+    const failed = store.updateChat('failure', { mode: 'normal' })
+    const queued = store.updateChat('failure', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first update failed'))
+    await expect(failed).rejects.toThrow('first update failed')
+    await expect(queued).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(store.chats.find(chat => chat.chat_id === 'failure')?.mode).toBe('plan')
+  })
+
+  it('clears mode pending after success or failure and continues the queue', async () => {
+    const store = useProjectStore()
+    const firstResponse = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockImplementationOnce(() => secondResponse.promise)
+    const failed = store.updateChat('pending', { mode: 'normal' })
+    const queued = store.updateChat('pending', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.pending).toBe(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    firstResponse.reject(new Error('mode write failed'))
+    await expect(failed).rejects.toThrow('mode write failed')
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    secondResponse.resolve({
+      ...fullChat('pending', { mode: 'plan' }),
+    })
+    await queued
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+
+    apiPatch.mockResolvedValueOnce(fullChat('pending', { mode: 'bypass' }))
+    const success = store.updateChat('pending', { mode: 'bypass' })
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    await success
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+  })
+
+  it('counts multiple queued mode writes but not thinking writes', async () => {
+    const store = useProjectStore()
+    const thinkingResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => thinkingResponse.promise)
+    const thinkingOnly = store.updateChat('other', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.other).toBeUndefined()
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    thinkingResponse.resolve({ chat_id: 'other', thinking_level: 'high' } as ChatInfo)
+    await thinkingOnly
+
+    apiPatch.mockReset()
+    const held = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+      .mockImplementationOnce(() => secondResponse.promise)
+      .mockResolvedValueOnce(fullChat('count', { mode: 'auto' }))
+      .mockResolvedValueOnce(fullChat('count', { mode: 'bypass' }))
+    const first = store.updateChat('count', { mode: 'normal' })
+    expect(store.pendingChatModeWrites.count).toBe(1)
+    const second = store.updateChat('count', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    const third = store.updateChat('count', { mode: 'auto' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    const thinking = store.updateChat('count', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first failed'))
+    await expect(first).rejects.toThrow('first failed')
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    secondResponse.resolve(fullChat('count', { mode: 'plan' }))
+    await Promise.all([second, third, thinking])
+    expect(store.pendingChatModeWrites.count).toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(4)
+  })
+
+  it.each(['post-first', 'patch-first'] as const)(
+    'serializes handover and mode in both orders without stale chat replacement (%s)',
+    async order => {
+      const store = useProjectStore()
+      const patch = deferred<ChatInfo>()
+      const post = deferred<ChatInfo>()
+      apiGet.mockResolvedValue([])
+      apiPatch.mockImplementationOnce(() => patch.promise)
+      apiPost.mockImplementationOnce(() => post.promise)
+      let handover!: Promise<ChatInfo>
+      let update!: Promise<void>
+      if (order === 'post-first') {
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        update = store.updateChat('combined', { mode: 'plan' })
+        expect(apiPatch).not.toHaveBeenCalled()
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'normal' }))
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        patch.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      } else {
+        update = store.updateChat('combined', { mode: 'plan' })
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        expect(apiPost).not.toHaveBeenCalled()
+        patch.resolve(fullChat('combined', { provider: 'opencode', model: 'old', mode: 'plan' }))
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      }
+      await update
+      await expect(handover).resolves.toMatchObject({ provider: 'claude', model: 'sonnet' })
+      expect(store.chats.find(chat => chat.chat_id === 'combined')).toMatchObject({
+        provider: 'claude', model: 'sonnet', mode: 'plan',
+      })
+    },
+  )
+
+  it('handover holds the queue through history load and reconnect', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'viewed'
+    store.connectWs('viewed')
+    const oldSocket = fakeSockets.at(-1)!
+    const history = deferred<ChatMessage[]>()
+    apiPost.mockResolvedValueOnce({ chat_id: 'viewed', provider: 'claude', model: 'sonnet' })
+    apiGet.mockImplementationOnce(() => history.promise)
+    const order: string[] = []
+    apiPatch.mockImplementationOnce(() => {
+      order.push('patch')
+      return Promise.resolve({ chat_id: 'viewed', mode: 'plan' })
+    })
+    class ObservedWebSocket extends FakeWebSocket {
+      constructor(url: string) {
+        super(url)
+        order.push('replacement socket')
+      }
+    }
+    vi.stubGlobal('WebSocket', ObservedWebSocket)
+    const handover = store.handoverChat('viewed', { provider: 'claude', model: 'sonnet' })
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/chats/viewed/messages?limit=50'))
+    const update = store.updateChat('viewed', { mode: 'plan' })
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(oldSocket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(fakeSockets).toHaveLength(1)
+    history.resolve([])
+    await handover
+    expect(oldSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets).toHaveLength(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(order.indexOf('replacement socket')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('replacement socket')).toBeLessThan(order.indexOf('patch'))
+    await update
+  })
+
+  it('handover snapshots visible messages when its queued operation starts', async () => {
+    const store = useProjectStore()
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+    apiPost.mockResolvedValueOnce({ chat_id: 'snapshot', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValue([])
+    store.messages.snapshot = [{ role: 'user', content: 'old text', timestamp: '' }]
+    const update = store.updateChat('snapshot', { mode: 'plan' })
+    const handover = store.handoverChat('snapshot', { provider: 'claude', model: 'sonnet' })
+    store.messages.snapshot = [
+      { role: 'user', content: '  new visible text  ', timestamp: '' },
+      { role: 'assistant', content: '   ', timestamp: '' },
+    ]
+    held.resolve({ chat_id: 'snapshot', mode: 'plan' } as ChatInfo)
+    await update
+    await handover
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/snapshot/handover', {
+      provider: 'claude', model: 'sonnet',
+      messages: [{ role: 'user', content: 'new visible text', timestamp: '' }],
+    })
+  })
+
+  it('releases the queue after a post-response handover failure', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'ws-failure'
+    store.connectWs('ws-failure')
+    const initialSocket = fakeSockets[0]
+    apiPost.mockResolvedValueOnce({ chat_id: 'ws-failure', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValueOnce([])
+    apiPatch.mockResolvedValueOnce({ chat_id: 'ws-failure', mode: 'plan' })
+    class ThrowingWebSocket {
+      constructor() { throw new Error('replacement socket failed') }
+    }
+    vi.stubGlobal('WebSocket', ThrowingWebSocket)
+    const handover = store.handoverChat('ws-failure', { provider: 'claude', model: 'sonnet' })
+    const update = store.updateChat('ws-failure', { mode: 'plan' })
+    await expect(handover).rejects.toThrow('replacement socket failed')
+    await expect(update).resolves.toBeUndefined()
+    expect(initialSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('staged thinking after handover does not deadlock', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValueOnce({ chat_id: 'thinking', provider: 'claude', model: 'sonnet' })
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', thinking_level: 'high' })
+    await store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    await expect(store.updateChat('thinking', { thinking_level: 'high' })).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledWith('/api/chats/thinking', { thinking_level: 'high' })
+
+    apiPost.mockRejectedValueOnce(new Error('handover rejected'))
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', mode: 'bypass' })
+    const rejected = store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    const mode = store.updateChat('thinking', { mode: 'bypass' })
+    await expect(rejected).rejects.toThrow('handover rejected')
+    await expect(mode).resolves.toBeUndefined()
+    expect(store.chats.find(chat => chat.chat_id === 'thinking')?.mode).toBe('bypass')
+  })
 })
 
 describe('chat websocket URL containment', () => {
@@ -6598,6 +7555,100 @@ describe('deep-link chat navigation', () => {
     })
     expect(store.activeWorkspace).toBe('santo')
     expect(localStorage.getItem('ciao-active-workspace')).toBe('santo')
+  })
+
+  test('workspace events invalidate before rename and fence an older read', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    let finishOld!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    const old = store.fetchWorkspaces()
+    const states: string[] = []
+    const stop = watch(() => store.activeWorkspace, () => states.push(store.workspaceRegistryStatus), { flush: 'sync' })
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => path === '/api/workspaces'
+      ? { workspaces: [{ name: 'renamed' }] }
+      : [])
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed', from: 'personal', to: 'renamed' }) })
+    expect(states).toEqual(['loading'])
+    finishOld({ workspaces: [{ name: 'personal' }] })
+    await old
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(store.activeWorkspace).toBe('renamed')
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['renamed'])
+    stop()
+  })
+
+  test.each([true, false])('event (rename=%s) fences a blocked read throughout the debounce', async rename => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const old = deferred<unknown>()
+    const fresh = deferred<unknown>()
+    apiGet.mockReturnValueOnce(old.promise)
+    const oldRead = store.fetchWorkspaces()
+    const observed: Array<[string, string, string[]]> = []
+    const stop = watch(
+      () => [store.workspaceRegistryStatus, store.activeWorkspace, store.workspaces] as const,
+      () => observed.push([store.workspaceRegistryStatus, store.activeWorkspace, store.workspaces.map(w => w.name)]),
+      { flush: 'sync' },
+    )
+    vi.useFakeTimers()
+    try {
+      apiGet.mockImplementation((path: string) => path === '/api/workspaces' ? fresh.promise : Promise.resolve([]))
+      const revision = store.workspaceRegistryRevision
+      events.onmessage?.({ data: JSON.stringify(rename
+        ? { type: 'workspaces_changed', from: 'personal', to: 'renamed' }
+        : { type: 'workspaces_changed' }) })
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      if (rename) expect(observed).toContainEqual(['loading', 'renamed', ['personal']])
+      old.resolve({ workspaces: [{ name: 'old' }], active: 'old' })
+      await oldRead
+      expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+      expect(store.activeWorkspace).toBe(rename ? 'renamed' : 'personal')
+      await vi.advanceTimersByTimeAsync(149)
+      expect(apiGet).not.toHaveBeenCalledWith('/api/projects')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(apiGet).toHaveBeenCalledWith('/api/projects')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      const name = rename ? 'renamed' : 'personal'
+      fresh.resolve({ workspaces: [{ name }] })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.workspaceRegistryStatus).toBe('ready')
+      expect(store.workspaces.map(w => w.name)).toEqual([name])
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+      expect(observed.filter(([status]) => status === 'ready')).toEqual([['ready', name, [name]]])
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
+  })
+
+  test('a rename event invalidates a ready registry before changing selection', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const selectionStates: string[] = []
+    const stop = watch(() => store.activeWorkspace, () => selectionStates.push(store.workspaceRegistryStatus), { flush: 'sync' })
+    vi.useFakeTimers()
+    try {
+      events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed', from: 'personal', to: 'renamed' }) })
+      expect(selectionStates).toEqual(['loading'])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(store.activeWorkspace).toBe('renamed')
+      expect(apiGet).toHaveBeenCalledTimes(1)
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
   })
 
   test('updateWorkspace adopts renamed.from into the active workspace', async () => {
