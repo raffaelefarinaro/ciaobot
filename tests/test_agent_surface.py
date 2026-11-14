@@ -142,16 +142,20 @@ def test_managed_recall_cli_reader_observes_stat_guards_and_read_limit(tmp_path:
             return self.handle.read(limit)
 
     def open_guard(candidate, *args, **kwargs):
+        seen.append(("open", None))
         return TrackingFile(real_open(candidate, *args, **kwargs))
 
     monkeypatch.setattr(Path, "stat", stat_guard)
     monkeypatch.setattr(Path, "open", open_guard)
     monkeypatch.setattr(os, "fstat", fstat_guard)
     assert agent_cli._recall_claims_file(str(path)) == "[]"
-    assert seen == [
-        ("stat", None), ("fstat", None),
-        ("read", agent_cli.RECALL_CHECK_MAX_REQUEST_BYTES + 1),
-    ]
+    labels = [event for event, _value in seen]
+    open_index = labels.index("open")
+    fstat_index = labels.index("fstat")
+    read_index = labels.index("read")
+    assert any(event == "stat" for event in labels[:open_index])
+    assert open_index < fstat_index < read_index
+    assert seen[read_index] == ("read", agent_cli.RECALL_CHECK_MAX_REQUEST_BYTES + 1)
 
     # A stable nonregular pre-open target is rejected without opening it.
     seen.clear()
