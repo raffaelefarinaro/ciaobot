@@ -713,7 +713,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   and URL inputs, shell-quoted, with the engine's `cd` prefix from
   `/api/mcp/status` `shell`) and "Run in terminal", which types the command into
   the in-app terminal via `composables/useRunInTerminal.ts` and falls back to
-  copying it when the terminal is locked or unavailable. The Providers tab's Connect does the same with the sign-in command the engine returns to a browser that is not on its computer (403 `not_on_host`), then the user presses Verify. `composables/useMcpServers.ts`
+  copying it when the terminal is locked or unavailable. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability. `composables/useMcpServers.ts`
   owns status and usage reads and `setEnabled` (Turn off / Turn on, `POST /api/mcp/servers/enabled`, row patched in place), while `components/settings/SettingsMcpServers.vue`
   renders provider configuration and per-chat connection states.
   Settings edits native MCP configuration only to turn one server off or on
