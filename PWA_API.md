@@ -199,8 +199,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
 | GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
 | POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, and restored ones are pinned to the workspace. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
-| GET | `/api/settings/providers` | Read each provider CLI's connection status |
-| POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`, which Settings types into the in-app browser terminal (`useRunInTerminal`), copying or showing it when the terminal cannot take it), verify, or log out through the Claude Code or opencode CLI |
+| GET | `/api/settings/providers` | Read each provider CLI's connection status. The OpenCode row includes `credential_inventory` as described below; successful responses are `Cache-Control: no-store`. |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`, which Settings types into the in-app browser terminal (`useRunInTerminal`), copying or showing it when the terminal cannot take it), verify, or log out through the Claude Code or opencode CLI. A successful OpenCode verify includes the inventory and `Cache-Control: no-store`, and invalidates all workspace model caches before probing. Later model reads fetch again; existing pickers must refetch, running chats are not restarted, and responses may arrive out of order. |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status; `install_problem` is non-empty when the npm package is present but its binary is missing |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -268,6 +268,21 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 The workspace-move operation record includes `denied` and, when launchd observed it, `startup_exit_code`. A destination access denial or engine startup exit 78 is captured before rollback; the source engine's successful restart can clear the shared denial notice without erasing the operation's diagnosis.
 
 `provider_catalog_evidence` is keyed by `claude` and `opencode`; each value is `{status: "observed"|"unknown", source: "claude_initialize"|"opencode_catalog"|null, models: [{id, label}], reason: "not_observed"|"expired"|"invalid_response"|"no_models_reported"|null}`. Claude evidence is passively captured from `get_server_info()` after an already-authorized chat connection, scoped to its SDK working directory and retained in process memory for 300 seconds. Missing/malformed/expired evidence has no models. The `provider_models`/`models` fields remain configured aliases and must not be represented as account availability; observed catalog metadata is not generation-verified.
+
+OpenCode `credential_inventory` is `{status, providers}`. Status is `complete`,
+`partial` (entries omitted or truncated), or `unknown` (the list could not be
+read; providers is empty, not proof of no connections). Each provider has only
+`id`, `name`, `auth_types` (`oauth`, `api_key`, `environment`, or `unknown`),
+`configured: true`, and `verified: null`. It describes CLI-reported
+configuration, not successful authentication. Only the first 100 providers and
+32 connections per provider are examined; IDs and names are bounded to 128
+characters and filtered for control characters. IDs and names are nevertheless
+untrusted user-visible metadata: a deliberately embedded secret cannot be
+detected. Credential labels, values, account details and raw errors are not
+included. Ollama appears when the CLI lists its connection, not merely because a
+local model is discoverable. If a workspace startup is quarantined, the operator
+must ensure the old server/tree is stopped before restarting the engine; restart
+alone does not prove termination.
 
 ## Agent recipes
 

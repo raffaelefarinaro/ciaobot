@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import deque
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
@@ -242,6 +243,13 @@ class ControlPlaneError(ValueError):
 
 MANAGED_RECALL_CHECK_ENABLED = False
 MANAGED_RECALL_OPERATION_TIMEOUT_S = 45.0
+MANAGED_RECALL_MAX_IN_FLIGHT = 2
+MANAGED_RECALL_MAX_ADMISSIONS = 12
+MANAGED_RECALL_WINDOW_S = 60.0
+
+
+def _managed_recall_now() -> float:
+    return time.monotonic()
 
 
 class _ManagedRecallRefusal(ControlPlaneError):
@@ -1392,6 +1400,8 @@ class CiaoControlPlane:
         self.startup_tracker = startup_tracker
         self._deferred_actions: dict[str, dict[str, Any]] = {}
         self._managed_recall_attempts: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+        self._managed_recall_tasks: set[asyncio.Task[Any]] = set()
+        self._managed_recall_admissions: deque[float] = deque()
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
         self.connection_tracker = connection_tracker
@@ -2632,6 +2642,22 @@ class CiaoControlPlane:
                         refuse(
                             "unauthorized", "The managed agent session is no longer authorized."
                         )
+                    now = _managed_recall_now()
+                    while self._managed_recall_admissions and now - self._managed_recall_admissions[0] >= MANAGED_RECALL_WINDOW_S:
+                        self._managed_recall_admissions.popleft()
+                    self._managed_recall_tasks.difference_update(
+                        {task for task in self._managed_recall_tasks if task.done()}
+                    )
+                    unfinished = len(self._managed_recall_tasks)
+                    if unfinished >= MANAGED_RECALL_MAX_IN_FLIGHT:
+                        self._managed_recall_attempts.discard(snapshot.turn_task)
+                        refuse("recall_check_busy", "Managed recall checking is busy.")
+                    if len(self._managed_recall_admissions) >= MANAGED_RECALL_MAX_ADMISSIONS:
+                        self._managed_recall_attempts.discard(snapshot.turn_task)
+                        refuse(
+                            "recall_check_rate_limited",
+                            "Managed recall checking attempt limit reached.",
+                        )
 
                     def before_helper() -> None:
                         if not authorization.is_active():
@@ -2639,14 +2665,26 @@ class CiaoControlPlane:
                                 "unauthorized", "The managed agent session is no longer authorized."
                             )
 
-                    checker = asyncio.create_task(
-                        verify_recall_claims(
-                            claims, vault_root=snapshot.vault_root, model=snapshot.helper_model,
-                            provider=snapshot.provider, cwd=snapshot.cwd,
-                            before_helper=before_helper,
-                        )
+                    admitted_at = _managed_recall_now()
+                    checker_coro = verify_recall_claims(
+                        claims, vault_root=snapshot.vault_root, model=snapshot.helper_model,
+                        provider=snapshot.provider, cwd=snapshot.cwd,
+                        before_helper=before_helper,
                     )
-                    watcher = asyncio.create_task(authorization.wait_invalid())
+                    self._managed_recall_admissions.append(admitted_at)
+                    try:
+                        checker = asyncio.create_task(checker_coro)
+                    except BaseException:
+                        checker_coro.close()
+                        raise
+                    self._managed_recall_tasks.add(checker)
+                    checker.add_done_callback(self._managed_recall_tasks.discard)
+                    watcher_coro = authorization.wait_invalid()
+                    try:
+                        watcher = asyncio.create_task(watcher_coro)
+                    except BaseException:
+                        watcher_coro.close()
+                        raise
                     assert watcher is not None and checker is not None
                     done, _ = await asyncio.wait(
                         {checker, watcher, snapshot.turn_task, snapshot.driver_task},
