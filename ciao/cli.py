@@ -6392,7 +6392,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     An empty worklist releases the lease again before returning: a quiet night
     must not hold the lease until the TTL expires.
     """
-    from ciao.curation_run import CurationBusy, begin_run, end_run
+    from ciao.curation_run import CurationBusy, begin_run, end_run, holder_is_live
 
     _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
     try:
@@ -6412,8 +6412,15 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     )
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
-        end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        try:
+            end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        except CurationBusy as exc:
+            print(f"curation lease lost: {exc}", file=sys.stderr)
+            return CURATION_BUSY_EXIT
         payload["lease"] = {}
+    elif not holder_is_live(vault, holder=lease.holder):
+        print("curation lease lost while building the worklist", file=sys.stderr)
+        return CURATION_BUSY_EXIT
     _print_curation(payload, as_json=args.json)
     return 0
 
@@ -6440,7 +6447,7 @@ def _curation_holder(args: argparse.Namespace) -> str:
 
 def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
-    from ciao.curation_run import CurationBusy, record_done, renew_run
+    from ciao.curation_run import CurationBusy, record_done
 
     _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
@@ -6451,11 +6458,10 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
         print("pass at least one --key from `curation-begin`", file=sys.stderr)
         return 2
     try:
-        added = record_done(vault, keys, holder=holder)
+        added = record_done(vault, keys, holder=holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
-    renew_run(vault, holder=holder, ttl_s=budget.max_seconds)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
