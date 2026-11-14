@@ -70,6 +70,129 @@ def test_dispatch_runs_the_registered_tool_and_tags_telemetry_cli(tmp_path: Path
     assert record["status"] == "ok"
 
 
+def test_managed_recall_cli_mapping_and_argument_surface(tmp_path: Path) -> None:
+    parser = agent_cli.build_parser()
+    payload = tmp_path / "claims.json"
+    payload.write_text("[]", encoding="utf-8")
+    assert agent_cli.resolve(parser.parse_args(["vault", "recall-check", "--claims-file", str(payload)])) == (
+        "vault_recall_check", {"claims_json": "[]"}
+    )
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vault", "recall-check"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vault", "recall-check", "--claims-json", "[]"])
+
+
+def test_managed_recall_cli_file_reader_is_bounded_and_strict(tmp_path: Path, monkeypatch) -> None:
+    from ciao.agent_surface import RECALL_CHECK_MAX_REQUEST_BYTES
+    from ciao.agent_cli import UsageError
+
+    exact = tmp_path / "exact.json"
+    exact.write_bytes(b" " * RECALL_CHECK_MAX_REQUEST_BYTES)
+    assert len(agent_cli._recall_claims_file(str(exact)).encode()) == RECALL_CHECK_MAX_REQUEST_BYTES
+    too_large = tmp_path / "large.json"
+    too_large.write_bytes(b"x" * (RECALL_CHECK_MAX_REQUEST_BYTES + 1))
+    with pytest.raises(UsageError, match="request size limit"):
+        agent_cli._recall_claims_file(str(too_large))
+    invalid = tmp_path / "invalid.json"
+    invalid.write_bytes(b"\xff")
+    with pytest.raises(UsageError, match="UTF-8"):
+        agent_cli._recall_claims_file(str(invalid))
+    credential = tmp_path / ".runtime" / "token.json"
+    credential.parent.mkdir()
+    credential.write_text("[]")
+    with pytest.raises(UsageError, match="credential"):
+        agent_cli._recall_claims_file(str(credential))
+
+
+def test_managed_recall_cli_reader_observes_stat_guards_and_read_limit(tmp_path: Path, monkeypatch) -> None:
+    import stat as stat_module
+
+    path = tmp_path / "claims.json"
+    path.write_text("[]", encoding="utf-8")
+    real_stat = Path.stat
+    real_fstat = os.fstat
+    real_open = Path.open
+    seen: list[tuple[str, int | None]] = []
+
+    def stat_guard(candidate, *args, **kwargs):
+        seen.append(("stat", None))
+        return real_stat(candidate, *args, **kwargs)
+
+    def fstat_guard(fd):
+        seen.append(("fstat", None))
+        return real_fstat(fd)
+
+    class TrackingFile:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, limit):
+            seen.append(("read", limit))
+            return self.handle.read(limit)
+
+    def open_guard(candidate, *args, **kwargs):
+        return TrackingFile(real_open(candidate, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    monkeypatch.setattr(Path, "open", open_guard)
+    monkeypatch.setattr(os, "fstat", fstat_guard)
+    assert agent_cli._recall_claims_file(str(path)) == "[]"
+    assert seen == [
+        ("stat", None), ("fstat", None),
+        ("read", agent_cli.RECALL_CHECK_MAX_REQUEST_BYTES + 1),
+    ]
+
+    # A stable nonregular pre-open target is rejected without opening it.
+    seen.clear()
+    monkeypatch.setattr(
+        Path, "stat",
+        lambda *_a, **_k: SimpleNamespace(st_mode=stat_module.S_IFIFO),
+    )
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: pytest.fail("nonregular target opened"))
+    with pytest.raises(agent_cli.UsageError, match="ordinary"):
+        agent_cli._recall_claims_file(str(path))
+    assert seen == []
+
+    # The descriptor check is independent; this uses a regular path and injects
+    # a nonregular opened handle without creating a FIFO.
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    monkeypatch.setattr(Path, "open", lambda candidate, *a, **k: real_open(candidate, *a, **k))
+
+    class NonregularHandleStat:
+        def __init__(self, value):
+            self.value = value
+
+        @property
+        def st_mode(self):
+            return stat_module.S_IFIFO
+
+        def __getattr__(self, name):
+            return getattr(self.value, name)
+
+    monkeypatch.setattr(os, "fstat", lambda fd: NonregularHandleStat(real_fstat(fd)))
+    with pytest.raises(agent_cli.UsageError, match="ordinary"):
+        agent_cli._recall_claims_file(str(path))
+
+
+def test_managed_recall_operation_is_read_only_with_narrow_schema() -> None:
+    from ciao import mcp_server
+
+    operation = mcp_server.OPERATIONS_BY_NAME["vault_recall_check"]
+    assert operation.annotations == mcp_server._READ
+    assert set(inspect.signature(operation.fn).parameters) == {"service", "claims_json"}
+
+
 def test_unknown_operation_and_bad_arguments_are_envelopes_with_telemetry(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     token = _token(service)
@@ -823,9 +946,12 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     # `chat needs-action command` reads its command at parse time too.
     command = tmp_path / "command.txt"
     command.write_text("ls -la\n", encoding="utf-8")
+    claims = tmp_path / "claims.json"
+    claims.write_text("[]", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "vault search": ["q"], "vault review show": ["p"],
+        "vault recall-check": ["--claims-file", str(claims)],
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
