@@ -6668,45 +6668,70 @@ export const inventory: InventoryEntry[] = [
       "path": "web/src/components/settings/WorkspaceColorPicker.vue",
       "anchor": "<template>"
     },
-    "sources": [],
+    "sources": ["web/src/lib/workspaceColors.ts"],
     "consumers": [
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": [
       "selected",
-      "expanded"
+      "expanded",
+      "disabled"
     ],
-    "variantNotes": "Observed branches in WorkspaceColorPicker.vue; remaining variants have not been audited.",
+    "variantNotes": "Controlled modelValue, disabled native buttons and local disclosure; five base presets and four extras. Selected extra remains visible after collapse.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceColorPicker.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--default"],
+        "note": "Amber selected with five base presets and a closed disclosure."
       },
       {
         "name": "selected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceColorPicker.vue has a selected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--selected"],
+        "note": "Pink selected; story parent feeds emitted choices back into modelValue."
       },
       {
         "name": "expanded",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceColorPicker.vue has a expanded branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--expanded"],
+        "note": "Teal selected, all nine presets visible on mount."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "selected-extra-collapsed",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--selected-extra-collapsed"],
+        "note": "Story closes the real disclosure; selected teal remains beside the five base presets."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--disabled"],
+        "note": "Amber selected, collapsed; every swatch and disclosure disabled."
+      },
+      {
+        "name": "disabled-expanded",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--disabled-expanded"],
+        "note": "Teal selected, all nine presets and disclosure disabled."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--narrow"],
+        "note": "Teal selected, expanded inside a maximum 390px container."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Native buttons support Tab and activation with focus-visible styling; no dedicated focus story. Radio arrow-key navigation is not implemented."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceColorPicker.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch or loading branch; the parent supplies modelValue and disabled."
     },
     "migration": {
       "status": "unassessed",

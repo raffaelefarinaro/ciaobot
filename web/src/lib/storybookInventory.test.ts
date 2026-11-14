@@ -61,6 +61,10 @@ const switchCovered: Record<string, string[]> = {
   narrow: ['settings-switch--narrow'],
 }
 const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
+  'web/src/components/settings/WorkspaceColorPicker.vue': Object.fromEntries(
+    ['default', 'selected', 'expanded', 'selected-extra-collapsed', 'disabled', 'disabled-expanded', 'narrow']
+      .map((state) => [state, [`settings-workspace-color-picker--${state}`]]),
+  ),
   'web/src/components/settings/SettingsSwitch.vue': switchCovered,
   'web/src/components/TabBar.vue': Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])),
   'web/src/components/SidebarRow.vue': {
@@ -77,6 +81,7 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
   },
 }
 const coveredOwners: Record<string, string> = {
+  'web/src/components/settings/WorkspaceColorPicker.vue': 'components-settings-workspace-color-picker',
   'web/src/components/settings/SettingsSwitch.vue': 'components-settings-settings-switch',
   'web/src/components/TabBar.vue': 'components-tab-bar',
   'web/src/components/SidebarRow.vue': 'components-sidebar-row',
@@ -256,7 +261,7 @@ describe('production ownership', () => {
 
   it('keeps switch admission complete without dropping existing row and skeleton coverage', () => {
     const admitted = inventory.filter((entry) => entry.owner.path in expectedCoverage)
-    expect(admitted).toHaveLength(4)
+    expect(admitted).toHaveLength(5)
     assertCoverage(admitted)
     const mutateSwitch = (change: (entry: InventoryEntry) => void, error: string) => {
       const entries = structuredClone(admitted)
@@ -291,6 +296,34 @@ describe('production ownership', () => {
     expect(() => checkStorybookIndex([entry], { [id]: { type: 'story' } })).toThrow('noncovered state has story IDs')
     const stories = Object.fromEntries(inventory.flatMap((entry) => entry.states.flatMap((state) => state.storyIds.map((id) => [id, { type: 'story' }]))))
     expect(() => checkStorybookIndex(inventory, stories)).not.toThrow()
+  })
+
+  it('rejects incomplete, duplicate, unrelated and nonstory colour-picker coverage', () => {
+    const original = inventory.find((entry) => entry.id === 'components-settings-workspace-color-picker')!
+    const corrupt = (change: (entry: InventoryEntry) => void, error: string) => {
+      const entries = structuredClone(inventory)
+      change(entries.find((entry) => entry.id === original.id)!)
+      expect(() => assertCoverage(entries)).toThrow(error)
+    }
+    for (const id of ['settings-switch--on', 'settings-workspace-color-picker--docs', 'settings-workspace-color-picker--missing', 'inventory--all', '']) {
+      corrupt((entry) => { entry.states[0].storyIds = [id] }, 'Invalid covered state')
+    }
+    corrupt((entry) => { entry.states[0].storyIds = [] }, 'Invalid covered state')
+    corrupt((entry) => { entry.states[0].storyIds.push(entry.states[0].storyIds[0]) }, 'Invalid covered state')
+    corrupt((entry) => { entry.states.shift() }, 'Missing covered state')
+    corrupt((entry) => { entry.states.push(entry.states[0]) }, 'Duplicate state')
+    corrupt((entry) => { entry.owner.path = 'web/src/components/TabBar.vue' }, 'Invalid covered state')
+    const stories = Object.fromEntries(original.states.flatMap((state) => state.storyIds.map((id) => [id, { type: 'story' }])))
+    expect(() => checkStorybookIndex([original], stories)).not.toThrow()
+    for (const state of original.states.filter((state) => state.coverage === 'covered')) {
+      const id = state.storyIds[0]
+      const missing = { ...stories }
+      delete missing[id]
+      expect(() => checkStorybookIndex([original], missing)).toThrow(`invalid or missing story ${id}`)
+      for (const type of ['docs', undefined]) {
+        expect(() => checkStorybookIndex([original], { ...stories, [id]: { type } })).toThrow(`invalid or missing story ${id}`)
+      }
+    }
   })
 
   it('documents the completion sheet rather than completion history', () => {
