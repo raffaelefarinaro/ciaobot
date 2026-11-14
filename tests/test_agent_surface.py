@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -1394,10 +1395,20 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     reference = agent_cli._help_text()
     missing = [command for command in _commands() if command not in reference]
     assert missing == []
-    assert "ciao help" in cli and "ciao <noun> --help" in cli
+    assert "ciao help <topic>" in cli and "ciao <noun> --help" in cli
     assert "vault search       QUERY" in cli and "task report" in cli
     assert "vault review restore-completed" not in cli
     assert len(cli) < 12000
+
+
+def test_cli_surface_prompt_routes_exact_lookups_to_topics() -> None:
+    cli = system_prompt_payload("")["append"]
+    assert "ciao help <topic>" in cli
+    assert "ciao help queues" in cli
+    assert "examples" in cli
+    for topic in re.findall(r"ciao help ([a-z]+)", cli):
+        args = agent_cli.build_parser().parse_args(["help", topic])
+        assert args.noun == "help" and args.topic == topic
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

@@ -82,5 +82,5 @@ Close with: they can ask "what can Ciaobot do?" (or about any specific feature) 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Automations how-to: `ciao schedule` commands in `ciao help`. Webhook triggers: `ciao webhook` commands in `ciao help`, and the manage + sender recipes in `PWA_API.md`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover`. Vault read conventions are inline system-prompt policy.
+- Automations how-to: `ciao schedule` commands in `ciao help schedule`. Webhook triggers: `ciao webhook` commands in `ciao help webhook`, and the manage + sender recipes in `PWA_API.md`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover`. Vault read conventions are inline system-prompt policy.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).
