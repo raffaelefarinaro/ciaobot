@@ -1048,6 +1048,16 @@ def _provider_config_payload(config) -> dict:
     }
 
 
+def _provider_config_payload_with_inventory(config) -> dict:
+    from ciao.providers.opencode import opencode_credential_inventory
+
+    payload = _provider_config_payload(config)
+    row = payload["connections"].get("opencode")
+    if row is not None:
+        row["credential_inventory"] = opencode_credential_inventory()
+    return payload
+
+
 _CONNECT_NOT_ON_HOST = "This browser cannot open a terminal window on the computer running Ciaobot."
 
 
@@ -1116,6 +1126,12 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                 from ciao.setup_status import clear_claude_discovery_cache
 
                 await asyncio.to_thread(clear_claude_discovery_cache)
+            if provider == "opencode":
+                from ciao.providers.opencode import invalidate_opencode_model_cache
+
+                invalidate_opencode_model_cache()
+                payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
+                return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
             payload = await asyncio.to_thread(_provider_config_payload, config)
             return JSONResponse(payload["connections"].get(provider, {}))
         finally:
@@ -1155,7 +1171,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
 async def provider_config_settings(request: Request) -> JSONResponse:
     config = request.app.state.config
-    return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
+    return JSONResponse(
+        await asyncio.to_thread(_provider_config_payload_with_inventory, config),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:

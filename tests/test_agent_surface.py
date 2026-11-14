@@ -1349,7 +1349,8 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     assert "You can never apply it yourself." in chat
     assert "`/mcp`, `/reload-plugins`" in chat
     assert "ciao chat reload" in chat
-    assert "never ask the user to reconnect" in chat
+    assert "Standalone `/mcp` is app navigation" in chat
+    assert "Chat details → MCP → Sign in" in chat
     assert "ciao chat needs-action mcp_auth --server" in chat
 
     webhook = topic_help("webhook")

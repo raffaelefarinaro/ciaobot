@@ -302,3 +302,15 @@ measured real-session parity (completion 86%/100% per provider on both
 surfaces, zero fallbacks) and drove the D-11 name resolution, D-12 command
 table in the core prompt, and the CLI permission posture that make the CLI
 surface usable.
+
+### Managed vault-recall checks
+
+The managed `vault_recall_check` operation remains rollout-disabled by default.
+If enabled, engine-local admission allows at most two unfinished checker tasks
+and twelve admissions per trailing 60 seconds across managed-recall callers.
+Busy and rate-limit denials refund the provisional provider-pass attempt; an
+immediate pre-checker authorization failure remains charged, and an admitted
+attempt remains charged even if it fails or is cancelled. State is process-local
+and resets on engine restart. These limits are an admission safeguard, not a
+monetary or token-spend guarantee, and do not promise cancellation of remote
+provider work or evidence threads.
