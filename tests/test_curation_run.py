@@ -188,11 +188,13 @@ def test_a_three_note_cluster_becomes_a_category_item(tmp_path: Path) -> None:
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     _cluster_vault(vault, "recipe-book", 3)
 
+    category_items = tuple(cr._category_cluster_items(vault, registry=_categories(vault)))
     worklist = cr.build_worklist(
         vault_root=vault,
         workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
+        category_items=category_items,
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -259,11 +261,13 @@ def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     _cluster_vault(vault, "recipe-book", 3)
 
+    first_categories = tuple(cr._category_cluster_items(vault, registry=_categories(vault)))
     first = cr.build_worklist(
         vault_root=vault,
         workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
+        category_items=first_categories,
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -273,11 +277,13 @@ def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
     # The bullet is gone, as it would be after the owner rejected it.
     (vault / cr.PROPOSALS_RELATIVE).unlink()
 
+    second_categories = tuple(cr._category_cluster_items(vault, registry=_categories(vault)))
     second = cr.build_worklist(
         vault_root=vault,
         workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
+        category_items=second_categories,
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -1528,6 +1534,219 @@ def test_a_rejected_run_cannot_advance_the_weekly_marker(
     assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
     # And the run it was rejected in favour of still holds the lease.
     assert (cr.active_lease(vault) or {})["holder"] == "run-b"
+
+
+def test_replaced_expired_holder_does_not_plan_category_proposals_before_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A category cluster must not make finalization mutate the vault before lease rejection."""
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    _cluster_vault(vault, "recipe-book", 3)
+    _stale_holder_replaced(vault)
+    before = {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()}
+    _capture(monkeypatch)
+
+    code = _curation_end_command(
+        _args(tmp_path, vault, guide, holder="run-a", status="ok")
+    )
+
+    assert code == CURATION_BUSY_EXIT
+    assert cr.load_state(vault).lease["holder"] == "run-b"
+    assert {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
+    assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_curation_plan_skips_category_generation_and_reports_incomplete_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import _curation_plan_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+    before = {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()}
+
+    def unexpected_generation(*_args: object, **_kwargs: object) -> list[object]:
+        pytest.fail("curation-plan must not generate category proposals")
+
+    monkeypatch.setattr(cr, "_category_cluster_items", unexpected_generation)
+    printed = _capture(monkeypatch)
+
+    assert _curation_plan_command(_args(tmp_path, vault, guide)) == 0
+    payload = json.loads("".join(printed))
+    assert payload["counts_complete"] is False
+    assert payload["remaining_observed_count"] == payload["planned_count"] + payload["deferred_count"]
+    assert any("category generation was omitted" in note for note in payload["coverage_notes"])
+    assert {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
+
+
+def test_curation_plan_reports_positive_observed_work_with_no_budget_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import _curation_plan_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "# Memory proposals\n\n- [review] Synthetic pending proposal.\n",
+        encoding="utf-8",
+    )
+    printed = _capture(monkeypatch)
+
+    _curation_plan_command(_args(tmp_path, vault, guide))
+    payload = json.loads("".join(printed))
+    assert payload["remaining_observed_count"] > 0
+    assert payload["deferred_count"] == 0
+    assert payload["counts_complete"] is False
+
+
+def test_empty_text_plan_still_discloses_incomplete_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import _curation_plan_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    printed = _capture(monkeypatch)
+    args = _args(tmp_path, vault, guide, json=False)
+
+    _curation_plan_command(args)
+
+    text = "".join(printed)
+    assert "Coverage is incomplete" in text
+    assert "Nothing to curate: every mechanical check is clear." not in text
+    assert "category generation was omitted" in text
+
+
+@pytest.mark.parametrize("with_cluster", [False, True])
+def test_curation_begin_records_that_category_generation_was_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_cluster: bool
+) -> None:
+    from ciao.cli import _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    if with_cluster:
+        _cluster_vault(vault, "recipe-book", 3)
+    printed = _capture(monkeypatch)
+
+    assert _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly")) == 0
+    payload = json.loads("".join(printed))
+
+    assert not any("category generation was omitted" in note for note in payload["coverage_notes"])
+    if with_cluster:
+        assert "- [category recipe-book]" in (vault / cr.PROPOSALS_RELATIVE).read_text(encoding="utf-8")
+        assert cr.PASS_CATEGORIES in {item["pass"] for item in payload["items"]}
+        assert cr.PASS_PROPOSALS in {item["pass"] for item in payload["items"]}
+    else:
+        assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
+def test_end_prunes_progress_for_begin_category_absent_from_incomplete_replan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Characterize cursor pruning; an incomplete replan does not resolve queued work."""
+    from ciao.cli import _curation_begin_command, _curation_end_command, _curation_progress_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+    printed = _capture(monkeypatch)
+
+    assert _curation_begin_command(
+        _args(tmp_path, vault, guide, holder="nightly")
+    ) == 0
+    begin = json.loads("".join(printed))
+    category_item = next(item for item in begin["items"] if item["pass"] == cr.PASS_CATEGORIES)
+    category_key = category_item["keys"][0]
+    printed.clear()
+
+    assert _curation_progress_command(
+        _args(
+            tmp_path, vault, guide, holder=begin["lease"]["holder"],
+            key=[category_key],
+        )
+    ) == 0
+    assert category_key in cr.load_state(vault).done_keys
+    printed.clear()
+
+    assert _curation_end_command(
+        _args(
+            tmp_path, vault, guide, holder=begin["lease"]["holder"],
+            status="failed",
+        )
+    ) == 0
+
+    # End's replan omits category discovery, so end_run's existing live-key
+    # pruning drops this cursor entry. The source cluster and proposal remain:
+    # absence from the incomplete replan is not evidence of resolution.
+    assert category_key not in cr.load_state(vault).done_keys
+    assert "- [category recipe-book]" in (vault / cr.PROPOSALS_RELATIVE).read_text(encoding="utf-8")
+    assert (vault / "Workspace" / "Memory-Category-Proposals" / "recipe-book.json").exists()
+
+
+def test_curation_end_does_not_call_category_generator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    _cluster_vault(vault, "recipe-book", 3)
+    _stale_holder_replaced(vault)
+
+    def unexpected_generation(*_args: object, **_kwargs: object) -> list[object]:
+        pytest.fail("curation-end must not generate category proposals")
+
+    monkeypatch.setattr(cr, "_category_cluster_items", unexpected_generation)
+    _capture(monkeypatch)
+
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder="run-a", status="ok")
+    ) == CURATION_BUSY_EXIT
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_curation_end_reports_incomplete_observed_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_json: bool
+) -> None:
+    from ciao.cli import _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "# Memory proposals\n\n- [review] Synthetic pending proposal.\n",
+        encoding="utf-8",
+    )
+    lease = cr.begin_run(vault, holder="nightly")
+    printed = _capture(monkeypatch)
+    args = _args(
+        tmp_path, vault, guide, holder=lease.holder, status="failed", json=as_json
+    )
+
+    assert _curation_end_command(args) == 0
+    output = "".join(printed)
+    if as_json:
+        summary = json.loads(output)
+        assert summary["counts_complete"] is False
+        assert summary["remaining_observed_count"] > 0
+        assert any("discovery is not exhaustive" in note for note in summary["coverage_notes"])
+        assert any("category generation was omitted" in note for note in summary["coverage_notes"])
+    else:
+        assert "coverage incomplete" in output.lower()
+        assert "Observed work" in output
+        assert "category generation was omitted" in output
 
 
 # ── Shipped instructions ──────────────────────────────────────────────────
