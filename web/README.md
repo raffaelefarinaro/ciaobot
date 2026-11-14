@@ -4,6 +4,14 @@ Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, serv
 
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
 
+Home's Needs you rows automatically prepare read-only maintenance previews for
+applicable update tasks in the active workspace. The one-line summary describes
+proposed work, not completed changes; pending or failed preparation is stated
+without claiming the workspace is clear. Refresh preview re-reads the plan and
+shows its checked time when available. Preparation starts no model or chat and
+does not approve, apply, or dismiss anything: content decisions remain explicit
+in the task's chat and review flow.
+
 Chat-originated file opens resolve a canonical absolute path through
 `/api/chats/{chat_id}/file-path` before rendering or pinning. Relative paths are
 anchored to that chat's agent root, never the sidebar's selected workspace.

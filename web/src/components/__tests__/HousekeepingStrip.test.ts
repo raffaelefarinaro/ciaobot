@@ -975,6 +975,148 @@ function updateTask(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
   }
 }
 
+describe('update task previews', () => {
+  let pinia: ReturnType<typeof createPinia>
+  const key = 'review-legacy-rows@1'
+  const checked = '2026-11-12T10:00:00Z'
+
+  beforeEach(() => {
+    resetHomeNoticeWindows()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    useProjectStore().activeWorkspace = 'personal'
+    const store = useHousekeepingStore()
+    vi.spyOn(store, 'init').mockImplementation(() => {})
+    vi.spyOn(store, 'refreshUpdateTasks').mockResolvedValue(undefined)
+    store.updateTasks = [updateTask()]
+    store.updateTasksWorkspace = 'personal'
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function seed(summary: string, state: 'review' | 'blocked' | 'unknown' = 'review', checkedAt = checked) {
+    useHousekeepingStore().taskPreviews[key] = {
+      loading: false, error: '', applicabilityCheckedAt: '',
+      result: { task_id: 'review-legacy-rows', revision: 1, workspace: 'personal', state, summary, checked_at: checkedAt, plan: { note: 'RAW_PRIVATE_SENTINEL' } },
+    }
+  }
+
+  function render() {
+    return mount(HousekeepingStrip, { global: { plugins: [pinia] }, attachTo: document.body })
+  }
+
+  it('shows automatically prepared proposed counts without starting a chat', () => {
+    const store = useHousekeepingStore()
+    const start = vi.spyOn(store, 'startUpdateTask')
+    const post = vi.spyOn(api, 'post')
+    seed('The planner proposes 2 moves. Review required.')
+    const wrapper = render()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Preview: The planner proposes 2 moves. Review required.')
+    expect(leadLabels(rows(wrapper)[0])).toEqual(['Start in chat'])
+    expect(start).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('keeps active attempts and transition errors ahead of preview summaries', async () => {
+    const store = useHousekeepingStore()
+    seed('Proposed changes')
+    const wrapper = render()
+    for (const status of ['in_progress', 'waiting_review', 'failed'] as const) {
+      store.updateTasks = [updateTask({ status, chat_live: true })]
+      await nextTick()
+      expect(rows(wrapper)[0].get('.needs-you-line').text()).not.toContain('Proposed changes')
+    }
+    store.updateTasks = [updateTask()]
+    store.taskErrors = { [key]: 'Transition refused.' }
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Transition refused.')
+  })
+
+  it('shows pending blocked unknown and failed previews without claiming completion', async () => {
+    const store = useHousekeepingStore()
+    store.taskPreviews[key] = { loading: true, result: null, error: '', applicabilityCheckedAt: '' }
+    const wrapper = render()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Preparing a preview…')
+    for (const [state, summary] of [
+      ['blocked', 'Blocked: conflicts. Review required.'],
+      ['unknown', 'Could not prepare this task; no changes were made.'],
+      ['unknown', 'This task has no automatic preview; no changes were made.'],
+    ] as const) {
+      seed(summary, state)
+      await nextTick()
+      expect(rows(wrapper)).toHaveLength(1)
+      expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe(`Preview: ${summary}`)
+      expect(leadLabels(rows(wrapper)[0])).toEqual(['Start in chat'])
+      expect(store.updateTasks[0].status).toBe('offered')
+    }
+    store.taskPreviews[key].loading = true
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Preview: This task has no automatic preview; no changes were made.')
+    store.taskPreviews[key] = { loading: false, result: null, error: 'offline', applicabilityCheckedAt: '' }
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Could not prepare a preview. You can review this in chat.')
+    delete store.taskPreviews[key]
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe(updateTask().why)
+    store.updateTasks = [updateTask({ applicability: 'unknown', offered: false })]
+    seed('Must not override applicability.')
+    await nextTick()
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Checking whether this applies here…')
+    expect(await menuLabels(rows(wrapper)[0])).not.toContain('Refresh preview')
+  })
+
+  it('refreshes preview from menu without a lifecycle transition', async () => {
+    const store = useHousekeepingStore()
+    const refresh = vi.spyOn(store, 'refreshTaskPreview').mockResolvedValue(undefined)
+    const start = vi.spyOn(store, 'startUpdateTask')
+    const dismiss = vi.spyOn(store, 'dismissUpdateTask')
+    const post = vi.spyOn(api, 'post')
+    seed('Review required.')
+    const wrapper = render()
+    const row = rows(wrapper)[0]
+    await row.get('.needs-you-more').trigger('click')
+    await nextTick()
+    const item = row.findAll('[role="menuitem"]')[0]
+    expect(item.text()).toBe(`Refresh preview (checked ${new Date(checked).toLocaleString()})`)
+    expect(document.activeElement).toBe(item.element)
+    await item.trigger('keydown', { key: 'Enter' })
+    // Native buttons translate Enter into click in a browser; jsdom does not.
+    await item.trigger('click')
+    await nextTick()
+    expect(refresh).toHaveBeenCalledWith(store.updateTasks[0])
+    expect(start).not.toHaveBeenCalled()
+    expect(dismiss).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(row.get('.needs-you-more').element)
+    expect(leadLabels(row)).toEqual(['Start in chat'])
+    for (const date of ['', 'not a date']) {
+      seed('Review required.', 'review', date)
+      await nextTick()
+      expect((await menuLabels(row))[0]).toBe('Refresh preview')
+      await row.get('.needs-you-more').trigger('click')
+    }
+    store.taskPreviews[key].loading = true
+    await nextTick()
+    await row.get('.needs-you-more').trigger('click')
+    expect(row.findAll('[role="menuitem"]')[0].attributes('aria-disabled')).toBe('true')
+    expect(leads(row)[0].attributes('disabled')).toBeUndefined()
+  })
+
+  it('never renders another workspaces preview or raw plan contents', async () => {
+    const store = useHousekeepingStore()
+    seed('Private preview')
+    const wrapper = render()
+    expect(wrapper.text()).not.toContain('RAW_PRIVATE_SENTINEL')
+    store.updateTasksWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.text()).not.toContain('Private preview')
+    expect(wrapper.text()).not.toContain('RAW_PRIVATE_SENTINEL')
+  })
+})
+
 describe('notice reveal', () => {
   const Empty = defineComponent({ template: '<div />' })
   const UNAVAILABLE = 'This notice is no longer available'
