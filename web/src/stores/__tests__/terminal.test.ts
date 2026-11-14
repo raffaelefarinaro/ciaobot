@@ -231,6 +231,90 @@ afterEach(() => {
 })
 
 describe('workspace terminal scope', () => {
+  it.each(['success', 'uncertain'] as const)(
+    'opens an empty workspace B while a workspace A create remains pending (%s)', async (outcome) => {
+      const store = useTerminalStore()
+      await store.open({ workspace: 'A' })
+      const pending = deferred<unknown>()
+      apiPost.mockReturnValueOnce(pending.promise)
+        .mockResolvedValueOnce({ session: sessionPayload('B-shell') })
+      const creatingA = store.createSession()
+      expect(store.creating).toBe(true)
+      await store.open({ workspace: 'B' }, { ensureSession: true })
+      expect(apiPost.mock.calls).toEqual([
+        ['/api/terminal/sessions', { workspace: 'A' }],
+        ['/api/terminal/sessions', { workspace: 'B' }],
+      ])
+      expect(store.activeSession?.session_id).toBe('B-shell')
+      expect(store.creating).toBe(false)
+      if (outcome === 'success') pending.resolve({ session: sessionPayload('A-shell') })
+      else pending.reject(new Error('network'))
+      expect(await creatingA).toBe(false)
+      expect(store.target).toEqual({ workspace: 'B' })
+      expect(store.activeSession?.session_id).toBe('B-shell')
+      expect(apiPost).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  it('keeps B creation pending when the older A creation settles', async () => {
+    const store = useTerminalStore()
+    await store.open({ workspace: 'A' })
+    const a = deferred<unknown>()
+    const b = deferred<unknown>()
+    apiPost.mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise)
+    const creatingA = store.createSession()
+    const openingB = store.open({ workspace: 'B' }, { ensureSession: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(store.creating).toBe(true)
+    a.resolve({ session: sessionPayload('A-shell') })
+    expect(await creatingA).toBe(false)
+    expect(store.creating).toBe(true)
+    expect(await store.createSession()).toBe(false)
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    b.resolve({ session: sessionPayload('B-shell') })
+    await openingB
+    expect(store.creating).toBe(false)
+    expect(store.activeSession?.session_id).toBe('B-shell')
+  })
+
+  it.each(['selected', 'unselected'] as const)(
+    'does not restore an ended workspace session from an older list (%s)', async (selection) => {
+      const store = useTerminalStore()
+      const rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`ended-${i}`, { exited: true }))
+      apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: rows }))
+      await store.openWorkspaceForSettings('personal')
+      if (selection === 'selected') store.selectSession('ended-0')
+      const stale = deferred<unknown>()
+      apiGet.mockReturnValueOnce(stale.promise)
+      const refresh = store.refreshSessions()
+      apiDel.mockResolvedValueOnce({ ok: true })
+      expect(await store.endSession('ended-0')).toBe(true)
+      stale.resolve({ sessions: rows })
+      expect(await refresh).toBe(false)
+      expect(store.sessions.map(session => session.session_id)).toEqual(['ended-1', 'ended-2', 'ended-3'])
+      expect(store.capacityError).toBe('')
+      expect(store.activeSession).toBeNull()
+    },
+  )
+
+  it('keeps an in-flight list valid when End is not confirmed', async () => {
+    const store = useTerminalStore()
+    const rows = Array.from({ length: 4 }, (_, i) => sessionPayload(`ended-${i}`, { exited: true }))
+    apiGet.mockImplementation((path: string) => Promise.resolve(path.endsWith('/status') ? statusPayload() : { sessions: rows }))
+    await store.openWorkspaceForSettings('personal')
+    const list = deferred<unknown>()
+    apiGet.mockReturnValueOnce(list.promise)
+    const refresh = store.refreshSessions()
+    apiDel.mockResolvedValueOnce({})
+    expect(await store.endSession('ended-0')).toBe(false)
+    list.resolve({ sessions: rows })
+    expect(await refresh).toBe(true)
+    expect(store.sessions).toHaveLength(4)
+    expect(store.capacityError).toContain('in this workspace')
+    expect(store.error).toContain('did not confirm the end')
+  })
+
   it.each(['close', 'navigation'] as const)(
     'ignores a late successful create after %s and rediscovers it on reopen', async (how) => {
       const store = useTerminalStore()

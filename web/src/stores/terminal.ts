@@ -298,8 +298,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   const truncated = ref(false)
   /** True while the terminal grant in the cookie is live. */
   const unlocked = ref(false)
-  /** True while a session creation is in flight, so a second click is refused. */
-  const creating = ref(false)
+  /** A pending create blocks only another create in the same scope. */
+  const creatingScopes = ref(new Set<string>())
+  const creating = computed(() => target.value !== null && creatingScopes.value.has(scopeKey(target.value)))
   /** True while a session is being ended. */
   const ending = ref(false)
   /**
@@ -1387,8 +1388,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     chatSwitch.value = false
     const scope = target.value
     if (!scope) return false
-    if (creating.value) return false
-    creating.value = true
+    const creatingKey = scopeKey(scope)
+    if (creatingScopes.value.has(creatingKey)) return false
+    creatingScopes.value.add(creatingKey)
     error.value = ''
     const myScope = scopeEpoch
     const myOpen = openEpoch
@@ -1444,7 +1446,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       return false
     } finally {
-      creating.value = false
+      creatingScopes.value.delete(creatingKey)
       createSettlementEpoch += 1
       if (unconfirmed) unconfirmedScopes.add(scopeKey(scope))
       if (myOpen !== openEpoch && target.value && scopeKey(target.value) === scopeKey(scope)) {
@@ -1529,6 +1531,8 @@ export const useTerminalStore = defineStore('terminal', () => {
         error.value = 'The engine did not confirm the end of the session.'
         return false
       }
+      // A list started before this confirmed End cannot restore the removed row.
+      refreshEpoch += 1
       sessions.value = sessions.value.filter((entry) => entry.session_id !== endedId)
       // Only the session that was asked about is torn down. A successor that
       // was selected while the request was open keeps its own socket.
