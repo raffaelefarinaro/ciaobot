@@ -115,6 +115,8 @@ After changes that touch running static assets (anything that lands in `ciao/web
 
 ## Layout
 
+The expanded sidebar places the six destinations above one contextual scroller (including Settings and Memory filters), with workspace selection in a fixed footer. Its upward menu is bounded by the visible viewport; an exceptionally short sidebar lets the header scroll to preserve access to the footer.
+
 Onboarding's Access & memory stage treats filesystem scope and runtime approval mode as separate choices. It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
 
 ```

@@ -109,6 +109,7 @@ describe('ProjectSidebar review section', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('counts the queue for the active workspace and what sits elsewhere', async () => {
@@ -147,6 +148,121 @@ describe('ProjectSidebar review section', () => {
     const create = wrapper.get('.workspace-scope-new')
     expect(create.text()).toContain('New workspace')
     expect(create.attributes('href')).toBe('/settings/workspace#new-workspace')
+  })
+
+  it('keeps the workspace footer after, and outside, the contextual scroller', async () => {
+    const wrapper = await mountSidebar('memory')
+    const context = wrapper.get('.sidebar-context').element
+    const footer = wrapper.get('.workspace-scope').element
+    expect(context.parentElement).toBe(footer.parentElement)
+    expect(context.nextElementSibling).toBe(footer)
+    expect(context.contains(footer)).toBe(false)
+    const trigger = wrapper.get('.workspace-scope-trigger')
+    expect(trigger.attributes('aria-haspopup')).toBe('menu')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(trigger.attributes('aria-controls')).toBe('workspace-scope-menu')
+    await trigger.trigger('click')
+    expect(trigger.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('#workspace-scope-menu').attributes('role')).toBe('menu')
+    wrapper.unmount()
+  })
+
+  it('remeasures the menu for viewport changes and releases its listeners on close', async () => {
+    const viewport = new EventTarget() as VisualViewport
+    Object.defineProperties(viewport, { offsetTop: { value: 0, configurable: true }, height: { value: 800, configurable: true } })
+    vi.stubGlobal('visualViewport', viewport)
+    const add = vi.spyOn(viewport, 'addEventListener')
+    const remove = vi.spyOn(viewport, 'removeEventListener')
+    const wrapper = await mountSidebar('memory')
+    const sidebar = wrapper.get('.sidebar').element
+    const trigger = wrapper.get('.workspace-scope-trigger')
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({ top: 10, bottom: 800 } as DOMRect)
+    const triggerRect = vi.spyOn(trigger.element, 'getBoundingClientRect').mockReturnValue({ top: 400 } as DOMRect)
+    await trigger.trigger('click')
+    await nextTick()
+    await nextTick()
+    expect(wrapper.get('.workspace-scope-menu').attributes('style')).toContain('378px')
+    Object.defineProperty(viewport, 'offsetTop', { value: 50, configurable: true })
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    await nextTick()
+    expect(wrapper.get('.workspace-scope-menu').attributes('style')).toContain('338px')
+    Object.defineProperty(viewport, 'height', { value: 250, configurable: true })
+    // The visual bottom now lies above the old trigger: constrain the sidebar
+    // before reading its newly positioned trigger.
+    triggerRect.mockReturnValue({ top: 240 } as DOMRect)
+    viewport.dispatchEvent(new Event('resize'))
+    await nextTick()
+    await nextTick()
+    expect(wrapper.get('.sidebar').attributes('style')).toContain('290px')
+    expect(wrapper.get('.workspace-scope-menu').attributes('style')).toContain('178px')
+    triggerRect.mockReturnValue({ top: 200 } as DOMRect)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+    await nextTick()
+    expect(wrapper.get('.workspace-scope-menu').attributes('style')).toContain('138px')
+    expect(add).toHaveBeenCalledWith('scroll', expect.any(Function))
+    await wrapper.get('.workspace-scope-menu').trigger('keydown', { key: 'Escape' })
+    expect(remove).toHaveBeenCalledWith('scroll', expect.any(Function))
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it.each(['Escape', 'Tab', 'outside', 'selection', 'settings', 'new-workspace', 'collapse', 'unmount'])(
+    'cleans up viewport listeners after %s, without duplicating them on reopen',
+    async (close) => {
+      const viewport = new EventTarget() as VisualViewport
+      Object.defineProperties(viewport, { offsetTop: { value: 0 }, height: { value: 800 } })
+      vi.stubGlobal('visualViewport', viewport)
+      const add = vi.spyOn(viewport, 'addEventListener')
+      const remove = vi.spyOn(viewport, 'removeEventListener')
+      const windowAdd = vi.spyOn(window, 'addEventListener')
+      const windowRemove = vi.spyOn(window, 'removeEventListener')
+      vi.spyOn(useProjectStore(), 'switchWorkspace').mockResolvedValue(true)
+      const wrapper = await mountSidebar()
+      await wrapper.get('.workspace-scope-trigger').trigger('click')
+      await wrapper.get('.workspace-scope-menu').trigger('keydown', { key: 'Escape' })
+      await wrapper.get('.workspace-scope-trigger').trigger('click')
+      expect(add.mock.calls.filter(([type]) => type === 'resize')).toHaveLength(2)
+      expect(add.mock.calls.filter(([type]) => type === 'scroll')).toHaveLength(2)
+      if (close === 'unmount') wrapper.unmount()
+      else if (close === 'collapse') await wrapper.setProps({ collapsed: true })
+      else if (close === 'outside') document.body.click()
+      else if (close === 'selection') await wrapper.findAll('.workspace-scope-option')[1].trigger('click')
+      else if (close === 'settings') await wrapper.get('.workspace-scope-link').trigger('click')
+      else if (close === 'new-workspace') await wrapper.get('.workspace-scope-new').trigger('click')
+      else await wrapper.get('.workspace-scope-menu').trigger('keydown', { key: close })
+      await nextTick()
+      expect(remove.mock.calls.filter(([type]) => type === 'resize')).toHaveLength(2)
+      expect(remove.mock.calls.filter(([type]) => type === 'scroll')).toHaveLength(2)
+      const callback = add.mock.calls.find(([type]) => type === 'resize')![1]
+      expect(windowAdd).toHaveBeenCalledWith('resize', callback)
+      expect(windowRemove).toHaveBeenCalledWith('resize', callback)
+      if (close !== 'unmount') {
+        expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
+        expect(wrapper.get('.sidebar').attributes('style') ?? '').not.toContain('max-height')
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('closes without forcing focus or page scrolling when the sidebar leaves the visual viewport', async () => {
+    const viewport = new EventTarget() as VisualViewport
+    Object.defineProperties(viewport, { offsetTop: { value: 0 }, height: { value: 800 } })
+    vi.stubGlobal('visualViewport', viewport)
+    const wrapper = await mountSidebar()
+    const bounds = vi.spyOn(wrapper.get('.sidebar').element, 'getBoundingClientRect')
+      .mockReturnValue({ top: 0, bottom: 800 } as DOMRect)
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
+    const focused = document.activeElement
+    const focus = vi.spyOn(wrapper.get<HTMLElement>('.workspace-scope-trigger').element, 'focus')
+    bounds.mockReturnValue({ top: -900, bottom: -100 } as DOMRect)
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
+    expect(focus).not.toHaveBeenCalled()
+    expect(document.activeElement).not.toBe(focused)
+    wrapper.unmount()
   })
 
   it('lists Workspace settings and New workspace after the options', async () => {

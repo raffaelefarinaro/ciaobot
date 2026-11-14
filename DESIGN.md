@@ -217,6 +217,8 @@ Respect the user-controlled font scale. Truncate compact navigation labels only 
 
 The PWA is mobile-first and safe-area aware. Desktop uses a persistent project sidebar beside the active workspace. Narrow screens use an overlay sidebar (a drawer that slides in on open and out on close, keeping its rows for the slide) and full-width panels, with secondary actions moving into menus or sheets before titles are sacrificed.
 
+The expanded sidebar keeps its utility row and six primary destinations above one contextual scroller, with the workspace switcher fixed below it. Its menu opens upward and scrolls when needed; in a very short viewport the header may also scroll to keep the footer reachable. Project-local new chat remains available.
+
 In project rows, fine-pointer action buttons yield their inline width while idle and return on hover or keyboard focus, so the project name uses the space when those actions are visually absent. Keyboard-focused actions regain their full target before activation. Coarse-pointer rows keep the full touch targets available.
 
 Use the 4px-based spacing scale deliberately: 4px for internal micro-spacing, 8px between closely related controls, 12–16px for component rhythm, and 24–32px between major groups. Long-form surfaces stay readable on wide screens: settings cards are capped at `min(100%, 1040px)`; the home intake/review column is capped near 920px; project, Memory, and Automations use the available pane width but keep conversational rows within a readable measure.

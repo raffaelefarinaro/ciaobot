@@ -1,5 +1,5 @@
 <template>
-  <aside class="sidebar" :class="{ collapsed }" v-bind="$attrs">
+  <aside class="sidebar" :class="{ collapsed }" :style="{ maxHeight: workspaceSidebarMaxHeight === null ? undefined : `${workspaceSidebarMaxHeight}px` }" v-bind="$attrs">
     <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
       <div class="sidebar-brand-row">
         <template v-if="!collapsed">
@@ -52,101 +52,6 @@
       </button>
       </div>
       <template v-if="!collapsed">
-        <!-- Prototype A's rail: brand row, workspace scope, one New chat, then
-             the destinations as a labelled vertical list. The pane header drops
-             its own centred wordmark on wide panes because this row carries it. -->
-        <!-- One workspace scope for the whole rail. It used to be repeated as a
-             per-mode row of pills (chat, automations, memory), which said the
-             same thing in three places and pushed each mode's own content down
-             the column. Selecting a workspace here commits the scope for
-             whichever mode is open and keeps the 1-9 shortcuts. -->
-        <div v-if="store.workspaceOptions.length" ref="workspaceScopeEl" class="workspace-scope">
-          <button
-            ref="workspaceScopeTrigger"
-            type="button"
-            class="workspace-scope-trigger"
-            :data-workspace-color="activeWorkspaceAccent(store.workspaces, store.activeWorkspace)"
-            :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
-            :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
-            :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
-            :aria-controls="canOpenWorkspaceMenu ? 'workspace-scope-menu' : undefined"
-            :aria-keyshortcuts="workspaceShortcut(store.activeWorkspace) || undefined"
-            :disabled="!canOpenWorkspaceMenu"
-            @click="toggleWorkspaceMenu"
-            @keydown.down.prevent="openWorkspaceMenu"
-          >
-            <!-- The workspace colour lives in a tinted initial tile, not a dot:
-                 a coloured dot is the app's "something needs you" signal. -->
-            <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
-            <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
-            <svg v-if="canOpenWorkspaceMenu" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-
-          <div
-            v-if="canOpenWorkspaceMenu && workspaceScopeOpen"
-            id="workspace-scope-menu"
-            ref="workspaceScopeMenu"
-            class="workspace-scope-menu"
-            role="menu"
-            aria-label="Choose workspace"
-            @keydown="onWorkspaceMenuKeydown"
-          >
-            <button
-              v-for="workspace in store.workspaceOptions"
-              :key="workspace.name"
-              type="button"
-              role="menuitem"
-              class="workspace-scope-option"
-              :class="{ active: workspace.name === store.activeWorkspace }"
-              :data-workspace-color="workspaceAccent(store.workspaces, workspace.name, store.activeWorkspace)"
-              :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-              @click="selectWorkspaceScope(workspace.name)"
-            >
-              <!-- The tile carries the workspace's 1-9 key, in its colour. -->
-              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
-              <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
-            </button>
-            <div class="workspace-scope-divider" role="separator"></div>
-            <router-link
-              to="/settings/workspace"
-              role="menuitem"
-              class="workspace-scope-option workspace-scope-link"
-              @click="workspaceScopeOpen = false"
-            >
-              <span class="workspace-scope-name">Workspace settings</span>
-            </router-link>
-            <router-link
-              to="/settings/workspace#new-workspace"
-              role="menuitem"
-              class="workspace-scope-option workspace-scope-new"
-              @click="workspaceScopeOpen = false"
-            >
-              <span class="workspace-scope-mark workspace-scope-mark--new" aria-hidden="true">+</span>
-              <span class="workspace-scope-name">New workspace</span>
-            </router-link>
-          </div>
-        </div>
-
-        <!-- One global New chat, directly under the scope it belongs to. It opens the same shared project picker as
-             everywhere else, so the sidebar never grows a second
-             project-selection path. Project-local "+" buttons stay, because
-             they preselect their own project. -->
-        <button
-          v-if="!mode || mode === 'chat' || mode === 'project'"
-          type="button"
-          class="sidebar-new-chat"
-          aria-haspopup="dialog"
-          :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
-          :aria-keyshortcuts="newChatKeyshortcuts"
-          :title="`New chat (${newChatShortcut})`"
-          @click="chooseNewChat(store.activeWorkspace)"
-        >
-          <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
-          <span>New chat</span>
-        </button>
-
         <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
@@ -326,11 +231,12 @@
       <NotificationBell class="sidebar-rail-bell" @navigate="emit('chat-selected')" />
     </div>
 
+    <div v-if="!collapsed" ref="contextListEl" class="sidebar-context">
     <!-- No section title here: the nav pill above already names this view.
          The create action sits on the Routines label, the way New sits on the
          Projects label in the chat sidebar. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div ref="schedulesListEl" class="schedules-list">
+      <div class="schedules-list">
         <SidebarListSkeleton v-if="!taskStore.schedulesLoaded && !taskStore.scheduleLoadError" label="Loading automations" :rows="3" />
         <template v-else>
           <template v-if="scheduleGroups.oneOffs.length">
@@ -419,7 +325,7 @@
          SidebarRows under each lane's label, the create action on To do's
          label. Rows open the task as a page, the same as its card. -->
     <template v-if="!collapsed && mode === 'tasks'">
-      <div ref="tasksListEl" class="schedules-list task-sidebar-list">
+      <div class="schedules-list task-sidebar-list">
         <SidebarListSkeleton v-if="!tasksLoaded && !taskBoard.loadError" label="Loading tasks" :groups="2" :rows="2" />
         <!-- The first read failed: the server's sentence and a Retry, never an
              empty list that reads as "no tasks". -->
@@ -961,6 +867,76 @@
       </div>
 
     </template>
+    </div>
+    <div v-if="!collapsed && store.workspaceOptions.length" ref="workspaceScopeEl" class="workspace-scope">
+      <button
+        ref="workspaceScopeTrigger"
+        type="button"
+        class="workspace-scope-trigger"
+        :data-workspace-color="activeWorkspaceAccent(store.workspaces, store.activeWorkspace)"
+        :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
+        :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
+        :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
+        :aria-controls="canOpenWorkspaceMenu ? 'workspace-scope-menu' : undefined"
+        :aria-keyshortcuts="workspaceShortcut(store.activeWorkspace) || undefined"
+        :disabled="!canOpenWorkspaceMenu"
+        @click="toggleWorkspaceMenu"
+        @keydown.down.prevent="openWorkspaceMenu"
+      >
+        <!-- The workspace colour lives in a tinted initial tile, not a dot:
+             a coloured dot is the app's "something needs you" signal. -->
+        <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
+        <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
+        <svg v-if="canOpenWorkspaceMenu" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      <div
+        v-if="canOpenWorkspaceMenu && workspaceScopeOpen"
+        id="workspace-scope-menu"
+        ref="workspaceScopeMenu"
+        class="workspace-scope-menu"
+        :style="{ maxHeight: `${workspaceMenuMaxHeight}px` }"
+        role="menu"
+        aria-label="Choose workspace"
+        @keydown="onWorkspaceMenuKeydown"
+      >
+        <button
+          v-for="workspace in store.workspaceOptions"
+          :key="workspace.name"
+          type="button"
+          role="menuitem"
+          class="workspace-scope-option"
+          :class="{ active: workspace.name === store.activeWorkspace }"
+          :data-workspace-color="workspaceAccent(store.workspaces, workspace.name, store.activeWorkspace)"
+          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
+          @click="selectWorkspaceScope(workspace.name)"
+        >
+          <!-- The tile carries the workspace's 1-9 key, in its colour. -->
+          <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
+          <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
+        </button>
+        <div class="workspace-scope-divider" role="separator"></div>
+        <router-link
+          to="/settings/workspace"
+          role="menuitem"
+          class="workspace-scope-option workspace-scope-link"
+          @click="closeWorkspaceMenu(false)"
+        >
+          <span class="workspace-scope-name">Workspace settings</span>
+        </router-link>
+        <router-link
+          to="/settings/workspace#new-workspace"
+          role="menuitem"
+          class="workspace-scope-option workspace-scope-new"
+          @click="closeWorkspaceMenu(false)"
+        >
+          <span class="workspace-scope-mark workspace-scope-mark--new" aria-hidden="true">+</span>
+          <span class="workspace-scope-name">New workspace</span>
+        </router-link>
+      </div>
+    </div>
   </aside>
 
   <!-- Completed (archived) projects dialog -->
@@ -1189,19 +1165,15 @@ function historyChordHint(key: '[' | ']'): string {
   return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
 }
 
-// With a single workspace the toggle is pure noise — hide it and let the
-// content fill the space.
 // The scope menu opens even with one workspace: it is also where a new
 // workspace is started.
 const canOpenWorkspaceMenu = computed(() => store.workspaceOptions.length > 0)
-// The chord ChatLayout binds for New chat: Option/Alt+N, because the browser
-// keeps Cmd+T for its own new-tab.
-const newChatShortcut = isApplePlatform() ? '⌥N' : 'Alt+N'
-const newChatKeyshortcuts = 'Alt+N'
 const workspaceScopeOpen = ref(false)
 const workspaceScopeEl = ref<HTMLElement | null>(null)
 const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)
 const workspaceScopeMenu = ref<HTMLElement | null>(null)
+const workspaceMenuMaxHeight = ref(0)
+const workspaceSidebarMaxHeight = ref<number | null>(null)
 
 // Review + retirement work waiting in a workspace, used only as the scope
 // trigger's attention badge. The retirement queue is only loaded for the active workspace,
@@ -1277,13 +1249,60 @@ function workspaceInitial(workspace: string): string {
   return (workspaceLabel(workspace).trim()[0] || '·').toUpperCase()
 }
 
-function openWorkspaceMenu(): void {
-  if (!canOpenWorkspaceMenu.value) return
-  workspaceScopeOpen.value = true
+function focusWorkspaceItem(item: HTMLElement | null | undefined): void {
+  item?.focus({ preventScroll: true })
+  item?.scrollIntoView?.({ block: 'nearest' })
+  const menu = workspaceScopeMenu.value
+  if (menu && item === menu.querySelector('[role="menuitem"]')) menu.scrollTop = 0
+}
+
+function measureWorkspaceMenu(): void {
+  const sidebar = workspaceScopeEl.value?.closest<HTMLElement>('.sidebar')
+  if (!sidebar || !workspaceScopeOpen.value) return
+  const viewport = window.visualViewport
+  const bounds = sidebar.getBoundingClientRect()
+  const top = bounds.top
+  const visibleTop = Math.max(top, viewport?.offsetTop ?? 0)
+  const visibleBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight
+  if (top >= visibleBottom || bounds.bottom < visibleTop) {
+    closeWorkspaceMenu(false)
+    return
+  }
+  workspaceSidebarMaxHeight.value = Math.max(0, visibleBottom - top)
   void nextTick(() => {
-    workspaceScopeMenu.value
-      ?.querySelector<HTMLElement>('[role="menuitem"]')
-      ?.focus()
+    if (!workspaceScopeOpen.value) return
+    const trigger = workspaceScopeTrigger.value
+    // Reserve the 4px trigger gap and an 8px visible-viewport margin.
+    if (trigger) workspaceMenuMaxHeight.value = Math.max(0, trigger.getBoundingClientRect().top - visibleTop - 12)
+  })
+}
+
+watch(workspaceScopeOpen, (open, _old, onCleanup) => {
+  if (!open) {
+    workspaceSidebarMaxHeight.value = null
+    return
+  }
+  const viewport = window.visualViewport
+  window.addEventListener('resize', measureWorkspaceMenu)
+  viewport?.addEventListener('resize', measureWorkspaceMenu)
+  viewport?.addEventListener('scroll', measureWorkspaceMenu)
+  measureWorkspaceMenu()
+  onCleanup(() => {
+    window.removeEventListener('resize', measureWorkspaceMenu)
+    viewport?.removeEventListener('resize', measureWorkspaceMenu)
+    viewport?.removeEventListener('scroll', measureWorkspaceMenu)
+    workspaceSidebarMaxHeight.value = null
+  })
+})
+watch(() => props.collapsed, collapsed => { if (collapsed) closeWorkspaceMenu(false) })
+
+function openWorkspaceMenu(): void {
+  if (!canOpenWorkspaceMenu.value || workspaceScopeOpen.value) return
+  workspaceScopeOpen.value = true
+  void nextTick(async () => {
+    measureWorkspaceMenu()
+    await nextTick()
+    if (workspaceScopeOpen.value) focusWorkspaceItem(workspaceScopeMenu.value?.querySelector<HTMLElement>('[role="menuitem"]'))
   })
 }
 
@@ -1334,7 +1353,7 @@ function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
   else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
   else return
   event.preventDefault()
-  items[next]?.focus()
+  focusWorkspaceItem(items[next])
 }
 
 function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
@@ -1361,26 +1380,25 @@ const sidebarTaskLanes = computed(() => {
     .filter(lane => lane.status === 'backlog' || lane.tasks.length > 0)
 })
 const routeTaskId = computed(() => (typeof route.params.taskId === 'string' ? route.params.taskId : ''))
-const tasksListEl = ref<HTMLElement | null>(null)
+const contextListEl = ref<HTMLElement | null>(null)
 function retryTasks(): void {
   void taskBoard.reload(store.activeWorkspace)
 }
 
 // ── Keyboard navigation for the schedules list: one flat list, the same
 // roaming as Home's chats and the Automations overview (lib/listRoaming.ts). ──
-const schedulesListEl = ref<HTMLElement | null>(null)
 
 function onArrow(key: string): boolean {
   if (props.collapsed) return false
   if (props.mode === 'tasks') {
     // The task lanes read top to bottom as one list, like the automation groups.
-    const tasksRows = Array.from(tasksListEl.value?.querySelectorAll<HTMLElement>('.task-sidebar-item') ?? [])
-    const open = tasksListEl.value?.querySelector<HTMLElement>('.task-sidebar-item.active')
+    const tasksRows = Array.from(contextListEl.value?.querySelectorAll<HTMLElement>('.task-sidebar-item') ?? [])
+    const open = contextListEl.value?.querySelector<HTMLElement>('.task-sidebar-item.active')
     return roamFocus([tasksRows], key, 'list', () => listAnchor(tasksRows, open))
   }
-  const rows = Array.from(schedulesListEl.value?.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])') ?? [])
+  const rows = Array.from(contextListEl.value?.querySelectorAll<HTMLElement>('.schedule-item:not([aria-disabled="true"])') ?? [])
   // Arrows start where the user is: the row for the open automation.
-  const current = schedulesListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
+  const current = contextListEl.value?.querySelector<HTMLElement>('.schedule-item.active')
   return roamFocus([rows], key, 'list', () => listAnchor(rows, current))
 }
 
@@ -1864,8 +1882,7 @@ async function confirmDeleteProject(id: string) {
   }
 }
 
-// The project-local "+" already names its project, and Home's chip names one
-// too; only the global New chat elsewhere asks which project.
+// The project-local "+" already names its project; Home owns its own picker.
 async function chooseNewChat(workspace: string, preferredProjectId?: string) {
   const projectId = preferredProjectId
     || homeNewChatProjectId.value
@@ -1964,6 +1981,7 @@ async function confirmDeleteChat(chatId: string) {
 
 <style scoped>
 .sidebar {
+  box-sizing: border-box;
   /* Fallback only: ChatLayout sets the real width inline (drag-resizable,
      remembered per user). Matches DEFAULT_SIDEBAR_WIDTH so the two agree
      before that inline style applies. */
@@ -1998,13 +2016,17 @@ async function confirmDeleteChat(chatId: string) {
   border-bottom: 1px solid var(--border);
 }
 
-/* Expanded: prototype A's stacked rail top - brand row, workspace scope,
-   New chat, then the destinations as a labelled list. */
+/* The header only scrolls when the pane is too short to fit it. */
 .sidebar-header--expanded {
   flex-direction: column;
   align-items: stretch;
   gap: 0;
   height: auto;
+  flex-shrink: 1;
+  min-height: 0;
+  /* Keep the 48px footer, its bottom gap and one contextual touch row. */
+  max-height: calc(100% - 48px - var(--space-3) - var(--touch));
+  overflow-y: auto;
   padding: 10px 12px 12px;
 }
 
@@ -2118,10 +2140,13 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--accent);
 }
 
-/* Scrollable area for chats and projects */
-.chats-scroll-area {
-  flex: 1;
+.sidebar-context {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+}
+.chats-scroll-area {
   display: flex;
   flex-direction: column;
   padding: 8px 8px 12px;
@@ -2233,44 +2258,6 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
 }
 
-.sidebar-new-chat {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 40px;
-  margin: 10px 0 0;
-  padding: 0 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font: inherit;
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 120ms var(--ease), background 120ms var(--ease);
-}
-
-.sidebar-new-chat:hover {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 13%, var(--bg2));
-}
-
-.sidebar-new-chat-plus {
-  color: var(--accent);
-  font-size: 20px;
-  line-height: 1;
-}
-
-.sidebar-new-chat .sidebar-keycap {
-  margin-left: auto;
-}
-
-/* The destinations, as a labelled vertical list. They used to be four icons
-   squeezed into the header row beside the workspace scope and New chat, which
-   left no room for either at the default sidebar width. */
 .nav-links {
   display: grid;
   gap: 3px;
@@ -2329,8 +2316,7 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
-  .nav-item,
-  .sidebar-new-chat { min-height: var(--touch); }
+  .nav-item { min-height: var(--touch); }
 }
 
 /* aria-hidden because .nav-item already carries the full aria-label. It
@@ -2779,7 +2765,8 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-scope {
   position: relative;
   z-index: 40;
-  margin: 0;
+  flex: none;
+  margin: auto 12px 12px;
 }
 
 .workspace-scope-trigger,
@@ -2848,11 +2835,12 @@ async function confirmDeleteChat(chatId: string) {
 
 .workspace-scope-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  bottom: calc(100% + 4px);
   right: 0;
   left: 0;
   z-index: 50;
-  overflow: hidden;
+  box-sizing: border-box;
+  overflow-y: auto;
   padding: var(--space-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -3195,8 +3183,7 @@ async function confirmDeleteChat(chatId: string) {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
-  .nav-item,
-  .sidebar-new-chat { min-height: var(--touch); }
+  .nav-item { min-height: var(--touch); }
   /* No containment on the drawer's header. `container-type: inline-size` makes
      the element its own rasterization root, and here that root sits inside a
      `position: fixed` layer that the transform above keeps composited - the
@@ -3234,13 +3221,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedules-list {
   display: flex;
-  /* Fills the space between the workspace toggle and the footer, so the create
-     button pins to the bottom exactly like the chat sidebar's. min-height:0 is
-     what lets it actually scroll inside a column flex parent. */
-  flex: 1;
-  min-height: 0;
   flex-direction: column;
-  overflow-y: auto;
   padding: 8px 8px 12px;
   gap: 12px;
 }
@@ -3324,10 +3305,7 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {
-  overflow-y: auto;
   padding: var(--space-3);
-  flex: 1;
-  min-height: 0;
 }
 /* Same register as the chat rail's "Projects" label: 11px sans, sentence
    case. The old uppercase tracked labels read as a second kind of heading. */
