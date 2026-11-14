@@ -218,6 +218,40 @@ describe('ModelSelector', () => {
     expect(document.activeElement).toBe(trigger.element)
   })
 
+  it('keeps focus on a focusable outside click target', async () => {
+    const wrapper = mountSelector()
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    outside.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    outside.focus() // The browser's pointerdown default action.
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
+  })
+
+  it.each([false, true])('does not restore focus over a navigation destination after selection (deferred=%s)', async (deferred) => {
+    const destination = document.createElement('button')
+    document.body.appendChild(destination)
+    const wrapper = mountSelector({ onSelect: () => {
+      if (deferred) nextTick(() => destination.focus())
+      else destination.focus()
+    } })
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    await wrapper.get('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(destination)
+    wrapper.unmount()
+    destination.remove()
+  })
+
   it('supports keyboard navigation and Enter selection without a pointer', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')
