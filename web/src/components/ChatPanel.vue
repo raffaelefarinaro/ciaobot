@@ -1355,8 +1355,10 @@
         :chat-id="chat.chat_id"
         :provider="chatMcpProvider"
         :controller="chatMcp"
+        :prioritize-heading="mcpHeadingPriority"
         @settings="openMcpSettings"
       />
+      <p v-if="mcpSettingsError" role="alert">{{ mcpSettingsError }}</p>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1477,6 +1479,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
@@ -1807,8 +1810,9 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
+const router = useRouter()
 const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
-  const provider = chat.value.provider
+  const provider = chat.value?.provider
   return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
 })
 const chatMcp = useChatMcpConnections({
@@ -1818,7 +1822,22 @@ const chatMcp = useChatMcpConnections({
   actions: () => store.chatActions[chat.value?.chat_id ?? ''] ?? [],
   archived: () => !!chat.value?.archived,
 })
-function openMcpSettings() { window.location.assign('/settings/mcp') }
+const mcpSettingsError = ref('')
+async function openMcpSettings() {
+  const workspace = store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace
+  const provider = chatMcpProvider.value
+  if (!workspace || !provider || !router) {
+    mcpSettingsError.value = 'This chat’s workspace or CLI could not be resolved.'
+    return
+  }
+  mcpSettingsError.value = ''
+  try {
+    const failure = await router.push({ path: '/settings/mcp', query: { workspace, provider } })
+    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) throw failure
+  } catch {
+    mcpSettingsError.value = 'Could not open this chat’s MCP settings.'
+  }
+}
 
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
 const titleRailOn = computed(() => titleRail.items.value.length > 1)
@@ -2333,12 +2352,19 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context' | 'repo'
+type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
+const mcpHeadingPriority = ref(false)
+let mcpHeadingEpoch = 0
+function clearMcpHeadingPriority() {
+  mcpHeadingEpoch++
+  mcpHeadingPriority.value = false
+}
 const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
+  if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
   return railHideButton.value
 })
 // Bumped when a caller points at the agent context, so its Always loaded
@@ -2346,6 +2372,8 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
 const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
+  mcpHeadingEpoch++
+  mcpHeadingPriority.value = target === 'mcp'
   // The rail may not be mounted yet (narrow drawer, or a wide rail that
   // starts closed), and its watch is lazy: bump the key once it exists.
   const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
@@ -2362,11 +2390,17 @@ function showDetails(target: DetailsTarget = 'close') {
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
-    el?.focus()
-    if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
+    el?.focus({ preventScroll: target === 'mcp' })
+    if (el && target === 'mcp' && railEl.value) {
+      const rail = railEl.value
+      const header = rail.querySelector<HTMLElement>('.chat-rail-head')
+      rail.scrollTo({ top: Math.max(0, rail.scrollTop + el.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
+    } else if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
   })
 }
 function closeDetails() {
+  pendingMcpReveal.value = false
+  clearMcpHeadingPriority()
   if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   // Opened from ⋯: the drawerShown watch below returns focus there instead.
@@ -2385,12 +2419,46 @@ function openProjectKnowledge() {
 }
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
-  onEscape: () => { inspectorOpen.value = false },
+  onEscape: () => { pendingMcpReveal.value = false; clearMcpHeadingPriority(); inspectorOpen.value = false },
 })
+const pendingMcpReveal = ref(false)
+function matchesMcpRoute(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
+  return route.params.chatId === props.chatId && route.query.details === 'mcp'
+}
+function signature(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
+  return `${String(route.params.chatId ?? '')}|${String(route.query.details ?? '')}`
+}
+if (router) {
+  pendingMcpReveal.value = matchesMcpRoute(router.currentRoute.value)
+  const removeAfterEach = router.afterEach((to, from, failure) => {
+    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) return
+    if (!matchesMcpRoute(to)) { pendingMcpReveal.value = false; clearMcpHeadingPriority(); return }
+    if (signature(to) !== signature(from) || to.fullPath === from.fullPath) pendingMcpReveal.value = true
+  })
+  onBeforeUnmount(removeAfterEach)
+}
+watch([pendingMcpReveal, () => view.chat, chatMcpProvider], async ([pending, loaded, provider]) => {
+  if (!pending || !loaded || loaded.chat_id !== props.chatId || !provider || loaded.archived) return
+  showDetails('mcp')
+  const epoch = mcpHeadingEpoch
+  await nextTick()
+  if (!pendingMcpReveal.value) return
+  const heading = railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading')
+  if (!heading) return
+  heading.focus({ preventScroll: true })
+  if (document.activeElement !== heading) return
+  const rail = railEl.value!
+  const header = rail.querySelector<HTMLElement>('.chat-rail-head')
+  rail.scrollTo({ top: Math.max(0, rail.scrollTop + heading.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
+  pendingMcpReveal.value = false
+  await nextTick()
+  if (epoch === mcpHeadingEpoch) clearMcpHeadingPriority()
+}, { immediate: true })
 // Chat details opened from the ⋯ menu return focus to ⋯ however they close (the
 // close button or Escape). Registered after useModalFocus, so this runs after
 // its restore of the opener, which is the menu item that has already gone.
 watch(drawerShown, (open) => {
+  if (!open) clearMcpHeadingPriority()
   if (open || !detailsFromMenu) return
   detailsFromMenu = false
   void nextTick(() => moreMenu.value?.focusTrigger())
@@ -3943,6 +4011,7 @@ function cancelStartupFocus(): void {
 
 function focusComposerOnOpen(): void {
   if (props.inactive) return
+  if (detailsTarget.value === 'mcp' && (railShown.value || drawerShown.value)) return
   if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
   if (questionCardVisible.value || pendingApprovals.value.length) return
   focusComposer()

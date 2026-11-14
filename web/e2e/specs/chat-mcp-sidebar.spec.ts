@@ -34,7 +34,7 @@ test('Chat details shows MCP connectivity separately from tool-use history', asy
   // This fixture chat has no historical tool usage; live connectivity must
   // stay a separate section rather than manufacturing a history row.
   await expect(details.locator('.chat-rail-tools')).toHaveCount(0)
-  await expect(details.getByRole('button', { name: 'Selected workspace MCP settings' })).toBeVisible()
+  await expect(details.getByRole('button', { name: 'Chat workspace MCP settings' })).toBeVisible()
   await settled(page.locator('.chat-layout'))
   await page.screenshot({ path: `${screenshots}/desktop.png`, animations: 'disabled' })
 
