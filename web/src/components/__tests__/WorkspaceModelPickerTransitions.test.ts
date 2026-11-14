@@ -13,6 +13,9 @@ import { createMemoryHistory, createRouter, routeLocationKey, routerKey } from '
 import { defineComponent, reactive } from 'vue'
 import TaskWorkspaceSurface from '../TaskWorkspaceSurface.vue'
 import { useTaskBoardStore } from '../../stores/taskBoard'
+import ConfirmDialog from '../ConfirmDialog.vue'
+import { pendingConfirm } from '../../lib/confirm'
+import { askPrompt, pendingPrompt } from '../../lib/prompt'
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -225,6 +228,46 @@ it('announces Home model failures outside the closed picker and retries', async 
   await flushPromises()
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   expect(wrapper.get('[role="status"]').text()).toContain('No models listed; availability is unknown')
+  wrapper.unmount()
+})
+
+it.each([
+  { name: 'Home', component: HomeIntake, trigger: '.home-intake-model-trigger', label: 'New chat models', retry: 'Retry new chat models' },
+  { name: 'new automation', component: NewScheduleForm, trigger: '.model-selector__trigger', label: 'Automation models', retry: 'Retry automation models' },
+])('exposes named loading, a single error, and completion for $name', async ({ component, trigger, label, retry }) => {
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  let fail!: (error: Error) => void
+  let succeed!: (value: unknown) => void
+  let reads = 0
+  vi.mocked(api.get).mockImplementation(url => {
+    if (!url.startsWith('/api/models')) return Promise.resolve([])
+    if (reads++ === 0) return new Promise((_, reject) => { fail = reject })
+    return new Promise(resolve => { succeed = resolve })
+  })
+  const wrapper = mount(component, { attachTo: document.body })
+  if (component === HomeIntake) await wrapper.get(trigger).trigger('click')
+  await flushPromises()
+  let status = wrapper.get(`[role="status"][aria-label="${label}"]`)
+  expect(status.attributes('aria-live')).toBe('polite')
+  expect(status.text()).toContain('Loading')
+  fail(new Error('offline'))
+  await flushPromises()
+  expect(wrapper.findAll('[role="alert"]')).toHaveLength(1)
+  expect(wrapper.get('[role="alert"]').text()).toContain('offline')
+  const button = wrapper.get<HTMLButtonElement>(`button[aria-label="${retry}"]`)
+  button.element.focus()
+  expect(document.activeElement).toBe(button.element)
+  await button.trigger('click')
+  await flushPromises()
+  status = wrapper.get(`[role="status"][aria-label="${label}"]`)
+  expect(status.attributes('aria-live')).toBe('polite')
+  expect(status.text()).toContain('Loading')
+  succeed({ models: ['recovered'], default: '', provider_models: {} })
+  await flushPromises()
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(wrapper.get(`[role="status"][aria-label="${label}"]`).text()).toContain('loaded')
   wrapper.unmount()
 })
 
@@ -478,6 +521,52 @@ it('does not show the active workspace catalog in another workspace’s automati
   wrapper.unmount()
 })
 
+it.each(['move', 'toggle', 'engine'] as const)('blocks another system routine edit while a %s is pending', async first => {
+  const savedWorkspace = localStorage.getItem('ciao-active-workspace')
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  const tasks = useTaskStore()
+  const schedule = {
+    schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me', scope: 'system',
+    daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+    enabled: true, model: '', provider: '',
+  } as typeof tasks.schedules[number]
+  tasks.schedules = [schedule]
+  tasks.schedulesLoaded = true
+  vi.mocked(api.get).mockResolvedValue({ models: ['new-model'], default: '', provider_models: {} })
+  let resolve!: (value: unknown) => void
+  vi.mocked(api.patch).mockReturnValueOnce(new Promise(done => { resolve = done }))
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+  ] })
+  await router.push('/schedules/s1')
+  await router.isReady()
+  const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+  await flushPromises()
+  if (first === 'move') await wrapper.get('.system-workspace-control select').setValue('work')
+  else if (first === 'toggle') await wrapper.get('.desktop-only.btn-small').trigger('click')
+  else {
+    await wrapper.get('[aria-label="Edit engine"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await wrapper.get('[role="option"][data-model="new-model"]').trigger('click')
+    await wrapper.get('.card-editing .btn-primary').trigger('click')
+  }
+  await flushPromises()
+  if (first !== 'engine') expect(wrapper.get('[aria-label="Edit engine"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('.system-workspace-control select').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('.desktop-only.btn-small').attributes('disabled')).toBeDefined()
+  expect(api.patch).toHaveBeenCalledTimes(1)
+  resolve({ ...schedule, ...(first === 'move' ? { workspace: 'work' } : first === 'toggle' ? { enabled: false } : { model: 'new-model', provider: 'claude' }) })
+  await flushPromises()
+  expect(wrapper.get('[aria-label="Edit engine"]').attributes('disabled')).toBeUndefined()
+  expect(tasks.schedules[0]).toMatchObject(first === 'move' ? { workspace: 'work' } : first === 'toggle' ? { enabled: false } : { model: 'new-model', provider: 'claude' })
+  wrapper.unmount()
+  if (savedWorkspace === null) localStorage.removeItem('ciao-active-workspace')
+  else localStorage.setItem('ciao-active-workspace', savedWorkspace)
+})
+
 it('keeps an unsaved engine edit bound to its schedule when the active workspace changes', async () => {
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
@@ -554,8 +643,12 @@ it('keeps automation model errors and retry available in the engine editor', asy
   await wrapper.get('[aria-label="Edit engine"]').trigger('click')
   await flushPromises()
   expect(wrapper.get('[role=alert]').text()).toContain('offline')
+  expect(wrapper.findAll('[role=alert]')).toHaveLength(1)
+  expect(wrapper.get<HTMLButtonElement>('[aria-label="Retry automation models"]').element.type).toBe('button')
   await wrapper.get('[aria-label="Retry automation models"]').trigger('click')
   await flushPromises()
+  expect(wrapper.get('[role="status"][aria-label="Automation models"]').attributes('aria-live')).toBe('polite')
+  expect(wrapper.get('[role="status"][aria-label="Automation models"]').text()).toContain('loaded')
   await wrapper.get('.model-selector__trigger').trigger('click')
   expect(wrapper.text()).toContain('Personal Model')
   const option = wrapper.get<HTMLButtonElement>('[role="option"][data-model="personal-model"]')
@@ -563,6 +656,143 @@ it('keeps automation model errors and retry available in the engine editor', asy
   await option.trigger('keydown', { key: 'Enter' })
   await flushPromises()
   expect(wrapper.getComponent(ModelSelector).props('modelValue')).toBe('personal-model')
+  wrapper.unmount()
+})
+
+it('lets Escape close the engine picker before it closes the editor', async () => {
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  const tasks = useTaskStore()
+  tasks.schedules = [{
+    schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me',
+    daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+    enabled: true, model: '', provider: '',
+  }] as typeof tasks.schedules
+  tasks.schedulesLoaded = true
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+  ] })
+  await router.push('/schedules/s1')
+  await router.isReady()
+  const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit engine"]').trigger('click')
+  await wrapper.get('.model-selector__trigger').trigger('click')
+  await flushPromises()
+  const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+  search.element.focus()
+  await search.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+  expect(wrapper.find('.card-editing').exists()).toBe(true)
+  expect(document.activeElement).toBe(wrapper.get('.model-selector__trigger').element)
+  await wrapper.get('.model-selector__trigger').trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(wrapper.find('.card-editing').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+it('gives a dirty engine confirmation and IME composition precedence over editor Escape', async () => {
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  const tasks = useTaskStore()
+  tasks.schedules = [{
+    schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me',
+    daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+    enabled: true, model: '', provider: '',
+  }] as typeof tasks.schedules
+  tasks.schedulesLoaded = true
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+  ] })
+  await router.push('/schedules/s1')
+  await router.isReady()
+  const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+  const dialog = mount(ConfirmDialog, { attachTo: document.body })
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit engine"]').trigger('click')
+  await wrapper.get('.model-selector__trigger').trigger('click')
+  await flushPromises()
+  await wrapper.get('[role="option"][data-model="model"]').trigger('click')
+  await flushPromises()
+  const trigger = wrapper.get('.model-selector__trigger')
+  for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    trigger.element.dispatchEvent(event)
+    await flushPromises()
+    expect(event.defaultPrevented).toBe(false)
+    expect(pendingConfirm.value).toBeNull()
+    expect(wrapper.find('.card-editing').exists()).toBe(true)
+  }
+  const prompt = askPrompt('Another action')
+  await trigger.trigger('keydown', { key: 'Escape' })
+  expect(pendingPrompt.value).not.toBeNull()
+  expect(pendingConfirm.value).toBeNull()
+  pendingPrompt.value?.resolve(null)
+  await prompt
+  const layer = document.createElement('div')
+  layer.setAttribute('data-dismissable-layer', '')
+  document.body.appendChild(layer)
+  await trigger.trigger('keydown', { key: 'Escape' })
+  expect(pendingConfirm.value).toBeNull()
+  expect(wrapper.find('.card-editing').exists()).toBe(true)
+  layer.remove()
+  await trigger.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  const original = pendingConfirm.value
+  expect(original?.message).toContain('Discard')
+  const cancel = dialog.get<HTMLButtonElement>('.confirm-action--cancel')
+  await cancel.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(pendingConfirm.value).toBeNull()
+  expect(wrapper.find('.card-editing').exists()).toBe(true)
+  expect(wrapper.getComponent(ModelSelector).props('modelValue')).toBe('model')
+  wrapper.unmount()
+  dialog.unmount()
+})
+
+it('restores the engine opener after registry loss but does not steal deliberately moved focus', async () => {
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  const tasks = useTaskStore()
+  tasks.schedules = [{
+    schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me',
+    daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+    enabled: true, model: '', provider: '',
+  }] as typeof tasks.schedules
+  tasks.schedulesLoaded = true
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+  ] })
+  await router.push('/schedules/s1')
+  await router.isReady()
+  const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit engine"]').trigger('click')
+  await wrapper.get('.model-selector__trigger').trigger('click')
+  await flushPromises()
+  wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+  projects.workspaceRegistryStatus = 'error'
+  await flushPromises()
+  expect(document.activeElement).toBe(wrapper.get('.model-selector__trigger').element)
+  projects.workspaceRegistryStatus = 'ready'
+  await flushPromises()
+  await wrapper.get('.model-selector__trigger').trigger('click')
+  await flushPromises()
+  wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+  const outside = document.createElement('button')
+  document.body.appendChild(outside)
+  projects.workspaceRegistryStatus = 'error'
+  outside.focus()
+  await flushPromises()
+  expect(document.activeElement).toBe(outside)
+  outside.remove()
   wrapper.unmount()
 })
 
@@ -599,6 +829,7 @@ it('recovers an open engine editor after registry readiness changes without a wo
 })
 
 it('requires explicit default selection before moving an automation with a model override', async () => {
+  const savedWorkspace = localStorage.getItem('ciao-active-workspace')
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
@@ -629,8 +860,198 @@ it('requires explicit default selection before moving an automation with a model
   await flushPromises()
   expect(update).toHaveBeenCalledWith('s1', expect.objectContaining({
     workspace: 'work', model: '', provider: '', prompt: 'Keep me',
+  }), expect.any(Symbol))
+  wrapper.unmount()
+  if (savedWorkspace === null) localStorage.removeItem('ciao-active-workspace')
+  else localStorage.setItem('ciao-active-workspace', savedWorkspace)
+})
+
+it.each(['success', 'declined', 'superseded', 'error'] as const)(
+  'guards an explicit user routine workspace move: %s',
+  async outcome => {
+    const savedWorkspace = localStorage.getItem('ciao-active-workspace')
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    projects.projects = [
+      { project_id: 'p', workspace: 'personal', name: 'Personal' },
+      { project_id: 'w', workspace: 'work', name: 'Work' },
+    ] as typeof projects.projects
+    const tasks = useTaskStore()
+    const original = {
+      schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me',
+      daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+      enabled: true, model: 'personal-model', provider: 'claude', web_project_id: 'p',
+    } as typeof tasks.schedules[number]
+    tasks.schedules = [original]
+    tasks.schedulesLoaded = true
+    let allow!: (value: boolean) => void
+    projects.registerWorkspaceSwitchGuard(() => new Promise(resolve => { allow = resolve }))
+    if (outcome === 'error') vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline'))
+    else vi.mocked(api.patch).mockResolvedValueOnce({ ...original, workspace: 'work', model: '', provider: '', web_project_id: 'w' })
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+    ] })
+    await router.push('/schedules/s1')
+    await router.isReady()
+    const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+    await flushPromises()
+    await wrapper.get('[aria-label="Edit delivery"]').trigger('click')
+    await wrapper.get('.card-editing select').setValue('work')
+    await wrapper.get('input[aria-label="Use destination workspace default model"]').setValue(true)
+    await wrapper.get('.card-editing button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(tasks.updatingSchedules.has('s1')).toBe(true)
+    expect(api.patch).not.toHaveBeenCalled()
+    await expect(tasks.updateSchedule('s1', { model: 'conflicting' })).rejects.toThrow('already being updated')
+    expect(api.patch).not.toHaveBeenCalled()
+    if (outcome === 'superseded') {
+      projects.activeWorkspace = 'work'
+      projects.activeWorkspace = 'personal'
+    }
+    allow(outcome !== 'declined')
+    await flushPromises()
+    if (outcome === 'declined' || outcome === 'superseded') {
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(projects.activeWorkspace).toBe('personal')
+      expect(tasks.schedules[0]).toMatchObject({ workspace: 'personal', model: 'personal-model', provider: 'claude' })
+      expect(wrapper.find('.card-editing').exists()).toBe(true)
+    } else {
+      expect(projects.activeWorkspace).toBe('work')
+      expect(api.patch).toHaveBeenCalledWith('/api/schedules/s1', expect.objectContaining({
+        workspace: 'work', model: '', provider: '', prompt: 'Keep me',
+      }))
+      if (outcome === 'success') {
+        expect(tasks.schedules[0]).toMatchObject({ workspace: 'work', model: '', provider: '' })
+        expect(wrapper.find('.card-editing').exists()).toBe(false)
+        await wrapper.get('[aria-label="Edit engine"]').trigger('click')
+        expect(wrapper.find('.card-editing .model-selector').exists()).toBe(true)
+        expect(wrapper.text()).not.toContain('Switch to work to choose automation models')
+      } else {
+        expect(wrapper.get('[role="alert"]').text()).toContain('offline')
+        expect(wrapper.find('.card-editing').exists()).toBe(true)
+      }
+    }
+    expect(tasks.updatingSchedules.has('s1')).toBe(false)
+    wrapper.unmount()
+    if (savedWorkspace === null) localStorage.removeItem('ciao-active-workspace')
+    else localStorage.setItem('ciao-active-workspace', savedWorkspace)
+  },
+)
+
+it.each(['away', 'away-and-back'] as const)(
+  'does not resubmit the old model after a delayed routine move and workspace change: %s',
+  async transition => {
+    const savedWorkspace = localStorage.getItem('ciao-active-workspace')
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    projects.projects = [
+      { project_id: 'p', workspace: 'personal', name: 'Personal' },
+      { project_id: 'w', workspace: 'work', name: 'Work' },
+      { project_id: 'w2', workspace: 'work', name: 'Other work' },
+    ] as typeof projects.projects
+    const tasks = useTaskStore()
+    const original = {
+      schedule_id: 's1', workspace: 'personal', title: 'Test', prompt: 'Keep me',
+      daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+      enabled: true, model: 'personal-model', provider: 'claude', web_project_id: 'p',
+    } as typeof tasks.schedules[number]
+    tasks.schedules = [original]
+    tasks.schedulesLoaded = true
+    let resolveMove!: (value: unknown) => void
+    const moved = { ...original, workspace: 'work', model: '', provider: '', web_project_id: 'w2' }
+    vi.mocked(api.patch).mockReturnValueOnce(new Promise(resolve => { resolveMove = resolve }))
+      .mockResolvedValueOnce({ ...moved, web_project_id: 'w' })
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+    ] })
+    await router.push('/schedules/s1')
+    await router.isReady()
+    const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+    await flushPromises()
+    await wrapper.get('[aria-label="Edit delivery"]').trigger('click')
+    await wrapper.get('.card-editing select').setValue('work')
+    await wrapper.findAll('.card-editing select')[1].setValue('proj:w2')
+    await wrapper.get('input[aria-label="Use destination workspace default model"]').setValue(true)
+    await wrapper.get('.card-editing button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(api.patch).toHaveBeenCalledTimes(1)
+    expect(projects.activeWorkspace).toBe('work')
+    projects.activeWorkspace = 'personal'
+    if (transition === 'away-and-back') projects.activeWorkspace = 'work'
+    resolveMove(moved)
+    await flushPromises()
+    expect(projects.activeWorkspace).toBe(transition === 'away' ? 'personal' : 'work')
+    expect(wrapper.find('.card-editing').exists()).toBe(true)
+    expect((wrapper.findAll('.card-editing select')[1].element as HTMLSelectElement).value).toBe('proj:w2')
+    expect(wrapper.text()).toContain('Keep me')
+    await wrapper.findAll('.card-editing select')[1].setValue('proj:w')
+    await wrapper.get('.card-editing button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(api.patch).toHaveBeenNthCalledWith(2, '/api/schedules/s1', expect.objectContaining({
+      workspace: 'work', model: '', provider: '', prompt: 'Keep me', web_project_id: 'w',
+    }))
+    wrapper.unmount()
+    if (savedWorkspace === null) localStorage.removeItem('ciao-active-workspace')
+    else localStorage.setItem('ciao-active-workspace', savedWorkspace)
+  },
+)
+
+it('does not alter a newly selected routine or its draft when an older move returns', async () => {
+  const savedWorkspace = localStorage.getItem('ciao-active-workspace')
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
+  projects.workspaceRegistryStatus = 'ready'
+  projects.projects = [
+    { project_id: 'p', workspace: 'personal', name: 'Personal' },
+    { project_id: 'w', workspace: 'work', name: 'Work' },
+    { project_id: 'w2', workspace: 'work', name: 'Other work' },
+  ] as typeof projects.projects
+  const tasks = useTaskStore()
+  const first = {
+    schedule_id: 's1', workspace: 'personal', title: 'First', prompt: 'First prompt',
+    daily_time_utc: '08:00', timezone_name: 'UTC', frequency: 'daily', chat_id: 0,
+    enabled: true, model: 'personal-model', provider: 'claude', web_project_id: 'p',
+  } as typeof tasks.schedules[number]
+  const second = { ...first, schedule_id: 's2', workspace: 'work', title: 'Second',
+    prompt: 'Second prompt', model: 'work-model', provider: 'opencode', web_project_id: 'w' } as typeof first
+  tasks.schedules = [first, second]
+  tasks.schedulesLoaded = true
+  let resolveMove!: (value: unknown) => void
+  vi.mocked(api.patch).mockReturnValueOnce(new Promise(resolve => { resolveMove = resolve }))
+    .mockResolvedValueOnce({ ...second, web_project_id: 'w2' })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
+  ] })
+  await router.push('/schedules/s1')
+  await router.isReady()
+  const wrapper = mount(SchedulePanel, { attachTo: document.body, global: { plugins: [router] } })
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit delivery"]').trigger('click')
+  await wrapper.get('.card-editing select').setValue('work')
+  await wrapper.get('input[aria-label="Use destination workspace default model"]').setValue(true)
+  await wrapper.get('.card-editing button.btn-primary').trigger('click')
+  await flushPromises()
+  expect(api.patch).toHaveBeenCalledTimes(1)
+  await router.push('/schedules/s2')
+  await flushPromises()
+  await wrapper.get('[aria-label="Edit delivery"]').trigger('click')
+  await wrapper.findAll('.card-editing select')[1].setValue('proj:w2')
+  resolveMove({ ...first, workspace: 'work', model: '', provider: '', web_project_id: 'w' })
+  await flushPromises()
+  expect(router.currentRoute.value.params.scheduleId).toBe('s2')
+  expect(projects.activeWorkspace).toBe('work')
+  expect(wrapper.find('.card-editing').exists()).toBe(true)
+  expect((wrapper.findAll('.card-editing select')[1].element as HTMLSelectElement).value).toBe('proj:w2')
+  await wrapper.get('.card-editing button.btn-primary').trigger('click')
+  await flushPromises()
+  expect(api.patch).toHaveBeenNthCalledWith(2, '/api/schedules/s2', expect.objectContaining({
+    workspace: 'work', model: 'work-model', provider: 'opencode', prompt: 'Second prompt', web_project_id: 'w2',
   }))
   wrapper.unmount()
+  if (savedWorkspace === null) localStorage.removeItem('ciao-active-workspace')
+  else localStorage.setItem('ciao-active-workspace', savedWorkspace)
 })
 
 it('closes task delegation on switching and opens the new workspace task with its own models', async () => {
@@ -709,11 +1130,31 @@ it('closes task delegation on switching and opens the new workspace task with it
   await flushPromises()
   expect(second.get('[role=alert]').text()).toContain('work offline')
   expect(second.findAll('[role=alert]')).toHaveLength(1)
+  expect(second.get<HTMLButtonElement>('[aria-label="Retry delegation models"]').element.type).toBe('button')
   await second.get('[aria-label="Retry delegation models"]').trigger('click')
   await flushPromises()
-  expect(second.get('[role=status]').attributes('aria-live')).toBe('polite')
+  expect(second.get('[role="status"][aria-label="Delegation models"]').attributes('aria-live')).toBe('polite')
+  expect(second.get('[role="status"][aria-label="Delegation models"]').text()).toContain('loaded')
   expect(second.text()).toContain('Work Model')
   expect(second.text()).not.toContain('Personal Model')
+  const listbox = second.get('[role="listbox"]')
+  const labelId = listbox.attributes('aria-labelledby')
+  expect(labelId).toBeTruthy()
+  expect(document.getElementById(labelId!)?.textContent).toContain('Provider & model')
+  const search = second.get<HTMLInputElement>('.model-selector__search')
+  for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    search.element.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(second.find('.model-selector__popover').exists()).toBe(true)
+    expect(second.find('#task-delegate-title').exists()).toBe(true)
+  }
+  await search.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(second.find('.model-selector__popover').exists()).toBe(false)
+  expect(document.activeElement).toBe(second.get('.task-delegate-model').element)
+  expect(second.find('#task-delegate-title').exists()).toBe(true)
+  await second.get('.task-delegate-model').trigger('click')
   await second.get('[role="option"][data-model="__workspace-default__"]').trigger('click')
   await second.get('.task-delegate-model').trigger('click')
   await flushPromises()
@@ -721,11 +1162,22 @@ it('closes task delegation on switching and opens the new workspace task with it
   workOption.element.focus()
   await workOption.trigger('keydown', { key: 'Enter' })
   await second.get('#task-delegate-instructions').setValue('Keep the B instruction')
+  const instructions = second.get<HTMLTextAreaElement>('#task-delegate-instructions')
+  for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    instructions.element.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(second.find('#task-delegate-title').exists()).toBe(true)
+    expect(instructions.element.value).toBe('Keep the B instruction')
+  }
   const delegate = vi.spyOn(useTaskBoardStore(), 'delegate').mockResolvedValue(null)
   await second.get('.task-sheet .btn-primary').trigger('click')
   await flushPromises()
   expect(delegate).toHaveBeenCalledWith('work', 'ship', 'a'.repeat(64), undefined,
     'Keep the B instruction', { model: 'work-model', provider: 'claude' })
+  await instructions.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(second.find('#task-delegate-title').exists()).toBe(false)
   second.unmount()
 })
 

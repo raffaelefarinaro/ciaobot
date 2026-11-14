@@ -11,7 +11,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useWebhookStore } from '../../stores/webhooks'
 
 const confirmMock = vi.fn(async (_message: string) => true)
-vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message) }))
+vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message), pendingConfirm: { value: null } }))
 
 const Stub = defineComponent({ render: () => h('div') })
 const ModelSelectorStub = defineComponent({
@@ -252,6 +252,107 @@ describe('SchedulePanel property cards', () => {
     expect(card(wrapper, 'Results').find('.card-edit').exists()).toBe(true)
     // …but the system workspace switcher is still reachable.
     expect(card(wrapper, 'Where it runs').find('.system-workspace-control').exists()).toBe(true)
+  })
+
+  it('does not save a system routine move when the workspace guard declines', async () => {
+    const wrapper = await mountPanel(makeSchedule({ scope: 'system', workspace: 'work' }))
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'work' }, { name: 'personal' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    projects.registerWorkspaceSwitchGuard(async () => false)
+    const select = wrapper.get<HTMLSelectElement>('.system-workspace-control select')
+    await select.setValue('personal')
+    await flushPromises()
+    expect(useTaskStore().updateSchedule).not.toHaveBeenCalled()
+    expect(projects.activeWorkspace).toBe('work')
+    expect(select.element.value).toBe('work')
+    expect(useTaskStore().schedules[0]).toMatchObject({ workspace: 'work', model: 'opus', provider: 'claude' })
+  })
+
+  it('does not save a system routine without an override when the workspace guard declines', async () => {
+    const wrapper = await mountPanel(makeSchedule({ scope: 'system', model: '', provider: '' }))
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'work' }, { name: 'personal' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    projects.registerWorkspaceSwitchGuard(async () => false)
+    const select = wrapper.get<HTMLSelectElement>('.system-workspace-control select')
+    await select.setValue('personal')
+    await flushPromises()
+    expect(useTaskStore().updateSchedule).not.toHaveBeenCalled()
+    expect(select.element.value).toBe('work')
+    expect(projects.activeWorkspace).toBe('work')
+    expect(confirmMock).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed system routine save after switching without changing the saved routine', async () => {
+    const wrapper = await mountPanel(makeSchedule({ scope: 'system', workspace: 'work' }))
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'work' }, { name: 'personal' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    let reject!: (error: Error) => void
+    vi.mocked(useTaskStore().updateSchedule).mockReturnValueOnce(new Promise((_, fail) => { reject = fail }))
+    const select = wrapper.get<HTMLSelectElement>('.system-workspace-control select')
+    await select.setValue('personal')
+    await flushPromises()
+    expect(projects.activeWorkspace).toBe('personal')
+    expect(select.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[role="status"]').text()).toContain('Moving routine')
+    expect(useTaskStore().updateSchedule).toHaveBeenCalledWith('sched-1', { workspace: 'personal', model: '', provider: '' }, expect.any(Symbol))
+    reject(new Error('offline'))
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('offline')
+    expect(select.element.value).toBe('work')
+    expect(useTaskStore().schedules[0]).toMatchObject({ workspace: 'work', model: 'opus', provider: 'claude' })
+  })
+
+  it('switches before saving a system routine without a model override', async () => {
+    const schedule = makeSchedule({ scope: 'system', workspace: 'work', model: '', provider: '' })
+    const wrapper = await mountPanel(schedule)
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'work' }, { name: 'personal' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    const store = useTaskStore()
+    vi.mocked(store.updateSchedule).mockImplementationOnce(async (_id, updates) => {
+      expect(projects.activeWorkspace).toBe('personal')
+      const saved = { ...schedule, ...updates } as Schedule
+      store.schedules = [saved]
+      return saved
+    })
+    await wrapper.get('.system-workspace-control select').setValue('personal')
+    await flushPromises()
+    expect(store.updateSchedule).toHaveBeenCalledWith('sched-1', { workspace: 'personal' }, expect.any(Symbol))
+    expect(projects.activeWorkspace).toBe('personal')
+    expect(confirmMock).not.toHaveBeenCalled()
+  })
+
+  it('does not save if the workspace changes while a system routine guard is pending', async () => {
+    const wrapper = await mountPanel(makeSchedule({ scope: 'system', workspace: 'work' }))
+    const projects = useProjectStore()
+    projects.workspaces = [{ name: 'work' }, { name: 'personal' }] as typeof projects.workspaces
+    projects.workspaceRegistryStatus = 'ready'
+    let allow!: (value: boolean) => void
+    projects.registerWorkspaceSwitchGuard(() => new Promise(resolve => { allow = resolve }))
+    const select = wrapper.get<HTMLSelectElement>('.system-workspace-control select')
+    await select.setValue('personal')
+    await flushPromises()
+    expect(select.attributes('disabled')).toBeDefined()
+    projects.activeWorkspace = 'personal'
+    projects.activeWorkspace = 'work'
+    allow(true)
+    await flushPromises()
+    expect(useTaskStore().updateSchedule).not.toHaveBeenCalled()
+    expect(select.element.value).toBe('work')
+  })
+
+  it.each(['system', 'user'] as const)('does not force the workspace back when the same %s schedule is refreshed', async scope => {
+    const wrapper = await mountPanel(makeSchedule({ scope, workspace: 'work' }))
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'personal'
+    const store = useTaskStore()
+    store.schedules = [{ ...store.schedules[0], title: 'Refreshed' }]
+    await flushPromises()
+    expect(projects.activeWorkspace).toBe('personal')
+    expect(wrapper.text()).toContain('Refreshed')
   })
 
   it('loads a cold model catalog when editing a system routine and gives it to the picker', async () => {

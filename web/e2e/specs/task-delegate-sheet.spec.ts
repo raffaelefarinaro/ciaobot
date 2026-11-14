@@ -34,6 +34,7 @@ test.describe('the delegate sheet', () => {
     const chip = sheet.locator('.task-delegate-model')
     const closedHeight = (await chip.boundingBox())!.height
     await chip.click()
+    await expect(page.getByRole('listbox', { name: 'Provider & model' })).toBeVisible()
     await expect(page.getByRole('option').first()).toBeVisible()
     expect((await chip.boundingBox())!.height).toBe(closedHeight)
 
@@ -43,4 +44,30 @@ test.describe('the delegate sheet', () => {
     await expect(sheet).toBeVisible()
     await expect(chip).toBeFocused()
   })
+})
+
+test('delegation model retry stays reachable on a 390px phone', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await isolate(page, `delegate-error-${testInfo.workerIndex}-${testInfo.testId}`)
+  await page.route('**/api/models?**', route => route.fulfill({ status: 503, body: 'offline' }))
+  await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  await page.evaluate(() => fetch('/__fixture__/transcript', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ shape: 'task-link' }),
+  }))
+  await page.reload()
+  await page.waitForSelector(COMPOSER)
+  await page.locator('.message-wrap.assistant a', { hasText: 'Reply to Ivo' }).click()
+  await page.locator('.task-delegate-actions button', { hasText: 'Delegate to agent' }).click()
+  await page.locator('.task-delegate-model').click()
+  const retry = page.getByRole('button', { name: 'Retry delegation models' })
+  await expect(retry).toBeVisible()
+  const bounds = await retry.boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(bounds!.width).toBeGreaterThanOrEqual(44)
+  expect(bounds!.height).toBeGreaterThanOrEqual(44)
+  expect(bounds!.x).toBeGreaterThanOrEqual(0)
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390)
+  await retry.click()
 })

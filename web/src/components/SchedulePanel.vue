@@ -54,7 +54,7 @@
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
           >{{ showRunning ? 'Running...' : 'Run now' }}</button>
-          <button class="btn-small desktop-only" @click="onToggleEnabled">
+          <button class="btn-small desktop-only" :disabled="scheduleUpdating" @click="onToggleEnabled">
             {{ enabledToggleLabel(schedule) }}
           </button>
           <!-- The shared ⋯ menu. A system routine has nothing in it on a wide
@@ -71,7 +71,7 @@
               >{{ showRunning ? 'Running...' : 'Run now' }}</button>
             </DropdownMenuItem>
             <DropdownMenuItem as-child>
-              <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
+              <button type="button" class="menu-toggle-item" :disabled="scheduleUpdating" @click="onToggleEnabled">
                 {{ enabledToggleLabel(schedule) }}
               </button>
             </DropdownMenuItem>
@@ -326,12 +326,14 @@
               <template v-else>
                 <div class="form-group">
                   <label>Run this routine in</label>
-                  <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
+                  <select :value="schedule.workspace" :disabled="systemWorkspacePending || scheduleUpdating || !!editingCard" @change="onSystemWorkspaceChange">
                     <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
                       {{ workspaceDisplayName(workspace.name) }}
                     </option>
                   </select>
                 </div>
+                <p v-if="systemWorkspacePending" role="status" aria-live="polite">Moving routine…</p>
+                <p v-if="systemWorkspaceError" role="alert">{{ systemWorkspaceError }}</p>
                 <p class="hint">Uses that workspace's provider and default model unless you set an override in Engine.</p>
               </template>
             </div>
@@ -340,7 +342,7 @@
           <div v-else class="card-form">
             <div class="form-group">
               <label>Workspace</label>
-              <select v-model="editData.workspace" @change="onEditWorkspaceChange">
+              <select v-model="editData.workspace" :disabled="scheduleUpdating" @change="onEditWorkspaceChange">
                 <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
                   {{ workspaceDisplayName(workspace.name) }}
                 </option>
@@ -348,7 +350,7 @@
             </div>
             <div class="form-group">
               <label>Deliver to</label>
-              <select v-model="editData.contextKey">
+              <select v-model="editData.contextKey" :disabled="scheduleUpdating">
                 <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
                   <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
                     {{ ctx.label || ctx.key }}
@@ -357,13 +359,14 @@
               </select>
             </div>
             <label v-if="workspaceMoveNeedsDefault">
-              <input v-model="acceptDestinationDefault" type="checkbox" aria-label="Use destination workspace default model">
+              <input v-model="acceptDestinationDefault" type="checkbox" :disabled="scheduleUpdating" aria-label="Use destination workspace default model">
               Clear the current model override and use the destination workspace default.
             </label>
+            <p v-if="cardSaveError" role="alert">{{ cardSaveError }}</p>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
-              <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid || (workspaceMoveNeedsDefault && !acceptDestinationDefault)" @click="saveCardEdit">Save</button>
+              <button class="btn-chip" :disabled="scheduleUpdating" @click="cancelCardEdit">Cancel</button>
+              <button class="btn-primary" :disabled="scheduleUpdating || !cardDirty || !cardEditValid || (workspaceMoveNeedsDefault && !acceptDestinationDefault)" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -378,6 +381,7 @@
               type="button"
               class="card-edit"
               :aria-label="'Edit engine'"
+              :disabled="scheduleUpdating"
               @click="startCardEdit('engine')"
             >Edit</button>
           </div>
@@ -444,6 +448,7 @@
               type="button"
               class="card-edit"
               :aria-label="'Edit advanced settings'"
+              :disabled="scheduleUpdating"
               @click="startCardEdit('advanced')"
             >Edit</button>
           </div>
@@ -747,7 +752,8 @@ import { providerForModelSection, sectionsFromModelsResponse } from '../lib/mode
 import { isPerWorkspaceRoutine, workspaceForSchedule } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { isMemoryProject } from '../lib/memoryPass'
-import { askConfirm } from '../lib/confirm'
+import { askConfirm, pendingConfirm } from '../lib/confirm'
+import { pendingPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 
@@ -766,6 +772,13 @@ const router = useRouter()
 const store = useTaskStore()
 const uid = useId()
 const projectStore = useProjectStore()
+const systemWorkspacePending = ref(false)
+const systemWorkspaceError = ref('')
+let systemWorkspaceSequence = 0
+let cardSaveSequence = 0
+const cardSaveError = ref('')
+let workspaceSequence = 0
+watch(() => projectStore.activeWorkspace, () => { workspaceSequence++ }, { flush: 'sync' })
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 // Properties are edited one card at a time ('' = nothing being edited), so the
@@ -815,7 +828,10 @@ function onVisibilityChange() {
 // Escape always leaves the open card. Stop it here so it doesn't also fall
 // through to whatever else listens for Escape and close the whole panel.
 function onEditKeydown(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || !editingCard.value) return
+  if (event.key !== 'Escape' || !editingCard.value || event.isComposing || event.keyCode === 229) return
+  if (pendingConfirm.value || pendingPrompt.value || document.querySelector('[data-dismissable-layer]')) return
+  if (editingCard.value === 'engine'
+    && editModelRegion.value?.querySelector('.model-selector__trigger[aria-expanded="true"]')) return
   event.stopPropagation()
   event.preventDefault()
   void cancelCardEdit()
@@ -829,6 +845,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  systemWorkspaceSequence++
+  cardSaveSequence++
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
   if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -839,7 +857,9 @@ const scheduleId = computed(() => (route.params.scheduleId as string) || '')
 const schedule = computed(() =>
   store.schedules.find(s => s.schedule_id === scheduleId.value) || null,
 )
-watch(schedule, (s) => {
+const scheduleUpdating = computed(() => store.updatingSchedules.has(scheduleId.value))
+watch(schedule, (s, previous) => {
+  if (s && previous?.schedule_id === s.schedule_id) return
   // An entry migrated from a loop may carry no workspace of its own; the
   // helper falls back to the bound chat's, which is where loops kept it.
   const targetWs = s
@@ -863,6 +883,11 @@ function onArrivalEnd(e: AnimationEvent): void {
   if (e.target === e.currentTarget) railArrival.value = 0
 }
 watch(scheduleId, () => {
+  systemWorkspaceSequence++
+  cardSaveSequence++
+  cardSaveError.value = ''
+  systemWorkspacePending.value = false
+  systemWorkspaceError.value = ''
   railLean.value = 0
   railArrival.value = takeScheduleRailArrival()
   editingCard.value = ''
@@ -1058,12 +1083,12 @@ watch(() => store.modelTransition, transition => {
   const region = editModelRegion.value
   const focused = document.activeElement
   const restore = !!focused && !!region?.querySelector('.model-selector__popover')?.contains(focused)
-  void nextTick(() => {
+  void nextTick(() => nextTick(() => {
     if (restore && transition === store.modelTransition && region?.isConnected
       && (document.activeElement === document.body || document.activeElement === focused)) {
       region.querySelector<HTMLButtonElement>('.model-selector__trigger')?.focus()
     }
-  })
+  }))
   if (editingCard.value === 'engine' && !inheritsChatModel.value && editModelWorkspaceMatches.value
     && store.modelWorkspaceEligible && !store.modelLoading && !store.models) void store.fetchModels()
 }, { flush: 'sync' })
@@ -1333,20 +1358,48 @@ const workspaceMoveNeedsDefault = computed(() =>
   && editData.value.workspace !== (schedule.value.workspace || projectStore.activeWorkspace),
 )
 async function onSystemWorkspaceChange(event: Event) {
-  if (!schedule.value) return
+  if (!schedule.value || systemWorkspacePending.value || editingCard.value) return
   const select = event.target as HTMLSelectElement
   const workspace = select.value
   const scheduleId = schedule.value.schedule_id
-  const changingModel = !!schedule.value.model && workspace !== schedule.value.workspace
-  if (changingModel && !(await askConfirm('Clear the current model override and use the destination workspace default?'))) {
+  const owner = store.reserveScheduleUpdate(scheduleId)
+  if (!owner) {
     select.value = schedule.value.workspace || projectStore.activeWorkspace
     return
   }
-  await store.updateSchedule(scheduleId, changingModel ? { workspace, model: '', provider: '' } : { workspace })
-  if (projectStore.activeWorkspace !== workspace) {
-    if ((await projectStore.switchWorkspace(workspace, { transition: false })) === false) return
+  const changingModel = !!schedule.value.model && workspace !== schedule.value.workspace
+  const source = projectStore.activeWorkspace
+  const originalWorkspace = schedule.value.workspace
+  const sequence = ++systemWorkspaceSequence
+  const sourceSequence = workspaceSequence
+  const current = () => sequence === systemWorkspaceSequence && schedule.value?.schedule_id === scheduleId
+  systemWorkspacePending.value = true
+  systemWorkspaceError.value = ''
+  try {
+    if (changingModel && !(await askConfirm('Clear the current model override and use the destination workspace default?'))) return
+    if (!current() || workspaceSequence !== sourceSequence || projectStore.activeWorkspace !== source
+      || schedule.value?.workspace !== originalWorkspace) return
+    const switched = await projectStore.switchWorkspace(workspace, {
+      transition: false,
+      isCurrent: () => current() && workspaceSequence === sourceSequence
+        && projectStore.activeWorkspace === source && schedule.value?.workspace === originalWorkspace,
+    })
+    if (!switched || !current() || projectStore.activeWorkspace !== workspace
+      || schedule.value?.workspace !== originalWorkspace) return
+    const switchedSequence = workspaceSequence
+    await store.updateSchedule(scheduleId, changingModel ? { workspace, model: '', provider: '' } : { workspace }, owner)
+    if (current() && workspaceSequence === switchedSequence && projectStore.activeWorkspace === workspace) {
+      await router.push(`/schedules/${scheduleId}`)
+    }
+  } catch (error: unknown) {
+    if (current()) systemWorkspaceError.value = `Could not confirm the routine move: ${error instanceof Error ? error.message : 'Please try again.'} Check the routine before retrying; the active workspace may have changed.`
+  } finally {
+    store.releaseScheduleUpdate(scheduleId, owner)
+    if (current()) {
+      systemWorkspacePending.value = false
+      if (select.isConnected) select.value = schedule.value?.workspace || projectStore.activeWorkspace
+    }
   }
-  await router.push(`/schedules/${scheduleId}`)
 }
 const canEditSchedule = computed(() => !!schedule.value && schedule.value.scope !== 'system')
 const canEditEngine = computed(() => !!schedule.value)
@@ -1361,7 +1414,8 @@ function editSnapshot(): string {
 const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== editBaseline.value)
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
-  if (!schedule.value) return
+  if (!schedule.value || scheduleUpdating.value) return
+  cardSaveError.value = ''
   acceptDestinationDefault.value = false
   const isSystem = schedule.value.scope === 'system'
   if (isSystem) {
@@ -1390,13 +1444,16 @@ function startCardEdit(card: Exclude<EditCard, ''>) {
 }
 
 async function cancelCardEdit() {
+  if (scheduleUpdating.value) return
   if (cardDirty.value && !(await askConfirm('Discard your unsaved changes?'))) return
+  cardSaveSequence++
+  cardSaveError.value = ''
   editingCard.value = ''
   editBaseline.value = ''
 }
 
 async function saveCardEdit() {
-  if (!schedule.value) return
+  if (!schedule.value || scheduleUpdating.value) return
   if (editingCard.value === 'engine' && !inheritsChatModel.value && !editModelWorkspaceMatches.value) return
   if (workspaceMoveNeedsDefault.value && !acceptDestinationDefault.value) return
   const d = editData.value
@@ -1451,9 +1508,52 @@ async function saveCardEdit() {
     updates.chat_id = parseInt(parts[0], 10)
     updates.thread_id = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
-  await store.updateSchedule(schedule.value.schedule_id, updates)
-  editingCard.value = ''
-  editBaseline.value = ''
+  const id = schedule.value.schedule_id
+  const originalWorkspace = schedule.value.workspace
+  const movingWorkspace = editingCard.value === 'delivery'
+    && d.workspace !== (originalWorkspace || projectStore.activeWorkspace)
+  if (!movingWorkspace) {
+    await store.updateSchedule(id, updates)
+    editingCard.value = ''
+    editBaseline.value = ''
+    return
+  }
+  const owner = store.reserveScheduleUpdate(id)
+  if (!owner) return
+  const sequence = ++cardSaveSequence
+  const source = projectStore.activeWorkspace
+  const sourceSequence = workspaceSequence
+  const snapshot = editSnapshot()
+  const acceptedDefault = acceptDestinationDefault.value
+  const sameEditor = () => sequence === cardSaveSequence && schedule.value?.schedule_id === id
+    && editingCard.value === 'delivery' && editSnapshot() === snapshot
+    && acceptDestinationDefault.value === acceptedDefault
+  const current = () => sameEditor() && schedule.value?.workspace === originalWorkspace
+  cardSaveError.value = ''
+  try {
+    const switched = await projectStore.switchWorkspace(d.workspace, {
+      transition: false,
+      isCurrent: () => current() && workspaceSequence === sourceSequence && projectStore.activeWorkspace === source,
+    })
+    if (!switched || !current() || projectStore.activeWorkspace !== d.workspace
+      || workspaceSequence !== sourceSequence + (source === d.workspace ? 0 : 1)) return
+    const switchedSequence = workspaceSequence
+    await store.updateSchedule(id, updates, owner)
+    const unchangedEditor = sameEditor()
+    if (sequence === cardSaveSequence && schedule.value?.schedule_id === id
+      && editingCard.value === 'delivery' && updates.model === '' && updates.provider === '') {
+      editData.value.model = ''
+      editModelProvider.value = ''
+    }
+    if (unchangedEditor && workspaceSequence === switchedSequence && projectStore.activeWorkspace === d.workspace) {
+      editingCard.value = ''
+      editBaseline.value = ''
+    }
+  } catch (error: unknown) {
+    if (current()) cardSaveError.value = `Could not confirm the routine move: ${error instanceof Error ? error.message : 'Please try again.'} Check the routine before retrying; the active workspace may have changed.`
+  } finally {
+    store.releaseScheduleUpdate(id, owner)
+  }
 }
 
 function openRunningChat() {
@@ -1567,7 +1667,7 @@ async function runAllMissed() {
 }
 
 async function onToggleEnabled() {
-  if (!schedule.value) return
+  if (!schedule.value || scheduleUpdating.value) return
   await store.updateSchedule(schedule.value.schedule_id, { enabled: !schedule.value.enabled })
 }
 

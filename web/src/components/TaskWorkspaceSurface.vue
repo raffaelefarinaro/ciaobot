@@ -46,7 +46,7 @@
  * that resolve it** rather than silently rewritten.
  */
 import TaskNoteFeed from './TaskNoteFeed.vue'
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
@@ -923,6 +923,7 @@ const DELEGATE_DEFAULT_KEY = '__workspace-default__'
 const delegateRuntime = ref<NewChatRuntime | null>(null)
 const delegateModelPickerOpen = ref(false)
 const delegateModelTrigger = ref<HTMLButtonElement | null>(null)
+const delegateModelLabelId = useId()
 const delegateModelRegion = ref<HTMLElement | null>(null)
 const delegateModelWorkspace = ref('')
 const taskStore = useTaskStore()
@@ -3630,7 +3631,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
               <dd>{{ delegatePreview?.project }}</dd>
             </div>
             <div>
-              <dt>Provider &amp; model</dt>
+              <dt :id="delegateModelLabelId">Provider &amp; model</dt>
               <dd>
                 <div v-if="delegateTakesInstructions" ref="delegateModelRegion" class="task-delegate-model-wrap">
                   <button
@@ -3648,6 +3649,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                     triggerless
                     :model-value="delegateRuntime?.model || DELEGATE_DEFAULT_KEY"
                     :sections="delegateModelSections"
+                    :labelled-by="delegateModelLabelId"
                     placeholder="Model"
                     placement="bottom-start"
                     v-on="{ select: delegateSelectionHandler(taskStore.modelTransition), close: delegateCloseHandler(taskStore.modelTransition) }"
@@ -5025,8 +5027,11 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 /* As wide as the task editor the sheet opens from. */
 .task-delegate-sheet { max-width: 1120px; }
 .task-delegate-sheet .task-form textarea { min-height: 12rem; }
-.task-delegate-model-wrap { position: relative; display: inline-flex; }
-.task-delegate-model { white-space: nowrap; }
+.task-delegate-model-wrap { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); min-width: 0; max-width: 100%; }
+.task-delegate-model { max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; }
+.task-delegate-model-wrap [role="alert"],
+.task-delegate-model-wrap [role="status"] { max-width: 100%; overflow-wrap: anywhere; }
+.task-delegate-model-wrap [role="alert"] button { min-width: var(--touch); min-height: var(--touch); }
 .task-form textarea {
   width: 100%;
   min-width: 0;

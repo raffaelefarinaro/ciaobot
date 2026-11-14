@@ -269,6 +269,46 @@ describe('ModelSelector', () => {
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
+  it.each([
+    { key: 'ArrowDown', isComposing: true },
+    { key: 'ArrowUp', isComposing: true },
+    { key: 'ArrowDown', keyCode: 229 },
+    { key: 'ArrowUp', keyCode: 229 },
+  ])('leaves IME arrow navigation to the input: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search').element
+    search.focus()
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    search.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(search)
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    const ordinary = new KeyboardEvent('keydown', { key: init.key, bubbles: true, cancelable: true })
+    search.dispatchEvent(ordinary)
+    expect(ordinary.defaultPrevented).toBe(true)
+    expect(document.activeElement?.classList.contains('model-selector__item')).toBe(true)
+  })
+
+  it.each([
+    { key: 'Enter', isComposing: true },
+    { key: ' ', isComposing: true },
+    { key: 'Enter', keyCode: 229 },
+    { key: ' ', keyCode: 229 },
+  ])('does not select an option during composition: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const item = wrapper.get<HTMLButtonElement>('.model-selector__item').element
+    item.focus()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true })
+    item.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+  })
+
   it('closes on Escape and restores the trigger', async () => {
     const wrapper = mountSelector()
     const trigger = wrapper.get<HTMLButtonElement>('.model-selector__trigger')
@@ -280,6 +320,24 @@ describe('ModelSelector', () => {
 
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
     expect(document.activeElement).toBe(trigger.element)
+  })
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('keeps the picker open during IME Escape: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    wrapper.get('.model-selector__search').element.dispatchEvent(event)
+    await flushPromises()
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    const layerEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    window.dispatchEvent(layerEvent)
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    await wrapper.get('.model-selector__search').trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
   it('renders disabled sections with hint', async () => {
