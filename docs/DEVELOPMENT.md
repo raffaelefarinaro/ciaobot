@@ -1508,6 +1508,8 @@ a remote browser can influence. Auth/origin coverage is in
 isolate browser storage/service workers, or replace the host password protocol
 with revocable per-device credentials; those remain follow-up work for #546.
 
+The completed-reply mention route (`/api/chats/{chat_id}/file-paths/resolve`, #2118) is a security-sensitive surface and needs a PR-scoped security review before merge. Its focused regression command is `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_chat_file_mentions.py -q`. Root-isolation tests must build real config layouts (legacy and migrated receipt) and must not monkeypatch `agent_root` or `workspace_vault_root`, because a stub can agree with itself about a layout the engine never produces.
+
 ## Quality gates
 
 Provider migration preflight uses the staged interpreter to check both the installed
@@ -2315,7 +2317,10 @@ would never show a person is not tonight's question) and
 `note_verification.should_check` (a note whose check is still inside its 30-day
 cooldown or still waiting on the proposal that check pinned is a question already
 answered — without this the same cooled-down notes take the first slots every
-night, come back `already_checked`, and the rest of the backlog starves). The cap
+night, come back `already_checked`, and the rest of the backlog starves). An
+attended chat is the one exception: `verify_note` with `attended=True` is not held
+off by an `unverified` check that has no proposal (`note_verification.reopens_unverified`).
+The cap
 is applied **after** that filter, and both exist for the same reason: the pass
 sits ahead of the two required hygiene keys in `PASS_ORDER` and the budget is a
 whole-run allowance, so an uncapped backlog spends it and `last_full_pass` can

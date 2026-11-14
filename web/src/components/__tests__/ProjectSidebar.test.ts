@@ -16,6 +16,8 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { Task } from '../../lib/types'
 import { pendingPrompt } from '../../lib/prompt'
+import { api } from '../../lib/api'
+import { pendingConfirm } from '../../lib/confirm'
 
 const chatId = 'chat-1234-abcd'
 
@@ -81,6 +83,29 @@ describe('ProjectSidebar chat actions', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+  })
+
+  it('does not replace a retry created while confirmation and history loading are pending', async () => {
+    const store = useProjectStore()
+    const wrapper = await mountSidebar()
+    let finishHistory!: () => void
+    vi.spyOn(store, 'loadMessages').mockImplementation(() => new Promise<void>(resolve => { finishHistory = resolve }))
+    store.messages[chatId] = [{ role: 'user', content: 'Original task', images: ['original.png'] }] as never
+    const post = vi.spyOn(api, 'post').mockRejectedValue(Object.assign(new Error('slot occupied'), { status: 409 }))
+    const replacement = { status: 'pending', mode: 'literal', schedule_id: 'other', next_at: '', last_error: '', attempts: 0, interval_seconds: 3600 } as const
+    vi.spyOn(api, 'get').mockResolvedValue({ ...store.chats[0], retry: replacement } as never)
+    const action = (wrapper.vm as unknown as { setRetry: (id: string) => Promise<void> }).setRetry(chatId)
+    expect(pendingConfirm.value?.title).toBe('Schedule literal rerun?')
+    pendingConfirm.value!.resolve(true)
+    await flushPromises()
+    store.chats[0].retry = replacement
+    finishHistory()
+    await action
+    expect(post).toHaveBeenCalledExactlyOnceWith(`/api/chats/${chatId}/retry`, {
+      action: 'set', prompt: 'Original task', images: ['original.png'], require_empty: true,
+    })
+    expect(store.chats[0].retry?.schedule_id).toBe('other')
+    wrapper.unmount()
   })
 
   it('shows a notification dot beside an unread chat', async () => {
@@ -705,7 +730,7 @@ describe('ProjectSidebar global new chat', () => {
     const wrapper = await mountSidebar('chat')
     const row = wrapper.get('.sidebar-brand-row').element
     expect(wrapper.find('.sidebar-brand-mark').exists()).toBe(false)
-    expect(wrapper.get('.sidebar-brand .brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
+    expect(wrapper.get('img.sidebar-brand').attributes()).toMatchObject({ src: '/icons/icon-32.png', alt: 'Ciaobot' })
     const order = Array.from(row.children).map((el) =>
       el.classList.contains('sidebar-history') ? 'history'
         : el.classList.contains('history-divider') ? 'divider'
@@ -820,6 +845,40 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
+  it('roams schedules then current task rows after a mode switch with the same context root', async () => {
+    const schedules = useTaskStore()
+    schedules.schedulesLoaded = true
+    schedules.schedules = ['a', 'b'].map(id => ({
+      schedule_id: id, title: id, prompt: id, workspace: 'personal',
+      enabled: true, frequency: 'daily', daily_time_utc: '09:00', project_id: 'project-1',
+    })) as never
+    const wrapper = await mountSidebar('schedules')
+    const context = wrapper.get('.sidebar-context').element
+    const rows = wrapper.findAll<HTMLElement>('.schedule-item')
+    expect(rows).toHaveLength(2)
+    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
+    rows[0].element.focus()
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(rows[1].element)
+    const { useTaskBoardStore } = await import('../../stores/taskBoard')
+    const board = useTaskBoardStore()
+    board.loadedWorkspace = 'personal'
+    board.rows = [
+      delegatedTask({ id: 'task-a', title: 'First task', status: 'backlog' }),
+      delegatedTask({ id: 'task-b', title: 'Second task', status: 'backlog' }),
+    ]
+    await wrapper.setProps({ mode: 'tasks' })
+    expect(wrapper.get('.sidebar-context').element).toBe(context)
+    expect(wrapper.findAll('.schedule-item')).toHaveLength(0)
+    const tasks = wrapper.findAll<HTMLElement>('.task-sidebar-item')
+    tasks[0].element.focus()
+    expect(vm.onArrow('ArrowDown')).toBe(true)
+    expect(document.activeElement).toBe(tasks[1].element)
+    await wrapper.setProps({ collapsed: true })
+    expect(vm.onArrow('ArrowDown')).toBe(false)
+    wrapper.unmount()
+  })
+
   it('agrees with the rail: a done task carries no working mark', async () => {
     const { useTaskBoardStore } = await import('../../stores/taskBoard')
     const board = useTaskBoardStore()
@@ -844,27 +903,42 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
-  it('offers one New chat above the tree, opening the shared picker', async () => {
-    const { pendingNewChat } = await import('../../lib/newChat')
-    const wrapper = await mountSidebar('chat')
-    const button = wrapper.get('.sidebar-new-chat')
-
-    expect(button.attributes('aria-haspopup')).toBe('dialog')
-    expect(button.attributes('aria-label')).toBe('New chat in Personal')
-    expect(button.text()).toContain('New chat')
-
-    await button.trigger('click')
-    // The shared picker is the one project-selection path; the sidebar just
-    // opens it in the active workspace rather than growing its own selector.
-    expect(pendingNewChat.value?.options).toEqual({ workspace: 'personal', projectId: undefined })
-    pendingNewChat.value?.resolve(null)
-    await nextTick()
+  it.each(['chat', 'memory'] as const)('has no global New chat in %s', async (mode) => {
+    const wrapper = await mountSidebar(mode)
+    expect(wrapper.find('.sidebar-new-chat').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('hides the global New chat in modes without a project tree', async () => {
-    const wrapper = await mountSidebar('memory')
+  it.each(['chat', 'schedules', 'tasks', 'memory'] as const)('keeps the same destination order in %s', async (mode) => {
+    const wrapper = await mountSidebar(mode)
+    const links = wrapper.findAll('.nav-links a')
+    expect(links.map(link => link.attributes('href'))).toEqual(['/', '/schedules', '/memory', '/tasks', '/stats', '/settings'])
+    expect(links.every(link => link.classes().includes('nav-item'))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('creates a chat in the project selected by its plus', async () => {
+    const store = useProjectStore()
+    store.bootstrapped = true
+    const createChat = vi.spyOn(store, 'newChatInProject').mockResolvedValue(undefined as never)
+    const wrapper = await mountSidebar('chat')
+    const project = store.projects.find(p => p.workspace === store.activeWorkspace)!
+    expect(project).toBeTruthy()
+    await wrapper.get(`.project-group[data-project-id="${project.project_id}"] .add-chat-btn`).trigger('click')
+    expect(createChat).toHaveBeenCalledWith(project.project_id)
+    wrapper.unmount()
+  })
+
+  it('keeps Home without fabricating a chat target when no eligible projects exist', async () => {
+    const store = useProjectStore()
+    store.projects = []
+    store.bootstrapped = true
+    const createChat = vi.spyOn(store, 'newChatInProject')
+    const wrapper = await mountSidebar('chat')
+    expect(wrapper.get('.nav-links a').attributes('href')).toBe('/')
     expect(wrapper.find('.sidebar-new-chat').exists()).toBe(false)
+    expect(wrapper.find('.add-chat-btn').exists()).toBe(false)
+    expect(createChat).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

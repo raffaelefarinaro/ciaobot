@@ -93,7 +93,9 @@ let screenToken = 0
 /** The last size the screen measured, in cells. */
 let measured: { cols: number; rows: number } | null = null
 /** The control that opened the pane, so the keyboard can go back to it. */
-let opener: HTMLElement | null = null
+let openFocus: { token: number; opener: HTMLElement | null } | null = null
+let closeFocusToken: number | null = null
+let actionFocus: { token: number; element: Element | null } | null = null
 /** A phone-sized pane is a drawer; a wide one docks beside the chat. */
 const isMobile = ref(false)
 /**
@@ -149,6 +151,7 @@ async function openScreen(sessionId: string): Promise<void> {
   if (!element) return
   releaseScreen()
   const token = screenToken
+  const focus = store.focusOpen
   const module = await import('../lib/terminalRenderer')
   // The user may have picked another session, or closed the pane, while the
   // module was loading.
@@ -167,7 +170,11 @@ async function openScreen(sessionId: string): Promise<void> {
   rendererSession = sessionId
   store.attachRenderer(created)
   applyInputState()
-  if (store.visible && !store.chatSwitch) created.focus()
+  if (store.visible && focus && store.focusOpen?.token === focus.token
+    && (document.activeElement === focus.opener
+      || (closeFocusToken === focus.token && document.activeElement === closeButtonEl.value)
+      || (actionFocus?.token === focus.token && document.activeElement === actionFocus.element))) created.focus()
+  actionFocus = null
 }
 
 /**
@@ -259,16 +266,27 @@ async function create(): Promise<void> {
     choosing.value = !choosing.value
     return
   }
-  await store.createSession()
+  const element = document.activeElement
+  const pending = store.createSession()
+  if (store.focusOpen) actionFocus = { token: store.focusOpen.token, element }
+  const intent = actionFocus
+  if (!(await pending) && actionFocus === intent) actionFocus = null
 }
 
 async function createIn(choice: TerminalFolderChoice): Promise<void> {
   choosing.value = false
-  await store.createSession(choice.location)
+  const element = document.activeElement
+  const pending = store.createSession(choice.location)
+  if (store.focusOpen) actionFocus = { token: store.focusOpen.token, element }
+  const intent = actionFocus
+  if (!(await pending) && actionFocus === intent) actionFocus = null
 }
 
 function openSession(session: TerminalSessionInfo): void {
+  const element = document.activeElement
+  const previous = store.activeSession?.session_id
   store.selectSession(session.session_id)
+  if (store.focusOpen && previous !== session.session_id) actionFocus = { token: store.focusOpen.token, element }
 }
 
 function onTabKeydown(event: KeyboardEvent, index: number): void {
@@ -366,22 +384,46 @@ watch(() => store.phase, () => {
   if (store.phase === 'live' && measured) store.resize(measured.cols, measured.rows)
 })
 
+function captureOpenFocus(): void {
+  openFocus = store.focusOpen
+  closeFocusToken = null
+  actionFocus = null
+  const focus = openFocus
+  void nextTick(() => {
+    if (!focus || !store.visible || store.focusOpen?.token !== focus.token
+      || document.activeElement !== focus.opener) return
+    if (renderer.value) focusScreen()
+    else if (closeButtonEl.value) {
+      closeButtonEl.value.focus()
+      if (document.activeElement === closeButtonEl.value) closeFocusToken = focus.token
+    }
+  })
+}
+
+watch(() => store.focusOpen, (focus) => {
+  if (focus && store.visible && !store.chatSwitch) captureOpenFocus()
+}, { flush: 'sync' })
+
 watch(() => store.visible, (open) => {
   // The layout owns the slot and needs to know whether the terminal is on
   // screen: a hidden terminal gives the slot back.
   emit('open', open)
   // A chat switch showed or hid the terminal: the keyboard stays where the
   // navigation left it, and the old opener is forgotten.
-  if (store.chatSwitch) { opener = null; return }
+  if (store.chatSwitch) { openFocus = null; closeFocusToken = null; actionFocus = null; return }
   if (open) {
-    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    void nextTick(() => { if (store.visible) focusScreen() })
+    captureOpenFocus()
     return
   }
-  // The pane is gone: the keyboard goes back to whatever opened it.
-  const target = opener
-  opener = null
-  void nextTick(() => { if (target?.isConnected) target.focus() })
+  const focus = openFocus
+  const current = store.focusOpen?.token === focus?.token
+  openFocus = null
+  closeFocusToken = null
+  actionFocus = null
+  void nextTick(() => {
+    if (current && !store.visible && !store.focusOpen
+      && focus?.token === store.focusGeneration && focus.opener?.isConnected) focus.opener.focus()
+  })
 }, { flush: 'sync', immediate: true })
 
 watch(() => props.chatId, (chatId) => { store.followChat(chatId) }, { immediate: true })
@@ -439,6 +481,7 @@ onBeforeUnmount(() => {
       acts on the engine's files as the engine's user.
     </p>
     <p v-if="truncatedMessage" class="tp-truncated" role="status">{{ truncatedMessage }}</p>
+    <p v-if="store.capacityError" class="tp-error" role="alert">{{ store.capacityError }}</p>
     <p v-if="store.error" class="tp-error" role="alert">{{ store.error }}</p>
 
     <template v-if="store.status?.available !== false">
@@ -447,7 +490,7 @@ onBeforeUnmount(() => {
           <div v-for="session in store.sessions" :key="session.session_id" class="tp-tab-wrap">
             <button type="button" class="tp-tab" role="tab"
               :aria-selected="session.session_id === store.activeSession?.session_id"
-              :tabindex="session.session_id === store.activeSession?.session_id ? 0 : -1"
+              :tabindex="session.session_id === store.activeSession?.session_id || (!store.activeSession && store.sessions[0]?.session_id === session.session_id) ? 0 : -1"
               :title="`${session.folder} · ${sessionState(session)}`"
               @keydown="onTabKeydown($event, store.sessions.indexOf(session))" @click="openSession(session)">
               <span class="tp-session-folder">{{ folderName(session.folder) }}</span>
@@ -493,7 +536,7 @@ onBeforeUnmount(() => {
           Starting a shell…
         </p>
         <p v-else-if="!store.activeSession" class="tp-phase" role="status">
-          No shell is open for this {{ store.target && 'projectId' in store.target ? 'project' : 'chat' }} yet.
+          No shell is open for this {{ store.target && 'workspace' in store.target ? 'workspace' : store.target && 'projectId' in store.target ? 'project' : 'chat' }} yet.
         </p>
       </div>
 

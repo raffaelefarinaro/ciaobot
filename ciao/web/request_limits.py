@@ -17,6 +17,8 @@ UPLOAD_BODY_LIMIT = 512 * 1024 * 1024 + 1024 * 1024
 IMAGE_BODY_LIMIT = 100 * 10 * 1024 * 1024 + 1024 * 1024
 SKILL_IMPORT_BODY_LIMIT = 10 * 1024 * 1024
 WORKSPACE_WRITE_BODY_LIMIT = 13 * 1024 * 1024
+# A read-only batch of up to 50 mention strings of at most 4 KiB each, JSON-escaped.
+FILE_MENTION_BODY_LIMIT = 32 * 1024
 SPOOL_MEMORY_LIMIT = 1024 * 1024
 REPLAY_CHUNK_SIZE = 64 * 1024
 
@@ -55,6 +57,8 @@ def _route_limit(app: Any, scope: dict[str, Any]) -> tuple[int, str]:
                 return WORKSPACE_WRITE_BODY_LIMIT, ""
             if method == "POST" and route_path == "/api/skills/import":
                 return SKILL_IMPORT_BODY_LIMIT, "skill_import"
+            if method == "POST" and route_path == "/api/chats/{chat_id}/file-paths/resolve":
+                return FILE_MENTION_BODY_LIMIT, ""
             return DEFAULT_BODY_LIMIT, ""
     return DEFAULT_BODY_LIMIT, ""
 

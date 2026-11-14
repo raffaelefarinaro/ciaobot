@@ -1,3 +1,5 @@
+import { COMMENT_TAGS } from './commentContext'
+
 // Shared helpers for detecting file paths in assistant text and tool
 // activity lines, and wrapping them in anchors that the delegated click
 // handler in ChatPanel.vue reads to open the file viewer.
@@ -252,6 +254,22 @@ function regexMatches(text: string): SpanMatch[] {
   return out
 }
 
+const MAX_LINE = 2147483647
+const LINE_NUMBER_RE = /^[1-9]\d{0,9}$/
+// Sticky, so the lookahead reads only the characters right after a match.
+const LINE_SUFFIX_AT_RE = /:([1-9]\d{0,9})(?!\w)/y
+
+function isLineNumber(digits: string): boolean {
+  return LINE_NUMBER_RE.test(digits) && Number(digits) <= MAX_LINE
+}
+
+/** The valid `:line` digits that start at `at`, if any. */
+function lineSuffixAt(text: string, at: number): string | undefined {
+  LINE_SUFFIX_AT_RE.lastIndex = at
+  const m = LINE_SUFFIX_AT_RE.exec(text)
+  return m && isLineNumber(m[1]) ? m[1] : undefined
+}
+
 function knownPathMatches(text: string, rules: KnownPathRule[], taken: SpanMatch[]): SpanMatch[] {
   const out: SpanMatch[] = []
   const occupied = [...taken, ...out]
@@ -260,13 +278,16 @@ function knownPathMatches(text: string, rules: KnownPathRule[], taken: SpanMatch
     while (idx < text.length) {
       const found = text.indexOf(rule.match, idx)
       if (found === -1) break
+      // A touched path followed by `:17` keeps its navigation line in the link.
+      const line = lineSuffixAt(text, found + rule.match.length)
+      const length = rule.match.length + (line ? line.length + 1 : 0)
       if (isInsideUrl(text, found)
-        || overlaps(occupied, found, rule.match.length)
+        || overlaps(occupied, found, length)
         || (rule.basenameOnly && !hasBasenameBoundary(text, found, rule.match.length))) {
         idx = found + 1
         continue
       }
-      const span: SpanMatch = { index: found, length: rule.match.length, path: rule.path }
+      const span: SpanMatch = { index: found, length, path: rule.path, line }
       out.push(span)
       occupied.push(span)
       idx = found + rule.match.length
@@ -318,11 +339,16 @@ export function linkifyText(text: string, knownPaths: string[] = []): string {
  * This is intentionally a string walk, not a DOM parse: we operate on the
  * HTML string produced by marked, so we only need to avoid recursing into
  * existing <a> elements.
+ *
+ * With `fileMentionTargets` the document is walked as DOM instead, and only
+ * known touched paths and exactly confirmed mentions link (see
+ * `linkifyChecked`).
  */
-export function linkifyHtml(html: string, knownPaths: string[] = []): string {
+export function linkifyHtml(html: string, knownPaths: string[] = [], fileMentionTargets?: FileMentionTargets): string {
   if (!html) return ''
   // One rule set for every span in this document, not one per span.
   const rules = buildKnownPathRules(knownPaths)
+  if (fileMentionTargets) return linkifyChecked(html, rules, fileMentionTargets)
   let out = ''
   let i = 0
   const lower = html.toLowerCase()
@@ -372,4 +398,196 @@ export function linkifyHtml(html: string, knownPaths: string[] = []): string {
     i = tagEnd + 1
   }
   return out
+}
+
+// --- Checked file mentions -------------------------------------------------
+//
+// A completed assistant message may link an untouched filename, but only one
+// a browser lookup already confirmed: the caller passes the confirmed map and
+// a candidate links only when its exact display spelling is a key. Nothing
+// here reads the network or a store.
+
+/** Confirmed mention spelling (the display text, with any `:line`) to canonical path. */
+export type FileMentionTargets = ReadonlyMap<string, string>
+
+/** One mention found in text. `input` is the exact display spelling. */
+export type FileMentionSpan = {
+  index: number
+  length: number
+  input: string
+  line?: string
+}
+
+// Discovery list, deliberately separate from EXTS: EXTS also feeds the legacy
+// regex and folder detection. `env` and `example` are left out on purpose.
+const DISCOVERY_EXTS = new Set([
+  'md', 'markdown', 'txt',
+  'py', 'ts', 'tsx', 'js', 'jsx', 'vue',
+  'css', 'html', 'htm', 'json',
+  'yaml', 'yml', 'toml',
+  'sh', 'rs', 'go', 'java', 'xml', 'sql',
+  'cfg', 'ini', 'log', 'csv',
+  'pdf', 'pptx', 'mht', 'mhtml',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico',
+])
+
+// Characters that make a token a glob, an env expansion, a URL-ish or
+// otherwise not a plain path. Quotes and ampersands are allowed: they are
+// filename characters inside a code span, and the renderer escapes them.
+const NOT_PATH_CHARS = /[\x00-\x1f\x7f*?$[\]{}<>|`@]/
+// Prose delimiters around a token: they are trimmed, never part of a path.
+const LEAD_DELIM = /^[([{<"'`*]+/
+const TRAIL_DELIM = /[)\]}>"'`*.,;:!?]+$/
+
+function isPathCandidate(p: string, wholeCode: boolean): boolean {
+  if (!p || NOT_PATH_CHARS.test(p) || p.includes('://') || p.includes('//') || p.includes('\\\\')) return false
+  // The only anchors a whole path may start with: a drive, `~/`, `/`, `./` or `../`.
+  const prefix = /^(?:[A-Za-z]:[\\/]|~[\\/]|[\\/]|\.{1,2}[\\/])/.exec(p)
+  const rest = prefix ? p.slice(prefix[0].length) : p
+  // Any other colon (`C:src`, `host:path`) is not a path shape.
+  if (rest.includes(':')) return false
+  // `~otheruser/...` is somebody else's home.
+  if (!prefix && p.startsWith('~')) return false
+  const segments = rest.split(/[\\/]/)
+  if (segments.some(s => !s)) return false
+  const name = segments[segments.length - 1]
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0 || !DISCOVERY_EXTS.has(name.slice(dot + 1).toLowerCase())) return false
+  // In a code span a space is allowed inside a path, but a relative path whose
+  // first word has a space reads as a command followed by a path: `cat a.md`.
+  if (wholeCode && !prefix && /\s/.test(p.split(/[\\/]/)[0])) return false
+  return true
+}
+
+/** A candidate with its optional `:line` split off, or null when it is not a path. */
+function mentionAt(input: string, index: number, wholeCode: boolean): FileMentionSpan | null {
+  const suffix = /:(\d+)$/.exec(input)
+  if (suffix && !isLineNumber(suffix[1])) return null
+  const path = suffix ? input.slice(0, suffix.index) : input
+  if (!isPathCandidate(path, wholeCode)) return null
+  return { index, length: input.length, input, line: suffix ? suffix[1] : undefined }
+}
+
+/**
+ * The file mentions in `text`, in order. Prose is split on whitespace and a
+ * token counts only when it is one whole path. A whole inline code span
+ * (`wholeCodeSpan`) is one path, possibly containing spaces.
+ */
+export function findFileMentionSpans(text: string, wholeCodeSpan = false): FileMentionSpan[] {
+  if (wholeCodeSpan) {
+    const span = mentionAt(text.trim(), text.length - text.trimStart().length, true)
+    return span ? [span] : []
+  }
+  const out: FileMentionSpan[] = []
+  for (const m of text.matchAll(/\S+/g)) {
+    const raw = m[0]
+    const lead = LEAD_DELIM.exec(raw)?.[0].length ?? 0
+    const core = raw.slice(lead).replace(TRAIL_DELIM, '')
+    if (!core) continue
+    const span = mentionAt(core, m.index + lead, false)
+    if (span) out.push(span)
+  }
+  return out
+}
+
+/** An element the text run runs straight into. A line break starts a new token. */
+function isGluingElement(node: Node | null): boolean {
+  return !!node && node.nodeType === Node.ELEMENT_NODE && (node as Element).localName !== 'br'
+}
+
+/**
+ * The mentions in one DOM text run. A token that continues into a neighbouring
+ * element is not whole: `a@b.co/x.md` after an autolinked address leaves
+ * `/x.md` glued to the link, and that suffix is not a path of its own.
+ */
+export function runMentionSpans(text: string, wholeCode: boolean, prev: Node | null, next: Node | null): FileMentionSpan[] {
+  const gluedStart = isGluingElement(prev)
+  const gluedEnd = isGluingElement(next)
+  return findFileMentionSpans(text, wholeCode).filter(s =>
+    !(gluedStart && s.index === 0) && !(gluedEnd && s.index + s.length === text.length),
+  )
+}
+
+function anchorNode(display: string, path: string, line: string | undefined): HTMLAnchorElement {
+  const el = document.createElement('a')
+  el.className = 'file-link'
+  el.setAttribute('href', '#')
+  el.setAttribute('data-file-path', path)
+  if (line) el.setAttribute('data-line', line)
+  el.textContent = display
+  return el
+}
+
+/**
+ * The nodes that replace one text run: known touched paths first, then the
+ * confirmed mentions that do not overlap them. null when nothing links.
+ */
+function mentionNodes(
+  text: string,
+  rules: KnownPathRule[],
+  targets: FileMentionTargets | null,
+  wholeCode: boolean,
+  prev: Node | null = null,
+  next: Node | null = null,
+): Node[] | null {
+  if (!text) return null
+  const known = rules.length ? knownPathMatches(text, rules, []) : []
+  const found: SpanMatch[] = []
+  if (targets?.size) {
+    for (const s of runMentionSpans(text, wholeCode, prev, next)) {
+      const path = targets.get(s.input)
+      if (path === undefined || overlaps(known, s.index, s.length)) continue
+      found.push({ index: s.index, length: s.length, path, line: s.line })
+    }
+  }
+  const matches = [...known, ...found].sort((a, b) => a.index - b.index)
+  if (!matches.length) return null
+  const nodes: Node[] = []
+  let last = 0
+  for (const m of matches) {
+    if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)))
+    nodes.push(anchorNode(text.slice(m.index, m.index + m.length), m.path, m.line))
+    last = m.index + m.length
+  }
+  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)))
+  return nodes
+}
+
+const CHECKED_SKIP_TAGS = new Set(['a', 'button', 'script', 'style', 'img'])
+const COMMENT_TAG_SET = new Set<string>(COMMENT_TAGS)
+
+/**
+ * Checked walk over parsed HTML. Text decodes into real text nodes before
+ * matching; new nodes come from DOM calls, never from interpolated markup.
+ * Existing anchors, buttons, scripts, styles and images are skipped whole.
+ * Fenced code and quoted-comment subtrees get known rules only: discovery
+ * never reads them.
+ */
+function linkifyChecked(html: string, rules: KnownPathRule[], targets: FileMentionTargets): string {
+  const template = document.createElement('template')
+  template.innerHTML = html
+  linkifyChildren(template.content, rules, targets, false)
+  return template.innerHTML
+}
+
+function linkifyChildren(parent: Node, rules: KnownPathRule[], targets: FileMentionTargets, knownOnly: boolean): void {
+  for (const child of Array.from(parent.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      const nodes = mentionNodes(child.textContent ?? '', rules, knownOnly ? null : targets, false, child.previousSibling, child.nextSibling)
+      if (nodes) (child as ChildNode).replaceWith(...nodes)
+      continue
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue
+    const el = child as Element
+    const tag = el.localName
+    if (CHECKED_SKIP_TAGS.has(tag)) continue
+    const inner = knownOnly || tag === 'pre' || COMMENT_TAG_SET.has(tag)
+    // An inline code span holding only text is one candidate: its whole text.
+    if (!inner && tag === 'code' && Array.from(el.childNodes).every(n => n.nodeType === Node.TEXT_NODE)) {
+      const nodes = mentionNodes(el.textContent ?? '', rules, targets, true)
+      if (nodes) el.replaceChildren(...nodes)
+      continue
+    }
+    linkifyChildren(el, rules, targets, inner)
+  }
 }

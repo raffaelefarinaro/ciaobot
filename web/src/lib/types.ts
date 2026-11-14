@@ -285,6 +285,9 @@ export interface ChatInfo {
   // One-line snippet of the error that ended the last turn. Empty or absent
   // when the last turn did not fail; cleared when a new turn starts.
   last_error?: string
+  failure_id?: string
+  recovery_eligible?: boolean
+  user_turn_count?: number
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
@@ -414,12 +417,21 @@ export interface ChatRetryInfo {
   last_error: string
   attempts: number
   interval_seconds: number
+  mode?: 'continue_recovery' | 'literal'
+  schedule_id?: string
 }
 
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
   | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover' | 'chat_action'
+
+export type VerifiedClaimStatus = 'supported' | 'unsupported' | 'general'
+export interface VerifiedClaim { text: string; status: VerifiedClaimStatus; source: string }
+export interface TurnVerification {
+  supported: number; unsupported: number; general: number
+  claims: VerifiedClaim[]; sources: string[]
+}
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -454,6 +466,8 @@ export interface ChatMessage {
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
+  // Engine vault answer check for this turn (last assistant row only).
+  verification?: TurnVerification
   // Populated when tool_name === '_filecard'. Drives the inline preview card
   // rendered alongside the activity trace. `file_path` is whatever the agent
   // told us; absolute host paths are intentionally supported by the viewer.
@@ -653,7 +667,7 @@ export type WsEvent =
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
-  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   // Idle heartbeat from the broker / events hub. Clients treat it as a
   // liveness signal only and must not mutate chat UI state.
   | { type: 'keepalive' }
@@ -668,18 +682,19 @@ export type EventsWsMessage =
   | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
+  | { type: 'turn_verification'; chat_id: string; turn_index: number; verification: TurnVerification }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
-  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
@@ -976,6 +991,8 @@ export interface RoutineSettings {
   // Settings → General: a chat whose turn a restart or crash cut off gets one
   // "Continue after restart" turn at the next start. Missing = on.
   resume_after_restart?: boolean
+  // Settings → General: check vault-grounded answers against the notes read. Missing = on.
+  verify_vault_answers?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string
@@ -1752,6 +1769,16 @@ export interface UpdateTaskRow {
   attempted_fingerprint: string
   /** When the *record* was last written — a decision or an attempt. */
   updated_at: string
+}
+
+export interface UpdateTaskPreview {
+  task_id: string
+  revision: number
+  workspace: string
+  state: 'review' | 'blocked' | 'unknown'
+  summary: string
+  plan: Record<string, unknown> | null
+  checked_at: string
 }
 
 /** Why `GET /api/update-tasks` is offering nothing. Present only then, because

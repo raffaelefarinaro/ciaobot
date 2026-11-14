@@ -9,6 +9,7 @@ dispatcher needs: the operation table, the bearer-token registry, the
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import inspect
@@ -17,7 +18,7 @@ import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -31,6 +32,7 @@ from ciao.control_plane import (
     AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
+    ManagedRecallAuthorization,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
 from ciao.schedules import DEFAULT_TIMEZONE
@@ -166,8 +168,34 @@ _SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_s
 @dataclass(slots=True)
 class _Session:
     principal: AgentPrincipal
-    token: str
+    token: str = field(repr=False)
     expires_at: int
+
+
+AGENT_SESSION_AUTH_POLL_S = 0.25
+
+
+class _ManagedRecallAuthorization:
+    __slots__ = ("__registry", "__session")
+
+    def __init__(self, registry: AgentSessionRegistry, session: _Session) -> None:
+        self.__registry = registry
+        self.__session = session
+
+    def __repr__(self) -> str:
+        return "<managed recall authorization>"
+
+    def is_active(self) -> bool:
+        with self.__registry._lock:
+            session = self.__session
+            return (
+                self.__registry._by_token.get(session.token) is session
+                and session.expires_at > int(time.time())
+            )
+
+    async def wait_invalid(self) -> None:
+        while self.is_active():
+            await asyncio.sleep(AGENT_SESSION_AUTH_POLL_S)
 
 
 class AgentSessionRegistry:
@@ -234,7 +262,9 @@ class AgentSessionRegistry:
             item = self._by_token.pop(token, None)
             if item is None:
                 return False
-            self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
+            key = (item.principal.chat_id, item.principal.provider)
+            if self._by_key.get(key) == token:
+                self._by_key.pop(key, None)
             return True
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -254,6 +284,21 @@ class AgentSessionRegistry:
                 subject=item.principal.chat_id,
                 claims=item.principal.to_claims(),
             )
+
+    def live_authorization(
+        self, access: AccessToken | None, principal: AgentPrincipal
+    ) -> ManagedRecallAuthorization | None:
+        if access is None or "ciaobot" not in (access.scopes or []):
+            return None
+        with self._lock:
+            session = self._by_token.get(access.token)
+            if (
+                session is None
+                or session.principal != principal
+                or session.expires_at <= int(time.time())
+            ):
+                return None
+            return _ManagedRecallAuthorization(self, session)
 
     def status(self) -> dict[str, Any]:
         now = int(time.time())
@@ -388,6 +433,21 @@ async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10)
     return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
 
+async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "") -> dict[str, Any]:
+    """Check selected factual claims against bounded vault evidence."""
+    return await service._invoke(
+        "vault_recall_check",
+        lambda cp, p: cp.vault_recall_check(
+            p,
+            claims_json=claims_json,
+            authorization_factory=lambda: service.registry.live_authorization(
+                get_access_token(), p
+            ),
+        ),
+        mutating=False,
+    )
+
+
 async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
                             disposition: str = "", confirm: str = "") -> dict[str, Any]:
     """List and decide scoped vault-note review candidates.
@@ -454,10 +514,13 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
       What needs you; do not try to apply it another way.
     - `unverified` — no source this pass reached could support the verdict, the
       check did not cover the whole note, or the input was too large to judge.
-      Nothing was written, and a cooldown stops tonight's run re-asking.
+      Nothing was written, and a cooldown stops tonight's run re-asking. An
+      attended chat that has the source can settle it later.
     - `conflict` — the note moved since you read it. Re-read and judge again.
     - `already_checked` — a check for this exact revision is in its cooldown or
-      is waiting on a proposal. Nothing was asked or written.
+      is waiting on a proposal. Nothing was asked or written. The reply names the
+      check's reason; an unattended `unverified` with no proposal does not block
+      an attended chat, which can send its verdict.
     - `failed` — the note could not be used at all.
 
     A retirement is never applied here: it is a human decision, all the way
@@ -1496,6 +1559,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
+    Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),

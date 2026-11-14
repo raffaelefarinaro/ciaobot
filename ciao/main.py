@@ -1051,6 +1051,7 @@ async def _run_server_locked(
     # The manager cannot hold a store reference in its constructor without
     # reshuffling init order, so it is attached right after both exist.
     pcm.schedule_store = schedule_store
+    pcm.verify_vault_answers_enabled = lambda: app_settings.settings.verify_vault_answers
 
     def _update_admission_closed() -> bool:
         """Whether an engine update claim holds admission closed.

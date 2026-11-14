@@ -18,8 +18,9 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
@@ -61,11 +62,9 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao import repo_location
+from ciao import repo_location, vault_verification
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from pathlib import Path
-
     from ciao.web.project_chats import ChatInfo
 
 logger = logging.getLogger(__name__)
@@ -147,6 +146,7 @@ class ChatStreamingHost(Protocol):
     _events: EventsHub
     _snapshots: SnapshotStore
     _shutting_down: bool
+    verify_vault_answers_enabled: Callable[[], bool]
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -157,6 +157,8 @@ class ChatStreamingHost(Protocol):
     def _get_provider(self, chat_id: str) -> ProviderService: ...
 
     def _agent_root_for_chat(self, chat_id: str) -> Path: ...
+
+    def _vault_root_for_chat(self, chat_id: str) -> Path | None: ...
 
     async def reload_provider(self, chat_id: str) -> bool: ...
 
@@ -258,9 +260,16 @@ class ChatStreamingHost(Protocol):
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None: ...
 
+    async def _verify_turn_and_publish(
+        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
+    ) -> None: ...
+
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+
+    def _release_recovery_claim(self, chat_id: str) -> None: ...
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool: ...
     def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
     @staticmethod
@@ -429,11 +438,6 @@ class ChatStreaming:
         unattended: bool,
         compact: bool = False,
     ) -> None:
-        # The one place a turn begins, so it is the one place a subscriber hears
-        # about it. Announced before the task exists: the drive loop is the turn,
-        # and a watcher that subscribes after it would miss the whole of it.
-        if not unattended:
-            self._host.notify_turn_started(chat_id, stream)
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,
@@ -456,6 +460,11 @@ class ChatStreaming:
                 self._drive_tasks.pop(chat_id, None)
 
         task.add_done_callback(_clear)
+        if not unattended:
+            try:
+                self._host.notify_turn_started(chat_id, stream)
+            except Exception:
+                logger.exception("Turn-start notification failed for chat %s", chat_id)
 
     def _save_at_turn_end(self, chat_id: str) -> None:
         """Persist the registry at turn end without letting a failed write skip teardown.
@@ -506,6 +515,12 @@ class ChatStreaming:
         last_error_text = ""
         had_provider_progress = False
         repo_hints: list[str] = []
+        # Vault notes this drive's turns read, checked after a successful turn.
+        # Resolved on the first Read tool event, so a drive that reads nothing
+        # never touches the vault layout.
+        vault_root: Path | None = None
+        agent_root: Path | None = None
+        vault_root_resolved = False
         await self._host._await_between_turns_drain(chat_id)
 
         hidden_turn = False
@@ -529,6 +544,11 @@ class ChatStreaming:
                 # force-closed partial): the selected answer then replaces the
                 # carry-over even when it is empty (#2139 review).
                 turn_answer_ready = False
+                turn_vault_reads: list[Path] = []
+                turn_succeeded = False
+                # The turn index the answer is filed under: the last steer that
+                # landed in this turn (its final answer row), else the turn itself.
+                turn_verify_index: int | None = None
                 stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
@@ -544,6 +564,8 @@ class ChatStreaming:
                     run_compact: bool = compact,
                 ) -> None:
                     nonlocal turn_assistant_text, turn_answer_text, turn_answer_ready
+                    nonlocal turn_succeeded, turn_verify_index
+                    nonlocal vault_root, agent_root, vault_root_resolved
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text, last_answer_text
@@ -614,6 +636,11 @@ class ChatStreaming:
                                 rec["completed_at"] = completed_at
                                 if duration_ms is not None:
                                     rec["duration_ms"] = duration_ms
+                                turn_verify_index = (
+                                    stream.steered_turn_indexes[-1]
+                                    if stream.steered_turn_indexes
+                                    else run_turn_index
+                                )
                                 # Steers delivered into this turn finish with it.
                                 for steered_index in stream.steered_turn_indexes:
                                     steered_rec = cm.user_turn_timings.setdefault(
@@ -757,6 +784,20 @@ class ChatStreaming:
                             return
                         if isinstance(event, ToolUseEvent):
                             repo_hints.extend(repo_location.tool_event_hints(event))
+                            if event.type != "tool_result" and event.tool_name in ("Read", "read"):
+                                if not vault_root_resolved:
+                                    vault_root = self._host._vault_root_for_chat(chat_id)
+                                    agent_root = self._host._agent_root_for_chat(chat_id)
+                                    vault_root_resolved = True
+                                if vault_root is not None and agent_root is not None:
+                                    read = vault_verification.vault_read_path(
+                                        event.tool_name,
+                                        event.tool_input,
+                                        vault_root=vault_root,
+                                        agent_root=agent_root,
+                                    )
+                                    if read is not None:
+                                        turn_vault_reads.append(read)
                             touches: list[dict] = []
                             if payload:
                                 multi = payload.get("file_touches")
@@ -835,6 +876,7 @@ class ChatStreaming:
                                     event.result or "", event.final_text, turn_segment
                                 )
                                 turn_answer_ready = True
+                                turn_succeeded = True
 
                 turn_task: asyncio.Task | None = None
                 if stream.user_stopped:
@@ -1036,6 +1078,21 @@ class ChatStreaming:
                     # including an explicitly empty one: keeping the previous
                     # turn's text here would re-announce it (#2139 review).
                     last_answer_text = turn_answer_text
+                if (
+                    turn_succeeded
+                    and turn_vault_reads
+                    and turn_verify_index is not None
+                    and turn_answer_text.strip()
+                    and self._host.verify_vault_answers_enabled()
+                ):
+                    asyncio.create_task(
+                        self._host._verify_turn_and_publish(
+                            chat_id,
+                            turn_verify_index,
+                            turn_answer_text,
+                            list(turn_vault_reads),
+                        )
+                    )
 
                 if question_paused:
                     self._host._fallback_steers(chat_id, stream, "finished")
@@ -1268,6 +1325,7 @@ class ChatStreaming:
                     if had_error
                     else ""
                 )
+                chat_meta.failure_id = uuid.uuid4().hex if had_error else ""
                 # A terminal SSE frame is not proof that a native V2 permission
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
@@ -1310,6 +1368,7 @@ class ChatStreaming:
                 "project_id": project_id,
                 "is_error": had_error,
                 "last_error": chat_meta.last_error if chat_meta is not None else "",
+                "failure_id": chat_meta.failure_id if chat_meta is not None else "",
             }
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
@@ -1329,12 +1388,15 @@ class ChatStreaming:
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
+            owns_retry = self._host._owns_retry(chat_id, stream)
+            if turn_succeeded and not had_error and is_retry and not stream.network_retry_armed and owns_retry:
+                chat_now = self._host._chats.get(chat_id)
+                if chat_now is not None and chat_now.retry_status == "pending":
+                    self._host._clear_chat_retry(chat_now)
             if not had_error and last_answer_text.strip():
                 snippet = self._host._result_snippet(last_answer_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
-                    if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
-                        self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
                     self._save_at_turn_end(chat_id)
@@ -1366,12 +1428,26 @@ class ChatStreaming:
                 and not began_compact
                 and not retry_armed
                 and not stream.network_retry_armed
+                and owns_retry
             ):
                 chat_unsettled = self._host._chats.get(chat_id)
                 if chat_unsettled is not None and chat_unsettled.retry_status == "pending":
-                    logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
-                    self._host._clear_chat_retry(chat_unsettled, status="stopped")
-            if (stream.network_retry_turn or is_retry) and not began_compact:
+                    recovery = chat_unsettled.retry_recovery
+                    if recovery == "" or (isinstance(recovery, dict) and recovery.get("manual") is True):
+                        logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
+                        self._host._clear_chat_retry(chat_unsettled, status="stopped")
+            if is_retry and owns_retry:
+                current_chat = self._host._chats.get(chat_id)
+                marker = current_chat.retry_recovery if current_chat is not None else ""
+                if current_chat is not None and isinstance(marker, dict) and marker.get("claim"):
+                    if had_error:
+                        try:
+                            self._host._release_recovery_claim(chat_id)
+                        except Exception:
+                            logger.exception("Could not release recovery claim for %s", chat_id)
+                    else:
+                        self._host._clear_chat_retry(current_chat, status="stopped")
+            if (stream.network_retry_turn or is_retry) and not began_compact and owns_retry:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
                 )
@@ -2080,6 +2156,7 @@ class ChatStreaming:
                             ]
                             chat_now.last_response_status = "success"
                             chat_now.last_error = ""
+                            chat_now.failure_id = ""
                             self._host._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         if settled:
@@ -2118,6 +2195,7 @@ class ChatStreaming:
                                 else "empty"
                             )
                             chat_now.last_error = last_error
+                            chat_now.failure_id = uuid.uuid4().hex if is_error else ""
                             self._host._save()
                         if settled:
                             self._host._flush_result_announce(chat_id)

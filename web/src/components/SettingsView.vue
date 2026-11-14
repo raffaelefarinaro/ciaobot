@@ -322,6 +322,11 @@
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
         />
+        <SettingsVaultCheck
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
 
         <!-- Start at sign-in. It changes whether the engine service starts at
              the *next* sign-in, never the engine running now, and never the
@@ -1326,7 +1331,8 @@
 
       <!-- Native provider MCP inventory, scoped to the selected workspace. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" :default-provider="mcpDefaultProvider" @ask-ciao="createAssetViaChat('mcp')" />
+        <p v-if="mcpLinkError" role="alert" class="action-result --error">{{ mcpLinkError }}</p>
+        <SettingsMcpServers v-if="mcpLinkVisible" :mcp="mcp" :default-provider="mcpDefaultProvider" :target-provider="mcpTargetProvider" :target-provider-key="mcpTargetProviderKey" @ask-ciao="createAssetViaChat('mcp')" />
       </template>
       </div>
 
@@ -1392,7 +1398,7 @@ import SkeletonLoader from './SkeletonLoader.vue'
 import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -1476,6 +1482,7 @@ import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
+import SettingsVaultCheck from './settings/SettingsVaultCheck.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'
@@ -1502,6 +1509,16 @@ const housekeeping = useHousekeepingStore()
 // Native MCP inventory follows the sidebar's selected workspace.
 const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
 const mcpDefaultProvider = computed(() => projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace)?.default_provider)
+const mcpLinkReady = ref(false)
+const mcpLinkError = ref('')
+const mcpTargetProvider = ref<'claude' | 'opencode'>()
+const mcpTargetProviderKey = ref(0)
+const mcpLinkVisible = computed(() => {
+  if (route.query.workspace === undefined) return true
+  return mcpLinkReady.value && typeof route.query.workspace === 'string'
+    && projectStore.activeWorkspace === route.query.workspace
+    && (!mcp.status.value || mcp.status.value.workspace === route.query.workspace)
+})
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -2643,41 +2660,118 @@ function scrollToWorkspaceFileAccess(name: string): void {
   workspaceLinkTarget.value = name
 }
 
-async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
+type WorkspaceLink = { request: number; fullPath: string; name: string; kind: 'file' | 'mcp'; provider?: 'claude' | 'opencode'; completedMcpLoad?: Promise<void> }
+let desiredWorkspaceLink: WorkspaceLink | null = null
+let workspaceLinkDraining = false
+let workspaceLinkDisposed = false
+
+function queueWorkspaceLink(fullPath: string): void {
   const request = ++workspaceLinkRequest
-  // A navigation clears what an earlier link said; a missing target and the
-  // row it pointed at must not outlive the address that produced them.
   workspaceLinkStatus.value = ''
   workspaceLinkTarget.value = null
-  const name = parseWorkspaceFileAccessHref(fullPath)
-  if (!name || currentTab.value !== 'workspace') return
-  await loadSettingsTab('workspace')
-  if (request !== workspaceLinkRequest) return
-  await nextTick()
-  if (request !== workspaceLinkRequest) return
-  // A failed load is an error, not a claim that the workspace is missing.
-  if (workspacesError.value) return
-  const form = workspaceForms.value.find(f => f.name === name)
-  if (!form) {
-    workspaceLinkStatus.value = `No workspace named "${name}" exists. No settings changed.`
-    return
+  mcpLinkReady.value = false
+  mcpLinkError.value = ''
+  const fileName = currentTab.value === 'workspace' ? parseWorkspaceFileAccessHref(fullPath) : null
+  const mcpLink = currentTab.value === 'mcp' && route.query.workspace !== undefined
+  if (!mcpLink) mcpTargetProvider.value = undefined
+  const name = fileName || (mcpLink && typeof route.query.workspace === 'string' ? route.query.workspace : '')
+  const provider = route.query.provider === 'claude' || route.query.provider === 'opencode' ? route.query.provider : undefined
+  const cachedMcp = mcpLink && name ? tabLoads.get(`mcp:${name}`) : undefined
+  const completedMcpLoad = cachedMcp && settledMcpLoads.has(cachedMcp) ? cachedMcp : undefined
+  desiredWorkspaceLink = name ? { request, fullPath, name, kind: fileName ? 'file' : 'mcp', provider, completedMcpLoad } : null
+  if (mcpLink && !name) mcpLinkError.value = 'The requested workspace is invalid. No settings changed.'
+  if (!workspaceLinkDraining && desiredWorkspaceLink) void drainWorkspaceLinks()
+}
+
+async function drainWorkspaceLinks(): Promise<void> {
+  workspaceLinkDraining = true
+  let handled = 0
+  while (!workspaceLinkDisposed && desiredWorkspaceLink && desiredWorkspaceLink.request !== handled) {
+    const link = desiredWorkspaceLink
+    handled = link.request
+    const current = () => !workspaceLinkDisposed && link.request === workspaceLinkRequest && route.fullPath === link.fullPath
+    try {
+      await (link.kind === 'file' ? loadSettingsTab('workspace') : ensureWorkspaceList())
+    } catch {
+      if (current()) {
+        if (link.kind === 'mcp') mcpLinkError.value = 'Could not load workspaces. No settings changed.'
+        else workspaceLinkStatus.value = 'Could not load workspaces. No settings changed.'
+      }
+      continue
+    }
+    if (!current()) continue
+    if (workspacesError.value) {
+      if (link.kind === 'mcp') mcpLinkError.value = 'Could not load workspaces. No settings changed.'
+      continue
+    }
+    if (!workspaceForms.value.some(form => form.name === link.name)) {
+      const message = `No workspace named "${link.name}" exists. No settings changed.`
+      if (link.kind === 'mcp') mcpLinkError.value = message
+      else workspaceLinkStatus.value = message
+      continue
+    }
+    let switched: boolean
+    try {
+      switched = await projectStore.switchWorkspace(link.name, { transition: false, isCurrent: current })
+    } catch {
+      if (current()) {
+        const message = `Settings for "${link.name}" could not be opened. No settings changed.`
+        if (link.kind === 'mcp') mcpLinkError.value = message
+        else workspaceLinkStatus.value = message
+      }
+      continue
+    }
+    if (!current()) continue
+    if (!switched || projectStore.activeWorkspace !== link.name) {
+      const message = `${link.kind === 'file' ? 'File access' : 'MCP settings'} for "${link.name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
+      if (link.kind === 'mcp') mcpLinkError.value = message
+      else workspaceLinkStatus.value = message
+      continue
+    }
+    if (link.kind === 'file') {
+      try {
+        const failure = await router.replace({ path: '/settings/workspace', hash: '#file-access' })
+        if (failure && current()) workspaceLinkStatus.value = 'File access could not be opened.'
+      } catch {
+        if (current()) workspaceLinkStatus.value = 'File access could not be opened.'
+      }
+      continue
+    }
+    await nextTick()
+    const loadKey = `mcp:${link.name}`
+    if (link.completedMcpLoad && tabLoads.get(loadKey) === link.completedMcpLoad
+      && mcp.status.value?.workspace !== link.name) {
+      tabLoads.delete(loadKey)
+    }
+    const load = loadSettingsTab('mcp')
+    try {
+      await load
+    } catch {
+      if (tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
+      if (current()) {
+        mcpLinkError.value = `Could not load MCP settings for "${link.name}".`
+      }
+      continue
+    }
+    if ((mcp.error.value || (!mcp.loading.value && mcp.status.value?.workspace !== link.name))
+      && tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
+    if (!current()) continue
+    if (projectStore.activeWorkspace !== link.name || mcp.status.value?.workspace !== link.name
+      || (link.provider && !mcp.status.value.providers.some(p => p.provider === link.provider))) {
+      if (tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
+      mcpLinkError.value = `Could not load MCP settings for "${link.name}".`
+      continue
+    }
+    mcpTargetProvider.value = link.provider
+    mcpTargetProviderKey.value++
+    mcpLinkReady.value = true
   }
-  // The page shows one workspace, so the link makes the named one active. It
-  // never selects a value or saves. Leaving a draft with unsaved edits asks
-  // first (the store's switch guard); declining keeps the user where they are.
-  await projectStore.switchWorkspace(name, { transition: false })
-  if (request !== workspaceLinkRequest) return
-  if (projectStore.activeWorkspace !== name) {
-    workspaceLinkStatus.value =
-      `File access for "${name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
-    return
-  }
-  await router.replace({ path: '/settings/workspace', hash: '#file-access' })
+  workspaceLinkDraining = false
 }
 
 // The Overview page is the active workspace's editor. A File access link lands
 // here with #file-access: scroll to and focus the selector once the list is in.
-// While the link still carries ?workspace=NAME, applyWorkspaceFileAccessLink
+// While the link still carries ?workspace=NAME, the workspace link drain
 // owns it: it switches to NAME and then drops the query, which re-runs this
 // watcher on the right workspace (scrolling now would hit the previous one).
 watch(
@@ -2735,6 +2829,7 @@ async function fetchWorkspaceModels(force = false) {
 // in-flight load is reused while this view stays mounted; workspace-scoped
 // tabs get a separate load after switching roots.
 const tabLoads = new Map<string, Promise<void>>()
+const settledMcpLoads = new WeakSet<Promise<void>>()
 // The workspace list feeds both workspace pages. It loads once per registry
 // revision, not once per page: a second load would rebuild the forms and drop
 // the unsaved edits a user left on Overview when they open Workspaces.
@@ -2797,6 +2892,7 @@ function loadSettingsTab(tab: string): Promise<void> {
   }
   const request = Promise.all(reads).then(() => {})
   tabLoads.set(key, request)
+  if (tab === 'mcp') void request.then(() => { settledMcpLoads.add(request) }, () => { settledMcpLoads.add(request) })
   return request
 }
 
@@ -2806,9 +2902,16 @@ function loadSettingsTab(tab: string): Promise<void> {
 // waits for that same load instead of opening a row that is not there yet.
 watch(
   () => route.fullPath,
-  path => { void applyWorkspaceFileAccessLink(path) },
-  { immediate: true },
+  path => { queueWorkspaceLink(path) },
+  { immediate: true, flush: 'sync' },
 )
+const removeWorkspaceLinkAfterEach = router.afterEach((to, from, failure) => {
+  if (currentTab.value === 'mcp' && route.query.workspace !== undefined && to.fullPath === from.fullPath
+    && (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated))) {
+    queueWorkspaceLink(to.fullPath)
+  }
+})
+onUnmounted(() => { workspaceLinkDisposed = true; ++workspaceLinkRequest; removeWorkspaceLinkAfterEach() })
 
 onMounted(() => {
   loadAppearanceSettings()

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 AGENT_TOKEN_ENV = "CIAO_AGENT_TOKEN"
 #: Base URL the CLI posts to; ``{op}`` is appended.
 AGENT_URL_ENV = "CIAO_AGENT_URL"
+RECALL_CHECK_MAX_REQUEST_BYTES = 262_144
 
 
 def _envelope_error(code: str, message: str, *, retryable: bool = False) -> dict[str, Any]:

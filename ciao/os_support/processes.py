@@ -40,9 +40,14 @@ tree is then empty rather than an error.
 from __future__ import annotations
 
 import os
+import errno
+import selectors
 import signal
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Sequence
 from typing import Any
 
 if sys.platform == "win32":
@@ -76,6 +81,10 @@ if sys.platform == "win32":
     )
     _GetExitCodeProcess = _declare(
         "GetExitCodeProcess", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)
+    )
+    _PeekNamedPipe = _declare(
+        "PeekNamedPipe", wintypes.BOOL, wintypes.HANDLE, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
     )
 
     class _IoCounters(ctypes.Structure):
@@ -123,6 +132,18 @@ if sys.platform == "win32":
         if not _GetExitCodeProcess(process, ctypes.byref(code)):
             return False
         return code.value != _STILL_ACTIVE
+
+    def pid_alive(pid: int) -> bool:
+        """Conservatively check a PID without sending it a signal."""
+        if pid <= 0 or pid > 0xFFFFFFFF:
+            return True
+        process = _OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not process:
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such PID
+        try:
+            return not _has_exited(process)
+        finally:
+            _CloseHandle(process)
 
     def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
@@ -192,6 +213,18 @@ if sys.platform == "win32":
                 self._job = None
 
 else:
+    def pid_alive(pid: int) -> bool:
+        """Conservatively check a PID without sending it a signal."""
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except (OSError, OverflowError):
+            return True
+        return True
+
 
     def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
@@ -231,6 +264,145 @@ else:
 
         def close(self) -> None:
             """Stop tracking the tree; nothing to release on POSIX."""
+
+
+def _reap_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.wait()
+    except Exception:
+        pass
+
+
+def bounded_output(
+    argv: Sequence[str], *, timeout: float, max_stdout: int
+) -> tuple[int, bytes] | None:
+    """Collect bounded stdout; tree cleanup is best effort, not a sandbox."""
+    deadline = time.monotonic() + timeout
+    process: subprocess.Popen[bytes] | None = None
+    tree: ProcessTree | None = None
+    selector: selectors.BaseSelector | None = None
+    result: tuple[int, bytes] | None = None
+    reaped = False
+    live = False
+    cleanup_failed = False
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=0, **tree_spawn_options(),
+        )
+        tree = ProcessTree(process.pid)
+        assert process.stdout is not None
+        fd = process.stdout.fileno()
+        if sys.platform != "win32":
+            os.set_blocking(fd, False)
+            selector = selectors.DefaultSelector()
+            selector.register(fd, selectors.EVENT_READ)
+        else:
+            import msvcrt
+
+            handle = msvcrt.get_osfhandle(fd)
+        data = bytearray()
+        eof = False
+        code: int | None = None
+        while True:
+            code = process.poll()
+            reaped = code is not None
+            live = not reaped
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if eof and code is not None:
+                result = (code, bytes(data))
+                break
+            if eof:
+                threading.Event().wait(min(remaining, 0.05))
+                continue
+            if sys.platform == "win32":
+                available = wintypes.DWORD()
+                if not _PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None):
+                    error = ctypes.get_last_error()
+                    if error == 109:  # ERROR_BROKEN_PIPE
+                        eof = True
+                        continue
+                    raise ctypes.WinError(error)
+                if not available.value:
+                    threading.Event().wait(min(remaining, 0.05))
+                    continue
+                count = min(available.value, max_stdout + 1 - len(data))
+            else:
+                assert selector is not None
+                if not selector.select(min(remaining, 0.05)):
+                    continue
+                count = min(65536, max_stdout + 1 - len(data))
+            chunk = os.read(fd, count)
+            if not chunk:
+                eof = True
+            else:
+                data.extend(chunk)
+                if len(data) > max_stdout:
+                    break
+    except Exception:
+        result = None
+    finally:
+        if process is not None:
+            # A live poll is the last operation before the group signal: once
+            # reaped, the numeric group ID can already belong to someone else.
+            if not reaped:
+                if not live:
+                    try:
+                        live = process.poll() is None
+                        reaped = not live
+                    except Exception:
+                        cleanup_failed = True
+                        # The group cannot safely be signalled without a live
+                        # poll, but Popen still owns the leader's process handle.
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                if live:
+                    if tree is not None:
+                        try:
+                            tree.kill()
+                        except OSError as exc:
+                            if exc.errno != errno.ESRCH:
+                                cleanup_failed = True
+                        except Exception:
+                            cleanup_failed = True
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        cleanup_failed = True
+            if selector is not None:
+                try:
+                    selector.close()
+                except Exception:
+                    cleanup_failed = True
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except Exception:
+                    cleanup_failed = True
+                process.stdout = None
+            if not reaped:
+                try:
+                    process.wait(timeout=1.0)
+                    reaped = True
+                except Exception:
+                    cleanup_failed = True
+                    try:
+                        threading.Thread(target=_reap_process, args=(process,), daemon=True).start()
+                    except Exception:
+                        # No bounded way remains to guarantee this leader is reaped.
+                        pass
+        if tree is not None:
+            try:
+                tree.close()
+            except Exception:
+                cleanup_failed = True
+    return None if cleanup_failed else result
 
 
 # ── Handing this process over to another program ───────────────────────────

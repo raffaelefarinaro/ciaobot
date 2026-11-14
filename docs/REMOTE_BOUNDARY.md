@@ -42,7 +42,8 @@ carried by the session.
 - `ApiRequestBodyLimitMiddleware` (`ciao/web/request_limits.py`) is inside
   `AuthMiddleware`, so session, origin and loopback-peer refusals never consume
   the body. HTTP `/api/*` gets a 1 MiB default; only exact upload/write
-  method-and-route pairs receive finite exceptions. It rejects both oversized
+  method-and-route pairs receive finite exceptions, plus one read-only exception:
+  `POST /api/chats/{chat_id}/file-paths/resolve` gets 32 KiB (#2118). It rejects both oversized
   declared lengths and actual streamed bytes, spools admitted bodies with a
   1 MiB in-memory threshold and replays them unchanged. `/ws/*`, `/hooks/*` and
   `/share-target` do not pass through it. Malformed or excessively nested JSON
@@ -142,6 +143,13 @@ carried by the session.
   between a signed-in tab and a shell on the engine; it is gone, so a
   signed-in browser is now enough. Anything that relied on that prompt as
   a second barrier has to rely on the session instead.
+- A workspace terminal uses the same signed session, same-origin/remote HTTPS
+  policy, grant and WebSocket checks as chat/project terminals. The registered
+  agent root is server-resolved, but workspace grouping is not authorization or
+  a filesystem sandbox. Revoking a grant disconnects the browser, not the shell
+  or its children. Sessions share the global four-session cap; replay is only
+  in memory (256 KiB per session) and detached sessions expire after 900 seconds.
+  The application supplies no command or input, although shell startup files run.
 - **Workspace diagnostics stop at the workspace.** `ciao context logs` and a
   user schedule's `{{ISSUE_REPORT}}` see only failed background-job runs
   whose recorded `extra.workspace` is exactly the caller's/target's

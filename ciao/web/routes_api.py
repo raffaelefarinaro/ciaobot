@@ -21,9 +21,10 @@ import tempfile
 import time
 import unicodedata
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
+from stat import S_ISREG
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from ciao.native_installer import NativeBootstrapContext
 
 from urllib.parse import parse_qsl, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
@@ -53,8 +54,9 @@ from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
 from ciao import repo_link
+from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
-from ciao.jsonio import write_private_text
+from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
@@ -71,6 +73,7 @@ from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
     MAX_IMAGE_SIZE_BYTES,
+    CiaoConfig,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
     default_agent_fs_scope,
@@ -146,6 +149,10 @@ from ciao.web.project_chats import (
     ChatInfo,
     ProjectChatManager,
     ProjectOrderError,
+    RecoveryLifecycleConflict,
+    RecoveryRequestConflict,
+    RecoveryRequestChatNotFound,
+    RecoveryOutcomeUnknown,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -157,7 +164,7 @@ from ciao.web.routes_helpers import (
 # its own module; the handlers below keep request parsing and response mapping.
 # Imported as a module, not by name, so a test can patch one helper and have the
 # handlers see the patch.
-from ciao.web import proposal_service
+from ciao.web import proposal_service, request_limits
 # Same arrangement for the chat workflow's domain rules (upload policy, handover
 # trimming, title derivation, scheduled-run grading), which ProjectChatManager
 # and these handlers share.
@@ -2542,7 +2549,10 @@ async def chat_detail(request: Request) -> Response:
         if request.query_params.get("only_if_empty") in {"1", "true"}:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
-        ok = pcm.delete_chat(chat_id)
+        try:
+            ok = pcm.delete_chat(chat_id)
+        except RecoveryLifecycleConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
@@ -2659,6 +2669,8 @@ async def chat_new_session(request: Request) -> JSONResponse:
     chat_id = request.path_params["chat_id"]
     try:
         chat = pcm.new_session(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2682,6 +2694,8 @@ async def chat_handover(request: Request) -> JSONResponse:
             model=model,
             messages=[m for m in messages if isinstance(m, dict)],
         )
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2747,17 +2761,178 @@ async def chat_retry(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
     action = str(body.get("action", "try_now"))
+    request_id = body.get("request_id")
+    if action == "issue_recovery_request":
+        if set(body) != {"action"} or len(chat_id) > 128:
+            return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+        try:
+            record, _ = await asyncio.to_thread(pcm.recovery_request_record, chat_id, None)
+        except RecoveryRequestChatNotFound:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        except (OSError, ValueError):
+            return JSONResponse({"status": "unknown"}, status_code=503)
+        return JSONResponse({"request_id": record["request_id"], "expires": record["expires"]})
+    if "request_id" in body or action == "recovery_request_status":
+        if (len(chat_id) > 128 or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id)
+                or action not in {"recovery_request_status", "continue_recovery", "continue_recovery_now"}):
+            return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+        if action == "recovery_request_status":
+            if set(body) != {"action", "request_id"}:
+                return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+            intent = None
+        else:
+            failure_id = body.get("failure_id")
+            if (set(body) != {"action", "failure_id", "request_id"} or not isinstance(failure_id, str)
+                    or not failure_id or len(failure_id) > 128):
+                return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+            intent = {"action": action, "failure_id": failure_id}
+        # Cancellation cannot stop a worker thread. Retain the whole handler's
+        # ownership until admission, effects, and terminal writes have all finished.
+        operation = asyncio.create_task(_chat_recovery_request(request, body, intent))
+        cancelled = False
+        while True:
+            try:
+                response = await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if operation.cancelled():
+                    raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return response
+    return await _chat_retry_action(request, body)
+
+
+async def _chat_recovery_request(
+    request: Request, body: dict[str, Any], intent: dict[str, str] | None,
+) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
+    chat_id, request_id = request.path_params["chat_id"], body["request_id"]
+
+    async def receipt(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+        # An executor Future (not a Task) also survives shutdown cancelling all
+        # asyncio Tasks. Never close the ownership handle while its worker runs.
+        pending = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(pcm.recovery_request_record, chat_id, request_id, intent=intent, **kwargs)
+        )
+        cancelled = False
+        result: tuple[dict[str, Any], bool]
+        while True:
+            try:
+                result = await asyncio.shield(pending)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    with contextlib.ExitStack() as lifetime:
+        try:
+            record, admitted = await receipt(lifetime=lifetime)
+        except RecoveryRequestConflict:
+            return JSONResponse({"error": "request ID conflict"}, status_code=409)
+        except RecoveryRequestChatNotFound:
+            return JSONResponse({"error": "not found", "request_id": request_id, "status": "unknown"}, status_code=404)
+        except (OSError, ValueError):
+            return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+        if not admitted:
+            status = record.get("status", "unknown")
+            response = {"request_id": request_id, "status": status}
+            if status == "completed":
+                response["result"] = record.get("result")
+            code = 503 if status == "unknown" else (200 if body["action"] == "recovery_request_status" or status == "completed" else (409 if status == "cancelled" else 202))
+            return JSONResponse(response, status_code=code)
+        try:
+            inner = await _chat_retry_action(request, {key: value for key, value in body.items() if key != "request_id"})
+            if inner.status_code >= 500:
+                await receipt(outcome_unknown=True)
+                return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+            result = {"http_status": inner.status_code}
+            record, _ = await receipt(result=result)
+        except Exception:
+            try:
+                await receipt(outcome_unknown=True)
+            except Exception:
+                pass
+            return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+        return JSONResponse({"request_id": request_id, "status": record["status"], "result": record.get("result")})
+
+
+async def _chat_retry_action(request: Request, body: dict[str, Any]) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    action = str(body.get("action", "try_now"))
+    schedule_id = body.get("schedule_id")
+    if "require_empty" in body and action != "set":
+        return JSONResponse({"error": "require_empty is only valid for set"}, status_code=400)
+    if "schedule_id" in body and (action not in {"stop", "try_now"} or not isinstance(schedule_id, str) or not schedule_id):
+        return JSONResponse({"error": "invalid schedule_id"}, status_code=400)
     if action == "stop":
-        chat = pcm.stop_chat_retry(chat_id)
+        status = pcm.recovery_status(chat_id)
+        if status and status["mode"] == "continue_recovery" and status["status"] == "pending":
+            return JSONResponse({"error": "use stop_recovery with the observed recovery_id"}, status_code=409)
+        try:
+            chat = pcm.stop_chat_retry(chat_id, allow_recovery=False, **({"schedule_id": schedule_id} if schedule_id is not None else {}))
+        except ValueError:
+            return JSONResponse({"error": "recovery is in flight or changed"}, status_code=409)
+    elif action == "stop_recovery":
+        recovery_id = body.get("recovery_id")
+        if set(body) != {"action", "recovery_id"} or not isinstance(recovery_id, str) or not recovery_id:
+            return JSONResponse({"error": "only action and recovery_id are accepted"}, status_code=400)
+        if not pcm.stop_recovery(chat_id, recovery_id):
+            return JSONResponse({"error": "recovery is in flight, changed, or not pending"}, status_code=409)
+        return JSONResponse({"stopped": True})
+    elif action == "recovery_status":
+        if set(body) != {"action"}:
+            return JSONResponse({"error": "only action is accepted"}, status_code=400)
+        try:
+            status = pcm.recovery_status(chat_id)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "recovery status unavailable"}, status_code=503)
+        if status is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(status)
     elif action == "set":
+        if "require_empty" in body and body["require_empty"] is not True:
+            return JSONResponse({"error": "require_empty must be true"}, status_code=400)
         prompt = str(body.get("prompt", ""))
+        if body.get("require_empty") is True and not prompt.strip():
+            return JSONResponse({"error": "prompt is required"}, status_code=400)
         images = [str(x) for x in body.get("images", []) if str(x)]
-        chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual")
-    elif action == "try_now":
-        stream = pcm.try_chat_retry_now(chat_id)
+        chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual",
+                                  **({"require_empty": True} if body.get("require_empty") is True else {}))
+        if chat is None and body.get("require_empty") is True and pcm.get_chat(chat_id) is not None:
+            return JSONResponse({"error": "retry slot is not empty or unavailable"}, status_code=409)
+    elif action in {"continue_recovery", "continue_recovery_now"}:
+        failure_id = body.get("failure_id")
+        if set(body) != {"action", "failure_id"} or not isinstance(failure_id, str) or not failure_id:
+            return JSONResponse({"error": "only action and failure_id are accepted"}, status_code=400)
         chat = pcm.get_chat(chat_id)
-        if chat is not None and stream is None and chat.retry_status == "pending":
+        if chat is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if chat.failure_id != failure_id or not chat.session_id or not chat.last_error or chat.last_response_status != "error":
+            return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if chat.retry_status == "pending":
+            if action != "continue_recovery_now" or not pcm._valid_recovery_retry(chat) or chat.retry_recovery == "":
+                return JSONResponse({"error": "retry already pending"}, status_code=409)
+        else:
+            try:
+                armed = pcm.schedule_continue_recovery(chat_id, chat.session_id, chat.last_error, chat.user_turn_count, failure_id, manual=action == "continue_recovery_now")
+            except RecoveryOutcomeUnknown:
+                return JSONResponse({"error": "recovery outcome unknown", "code": "recovery_outcome_unknown"}, status_code=503)
+            if not armed:
+                return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if action == "continue_recovery_now" and pcm.try_chat_retry_now(chat_id) is None:
+            return JSONResponse({"error": "recovery not started"}, status_code=409)
+    elif action == "try_now":
+        stream = pcm.try_chat_retry_now(chat_id, **({"schedule_id": schedule_id} if schedule_id is not None else {}))
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and stream is None and (schedule_id is not None or chat.retry_status == "pending"):
             return JSONResponse({"error": "retry not started"}, status_code=409)
     else:
         return JSONResponse({"error": "unknown retry action"}, status_code=400)
@@ -2956,7 +3131,10 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    outcome = await pcm.archive_chat(chat_id)
+    try:
+        outcome = await pcm.archive_chat(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
     return JSONResponse({
@@ -3705,6 +3883,316 @@ async def chat_file_path(request: Request) -> Response:
     if result.suffix.lower() not in extensions:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
     return JSONResponse({"path": result.as_posix()})
+
+
+# Browser-only discovery of files a completed reply mentions (#2118). Exact
+# lookups inside the owning workspace's own roots: no fuzzy search, no content
+# read, and no fallback to the primary workspace or the install root.
+FILE_MENTION_MAX_BODY_BYTES = request_limits.FILE_MENTION_BODY_LIMIT
+FILE_MENTION_MAX_PATHS = 50
+FILE_MENTION_MAX_PATH_CHARS = 4096
+_FILE_MENTION_MAX_LINE = 2147483647
+_FILE_MENTION_LINE_RE = re.compile(r"(.+):([0-9]+)")
+_FILE_MENTION_LOCATION_KEYS = ("path", "exists", "is_worktree", "branch")
+
+
+@dataclass(frozen=True)
+class _FileMentionContext:
+    """The roots one batch may search, and the layout they were derived from.
+
+    A batch's rows are returned only when a fresh snapshot compares equal, so any
+    change to membership, roots, layout or repo state during the lookup nulls them.
+    """
+
+    roots: tuple[Path, ...]
+    identity: tuple[object, ...]
+
+
+def _no_store_json(content: object, status: int = 200) -> JSONResponse:
+    return JSONResponse(content, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+def _valid_mention_string(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > FILE_MENTION_MAX_PATH_CHARS:
+        return False
+    # Printable means "no control character or lone surrogate". str.isprintable()
+    # would also refuse U+202F, which macOS puts in screenshot names.
+    return all(
+        not 0xD800 <= ord(char) <= 0xDFFF and unicodedata.category(char) != "Cc"
+        for char in value
+    )
+
+
+async def _read_file_mention_request(request: Request) -> list[str] | Response:
+    """The validated `paths` list, or the error response for the whole body."""
+    body = await request.body()
+    if len(body) > FILE_MENTION_MAX_BODY_BYTES:
+        return _no_store_json({"error": "request body too large"}, 413)
+    try:
+        payload = loads_untrusted(body)
+    except (ValueError, RecursionError):
+        return _no_store_json({"error": "bad json"}, 400)
+    if not isinstance(payload, dict) or set(payload) != {"paths"}:
+        return _no_store_json({"error": "invalid request"}, 400)
+    paths = payload["paths"]
+    if not isinstance(paths, list) or not all(_valid_mention_string(item) for item in paths):
+        return _no_store_json({"error": "invalid request"}, 400)
+    if len(paths) > FILE_MENTION_MAX_PATHS:
+        return _no_store_json({"error": "too many paths"}, 413)
+    return paths
+
+
+def _owning_mention_roots(config: CiaoConfig, name: str) -> tuple[Path, ...] | None:
+    """The canonical roots one registered workspace may search, or None (fail closed).
+
+    Before the re-rooting the agent root is the shared install root, so only the
+    workspace's vault counts. After it, the agent root and the nested vault both do.
+    """
+    try:
+        rerooted = config._rerooted()
+        vault = config.workspace_vault_root(name)
+        agent = config.agent_root(name)
+        if rerooted and agent != config.workspace_root / name:
+            return None
+        roots: list[Path] = []
+        for raw in ([agent, vault] if rerooted else [vault]):
+            if raw.is_symlink():
+                return None
+            canon = raw.resolve(strict=True)
+            if not canon.is_dir() or canon == Path(canon.anchor):
+                return None
+            roots.append(canon)
+        install = config.workspace_root.resolve(strict=True)
+        vault_canon = roots[-1]
+        if not rerooted and (vault_canon == install or install.is_relative_to(vault_canon)):
+            return None
+        for other in config.workspaces:
+            if other == name:
+                continue
+            other_vault = config.workspace_vault_root(other).resolve(strict=True)
+            other_agent = config.agent_root(other).resolve(strict=True)
+            for root in roots:
+                if root == other_vault or other_vault.is_relative_to(root):
+                    return None
+                if root in (other_agent, other_vault):
+                    return None
+        return tuple(dict.fromkeys(roots))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _mention_protected_roots(config: CiaoConfig) -> tuple[Path, ...] | None:
+    """The install root and every registered workspace's agent root and vault.
+
+    A linked repo may not equal or contain any of them. None when one cannot be
+    resolved, which fails the repo closed.
+    """
+    try:
+        protected = [config.workspace_root.resolve(strict=True)]
+        for name in config.workspaces:
+            protected.append(config.agent_root(name).resolve(strict=True))
+            protected.append(config.workspace_vault_root(name).resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return tuple(protected)
+
+
+def _mention_repo_root(
+    repo_path: str,
+    recorded: bool,
+    repo_now: dict[str, Any],
+    protected: tuple[Path, ...] | None,
+) -> Path | None:
+    """The linked repo's root for this batch, or None when it is unavailable."""
+    if not repo_path or protected is None:
+        return None
+    if recorded:
+        # A recorded worktree that is gone or belongs elsewhere is unavailable.
+        # Never substitute the main checkout for it.
+        if not repo_now.get("exists"):
+            return None
+        raw = str(repo_now.get("path") or "")
+    else:
+        raw = repo_path
+    path = Path(raw)
+    if not raw or not path.is_dir():
+        return None
+    canon = path.resolve()
+    if canon == Path(canon.anchor):
+        return None
+    # A repo that equals or contains another root would expose that root's files.
+    if any(item.is_relative_to(canon) for item in protected):
+        return None
+    return canon
+
+
+def _file_mention_identity(
+    config: CiaoConfig,
+    chat_id: str,
+    workspace: str | None,
+    repo_path: str,
+    recorded: bool,
+    location: tuple[object, ...],
+    repo_now: dict[str, Any],
+) -> _FileMentionContext:
+    registered = tuple(sorted((name, item.vault_root) for name, item in config.workspaces.items()))
+    head: tuple[object, ...] = (
+        chat_id,
+        workspace,
+        registered,
+        str(config.workspace_root),
+        str(config.vault_root),
+        str(config.state_path.parent),
+        config._rerooted(),
+        repo_path,
+        location,
+        tuple(repo_now.get(key) for key in _FILE_MENTION_LOCATION_KEYS),
+    )
+    if not workspace or config.workspace(workspace) is None:
+        return _FileMentionContext((), (*head, "unavailable"))
+    owning = _owning_mention_roots(config, workspace)
+    if owning is None:
+        return _FileMentionContext((), (*head, "unavailable"))
+    repo = _mention_repo_root(repo_path, recorded, repo_now, _mention_protected_roots(config))
+    roots = tuple(dict.fromkeys([*owning, *([repo] if repo is not None else [])]))
+    return _FileMentionContext(roots, (*head, roots))
+
+
+async def _snapshot_file_mention_context(request: Request, chat_id: str) -> _FileMentionContext | None:
+    """The batch's roots and layout, or None when the chat does not exist."""
+    pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return None
+    project = pcm.get_project(chat.project_id)
+    # The repo's is_dir/resolve are filesystem work, so they stay off the event loop.
+    repo_path = await asyncio.to_thread(pcm.linked_repo_for_chat, chat)
+    location = dict(chat.repo_location or {})
+    recorded = bool(location.get("path"))
+    repo_now: dict[str, Any] = {}
+    if repo_path and recorded:
+        # One repo-identity check per snapshot. Its git common-dir match is enforced inside.
+        repo_now = await resolve_chat_location(repo_path=repo_path, hints=[], previous=location)
+    return await asyncio.to_thread(
+        _file_mention_identity,
+        config,
+        chat.chat_id,
+        project.workspace if project is not None else None,
+        repo_path,
+        recorded,
+        tuple(location.get(key) for key in _FILE_MENTION_LOCATION_KEYS),
+        dict(repo_now),
+    )
+
+
+def _strip_mention_line(raw: str) -> str | None:
+    """`raw` without a final valid `:line`; None when a `:line` suffix is malformed."""
+    match = _FILE_MENTION_LINE_RE.fullmatch(raw)
+    # A bare drive letter ("C:17") is a drive, not a line suffix.
+    if match is None or re.fullmatch(r"[A-Za-z]", match.group(1)):
+        return raw
+    digits = match.group(2)
+    if digits[0] == "0" or not 1 <= int(digits) <= _FILE_MENTION_MAX_LINE:
+        return None
+    return match.group(1)
+
+
+def _absolute_mention_candidate(roots: tuple[Path, ...], path: Path) -> set[Path]:
+    try:
+        canon = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return set()
+    return {canon} if any(canon.is_relative_to(root) for root in roots) else set()
+
+
+def _mention_candidates(roots: tuple[Path, ...], target: str) -> set[Path]:
+    """Canonical paths `target` names exactly, one per root that confines them."""
+    if target == "~" or target.startswith(("~/", "~\\")):
+        return _absolute_mention_candidate(roots, Path.home() / target[2:])
+    if target.startswith(("~", "\\\\", "//")):
+        # `~otheruser`, UNC, device and network-share forms are never looked up.
+        return set()
+    if re.match(r"[A-Za-z]:([\\/]|$)", target):
+        # A drive path is native only on Windows; elsewhere it is foreign.
+        path = Path(target)
+        return _absolute_mention_candidate(roots, path) if os.name == "nt" and path.is_absolute() else set()
+    path = Path(target)
+    if path.is_absolute():
+        return _absolute_mention_candidate(roots, path)
+    found: set[Path] = set()
+    for root in roots:
+        try:
+            canon = (root / path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if canon.is_relative_to(root):
+            found.add(canon)
+    return found
+
+
+def _mention_file_path(canon: Path) -> str | None:
+    """The canonical path if it is a regular file the viewers serve, within its size cap."""
+    suffix = canon.suffix.lower()
+    if suffix in _WORKSPACE_FILE_EXTS:
+        cap = _WORKSPACE_FILE_MAX_BYTES
+    elif suffix in _WORKSPACE_IMAGE_EXTS:
+        cap = _WORKSPACE_IMAGE_MAX_BYTES
+    elif suffix in _WORKSPACE_BINARY_EXTS:
+        cap = _WORKSPACE_BINARY_MAX_BYTES
+    else:
+        return None
+    info = canon.stat()
+    if not S_ISREG(info.st_mode) or info.st_size > cap:
+        return None
+    return canon.as_posix()
+
+
+def _resolve_one_file_mention(roots: tuple[Path, ...], raw: str) -> str | None:
+    try:
+        target = _strip_mention_line(raw)
+        if target is None:
+            return None
+        found = _mention_candidates(roots, target)
+        if len(found) != 1:
+            # No match, or distinct exact targets (ambiguous): both are null.
+            return None
+        (canon,) = found
+        return _mention_file_path(canon)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _resolve_file_mention_batch(roots: tuple[Path, ...], paths: list[str]) -> list[dict[str, str | None]]:
+    resolved: dict[str, str | None] = {}
+    rows: list[dict[str, str | None]] = []
+    for raw in paths:
+        if raw not in resolved:
+            resolved[raw] = _resolve_one_file_mention(roots, raw)
+        rows.append({"input": raw, "path": resolved[raw]})
+    return rows
+
+
+async def resolve_chat_file_paths(request: Request) -> Response:
+    """Exact canonical paths for the files a completed chat reply mentions (#2118).
+
+    Browser-only and read-only: each input gets its canonical path or null. A
+    response never carries content, reasons, stat data or possible matches.
+    """
+    chat_id = request.path_params["chat_id"]
+    paths = await _read_file_mention_request(request)
+    if isinstance(paths, Response):
+        return paths
+    snapshot = await _snapshot_file_mention_context(request, chat_id)
+    if snapshot is None:
+        return _no_store_json({"error": "chat not found"}, 404)
+    rows = await asyncio.to_thread(_resolve_file_mention_batch, snapshot.roots, paths)
+    fresh = await _snapshot_file_mention_context(request, chat_id)
+    if fresh is None:
+        return _no_store_json({"error": "chat not found"}, 404)
+    if fresh != snapshot:
+        rows = [{"input": raw, "path": None} for raw in paths]
+    return _no_store_json({"results": rows})
 
 
 # The folder browser's listing. Unlike the file viewers above, browsing is
@@ -6224,6 +6712,7 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "dev_mode",
     "app_repo",
     "resume_after_restart",
+    "verify_vault_answers",
 })
 
 
@@ -6256,6 +6745,8 @@ def _routines_payload(config, app_settings) -> dict:
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
+        # Settings → General: check a vault-grounded answer's claims against its notes.
+        "verify_vault_answers": s.verify_vault_answers,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
@@ -10980,6 +11471,42 @@ async def list_update_tasks(request: Request) -> JSONResponse:
     return JSONResponse(
         {"tasks": rows, "coverage_gap": gap} if gap else {"tasks": rows}
     )
+
+
+async def preview_update_task(request: Request) -> JSONResponse:
+    """Prepare an observational, read-only task plan off the event loop."""
+    from ciao import __version__, update_task_preview
+    from ciao.web import update_task_launch
+
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    fresh = request.query_params.get("fresh", "0")
+    if fresh not in ("0", "1"):
+        return JSONResponse({"error": "fresh must be 0 or 1"}, status_code=400)
+    config = request.app.state.config
+    try:
+        task = update_task_launch.resolve_task(
+            request.path_params["task_id"], installed_version=__version__
+        )
+        key = f"update-task-preview:{config.state_path.parent}:{workspace}:{task.id}@{task.revision}"
+        if fresh == "1":
+            key += f":{uuid4().hex}"
+
+        def scan() -> dict[str, Any]:
+            checked_at = datetime.now(UTC).isoformat()
+            return {
+                **update_task_preview.prepare(task, config=config, workspace=workspace),
+                "checked_at": checked_at,
+            }
+
+        result = await run_read(key, scan)
+    except ValueError:
+        return JSONResponse(
+            {"error": "This update task cannot be previewed for this workspace."},
+            status_code=409,
+        )
+    return JSONResponse(result)
 
 
 async def start_update_task(request: Request) -> JSONResponse:

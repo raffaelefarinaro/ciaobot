@@ -56,6 +56,7 @@ A dev or preview server is one background run for the whole session. Start it wi
 | Command | Purpose | Guard |
 |---|---|---|
 | `vault search QUERY [--limit N]` | Full-text search the active workspace vault. | — |
+| `vault recall-check --claims-file FILE` | Registered model-invoked recall-check operation. | Dormant: rollout-disabled and returns `feature_inactive`; do not invoke. If enabled in a future release, this remains an on-demand tool, not a guaranteed pre-final check. |
 | `vault review list` | List scoped vault-note review candidates (stale, orphaned, duplicate, weakly linked). | Read-only; an unattended schedule may only list, never decide. |
 | `vault review show PATH` | Inspect one candidate's evidence (why it was flagged, backlinks, duplicates). | Read-only. |
 | `vault review keep --candidate ID` | Record a "keep" decision: clears the row and stamps the note's `updated:` date to today. | Mutating; needs an attended turn — `unattended_forbidden` when run from a schedule or other automation. |
@@ -73,7 +74,7 @@ A dev or preview server is one background run for the whole session. Start it wi
 | `note related PATH [--limit N]` | List the vault notes connected to one note: the ones it links to, the ones linking to it and the ones whose body names its title or an alias. Read it before a verdict on a stale note. | Read-only, scoped to this workspace's vault, `PATH` vault-relative. Each related note prints its own `revision` and `due`: `revision` is the `expected_revision` a `note verify` payload for that note needs, and `due: false` means a check already settles it. |
 | `note verify --payload-file FILE` | Record one stale note's verification verdict, or one stale **entry's** with `entry` + `entry_fingerprint`: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON inside this workspace (note prose never travels as a shell argument). Fields, the `expected_revision` rule, the entry-level steps and an example are in the `ciao-memory` skill, `references/note-verify.md`. |
 
-The reply's `status` is the whole decision: `applied` wrote the note through a durable receipt; `needs_review` means one typed `note_edit` proposal is queued for a person (report it, do not route around it); `unverified` and `conflict` wrote nothing; `already_checked` means a check for this exact revision is in its cooldown or waiting on a proposal; `failed` means the note could not be used at all. Retirement always comes back `needs_review`. Do not hand-edit a stale note's Markdown instead of calling this.
+The reply's `status` is the whole decision: `applied` wrote the note through a durable receipt; `needs_review` means one typed `note_edit` proposal is queued for a person (report it, do not route around it); `unverified` and `conflict` wrote nothing; `already_checked` means a check for this exact revision is in its cooldown or waiting on a proposal (an attended chat may re-verify an `unverified` check that has no pending proposal); `failed` means the note could not be used at all. Retirement always comes back `needs_review`. Do not hand-edit a stale note's Markdown instead of calling this.
 
 ### Review queues
 

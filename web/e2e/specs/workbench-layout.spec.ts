@@ -103,13 +103,240 @@ async function measureReadingColumn(
 /**
  * Prototype A at a desktop width: layout facts jsdom cannot see. The review
  * rail must sit beside the request column rather than under it, and the
- * sidebar's stacked top (workspace, New chat, destinations) must not collapse
+ * sidebar's utility row and destinations must not collapse
  * back into one crowded row - which is what it did at the default 340px
  * sidebar before the rail was restacked. The Home section gaps are here for the
  * same reason: one owner for the gap between sections is a claim about real
  * boxes, and only a real layout engine can check it.
  */
 test.use({ viewport: { width: 1440, height: 900 } })
+
+async function openSidebar(page: Page): Promise<void> {
+  await quiesce(page)
+  if (await page.locator('.sidebar.collapsed').count()) {
+    await page.getByRole('button', { name: 'Open sidebar', exact: true }).filter({ visible: true }).first().click()
+  }
+  await quiesce(page)
+}
+
+async function longSidebarFixture(page: Page): Promise<void> {
+  await page.route('**/api/workspaces', async route => {
+    const response = await route.fetch()
+    const data = await response.json()
+    data.workspaces.push(...Array.from({ length: 24 }, (_, i) => ({
+      ...data.workspaces[0], name: `workspace-${i + 3}`,
+    })))
+    await route.fulfill({ response, json: data })
+  })
+  await page.route('**/api/vault/graph?*', async route => {
+    const response = await route.fetch()
+    const data = await response.json()
+    data.nodes.push(...Array.from({ length: 24 }, (_, i) => ({
+      ...data.nodes[0], id: `synthetic-${i}`, type: `category-${i}`, title: `Synthetic note ${i}`,
+    })))
+    await route.fulfill({ response, json: data })
+  })
+  const response = await page.request.post('/__fixture__/projects', {
+    data: { projects: [
+      { project_id: 'alpha-general', name: 'General', workspace: 'alpha', context: '', order: 0, is_auto: true },
+      ...Array.from({ length: 35 }, (_, i) => ({
+        project_id: `shell-project-${i}`, name: `Project ${i}`, workspace: 'alpha', context: '', order: i + 1,
+      })),
+    ] },
+  })
+  expect(response.ok()).toBe(true)
+}
+
+async function expectMenuWithinViewport(page: Page): Promise<void> {
+  await expect.poll(() => page.locator('.workspace-scope-menu').evaluate(el => {
+    const r = el.getBoundingClientRect()
+    const trigger = document.querySelector('.workspace-scope-trigger')!.getBoundingClientRect()
+    const vv = window.visualViewport
+    const top = vv?.offsetTop ?? 0
+    const bottom = top + (vv?.height ?? innerHeight)
+    return r.top >= top && r.bottom <= trigger.top - 3 && trigger.bottom <= bottom
+      && r.left >= 0 && r.right <= innerWidth
+  })).toBe(true)
+}
+
+test.describe('sidebar shell navigation', () => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `shell-${testInfo.workerIndex}-${testInfo.title}`)
+  })
+
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 450 }]) {
+    test(`one context scroller and a fixed workspace footer at ${viewport.width}px`, async ({ page }, testInfo) => {
+      await longSidebarFixture(page)
+      await page.setViewportSize(viewport)
+      await boot(page)
+      await openSidebar(page)
+      const context = page.locator('.sidebar-context')
+      const trigger = page.locator('.workspace-scope-trigger')
+      for (const [path, ready] of [
+        ['/', '.project-header'],
+        ['/settings/general', '.settings-nav-list'],
+        ['/memory/map', '.mm-sidebar-scroll .mm-chip'],
+      ]) {
+        if (path !== '/') {
+          // The finite Settings index fits a 900px pane. A short pane makes
+          // its complete real index overflow without inventing extra links.
+          await page.setViewportSize({ ...viewport, height: path.includes('settings') ? 450 : viewport.height })
+          await page.goto(path)
+          // Context rows can be hidden by the initially collapsed phone drawer.
+          await expect(page.locator('.startup-overlay')).toHaveCount(0)
+          await openSidebar(page)
+          await expect(page.locator(ready).first()).toBeVisible()
+        }
+        await quiesce(page)
+        const y = (await trigger.boundingBox())!.y
+        await expect.poll(() => context.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true)
+        await context.evaluate(el => { el.scrollTop = el.scrollHeight })
+        expect((await trigger.boundingBox())!.y).toBeCloseTo(y, 1)
+        expect(await page.locator('.sidebar').evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
+        expect(await context.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
+        if (path.includes('settings')) {
+          const last = context.locator('.settings-nav-item').last()
+          await expect(last).toBeInViewport()
+          const href = await last.getAttribute('href')
+          await last.click()
+          await expect(page).toHaveURL(new RegExp(`${href}$`))
+          await openSidebar(page)
+          expect((await trigger.boundingBox())!.y).toBeCloseTo(y, 1)
+        }
+        if (path.includes('memory')) {
+          expect(await context.locator('.memory-nav-list').count()).toBe(1)
+          expect(await context.locator('.mm-sidebar-scroll').count()).toBe(1)
+          const last = context.locator('.mm-chip').last()
+          await last.click()
+          await expect(last).toHaveClass(/\boff\b/)
+          expect((await trigger.boundingBox())!.y).toBeCloseTo(y, 1)
+          await context.evaluate(el => { el.scrollTop = 0 })
+          await expect(context.locator('.memory-nav-item').first()).toBeInViewport()
+        }
+        await page.screenshot({ path: testInfo.outputPath(`${viewport.width}-${path.includes('settings') ? 'settings' : path.includes('memory') ? 'memory' : 'home'}.png`) })
+      }
+    })
+
+    test(`workspace menu stays upward, scrollable and keyboard reachable at ${viewport.width}px`, async ({ page }, testInfo) => {
+      await longSidebarFixture(page)
+      await page.setViewportSize(viewport)
+      await boot(page)
+      await openSidebar(page)
+      const trigger = page.locator('.workspace-scope-trigger')
+      await trigger.click()
+      const menu = page.locator('.workspace-scope-menu')
+      const items = menu.getByRole('menuitem')
+      await expect(items.first()).toBeFocused()
+      await expectMenuWithinViewport(page)
+      expect(await menu.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true)
+      await page.keyboard.press('End')
+      await expect(items.last()).toBeFocused()
+      await expect(items.last()).toBeInViewport()
+      expect(await menu.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+      await page.keyboard.press('Home')
+      await expect(items.first()).toBeFocused()
+      await expect(items.first()).toBeInViewport()
+      expect(await menu.evaluate(el => el.scrollTop)).toBe(0)
+      await page.screenshot({ path: testInfo.outputPath(`menu-${viewport.width}.png`) })
+      const oldTrigger = (await trigger.boundingBox())!
+      await page.evaluate(() => {
+        const viewport = window.visualViewport!
+        Object.defineProperty(viewport, 'height', { configurable: true, value: viewport.height / 2 })
+        viewport.dispatchEvent(new Event('scroll'))
+      })
+      expect(oldTrigger.y).toBeGreaterThan(viewport.height / 2)
+      await expectMenuWithinViewport(page)
+      await page.keyboard.press('End')
+      await expect(items.last()).toBeInViewport()
+      await page.evaluate(() => {
+        Reflect.deleteProperty(window.visualViewport!, 'height')
+        window.visualViewport!.dispatchEvent(new Event('scroll'))
+      })
+      await page.setViewportSize({ width: viewport.width, height: 320 })
+      await expectMenuWithinViewport(page)
+      expect(await page.locator('.sidebar-context').evaluate(el => el.clientHeight)).toBeGreaterThanOrEqual(44)
+      expect(await page.locator('.sidebar-header').evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true)
+      await page.keyboard.press('End')
+      await expect(items.last()).toBeFocused()
+      await expect(items.last()).toBeInViewport()
+      await page.keyboard.press('Home')
+      await expect(items.first()).toBeInViewport()
+      await page.keyboard.press('Escape')
+      await expect(trigger).toBeFocused()
+      await expect(menu).toHaveCount(0)
+      await expect(trigger).toBeInViewport()
+      await trigger.click()
+      await menu.hover()
+      await page.mouse.wheel(0, 10000)
+      await expect(items.last()).toBeInViewport()
+      await menu.locator('.workspace-scope-link').click()
+      await expect(page).toHaveURL(/\/settings\/workspace$/)
+      if (viewport.width > 768) {
+        await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+        await expect(trigger).toHaveCount(0)
+        await openSidebar(page)
+        await expect(trigger).toBeInViewport()
+      }
+    })
+  }
+
+  test('Home intake and the supported new-chat chord remain available from Settings', async ({ page }) => {
+    await boot(page, '/settings/general', '.settings-nav-list')
+    await page.locator('.nav-links a[href="/"]').click()
+    await expect(page.locator('.home-intake-form')).toBeVisible()
+    await page.getByRole('button', { name: /^Choose a project for the new chat/ }).click()
+    await expect(page.getByRole('dialog', { name: 'New chat' })).toBeVisible()
+    await page.getByRole('option', { name: 'General' }).click()
+    const created = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/projects/alpha-general/chats'))
+    await page.locator('.home-intake').getByRole('button', { name: 'New chat', exact: true }).click()
+    await created
+    await expect(page.locator(COMPOSER)).toBeVisible()
+    await page.keyboard.press('Alt+n')
+    await expect(page.getByRole('dialog', { name: 'New chat' })).toBeVisible()
+    await page.keyboard.press('Escape')
+  })
+
+  test('200% reflow, coarse targets and visible keyboard focus keep the footer usable', async ({ browser }, testInfo) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, hasTouch: true, reducedMotion: 'reduce', colorScheme: 'light' })
+    const page = await context.newPage()
+    try {
+      await isolate(page, `shell-touch-${testInfo.workerIndex}`)
+      await longSidebarFixture(page)
+      await boot(page)
+      // Same CSS viewport reflow as a 1440×900 browser window at 200%.
+      await page.setViewportSize({ width: 720, height: 450 })
+      await openSidebar(page)
+      for (const selector of ['.nav-links a', '.workspace-scope-trigger']) {
+        for (const control of await page.locator(selector).all()) {
+          const box = (await control.boundingBox())!
+          expect(box.height).toBeGreaterThanOrEqual(44)
+          expect(box.width).toBeGreaterThanOrEqual(44)
+        }
+      }
+      await page.locator('.workspace-scope-trigger').focus()
+      await page.keyboard.press('ArrowDown')
+      await expectMenuWithinViewport(page)
+      for (const control of await page.locator('.workspace-scope-menu [role="menuitem"]').all()) {
+        const box = (await control.boundingBox())!
+        expect(box.height).toBeGreaterThanOrEqual(44)
+        expect(box.width).toBeGreaterThanOrEqual(44)
+      }
+      const last = page.locator('.workspace-scope-menu [role="menuitem"]').last()
+      await page.keyboard.press('End')
+      await expect(last).toBeFocused()
+      await expect(last).toBeInViewport()
+      const focus = await last.evaluate(el => {
+        const style = getComputedStyle(el)
+        return { visible: el.matches(':focus-visible'), outline: style.outlineStyle }
+      })
+      expect(focus.visible).toBe(true)
+      expect(focus.outline).not.toBe('none')
+      await page.screenshot({ path: testInfo.outputPath('light-reduced-motion-200-percent.png') })
+    } finally {
+      await context.close()
+    }
+  })
+})
 
 test.describe('workbench layout', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -148,9 +375,10 @@ test.describe('workbench layout', () => {
     await expect(today.first()).toContainText('avg 10')
   })
 
-  test('the sidebar stacks workspace, New chat and navigation without overlap', async ({ page }) => {
+  test('the sidebar keeps navigation above the context and workspace footer', async ({ page }) => {
     await boot(page)
-    const order = ['.workspace-scope-trigger', '.sidebar-new-chat', '.nav-links']
+    const order = ['.sidebar-brand-row', '.nav-links', '.sidebar-context', '.workspace-scope-trigger']
+    await expect(page.locator('.sidebar-new-chat')).toHaveCount(0)
     let previousBottom = -Infinity
     for (const selector of order) {
       const box = await page.locator(selector).first().boundingBox()
@@ -497,7 +725,9 @@ test.describe('pane header at a narrow desktop window', () => {
         .filter((r) => r.right - r.x > 1 && r.bottom - r.y > 1),
     )
     // Without this the loop below would pass on a header that rendered nothing.
-    expect(regions.map((r) => r.name)).toEqual(expect.arrayContaining(['header-lead', 'header-center']))
+    expect(regions.map((r) => r.name)).toEqual(expect.arrayContaining(['header-lead', 'header-trail']))
+    await expect(page.getByRole('button', { name: 'Open sidebar', exact: true })).toBeVisible()
+    await expect(page.locator('.pane-header .notif-bell')).toBeVisible()
 
     for (let i = 0; i < regions.length; i++) {
       for (let j = i + 1; j < regions.length; j++) {
