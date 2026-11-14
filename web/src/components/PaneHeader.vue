@@ -36,7 +36,6 @@
       <slot name="title" />
     </div>
     <div class="header-center" :class="{ 'header-center--with-title': hasTitle }">
-      <BrandMark v-if="brand" />
       <!-- Which view this is. Styled as a quiet marker, never as a heading: it
            answers "where am I", it is not the subject of the page, so it stays at
            --fg3 in an outlined chip. A fill would read as "needs you" (Rule S1).
@@ -60,7 +59,6 @@
 
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
-import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
 import { useHistoryNav } from '../composables/useHistoryNav'
 
@@ -68,12 +66,10 @@ const props = withDefaults(defineProps<{
   activeBgAgents?: number
   /** Short marker for the current view: 'home', 'settings', 'automations', … */
   pageTag?: string
-  /** Off only where a second mark would duplicate the main pane's (split view). */
-  brand?: boolean
   /** Phones only: Back and the bell move into the view's own overflow menu, so
    *  this header hides them. Other views keep both. */
   phoneOverflow?: boolean
-}>(), { brand: true, phoneOverflow: false })
+}>(), { phoneOverflow: false })
 defineEmits<{ 'open-sidebar': [] }>()
 
 const slots = useSlots()
@@ -84,23 +80,13 @@ const historyNav = useHistoryNav()
 const hasTitle = computed(() => !!slots.title)
 // The middle track only earns its symmetric siblings when it has something
 // to centre.
-const hasCenter = computed(() => props.brand || !!props.pageTag)
+const hasCenter = computed(() => !!props.pageTag)
 </script>
 
 <style scoped>
 .pane-header {
-  /* Three columns, so the brand in the middle one is genuinely centred on the
-     header rather than centred-by-eye with an absolute offset.
-       col 1  minmax(0, 1fr)  the title: may shrink to nothing, so it ellipses
-                              instead of pushing the middle column off centre
-       col 2  auto            the brand + page tag, sized by content
-       col 3  1fr             the actions: `1fr` is minmax(auto, 1fr), so its
-                              min is the icons' own width and they never crush
-     Both side tracks are `1fr`, so while there is free space they are equal and
-     the middle one lands dead centre. Once the actions need more than their
-     share they take it from col 1, which is the correct order of sacrifice: a
-     long chat title ellipses, no icon is clipped, and the mark drifts off centre
-     only in the layout where nothing could have stayed centred anyway. */
+  /* Keep the page-tag track between the shrinkable title and the actions.
+     The trailing 1fr has an automatic minimum so controls never get crushed. */
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto 1fr;
   align-items: center;
@@ -120,10 +106,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 /* Nothing in the middle column to centre, so there is nothing for the symmetric
    side tracks to buy - and they are not free: `1fr` on the trailing track holds
    back half the spare width for actions that only need their own size, while
-   the title ellipses in the other half. The chat header is exactly this case
-   (`:brand="false"`, no page tag), which is where a title truncated to "Hourly
-   skills page m..." sat next to an empty stretch of header. Size the trail to
-   its content and give the remainder to the title. */
+   the title ellipses in the other half. Item headers have no page tag: size
+   the trail to its content and give the remainder to the title. */
 .pane-header--no-center {
   grid-template-columns: minmax(0, 1fr) auto auto;
 }
@@ -146,45 +130,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   justify-content: flex-end;
   gap: var(--space-2);
 }
-/* In the split view the chat pane can be dragged down to its 240px floor, where
-   the header cannot hold a centred mark on top of a title and the action icons.
-   The middle column is the first thing to go: the mark is decoration plus a
-   reload shortcut that is one drag of the splitter away, whereas a clipped icon
-   is a lost action. `chat-split` is declared on the chat column in ChatLayout,
-   so this only applies inside the split view. */
-@container chat-split (max-width: 420px) {
-  .header-center { display: none; }
-}
-
-/* A wide viewport can still leave this pane narrow when the sidebar has been
-   dragged near its maximum. The header's action trail is unshrinkable, so
-   let the mark shrink to the available column rather than overflow into the
-   hamburger or actions. Same trade on mobile: the wordmark stays, sized down
-   so it fits between the hamburger and the action trail. Hiding it left the home
-   screen with an empty header strip and no click target to reload the app. */
-@container chat-pane (max-width: 460px) {
-  .header-center { min-width: 0; }
-}
-
-/* Same idea at viewport level: keep the wordmark on mobile (it is the only
-   reload entry point the home screen has), and shrink it instead of clipping.
-   font-size lands on --text-sm, the same size the mobile title uses. */
-@media (max-width: 460px) {
-  .header-center { min-width: 0; }
-  .header-center :deep(.brand) { font-size: var(--text-sm); }
-  .header-center :deep(.brand-label) { min-width: 5ch; }
-}
-
-/* A title plus three text actions needs the full pane. Hide the duplicate
-   centre mark first; pages without their own title keep it as the compact
-   reload affordance on tablet-sized panes. */
-@container chat-pane (max-width: 899px) {
-  .header-center--with-title :deep(.brand) { display: none; }
-}
-
-/* The expanded sidebar carries the product mark, so on a pane wide enough for
-   a real title the header drops its centred wordmark. A view with no title of
-   its own (Home, Settings, Automations, Memory) shows its page tag as that
+/* A view with no title of its own (Home, Settings, Automations, Memory)
+   shows its page tag as that
    title, on the left, where every other page's title sits - not as a pill in
    the middle of the header.
 
@@ -197,10 +144,9 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
    visible left-hand title *into the hamburger's own grid cell*, and the two
    printed on top of each other, at exactly the widths where the phone layout
    had just been given room to breathe. Below 600px the tag is screen-reader
-   only and the wordmark stays centred, which is the phone header working. */
+   only. */
 @container chat-pane (min-width: 600px) {
   @media (min-width: 769px) {
-    .header-center :deep(.brand) { display: none; }
     .pane-header--tag-title {
       grid-template-columns: minmax(0, 1fr) auto;
     }
@@ -230,7 +176,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second
-   copy here beside the wordmark was the same fact twice. It stays rendered
+   copy here would say the same fact twice. It stays rendered
    because on home, settings and the automations list it is the pane's only
    heading, and dropping the element would cost those views their document
    outline. Same rule as .sr-only in App.vue. */
@@ -350,22 +296,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   background: transparent;
 }
 @media (max-width: 768px) {
-  /* Narrow: the hamburger joins the row, so a single row would have to fit
-      hamburger + title + brand + actions across ~360px and the title is
-     what would lose. Instead the chrome keeps row 1 - hamburger, brand, actions -
-     and the title gets row 2 to itself, full width, where its two-line clamp has
-     somewhere to go. Row 2 only exists when there is a title, because
-     `.header-title` is not rendered otherwise.
-     Same three tracks as the desktop header, and for the same reason: two `1fr`
-     side tracks are equal while there is slack, so the mark lands on the
-     header's centre rather than on the centre of whatever the hamburger and the
-     actions left over. Sizing the sides to their content instead put the mark
-     wherever the leftover gap happened to be - visibly right of centre, because
-     the 30px hamburger is narrower than the action trail. The trailing track is
-     plain `1fr` (= minmax(auto, 1fr)) so the actions are still never crushed;
-     when they need more than their share they take it from the leading track and
-     the mark drifts, which is the same order of sacrifice the desktop header
-     documents above. */
+  /* Narrow: keep lead, page tag and actions in row 1. A tagged view's title
+     gets row 2; untagged item headers use the single-row override below. */
   .pane-header {
     height: auto;
     grid-template-columns: minmax(0, 1fr) auto 1fr;
@@ -393,12 +325,6 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     grid-column: 2;
     grid-row: 1;
     justify-content: center;
-    /* The track shrinks but the wordmark does not, so on the tightest headers -
-       an automation detail at 375px, where the trail already holds Run now,
-       and worse again at a raised font scale - it
-       overran the hamburger and the actions. Let it disappear instead: it is
-       decoration plus a reload shortcut, and a clipped control is a lost
-       action. Same trade the split-view rule above makes. */
     min-width: 0;
     overflow: hidden;
   }

@@ -7,13 +7,7 @@
          repeat what the transcript underneath already says. This is also the
          most crowded header in the app, so the room goes to those two pieces
          and the action icons. -->
-    <!-- No brand mark here. This is the densest header in the app - breadcrumb,
-         model picker, agent pill, archive - and the centred wordmark was
-         squeezing the chat title down to a few characters. The breadcrumb
-         already says where you are, and the mark is a click-to-reload
-         shortcut available on every other view. -->
     <PaneHeader
-      :brand="false"
       phone-overflow
       :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
@@ -8179,10 +8173,10 @@ details[open] > .activity-summary::before {
   }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
-  /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
-     right for a title competing with a page tag and a wordmark. This header has
-     neither, and the title has its own full-width row, so it keeps body size and
-     stays the anchor of the block. Two-line clamp is inherited from PaneHeader. */
+  /* PaneHeader drops pane titles to --text-sm on narrow screens when they
+     share the compact header grid. This title has its own full-width row, so it
+     keeps body size and stays the anchor of the block. Two-line clamp is
+     inherited from PaneHeader. */
   .header-breadcrumb .pane-title.chat-title {
     font-size: var(--text-base);
     line-height: 1.25;

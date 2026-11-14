@@ -73,38 +73,43 @@ describe('BrandMark', () => {
   })
 })
 
-describe('PaneHeader brand and page tag', () => {
+describe('PaneHeader page tag, title and controls', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('puts the brand in its own column, outside the title', () => {
+  it('keeps the page tag without owning a brand image or prop', () => {
     const wrapper = mount(PaneHeader, { props: { pageTag: 'home' } })
 
     const centre = wrapper.get('.header-center')
-    expect(centre.find('.brand').exists()).toBe(true)
-    // Sibling of the title, not inside it: this is what makes the centring hold.
-    expect(wrapper.find('.header-title .brand').exists()).toBe(false)
+    expect(centre.get('.page-tag').text()).toBe('home')
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.vm.$options.props).not.toHaveProperty('brand')
+    expect(wrapper.classes()).not.toContain('pane-header--no-center')
     expect(centre.element.parentElement).toBe(wrapper.get('.pane-header').element)
     wrapper.unmount()
   })
 
-  it('keeps the brand in the middle column when the title is very long', () => {
+  it('keeps a long title, page tag and working action in separate regions', async () => {
+    const action = vi.fn()
     const wrapper = mount(PaneHeader, {
       props: { pageTag: 'project' },
-      slots: { title: `<span class="pane-title">${LONG_TITLE}</span>` },
+      slots: {
+        title: `<span class="pane-title">${LONG_TITLE}</span>`,
+        actions: () => h('button', { onClick: action }, 'Run now'),
+      },
       global: { stubs: { transition: false } },
     })
 
-    // The long title is present, and the header still reads title | centre | trail
-    // in that order, with the brand in the centre column and nowhere else.
-    expect(wrapper.get('.pane-title').text().length).toBeGreaterThan(200)
+    expect(wrapper.get('.pane-title').text()).toBe(LONG_TITLE.trim())
     const columns = Array.from(wrapper.get('.pane-header').element.children)
       .map(el => el.className)
       .filter(name => !name.includes('header-lead'))
     expect(columns).toEqual(['header-title', 'header-center header-center--with-title', 'header-trail'])
-    expect(wrapper.findAll('.brand')).toHaveLength(1)
-    expect(wrapper.get('.header-center').find('.brand').exists()).toBe(true)
+    expect(wrapper.get('.header-center .page-tag').text()).toBe('project')
+    expect(wrapper.find('img').exists()).toBe(false)
+    await wrapper.get('.header-actions button').trigger('click')
+    expect(action).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
 
@@ -115,7 +120,8 @@ describe('PaneHeader brand and page tag', () => {
 
     const untagged = mount(PaneHeader)
     expect(untagged.find('.page-tag').exists()).toBe(false)
-    expect(untagged.find('.brand').exists()).toBe(true)
+    expect(untagged.find('img').exists()).toBe(false)
+    expect(untagged.classes()).toContain('pane-header--no-center')
     untagged.unmount()
   })
 
@@ -144,25 +150,31 @@ describe('PaneHeader brand and page tag', () => {
     overflow.unmount()
   })
 
-  it('drops the brand where a second mark would duplicate the main pane', () => {
-    const wrapper = mount(PaneHeader, { props: { brand: false } })
-    expect(wrapper.find('.brand').exists()).toBe(false)
+  it('gives an item title the no-center layout and retains mobile navigation', async () => {
+    const wrapper = mount(PaneHeader, {
+      slots: { title: '<h2 class="pane-title">An item</h2>' },
+    })
+    expect(wrapper.classes()).toContain('pane-header--no-center')
+    expect(wrapper.get('h2').text()).toBe('An item')
     expect(wrapper.find('.header-center').exists()).toBe(true)
+    expect(wrapper.find('img').exists()).toBe(false)
+    await wrapper.get('button[aria-label="Open sidebar"]').trigger('click')
+    expect(wrapper.emitted('open-sidebar')).toHaveLength(1)
+    expect(wrapper.find('.header-bell').exists()).toBe(true)
     wrapper.unmount()
   })
 })
 
 describe('page tag per view', () => {
-  const seen: { pageTag: string; brand: boolean }[] = []
+  const seen: { pageTag: string }[] = []
 
   const RecordingPaneHeader = defineComponent({
     name: 'PaneHeader',
     props: {
       pageTag: { type: String, default: '' },
-      brand: { type: Boolean, default: true },
     },
     setup(props) {
-      seen.push({ pageTag: props.pageTag, brand: props.brand })
+      seen.push({ pageTag: props.pageTag })
       return () => h('div', { class: 'pane-header-stub' })
     },
   })
@@ -224,7 +236,7 @@ describe('page tag per view', () => {
     await flushPromises()
     await nextTick()
 
-    expect(seen).toEqual([{ pageTag: 'Home', brand: true }])
+    expect(seen).toEqual([{ pageTag: 'Home' }])
     wrapper.unmount()
   })
 })
