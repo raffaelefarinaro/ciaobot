@@ -56,6 +56,7 @@ A dev or preview server is one background run for the whole session. Start it wi
 | Command | Purpose | Guard |
 |---|---|---|
 | `vault search QUERY [--limit N]` | Full-text search the active workspace vault. | — |
+| `vault recall-check --claims-file FILE` | Registered model-invoked recall-check operation. | Dormant: rollout-disabled and returns `feature_inactive`; do not invoke. If enabled in a future release, this remains an on-demand tool, not a guaranteed pre-final check. |
 | `vault review list` | List scoped vault-note review candidates (stale, orphaned, duplicate, weakly linked). | Read-only; an unattended schedule may only list, never decide. |
 | `vault review show PATH` | Inspect one candidate's evidence (why it was flagged, backlinks, duplicates). | Read-only. |
 | `vault review keep --candidate ID` | Record a "keep" decision: clears the row and stamps the note's `updated:` date to today. | Mutating; needs an attended turn — `unattended_forbidden` when run from a schedule or other automation. |

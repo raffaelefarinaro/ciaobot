@@ -149,6 +149,10 @@ from ciao.web.project_chats import (
     ChatInfo,
     ProjectChatManager,
     ProjectOrderError,
+    RecoveryLifecycleConflict,
+    RecoveryRequestConflict,
+    RecoveryRequestChatNotFound,
+    RecoveryOutcomeUnknown,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -2545,7 +2549,10 @@ async def chat_detail(request: Request) -> Response:
         if request.query_params.get("only_if_empty") in {"1", "true"}:
             if not pcm.is_empty_chat(chat_id):
                 return JSONResponse({"ok": False, "deleted": False, "reason": "not empty"})
-        ok = pcm.delete_chat(chat_id)
+        try:
+            ok = pcm.delete_chat(chat_id)
+        except RecoveryLifecycleConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
@@ -2662,6 +2669,8 @@ async def chat_new_session(request: Request) -> JSONResponse:
     chat_id = request.path_params["chat_id"]
     try:
         chat = pcm.new_session(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2685,6 +2694,8 @@ async def chat_handover(request: Request) -> JSONResponse:
             model=model,
             messages=[m for m in messages if isinstance(m, dict)],
         )
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2750,17 +2761,178 @@ async def chat_retry(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
     action = str(body.get("action", "try_now"))
+    request_id = body.get("request_id")
+    if action == "issue_recovery_request":
+        if set(body) != {"action"} or len(chat_id) > 128:
+            return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+        try:
+            record, _ = await asyncio.to_thread(pcm.recovery_request_record, chat_id, None)
+        except RecoveryRequestChatNotFound:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        except (OSError, ValueError):
+            return JSONResponse({"status": "unknown"}, status_code=503)
+        return JSONResponse({"request_id": record["request_id"], "expires": record["expires"]})
+    if "request_id" in body or action == "recovery_request_status":
+        if (len(chat_id) > 128 or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id)
+                or action not in {"recovery_request_status", "continue_recovery", "continue_recovery_now"}):
+            return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+        if action == "recovery_request_status":
+            if set(body) != {"action", "request_id"}:
+                return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+            intent = None
+        else:
+            failure_id = body.get("failure_id")
+            if (set(body) != {"action", "failure_id", "request_id"} or not isinstance(failure_id, str)
+                    or not failure_id or len(failure_id) > 128):
+                return JSONResponse({"error": "invalid recovery request"}, status_code=400)
+            intent = {"action": action, "failure_id": failure_id}
+        # Cancellation cannot stop a worker thread. Retain the whole handler's
+        # ownership until admission, effects, and terminal writes have all finished.
+        operation = asyncio.create_task(_chat_recovery_request(request, body, intent))
+        cancelled = False
+        while True:
+            try:
+                response = await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if operation.cancelled():
+                    raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return response
+    return await _chat_retry_action(request, body)
+
+
+async def _chat_recovery_request(
+    request: Request, body: dict[str, Any], intent: dict[str, str] | None,
+) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
+    chat_id, request_id = request.path_params["chat_id"], body["request_id"]
+
+    async def receipt(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+        # An executor Future (not a Task) also survives shutdown cancelling all
+        # asyncio Tasks. Never close the ownership handle while its worker runs.
+        pending = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(pcm.recovery_request_record, chat_id, request_id, intent=intent, **kwargs)
+        )
+        cancelled = False
+        result: tuple[dict[str, Any], bool]
+        while True:
+            try:
+                result = await asyncio.shield(pending)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    with contextlib.ExitStack() as lifetime:
+        try:
+            record, admitted = await receipt(lifetime=lifetime)
+        except RecoveryRequestConflict:
+            return JSONResponse({"error": "request ID conflict"}, status_code=409)
+        except RecoveryRequestChatNotFound:
+            return JSONResponse({"error": "not found", "request_id": request_id, "status": "unknown"}, status_code=404)
+        except (OSError, ValueError):
+            return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+        if not admitted:
+            status = record.get("status", "unknown")
+            response = {"request_id": request_id, "status": status}
+            if status == "completed":
+                response["result"] = record.get("result")
+            code = 503 if status == "unknown" else (200 if body["action"] == "recovery_request_status" or status == "completed" else (409 if status == "cancelled" else 202))
+            return JSONResponse(response, status_code=code)
+        try:
+            inner = await _chat_retry_action(request, {key: value for key, value in body.items() if key != "request_id"})
+            if inner.status_code >= 500:
+                await receipt(outcome_unknown=True)
+                return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+            result = {"http_status": inner.status_code}
+            record, _ = await receipt(result=result)
+        except Exception:
+            try:
+                await receipt(outcome_unknown=True)
+            except Exception:
+                pass
+            return JSONResponse({"request_id": request_id, "status": "unknown"}, status_code=503)
+        return JSONResponse({"request_id": request_id, "status": record["status"], "result": record.get("result")})
+
+
+async def _chat_retry_action(request: Request, body: dict[str, Any]) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    action = str(body.get("action", "try_now"))
+    schedule_id = body.get("schedule_id")
+    if "require_empty" in body and action != "set":
+        return JSONResponse({"error": "require_empty is only valid for set"}, status_code=400)
+    if "schedule_id" in body and (action not in {"stop", "try_now"} or not isinstance(schedule_id, str) or not schedule_id):
+        return JSONResponse({"error": "invalid schedule_id"}, status_code=400)
     if action == "stop":
-        chat = pcm.stop_chat_retry(chat_id)
+        status = pcm.recovery_status(chat_id)
+        if status and status["mode"] == "continue_recovery" and status["status"] == "pending":
+            return JSONResponse({"error": "use stop_recovery with the observed recovery_id"}, status_code=409)
+        try:
+            chat = pcm.stop_chat_retry(chat_id, allow_recovery=False, **({"schedule_id": schedule_id} if schedule_id is not None else {}))
+        except ValueError:
+            return JSONResponse({"error": "recovery is in flight or changed"}, status_code=409)
+    elif action == "stop_recovery":
+        recovery_id = body.get("recovery_id")
+        if set(body) != {"action", "recovery_id"} or not isinstance(recovery_id, str) or not recovery_id:
+            return JSONResponse({"error": "only action and recovery_id are accepted"}, status_code=400)
+        if not pcm.stop_recovery(chat_id, recovery_id):
+            return JSONResponse({"error": "recovery is in flight, changed, or not pending"}, status_code=409)
+        return JSONResponse({"stopped": True})
+    elif action == "recovery_status":
+        if set(body) != {"action"}:
+            return JSONResponse({"error": "only action is accepted"}, status_code=400)
+        try:
+            status = pcm.recovery_status(chat_id)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "recovery status unavailable"}, status_code=503)
+        if status is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(status)
     elif action == "set":
+        if "require_empty" in body and body["require_empty"] is not True:
+            return JSONResponse({"error": "require_empty must be true"}, status_code=400)
         prompt = str(body.get("prompt", ""))
+        if body.get("require_empty") is True and not prompt.strip():
+            return JSONResponse({"error": "prompt is required"}, status_code=400)
         images = [str(x) for x in body.get("images", []) if str(x)]
-        chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual")
-    elif action == "try_now":
-        stream = pcm.try_chat_retry_now(chat_id)
+        chat = pcm.set_chat_retry(chat_id, prompt, image_refs=images, reason="manual",
+                                  **({"require_empty": True} if body.get("require_empty") is True else {}))
+        if chat is None and body.get("require_empty") is True and pcm.get_chat(chat_id) is not None:
+            return JSONResponse({"error": "retry slot is not empty or unavailable"}, status_code=409)
+    elif action in {"continue_recovery", "continue_recovery_now"}:
+        failure_id = body.get("failure_id")
+        if set(body) != {"action", "failure_id"} or not isinstance(failure_id, str) or not failure_id:
+            return JSONResponse({"error": "only action and failure_id are accepted"}, status_code=400)
         chat = pcm.get_chat(chat_id)
-        if chat is not None and stream is None and chat.retry_status == "pending":
+        if chat is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if chat.failure_id != failure_id or not chat.session_id or not chat.last_error or chat.last_response_status != "error":
+            return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if chat.retry_status == "pending":
+            if action != "continue_recovery_now" or not pcm._valid_recovery_retry(chat) or chat.retry_recovery == "":
+                return JSONResponse({"error": "retry already pending"}, status_code=409)
+        else:
+            try:
+                armed = pcm.schedule_continue_recovery(chat_id, chat.session_id, chat.last_error, chat.user_turn_count, failure_id, manual=action == "continue_recovery_now")
+            except RecoveryOutcomeUnknown:
+                return JSONResponse({"error": "recovery outcome unknown", "code": "recovery_outcome_unknown"}, status_code=503)
+            if not armed:
+                return JSONResponse({"error": "failure or session changed, chat is busy, or a retry is pending"}, status_code=409)
+        if action == "continue_recovery_now" and pcm.try_chat_retry_now(chat_id) is None:
+            return JSONResponse({"error": "recovery not started"}, status_code=409)
+    elif action == "try_now":
+        stream = pcm.try_chat_retry_now(chat_id, **({"schedule_id": schedule_id} if schedule_id is not None else {}))
+        chat = pcm.get_chat(chat_id)
+        if chat is not None and stream is None and (schedule_id is not None or chat.retry_status == "pending"):
             return JSONResponse({"error": "retry not started"}, status_code=409)
     else:
         return JSONResponse({"error": "unknown retry action"}, status_code=400)
@@ -2959,7 +3131,10 @@ async def chat_archive(request: Request) -> JSONResponse:
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
     )
-    outcome = await pcm.archive_chat(chat_id)
+    try:
+        outcome = await pcm.archive_chat(chat_id)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if outcome is not None:
         pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
     return JSONResponse({

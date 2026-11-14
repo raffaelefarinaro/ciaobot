@@ -497,7 +497,9 @@ test.describe('pane header at a narrow desktop window', () => {
         .filter((r) => r.right - r.x > 1 && r.bottom - r.y > 1),
     )
     // Without this the loop below would pass on a header that rendered nothing.
-    expect(regions.map((r) => r.name)).toEqual(expect.arrayContaining(['header-lead', 'header-center']))
+    expect(regions.map((r) => r.name)).toEqual(expect.arrayContaining(['header-lead', 'header-trail']))
+    await expect(page.getByRole('button', { name: 'Open sidebar', exact: true })).toBeVisible()
+    await expect(page.locator('.pane-header .notif-bell')).toBeVisible()
 
     for (let i = 0; i < regions.length; i++) {
       for (let j = i + 1; j < regions.length; j++) {
