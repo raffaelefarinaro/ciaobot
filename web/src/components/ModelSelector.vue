@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -75,6 +75,11 @@ const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
+let preserveFocusOnUnmount = false
+onBeforeUnmount(() => {
+  const active = document.activeElement
+  preserveFocusOnUnmount = !!active && active !== document.body && !rootRef.value?.contains(active)
+})
 
 const effectiveValue = computed<string | string[]>(() => {
   if (props.multiple) return Array.isArray(props.modelValue) ? props.modelValue : []
@@ -160,9 +165,16 @@ function onPopoverOpenChange(nextOpen: boolean): void {
 
 function close(reason: 'escape' | 'other' = 'other') {
   const returnFocus = !props.triggerless ? triggerRef.value : null
+  const active = document.activeElement
+  const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
   open.value = false
   query.value = ''
-  if (returnFocus) nextTick(() => returnFocus.focus())
+  if (returnFocus && shouldReturnFocus) nextTick(() => {
+    const current = document.activeElement
+    if (returnFocus.isConnected && (!current || current === document.body || rootRef.value?.contains(current))) {
+      returnFocus.focus()
+    }
+  })
   if (props.triggerless) emit('close', reason)
 }
 
@@ -289,6 +301,14 @@ function onOpenAutoFocus(event: Event): void {
   focusSearch()
 }
 
+function onCloseAutoFocus(event: Event): void {
+  // Never override focus that has already moved outside the picker.
+  const active = document.activeElement
+  if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
+    event.preventDefault()
+  }
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
@@ -363,6 +383,7 @@ onMounted(() => {
         :position-strategy="'fixed'"
         :update-position-strategy="'always'"
         @open-auto-focus="onOpenAutoFocus"
+        @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
       >
         <div

@@ -1952,6 +1952,34 @@ describe('ChatPanel recovery model picker', () => {
     wrapper.unmount()
   })
 
+  it('does not steal focus from a textarea focused after Escape before nextTick', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    textarea.element.focus()
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore composer focus when Escape starts with focus outside the picker', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
   it('does not restore composer focus on recovery Escape or unmount', async () => {
     const { wrapper, store } = await mountPanel()
     document.body.appendChild(wrapper.element)

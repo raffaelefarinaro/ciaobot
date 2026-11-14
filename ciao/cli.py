@@ -6290,7 +6290,12 @@ def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
     )
 
 
-def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+def _curation_plan(
+    args: argparse.Namespace,
+    *,
+    category_items: tuple[Any, ...] = (),
+    category_generation_attempted: bool = False,
+) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
     from ciao.vault_index import VAULT_RENDER_PREFIX
@@ -6304,6 +6309,7 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         guide_path=guide,
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
+        category_items=category_items,
         category_registry=load_entity_types(registry_root),
         # The one pass that folds the proposal queue needs the registry; every
         # other pass reads files, and saying so is cheaper than making the whole
@@ -6321,12 +6327,22 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         workspace=name,
     )
     plan = plan_run(worklist, budget)
+    coverage_notes = [
+        "coverage is incomplete: discovery is not exhaustive and observed work may omit items"
+    ]
+    if not category_generation_attempted:
+        coverage_notes.append(
+            "category generation was omitted; category clusters were not scanned"
+        )
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
         "handover": handover,
         **worklist.as_dict(),
         **plan.as_dict(),
+        "counts_complete": False,
+        "remaining_observed_count": worklist.total_keys,
+        "coverage_notes": coverage_notes,
         "last_run": state.last_run,
     }
     return payload, worklist
@@ -6338,8 +6354,17 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         sys.stdout.write("\n")
         return
     if payload.get("empty"):
-        print("Nothing to curate: every mechanical check is clear.")
+        print("No observed work remains. Coverage is incomplete.")
+        for note in payload.get("coverage_notes", []):
+            print(f"Coverage note: {note}")
         return
+    lease = payload.get("lease")
+    if lease and lease.get("holder"):
+        print(f"Lease holder (use exactly for follow-ups): {lease['holder']}")
+    print("Coverage is incomplete; counts are observed, not exhaustive.")
+    print(f"Observed work items: {payload.get('remaining_observed_count', 0)}")
+    for note in payload.get("coverage_notes", []):
+        print(f"Coverage note: {note}")
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
     print(f"Handover: {payload['handover']}")
     for item in payload.get("planned", []):
@@ -6369,14 +6394,22 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
-    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
+    _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
 
-    payload, _worklist = _curation_plan(args)
+    from ciao.curation_run import _category_cluster_items
+    from ciao.entity_types import load_entity_types
+
+    categories = tuple(
+        _category_cluster_items(vault, registry=load_entity_types(registry_root))
+    )
+    payload, _worklist = _curation_plan(
+        args, category_items=categories, category_generation_attempted=True
+    )
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
         end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
@@ -6395,12 +6428,13 @@ def _curation_holder(args: argparse.Namespace) -> str:
     than defaulted, because only `curation-begin` knows the value — guessing
     `host:pid` here would match nothing and reject every honest run.
     """
-    holder = (getattr(args, "holder", "") or "").strip()
-    if not holder:
+    holder = getattr(args, "holder", "") or ""
+    if not holder.strip():
         print(
             "pass --holder with the value `curation-begin` reported as lease.holder",
             file=sys.stderr,
         )
+        return ""
     return holder
 
 
@@ -6470,6 +6504,11 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    summary.update(
+        counts_complete=False,
+        remaining_observed_count=int(payload["remaining_observed_count"]),
+        coverage_notes=payload["coverage_notes"],
+    )
     advanced = bool(summary.get("full_pass_advanced"))
     if args.json:
         json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
@@ -6478,8 +6517,11 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         print(
             f"run {summary['status']}: planned {summary['planned']}, "
             f"completed {summary['completed']}, deferred {summary['deferred']}; "
-            f"weekly marker {'advanced' if advanced else 'left due'}"
+            f"weekly marker {'advanced' if advanced else 'left due'}; "
+            f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )
+        for note in summary["coverage_notes"]:
+            print(f"Coverage note: {note}")
     return 0
 
 
@@ -9550,7 +9592,7 @@ def build_parser() -> argparse.ArgumentParser:
     curation_begin_parser.add_argument(
         "--holder",
         default="",
-        help="Label recorded as the lease owner. Defaults to host:pid.",
+        help="Descriptive label; follow-ups must use the exact lease.holder returned. Defaults to host:pid.",
     )
     curation_begin_parser.set_defaults(func=_curation_begin_command)
 

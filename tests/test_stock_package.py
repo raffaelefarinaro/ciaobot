@@ -7,6 +7,11 @@ from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
+import pytest
+
+from ciao import agent_cli
+from ciao.skills_inventory import MAX_SKILL_BYTES
+
 
 EXPECTED_COMMANDS = {
     "interrogation.md",
@@ -24,6 +29,53 @@ PRIVATE_MARKERS = {
     "PrivateCo",
     "/Users/private",
 }
+
+
+def _over_budget(text: str) -> bool:
+    return len(text.encode("utf-8")) > MAX_SKILL_BYTES
+
+
+def test_stock_skill_entries_fit_existing_context_budget() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    entries = [p.joinpath("SKILL.md") for p in skills.iterdir() if p.is_dir() and p.joinpath("SKILL.md").is_file()]
+    assert any(p.parent.name == "ciao-cli" for p in entries)
+    for entry in entries:
+        text = entry.read_text(encoding="utf-8")
+        assert not _over_budget(text), f"{entry}: {len(text.encode('utf-8'))} bytes"
+
+
+def test_stock_skill_budget_uses_utf8_bytes() -> None:
+    assert not _over_budget("x" * MAX_SKILL_BYTES)
+    assert _over_budget("x" * (MAX_SKILL_BYTES + 1))
+    assert _over_budget("é" * (MAX_SKILL_BYTES // 2 + 1))
+
+
+def test_cli_reference_links_resolve_to_packaged_files() -> None:
+    skill = resources.files("ciao.stock").joinpath("skills", "ciao-cli")
+    entry = skill.joinpath("SKILL.md").read_text(encoding="utf-8")
+    for path in ("reference.md", "references/memory-and-review.md", "references/workspace-operations.md",
+                 "references/tasks.md", "references/automation-and-status.md"):
+        assert f"]({path})" in entry
+        assert skill.joinpath(*path.split("/")).read_text(encoding="utf-8").strip()
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "skills/**/*" in pyproject["tool"]["setuptools"]["package-data"]["ciao.stock"]
+
+
+@pytest.mark.parametrize(("path", "topics"), [
+    ("ciao-memory/SKILL.md", ("note",)),
+    ("ciao-capabilities/SKILL.md", ("schedule", "webhook")),
+    ("ciao-capabilities/references/automations.md", ("schedule", "webhook")),
+    ("ciao-capabilities/references/memory.md", ("vault", "project", "chat")),
+])
+def test_stock_skill_help_lookups_use_bounded_topics(path: str, topics: tuple[str, ...]) -> None:
+    text = resources.files("ciao.stock").joinpath("skills", *path.split("/")).read_text(encoding="utf-8")
+    assert "`ciao help`" not in text
+    if path.endswith("references/memory.md"):
+        assert "ciao help <topic>" in text
+    for topic in topics:
+        assert f"ciao help {topic}" in text
+        args = agent_cli.build_parser().parse_args(["help", topic])
+        assert args.noun == "help" and args.topic == topic
 
 
 def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:

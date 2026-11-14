@@ -19,6 +19,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import agent_cli
 from ciao.chat_actions import ChatActionError, validate_params
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
@@ -256,9 +257,7 @@ def test_no_agent_surface_starts_actions() -> None:
 
 def test_the_cli_skill_documents_the_permission_mode_request() -> None:
     """The agent learns the request from its own skill, and the skill says it cannot apply it."""
-    skill = (
-        Path(__file__).resolve().parents[1] / "ciao" / "stock" / "skills" / "ciao-cli" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    skill = agent_cli._help_text()
     assert "`permission_mode --mode plan|normal|auto|bypass [--note TEXT]`" in skill
     assert "You can never apply it yourself." in skill
     assert "Asking for the chat's current mode is refused with `invalid_action`." in skill

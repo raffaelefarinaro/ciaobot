@@ -27,7 +27,7 @@ from ciao.providers.claude import (
     _is_initialize_timeout,
     _sdk_permission_mode,
 )
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.opencode import OpencodeProvider, SanitizedStartupError
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -1937,7 +1937,7 @@ def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[st
         spawned.append(argv)
         if envs is not None:
             envs.append(kwargs.get("env") or {})
-        raise _SpawnCaptured
+        raise _SpawnCaptured("spawn-capture-private-sentinel")
 
     monkeypatch.setattr("ciao.providers.opencode._spawn_server", fake_spawn)
     return spawned
@@ -1971,8 +1971,10 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
 
-    with pytest.raises(_SpawnCaptured):
+    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
         await provider._start_server_once(request, str(binary))
+    assert error.value.__cause__ is None and error.value.__context__ is None
+    assert "spawn-capture-private-sentinel" not in str(error.value)
 
     roots, read_only = calls[0]
     assert paths == [str(tmp_path / "node-bin")]
@@ -2006,8 +2008,10 @@ async def test_opencode_machine_scope_spawns_the_binary_directly(tmp_path, monke
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", no_prefix)
 
-    with pytest.raises(_SpawnCaptured):
+    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
         await provider._start_server_once(request, "/bin/opencode")
+    assert error.value.__cause__ is None and error.value.__context__ is None
+    assert "spawn-capture-private-sentinel" not in str(error.value)
 
     argv = spawned[0]
     assert argv[0] == "/bin/opencode"
@@ -2166,8 +2170,10 @@ async def test_opencode_snapshot_predates_the_sandbox_binds(tmp_path, monkeypatc
         return ["opencode", "serve"], {}
 
     monkeypatch.setattr(provider, "_server_launch", racing_launch)
-    with pytest.raises(_SpawnCaptured):
+    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
         await provider._start_server_once(request, "/bin/opencode")
+    assert error.value.__cause__ is None and error.value.__context__ is None
+    assert "spawn-capture-private-sentinel" not in str(error.value)
 
     assert provider._read_only_snapshot == ((str(receipt), None),)
     assert provider._read_only_snapshot != _read_only_snapshot(request)
@@ -3793,7 +3799,9 @@ async def test_opencode_workspace_scope_passes_read_only_files_to_the_prefix(tmp
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
 
-    with pytest.raises(_SpawnCaptured):
+    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
         await provider._start_server_once(request, str(binary))
+    assert error.value.__cause__ is None and error.value.__context__ is None
+    assert "spawn-capture-private-sentinel" not in str(error.value)
 
     assert Path(request.agent_read_only[0]) in calls[0]

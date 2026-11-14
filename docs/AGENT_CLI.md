@@ -3,8 +3,8 @@
 Since the S6 slice of the CLI-first migration, Ciaobot's own control surface
 for the two supported providers, Claude and OpenCode, is a command line:
 every operation runs as `ciao <noun> <verb> … --json` inside the managed
-provider's shell, described by one skill document
-(`ciao/stock/skills/ciao-cli/SKILL.md`). The MCP adapter and `/mcp/` mount are
+provider's shell, described by the shared entry and linked references in
+`ciao/stock/skills/ciao-cli/`. The MCP adapter and `/mcp/` mount are
 gone. What remains is the transport-free core the dispatcher needs: the shared
 operation table, the bearer-token registry, the plan-mode gate/envelope/
 telemetry, and the third-party project MCP server management surfaced by
@@ -128,7 +128,7 @@ self-actions, and telemetry remain enforced.
 ## Operation catalog
 
 The operation table in `ciao/mcp_server.py` is the single source the dispatcher
-runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the command reference and
+runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the reference entry and index, and
 `GET /api/agent/status` reports the live operation list. The catalog covers
 application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
@@ -276,9 +276,14 @@ belongs in Settings; a request is for the steps Settings does not cover.
 The CLI replaces transport recipes, not behavioural knowledge. The core keeps
 the safety boundaries, recall and write-authorization rules, and a compact
 common-command synopsis: removing that synopsis previously hurt routing.
-`ciao help` exposes the full packaged `ciao-cli` reference even though that
-skill is not installed in workspace catalogs; `ciao <noun> --help` gives group
-syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
+`ciao help [topic]` exposes the packaged `ciao-cli` reference even though that
+skill is not installed in workspace catalogs. Bare `ciao help` prints the full
+reference; a topic prints the shared entry and one grouped reference, bounded
+to 16,000 UTF-8 bytes. Topics are `memory`, `vault`, `queues` (memory and
+review); `note`, `file`, `chat`, `project` (workspace operations); `task`;
+`schedule`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo`
+(automation and status); and `examples`. Use topic help for detailed lookups;
+`ciao <noun> --help` gives group syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
 commands have their own documented output conventions.
 
 Durable writes must load `ciao-memory` for destinations, frontmatter,
@@ -297,3 +302,15 @@ measured real-session parity (completion 86%/100% per provider on both
 surfaces, zero fallbacks) and drove the D-11 name resolution, D-12 command
 table in the core prompt, and the CLI permission posture that make the CLI
 surface usable.
+
+### Managed vault-recall checks
+
+The managed `vault_recall_check` operation remains rollout-disabled by default.
+If enabled, engine-local admission allows at most two unfinished checker tasks
+and twelve admissions per trailing 60 seconds across managed-recall callers.
+Busy and rate-limit denials refund the provisional provider-pass attempt; an
+immediate pre-checker authorization failure remains charged, and an admitted
+attempt remains charged even if it fails or is cancelled. State is process-local
+and resets on engine restart. These limits are an admission safeguard, not a
+monetary or token-spend guarantee, and do not promise cancellation of remote
+provider work or evidence threads.

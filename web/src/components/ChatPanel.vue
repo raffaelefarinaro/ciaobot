@@ -1906,7 +1906,7 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
 const needsYouActions = computed(() => {
   const current = chat.value
   if (!current || current.archived) return []
-  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
+  return (store.chatActions[current.chat_id] ?? []).filter(a => a.kind !== 'mcp_auth' && actionCopy(a) !== null)
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
@@ -5314,12 +5314,23 @@ function handleModelPickerClose(reason: 'escape' | 'other') {
   const chatId = chat.value?.chat_id
   const mode = pickerMode.value
   const generation = pickerGeneration
+  const focusedAtClose = document.activeElement
+  const closingPicker = modelPickerRef.value
+  const closingPopover = closingPicker?.querySelector('.model-selector__popover')
+  const focusWasInClosingPicker = !!focusedAtClose
+    && (!!closingPicker?.contains(focusedAtClose) || !!closingPopover?.contains(focusedAtClose))
   showModelPicker.value = false
   if (reason !== 'escape' || mode !== 'normal') return
   void nextTick(() => {
+    const active = document.activeElement
+    const focusStillBelongsToPicker = (focusWasInClosingPicker && active === focusedAtClose)
+      || (!!active && !!closingPicker?.contains(active))
+      || (!!active && !!closingPopover?.contains(active))
+    const focusWasLost = !active || active === document.body
     if (chat.value?.chat_id === chatId
       && pickerMode.value === 'normal'
       && pickerGeneration === generation + 1
+      && (focusStillBelongsToPicker || focusWasLost)
       && composerModelTrigger.value?.isConnected
       && !composerModelTrigger.value.disabled) composerModelTrigger.value.focus()
   })

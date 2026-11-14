@@ -4124,10 +4124,67 @@ describe('needs-you chat actions', () => {
     const sock = events(store)
     expect(store.chatNeedsYou('c-1')).toBe(false)
 
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { kind: 'command', params: { command: 'echo review-only' } })])))
     expect(store.chatNeedsYou('c-1')).toBe(true)
 
     sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+  })
+
+  test.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
+    'MCP action in %s state is retained without creating attention',
+    (state) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      const sock = events(store)
+      const mcp = action('a1', { state })
+      sock.onmessage?.(frame(actionsChanged('c-1', [mcp])))
+      expect(store.chatActions['c-1']).toEqual([mcp])
+      expect(store.chatNeedsYou('c-1')).toBe(false)
+      sock.onmessage?.(frame(actionsChanged('c-1', [])))
+      expect(store.chatActions['c-1']).toBeUndefined()
+    },
+  )
+
+  test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
+    'non-MCP %s action still creates attention alongside MCP',
+    (kind) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      store.chatActions['c-1'] = [action('mcp'), action('other', { kind })]
+      expect(store.chatNeedsYou('c-1')).toBe(true)
+    },
+  )
+
+  test.each([
+    { last_error: 'MCP turn failed' },
+    { pending_permission: '{"tool":"Bash"}' },
+    { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) },
+  ])('real chat blocker remains attention alongside MCP: %o', (blocker) => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', blocker)]
+    store.chatActions['c-1'] = [action('mcp')]
+    expect(store.chatNeedsYou('c-1')).toBe(true)
+  })
+
+  test('snapshot and subsequent event retain and clear MCP without attention', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('mcp')] } })))
+    expect(store.chatActions['c-1']).toEqual([action('mcp')])
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+    sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('memory pass remains excluded even with a real blocker and MCP', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', {
+      last_error: 'failed turn',
+      helper: { kind: 'memory_pass', state: 'running' } as never,
+    })]
+    store.chatActions['c-1'] = [action('mcp'), action('command', { kind: 'command' })]
     expect(store.chatNeedsYou('c-1')).toBe(false)
   })
 
@@ -10449,6 +10506,17 @@ describe('delegated task signals', () => {
     expect(store.chatIsAttentionItem(chat)).toBe(true)
     expect(store.attentionChatCount).toBe(1)
     expect(store.chatNeedsYou('c-plain')).toBe(false)
+  })
+
+  test('a scoped blocked task still needs you with MCP, but another workspace does not', async () => {
+    const store = await seeded([taskRow({ attempt_outcome: 'blocked' })])
+    store.chatActions['c-task'] = [{
+      id: 'mcp', kind: 'mcp_auth', origin: 'engine', state: 'open',
+      params: { server: 'linear', provider: 'claude' }, error: '', created_at: 1,
+    }]
+    expect(store.chatNeedsYou('c-task')).toBe(true)
+    store.projects[0].workspace = 'other'
+    expect(store.chatNeedsYou('c-task')).toBe(false)
   })
 
   test('the project counts a chat whose task stopped for the user', async () => {

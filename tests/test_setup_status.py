@@ -33,6 +33,11 @@ _LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 
 @pytest.fixture(autouse=True)
+def _stub_auth_list(monkeypatch):
+    monkeypatch.setattr("ciao.providers.opencode.bounded_output", lambda *a, **k: (0, b"[]"))
+
+
+@pytest.fixture(autouse=True)
 def claude_cli_present(monkeypatch):
     """Pretend the ``claude`` CLI is installed.
 
@@ -1569,6 +1574,8 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
 
     monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", fake_clear)
     monkeypatch.setattr(routes_api, "_provider_config_payload", fake_payload)
+    monkeypatch.setattr("ciao.providers.opencode.opencode_credential_inventory",
+                        lambda: {"status": "complete", "providers": []})
 
     config = _config(tmp_path)
     request = SimpleNamespace(
@@ -1583,6 +1590,44 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     request.path_params["provider"] = "opencode"
     await provider_connection_action(request)
     assert calls == {"clear": 1, "payload": 2}
+
+
+async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_path):
+    from ciao.web import routes_api
+    import ciao.providers.opencode as mod
+
+    calls = []
+    monkeypatch.setattr(mod, "invalidate_opencode_model_cache", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(mod, "opencode_credential_inventory",
+                        lambda: (calls.append("inventory") or {"status": "complete", "providers": []}))
+    monkeypatch.setattr(routes_api, "_provider_config_payload",
+                        lambda config: (calls.append("payload") or
+                                        {"connections": {"opencode": {}, "claude": {"ready": True}}}))
+    monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", lambda: calls.append("claude-clear"))
+    request = SimpleNamespace(path_params={"provider": "opencode", "action": "verify"},
+                              app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))))
+    await provider_connection_action(request)
+    assert calls == ["invalidate", "payload", "inventory"]
+    calls.clear()
+    request.path_params["provider"] = "claude"
+    response = await provider_connection_action(request)
+    assert json.loads(response.body) == {"ready": True}
+    assert calls == ["claude-clear", "payload"]
+    calls.clear()
+    await routes_api.provider_config_settings(request)
+    assert calls == ["payload", "inventory"]
+    calls.clear()
+    monkeypatch.setattr(routes_api.host_terminal, "action_command", lambda action: "fake login")
+    monkeypatch.setattr(routes_api, "host_browser_request", lambda request: False)
+    request.path_params.update(provider="opencode", action="connect")
+    await provider_connection_action(request)
+    assert calls == []
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    request.path_params["action"] = "logout"
+    await provider_connection_action(request)
+    assert calls == []
 
 
 async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) -> None:

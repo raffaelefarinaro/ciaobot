@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, nextTick, ref } from 'vue'
 import ModelSelector, { type ModelSection } from '../ModelSelector.vue'
 
 beforeEach(() => {
@@ -68,6 +68,25 @@ describe('ModelSelector', () => {
 
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it.each([false, true])('preserves newly moved focus when an open selector is removed (triggerless=%s)', async (triggerless) => {
+    const key = ref(0)
+    const Host = defineComponent({
+      components: { ModelSelector },
+      setup: () => ({ key, triggerless, sections: SECTIONS }),
+      template: '<div><textarea /><ModelSelector v-if="!triggerless || !key" :key="key" :sections="sections" :triggerless="triggerless" /></div>',
+    })
+    const wrapper = mount(Host, { attachTo: document.body })
+    if (!triggerless) await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+    key.value++
+    const prompt = wrapper.get<HTMLTextAreaElement>('textarea').element
+    prompt.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(prompt)
+    wrapper.unmount()
   })
 
   it('exposes the full trigger label as a title, since the label ellipsizes', () => {
@@ -199,6 +218,40 @@ describe('ModelSelector', () => {
     expect(document.activeElement).toBe(trigger.element)
   })
 
+  it('keeps focus on a focusable outside click target', async () => {
+    const wrapper = mountSelector()
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    outside.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    outside.focus() // The browser's pointerdown default action.
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
+  })
+
+  it.each([false, true])('does not restore focus over a navigation destination after selection (deferred=%s)', async (deferred) => {
+    const destination = document.createElement('button')
+    document.body.appendChild(destination)
+    const wrapper = mountSelector({ onSelect: () => {
+      if (deferred) nextTick(() => destination.focus())
+      else destination.focus()
+    } })
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    await wrapper.get('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(destination)
+    wrapper.unmount()
+    destination.remove()
+  })
+
   it('supports keyboard navigation and Enter selection without a pointer', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')
@@ -227,6 +280,24 @@ describe('ModelSelector', () => {
 
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
     expect(document.activeElement).toBe(trigger.element)
+  })
+
+  it('does not restore the trigger when focus moves elsewhere after Escape', async () => {
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    search.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    outside.focus()
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
   })
 
   it('renders disabled sections with hint', async () => {
