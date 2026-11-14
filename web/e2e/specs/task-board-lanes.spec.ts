@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, settled } from '../support/app'
 
 /**
  * The board's lanes are one fixed width at every pane width (it scrolls
@@ -89,6 +89,131 @@ async function expectFixedLanes(page: Page) {
   const widths = await laneWidths(page)
   expect(widths.length).toBeGreaterThanOrEqual(3)
   for (const width of widths) expect(Math.abs(width - 310)).toBeLessThanOrEqual(1)
+}
+
+async function boardGeometry(page: Page) {
+  await settled(page.locator('body'))
+  return page.locator('.task-lanes').evaluate(board => {
+    const origin = board.getBoundingClientRect().left
+    return {
+      lanes: Array.from(board.querySelectorAll(':scope > .task-lane')).map(lane => {
+        const head = lane.querySelector('.task-lane-head')!
+        const card = lane.querySelector('.task-card')!
+        const rect = lane.getBoundingClientRect()
+        const cardRect = card.getBoundingClientRect()
+        const style = getComputedStyle(card)
+        return {
+          width: rect.width, left: rect.left - origin,
+          headWidth: head.getBoundingClientRect().width,
+          headBorder: getComputedStyle(head).borderBottom,
+          cardWidth: cardRect.width, cardLeft: cardRect.left - rect.left,
+          padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+        }
+      }),
+      tabWidth: board.querySelector('.task-done-toggle')?.getBoundingClientRect().width ?? null,
+      width: board.clientWidth, scrollWidth: board.scrollWidth,
+      overflowX: getComputedStyle(board).overflowX,
+      documentOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+        - document.documentElement.clientWidth,
+    }
+  })
+}
+
+for (const width of [1440, 390]) {
+  for (const theme of ['light', 'dark'] as const) {
+    for (const expanded of [false, true]) {
+      test(`first-load lanes match loaded at ${width}px ${theme}, Done ${expanded ? 'expanded' : 'collapsed'}`, async ({ page }, info) => {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
+        await page.emulateMedia({ colorScheme: theme, reducedMotion: theme === 'light' ? 'reduce' : 'no-preference' })
+        await isolate(page, `loading-lanes-${width}-${theme}-${expanded}`)
+        await page.addInitScript(({ theme, expanded }) => {
+          localStorage.setItem('ciao-theme', theme)
+          localStorage.setItem('ciao.tasks.doneShown', expanded ? '1' : '0')
+        }, { theme, expanded })
+        let release!: () => void
+        const held = new Promise<void>(resolve => { release = resolve })
+        await page.route(/\/api\/tasks(?:\?|$)/, async route => {
+          await held
+          await route.fulfill({ json: { workspace: 'alpha', tasks: TASKS } })
+        })
+        try {
+          await boot(page, '/tasks', '[role="status"][aria-label="Loading tasks"]')
+          const loading = page.getByRole('status', { name: 'Loading tasks', exact: true })
+          await expect(loading).toHaveCount(1)
+          await expect(loading.locator('.task-lane-label')).toHaveText(
+            expanded ? ['To do', 'In progress', 'In review', 'Done'] : ['To do', 'In progress', 'In review'],
+          )
+          await expect(loading.locator('button, a, input, select, textarea, [tabindex], [draggable]')).toHaveCount(0)
+          await expect(loading).not.toContainText(/\d/)
+          await expect(page.locator('.task-empty, .task-filtered-empty')).toHaveCount(0)
+          const before = await boardGeometry(page)
+          expect(before.lanes).toHaveLength(expanded ? 4 : 3)
+          for (const lane of before.lanes) expect(Math.abs(lane.width - 310)).toBeLessThanOrEqual(1)
+          expect(before.tabWidth).toBe(expanded ? null : 44)
+          expect(before.documentOverflow).toBeLessThanOrEqual(1)
+          if (width === 390) {
+            expect(before.scrollWidth).toBeGreaterThan(before.width)
+            expect(before.overflowX).toBe('auto')
+          }
+          expect(await loading.evaluate(el => el.getAnimations({ subtree: true }).length)).toBe(0)
+          await page.screenshot({ path: info.outputPath('synthetic-loading.png') })
+          await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = el.scrollWidth })
+          await page.screenshot({ path: info.outputPath('synthetic-loading-done.png') })
+          await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = 0 })
+          release()
+          await expect(loading).toHaveCount(0)
+          await expect(page.locator('.task-card').first()).toBeVisible()
+          const after = await boardGeometry(page)
+          expect(after.lanes).toEqual(before.lanes)
+          expect(after.tabWidth).toBe(before.tabWidth)
+          expect(after.width).toBe(before.width)
+          expect(after.documentOverflow).toBeLessThanOrEqual(1)
+          await page.screenshot({ path: info.outputPath('synthetic-loaded.png') })
+          await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = el.scrollWidth })
+          await page.screenshot({ path: info.outputPath('synthetic-loaded-done.png') })
+          await info.attach('geometry', { body: JSON.stringify({ before, after }, null, 2), contentType: 'application/json' })
+        } finally {
+          release()
+        }
+      })
+    }
+  }
+
+  test(`first-load status filter matches the loaded full-width lane at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await isolate(page, `loading-filter-${width}`)
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    await page.route(/\/api\/tasks(?:\?|$)/, async route => {
+      await held
+      await route.fulfill({ json: { workspace: 'alpha', tasks: TASKS } })
+    })
+    try {
+      await boot(page, '/tasks', '[role="status"][aria-label="Loading tasks"]')
+      await page.getByRole('group', { name: 'Filter by status' }).getByRole('button', { name: /^In progress/ }).click()
+      const loading = page.getByRole('status', { name: 'Loading tasks', exact: true })
+      await expect(loading.locator('.task-lanes--list > .task-lane')).toHaveCount(1)
+      await expect(loading.locator('.task-lane-label')).toHaveText('In progress')
+      await expect(loading.locator('.task-done-toggle')).toHaveCount(0)
+      const before = await boardGeometry(page)
+      expect(before.lanes[0]!.width).toBeGreaterThan(before.width - 20)
+      expect(before.documentOverflow).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: info.outputPath('synthetic-filtered-loading.png') })
+      release()
+      await expect(loading).toHaveCount(0)
+      await expect(page.locator('.task-card')).toHaveCount(1)
+      await expect(page.locator('.task-card')).toContainText('Draft the quarterly summary')
+      const after = await boardGeometry(page)
+      expect(after.lanes).toEqual(before.lanes)
+      expect(after.tabWidth).toBeNull()
+      expect(after.documentOverflow).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: info.outputPath('synthetic-filtered-loaded.png') })
+      await info.attach('geometry', { body: JSON.stringify({ before, after }, null, 2), contentType: 'application/json' })
+    } finally {
+      release()
+    }
+  })
 }
 
 for (const width of [1440, 1100, 900]) {

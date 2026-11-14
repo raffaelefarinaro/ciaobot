@@ -644,15 +644,15 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('holds the first load as its own state rather than an empty board', async () => {
+  it('does not write into an unmounted pane when its pending first load resolves', async () => {
     let release: (answer: { workspace: string; tasks: TaskRow[] }) => void = () => {}
     apiGet.mockImplementation(() => new Promise((resolve) => { release = resolve }))
     const wrapper = mount(TaskBoardView, { attachTo: document.body })
     await nextTick()
 
-    expect(wrapper.get('.skeleton').attributes('aria-label')).toBe('Loading tasks')
+    expect(wrapper.findAll('[role="status"][aria-label="Loading tasks"]')).toHaveLength(1)
     expect(wrapper.text()).not.toContain('No tasks in')
-    expect(wrapper.findAll('.task-card')).toHaveLength(0)
+    expect(wrapper.findAll('[data-task-id]')).toHaveLength(0)
 
     wrapper.unmount()
     release({ workspace: 'personal', tasks: BOARD })
@@ -660,6 +660,48 @@ describe('TaskBoardView', () => {
     // The promise the loading mount left behind settles into a pane that is
     // gone, and writes nothing.
     expect(document.body.innerHTML).toBe('')
+  })
+
+  it.each([false, true])('holds real lane geometry during first load (Done expanded: %s)', async (expanded) => {
+    localStorage.setItem('ciao.tasks.doneShown', expanded ? '1' : '0')
+    let release!: (answer: { workspace: string; tasks: TaskRow[] }) => void
+    apiGet.mockImplementation(() => new Promise((resolve) => { release = resolve }))
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    try {
+      await nextTick()
+      const loading = wrapper.get('[role="status"][aria-label="Loading tasks"]')
+      expect(wrapper.findAll('[role="status"][aria-label="Loading tasks"]')).toHaveLength(1)
+      expect(loading.get('.task-lanes--columns').attributes('aria-hidden')).toBe('true')
+      expect(loading.findAll('.task-lane-label').map(label => label.text())).toEqual(
+        expanded ? ['To do', 'In progress', 'In review', 'Done'] : ['To do', 'In progress', 'In review'],
+      )
+      expect(loading.findAll('.task-lane .task-cards')).toHaveLength(expanded ? 4 : 3)
+      for (const lane of loading.findAll('.task-lane')) {
+        expect(lane.findAll('li.task-card')).toHaveLength(2)
+      }
+      expect(loading.findAll('.task-done-toggle')).toHaveLength(expanded ? 0 : 1)
+      expect(loading.findAll('button, a, input, select, textarea, [tabindex], [draggable], [data-task-id]')).toHaveLength(0)
+      expect(loading.text()).not.toMatch(/\d/)
+      expect(wrapper.get('[aria-label="Filter by status"]').isVisible()).toBe(true)
+      expect(wrapper.find('.task-empty').exists()).toBe(false)
+      expect(wrapper.find('.task-filtered-empty').exists()).toBe(false)
+
+      const progress = wrapper.findAll('[aria-label="Filter by status"] button')
+        .find(button => button.text().startsWith('In progress'))!
+      await progress.trigger('click')
+      expect(loading.findAll('.task-lanes--list > .task-lane')).toHaveLength(1)
+      expect(loading.get('.task-lane-label').text()).toBe('In progress')
+      expect(loading.find('.task-done-toggle').exists()).toBe(false)
+
+      release({ workspace: 'personal', tasks: BOARD })
+      await flushPromises()
+      expect(wrapper.find('[aria-label="Loading tasks"]').exists()).toBe(false)
+      expect(wrapper.findAll('.task-card')).toHaveLength(1)
+      expect(wrapper.get('.task-card').text()).toContain('Wire the store')
+    } finally {
+      wrapper.unmount()
+      localStorage.removeItem('ciao.tasks.doneShown')
+    }
   })
 
   it('keeps the rows it has when a refresh fails, marked stale with a retry', async () => {
