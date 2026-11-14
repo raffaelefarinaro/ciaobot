@@ -11,24 +11,19 @@
     </div>
     <div class="settings-switch-row">
       <span class="hint">Check answers against your notes</span>
-      <button
-        class="settings-switch"
-        type="button"
-        role="switch"
-        :aria-checked="enabled"
+      <SettingsSwitch
+        :checked="enabled"
         aria-label="Check vault answers against your notes"
         :disabled="!routines || routinesSaving"
-        @click="saveRoutines({ verify_vault_answers: !enabled })"
-      >
-        <span class="switch-word">{{ enabled ? 'On' : 'Off' }}</span>
-        <span class="switch-track" aria-hidden="true"></span>
-      </button>
+        @toggle="saveRoutines({ verify_vault_answers: !enabled })"
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import SettingsSwitch from './SettingsSwitch.vue'
 import type { RoutineSettings } from '../../lib/types'
 
 // The settings store is owned by SettingsView.

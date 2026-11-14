@@ -13,6 +13,27 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-settings-settings-switch',
+    name: 'SettingsSwitch',
+    family: 'Settings',
+    kind: 'component',
+    owner: { path: 'web/src/components/settings/SettingsSwitch.vue', anchor: 'class="settings-switch"' },
+    sources: [],
+    consumers: ['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
+    variants: ['checked', 'disabled', 'busy'],
+    variantNotes: 'Controlled native switch; checked controls On/Off, disabled blocks activation, busy shows an ellipsis without disabling. Parents own saves.',
+    states: [
+      { name: 'default', coverage: 'covered', storyIds: ['settings-switch--on', 'settings-switch--off'], note: 'On renders checked; Off renders unchecked. Both use the production component.' },
+      { name: 'disabled', coverage: 'covered', storyIds: ['settings-switch--disabled-on', 'settings-switch--disabled-off'], note: 'DisabledOn renders checked and disabled; DisabledOff renders unchecked and disabled.' },
+      { name: 'busy', coverage: 'covered', storyIds: ['settings-switch--busy'], note: 'Busy renders checked, aria-busy and an ellipsis; the native button remains enabled.' },
+      { name: 'narrow', coverage: 'covered', storyIds: ['settings-switch--narrow'], note: 'Narrow renders checked in a maximum 390px container.' },
+      { name: 'keyboard-focus', coverage: 'uncovered', storyIds: [], note: 'Native keyboard activation and focus styling exist; no dedicated rendered focus story.' },
+      { name: 'reduced-motion', coverage: 'uncovered', storyIds: [], note: 'Track transitions stop under reduced motion; no dedicated rendered-state story.' },
+    ],
+    loading: { status: 'none', detail: 'No initial or refresh fetch. Busy is supplied by a parent, not owner-level loading coverage.' },
+    migration: { status: 'migrated', note: 'Approved shared-switch slice 1: only vault check and restart resume use this component; remaining native Settings switches are not migrated.' },
+  },
+  {
     "id": "app",
     "name": "App",
     "family": "Root, navigation and common presentation",
@@ -3438,9 +3459,15 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SidebarListSkeleton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-list-skeleton--loading"],
+        "note": "Actual SidebarListSkeleton: Loading automations, one group of three placeholder rows and one status announcement."
+      },
+      {
+        "name": "nested",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-list-skeleton--nested"],
+        "note": "Actual SidebarListSkeleton: Loading chats, two groups of two nested placeholder rows. Does not separately cover SidebarRow placeholder mode."
       },
       {
         "name": "other states",
@@ -3477,9 +3504,39 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SidebarRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--default"],
+        "note": "Actual plain-div SidebarRow with Weekly review text and 09:00 meta; no link, host controls or click/focus behavior claimed."
+      },
+      {
+        "name": "active",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--active"],
+        "note": "Plain-div row with active: true."
+      },
+      {
+        "name": "unread",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--unread"],
+        "note": "Plain-div row with unread: true; no host-added unread dot."
+      },
+      {
+        "name": "muted",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--muted"],
+        "note": "Plain-div row with muted: true; combinations with unread are not covered."
+      },
+      {
+        "name": "pending",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--pending"],
+        "note": "Plain-div row with pending: true; production naming shimmer and Naming conversation screen-reader text."
+      },
+      {
+        "name": "long-content",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--long-content"],
+        "note": "Long title and 09:00 meta in a 240px wrapper; production ellipsis, not a navigation or keyboard story."
       },
       {
         "name": "other states",

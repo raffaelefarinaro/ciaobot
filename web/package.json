@@ -16,7 +16,7 @@
     "pretest:e2e": "vite build && vite build --mode e2e",
     "test:e2e": "playwright test",
     "storybook": "node scripts/check-node.mjs && storybook dev --host 127.0.0.1 -p 6006",
-    "build-storybook": "node scripts/check-node.mjs && storybook build --output-dir dist/storybook",
+    "build-storybook": "node scripts/check-node.mjs && storybook build --output-dir dist/storybook && node --experimental-strip-types scripts/check-storybook-index.ts",
     "preview": "vite preview"
   },
   "dependencies": {
