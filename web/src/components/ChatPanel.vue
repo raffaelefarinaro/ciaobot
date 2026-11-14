@@ -1350,6 +1350,13 @@
           </button>
         </div>
       </section>
+      <ChatMcpConnections
+        v-if="!chat.archived && chatMcpProvider"
+        :chat-id="chat.chat_id"
+        :provider="chatMcpProvider"
+        :controller="chatMcp"
+        @settings="openMcpSettings"
+      />
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1501,7 +1508,9 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
+import { useChatMcpConnections } from '../composables/useChatMcpConnections'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import ChatMcpConnections from './ChatMcpConnections.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1798,6 +1807,18 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
+const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
+  const provider = chat.value.provider
+  return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
+})
+const chatMcp = useChatMcpConnections({
+  workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
+  provider: () => chat.value?.provider ?? '',
+  chatId: () => chat.value?.chat_id ?? '',
+  actions: () => store.chatActions[chat.value?.chat_id ?? ''] ?? [],
+  archived: () => !!chat.value?.archived,
+})
+function openMcpSettings() { window.location.assign('/settings/mcp') }
 
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
 const titleRailOn = computed(() => titleRail.items.value.length > 1)
