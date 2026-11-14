@@ -147,12 +147,105 @@ export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
   const workspaces = ref<WorkspaceInfo[]>([])
+  const workspaceRegistryStatus = ref<'loading' | 'ready' | 'error'>('loading')
+  const workspaceRegistryError = ref('')
+  let workspaceRegistryEpoch = 0
+  let workspaceMutationsPending = 0
+  let deferredWorkspaceRead: {
+    promise: Promise<WorkspacesResponse>
+    resolve: (value: WorkspacesResponse | PromiseLike<WorkspacesResponse>) => void
+    reject: (reason: unknown) => void
+  } | undefined
+
+  function invalidateWorkspaceRegistry(): number {
+    const epoch = ++workspaceRegistryEpoch
+    workspaceRegistryStatus.value = 'loading'
+    if (epoch === workspaceRegistryEpoch) workspaceRegistryError.value = ''
+    return epoch
+  }
+
+  function validWorkspaceRegistry(value: unknown): value is WorkspaceInfo[] {
+    if (!Array.isArray(value)) return false
+    const names = new Set<string>()
+    return value.every(item => {
+      if (!item || typeof item !== 'object' || typeof item.name !== 'string' || !item.name.trim() || names.has(item.name)) return false
+      names.add(item.name)
+      return true
+    })
+  }
+
+  function legacyWorkspaceList(value: unknown): WorkspaceInfo[] {
+    return Array.isArray(value) && value.every(item => item && typeof item === 'object') ? value : []
+  }
+
+  function workspaceRegistryFailure(epoch: number): void {
+    if (epoch !== workspaceRegistryEpoch || workspaceMutationsPending) return
+    workspaceRegistryError.value = 'Could not load workspaces.'
+    if (epoch === workspaceRegistryEpoch && !workspaceMutationsPending) workspaceRegistryStatus.value = 'error'
+  }
+
+  function beginWorkspaceMutation(): number {
+    workspaceMutationsPending++
+    return invalidateWorkspaceRegistry()
+  }
+
+  function endWorkspaceMutation(): void {
+    workspaceMutationsPending--
+    if (!workspaceMutationsPending) {
+      const deferred = deferredWorkspaceRead
+      deferredWorkspaceRead = undefined
+      const read = readWorkspaceRegistry(false, !deferred)
+      if (deferred) read.then(deferred.resolve, deferred.reject)
+      else void read.catch(() => {})
+    }
+  }
+
+  async function readWorkspaceRegistry(bootstrap = false, preserveOnMalformed = false): Promise<WorkspacesResponse> {
+    if (workspaceMutationsPending) {
+      if (!deferredWorkspaceRead) {
+        let resolve!: (value: WorkspacesResponse | PromiseLike<WorkspacesResponse>) => void
+        let reject!: (reason: unknown) => void
+        const promise = new Promise<WorkspacesResponse>((ok, fail) => { resolve = ok; reject = fail })
+        deferredWorkspaceRead = { promise, resolve, reject }
+      }
+      return deferredWorkspaceRead.promise
+    }
+    const epoch = invalidateWorkspaceRegistry()
+    try {
+      const res = await api.get<WorkspacesResponse>('/api/workspaces')
+      if (epoch !== workspaceRegistryEpoch) return res
+      const valid = validWorkspaceRegistry(res?.workspaces)
+      if (!res || (!valid && preserveOnMalformed)) {
+        workspaceRegistryFailure(epoch)
+        return res
+      }
+      workspaces.value = legacyWorkspaceList(res.workspaces)
+      if (epoch !== workspaceRegistryEpoch) return res
+      workspaceProviderOptions.value = res.provider_options?.length
+        ? res.provider_options
+        : [{ value: 'claude', label: 'Claude' }]
+      claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
+      if (epoch !== workspaceRegistryEpoch) return res
+      const names = (bootstrap ? workspaceOptions.value : workspaces.value).map(w => w.name)
+      if ((!bootstrap || workspaces.value.length > 0) && activeWorkspace.value && !names.includes(activeWorkspace.value)) {
+        activeWorkspace.value = res.active || names[0] || 'personal'
+      }
+      if (!valid) workspaceRegistryFailure(epoch)
+      else if (epoch === workspaceRegistryEpoch && !workspaceMutationsPending) workspaceRegistryStatus.value = 'ready'
+      return res
+    } catch (error) {
+      workspaceRegistryFailure(epoch)
+      throw error
+    }
+  }
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
     { value: 'claude', label: 'Claude' },
   ])
   // The engine's Claude context-trim catalog (Settings > Overview card). Kept from the last response that carried it.
   const claudeTrimOptions = ref<ClaudeTrimOption[]>([])
   const activeWorkspace = ref<WorkspaceName>('personal')
+  let workspaceSelectionEpoch = 0
+  watch(activeWorkspace, () => { workspaceSelectionEpoch++ }, { flush: 'sync' })
   const activeChatId = ref<string | null>(null)
   // App-wide read of the active workspace's delegated tasks: the sidebar's
   // review count and Home's "needs you" tier. Re-read on boot, on a workspace
@@ -2132,21 +2225,32 @@ export const useProjectStore = defineStore('projects', () => {
         restoreUnread()
       }
       const listReadStart = chatReadStart()
+      const workspaceRead = readWorkspaceRegistry(true)
+      const registryReadEpoch = workspaceRegistryEpoch
       const [workspaceResponse, p, c] = await Promise.all([
-        api.get<WorkspacesResponse>('/api/workspaces'),
+        workspaceRead,
         api.get<ProjectInfo[]>('/api/projects'),
         api.get<ChatInfo[]>('/api/chats?active_only=1'),
       ]).catch((e) => {
         chatsHealth.value = failedHealth(chatsHealth.value, e)
         throw e
       })
-      workspaces.value = workspaceResponse.workspaces || []
-      workspaceProviderOptions.value = workspaceResponse.provider_options?.length
-        ? workspaceResponse.provider_options
-        : [{ value: 'claude', label: 'Claude' }]
-      claudeTrimOptions.value = workspaceResponse.claude_trim_options ?? claudeTrimOptions.value
       projects.value = p
       bumpProjectOrderEpoch()
+      if (registryReadEpoch === workspaceRegistryEpoch && workspaceRegistryStatus.value !== 'loading') {
+        const names = workspaceOptions.value.map(w => w.name)
+        if (!names.includes(activeWorkspace.value)) {
+          if (workspaceRegistryStatus.value === 'error') {
+            activeWorkspace.value = workspaceResponse.active || names[0] || 'personal'
+          } else {
+            const epoch = invalidateWorkspaceRegistry()
+            if (epoch === workspaceRegistryEpoch) {
+              activeWorkspace.value = workspaceResponse.active || names[0] || 'personal'
+              if (epoch === workspaceRegistryEpoch) workspaceRegistryStatus.value = 'ready'
+            }
+          }
+        }
+      }
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
       reconcileActiveChats(c, listReadStart)
@@ -2159,10 +2263,6 @@ export const useProjectStore = defineStore('projects', () => {
       // re-offers it rather than losing it.
       if (!bootstrapped.value) void offerOrphanDrafts(new Set(chats.value.map(ch => ch.chat_id)))
       void refreshRunningSubagents()
-      const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
-      if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
-        activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
-      }
       reloadTaskSignals()
       if (initialDetail) {
         const detail = await initialDetail
@@ -2767,27 +2867,23 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Workspace actions ────────────────────────────────────────────────
   async function fetchWorkspaces() {
-    const res = await api.get<WorkspacesResponse>('/api/workspaces')
-    workspaces.value = res.workspaces || []
-    workspaceProviderOptions.value = res.provider_options?.length
-      ? res.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
-    const names = workspaces.value.map(w => w.name)
-    if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
-      activeWorkspace.value = res.active || names[0] || 'personal'
-    }
-    return res
+    return readWorkspaceRegistry()
   }
 
   async function createWorkspace(payload: Partial<WorkspaceInfo> & { name: string }) {
-    const res = await api.post<WorkspacesResponse>('/api/workspaces', payload)
-    workspaces.value = res.workspaces || []
-    workspaceProviderOptions.value = res.provider_options?.length
-      ? res.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
-    return res
+    const epoch = beginWorkspaceMutation()
+    try {
+      const res = await api.post<WorkspacesResponse>('/api/workspaces', payload)
+      if (epoch === workspaceRegistryEpoch) {
+        workspaces.value = legacyWorkspaceList(res.workspaces)
+        if (epoch !== workspaceRegistryEpoch) return res
+        workspaceProviderOptions.value = res.provider_options?.length
+          ? res.provider_options
+          : [{ value: 'claude', label: 'Claude' }]
+        claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
+      }
+      return res
+    } finally { endWorkspaceMutation() }
   }
 
   // Persist a new workspace order. The list moves at once and snaps back when
@@ -2799,35 +2895,44 @@ export const useProjectStore = defineStore('projects', () => {
     const reordered = names
       .map(name => previous.find(w => w.name === name))
       .filter((w): w is WorkspaceInfo => w !== undefined)
-    if (reordered.length !== previous.length) return null
-    workspaces.value = reordered
+    if (reordered.length !== previous.length || new Set(names).size !== previous.length) return null
+    const epoch = beginWorkspaceMutation()
+    if (epoch === workspaceRegistryEpoch) workspaces.value = reordered
     try {
       const res = await api.post<WorkspacesResponse>('/api/workspaces/reorder', { order: names })
-      workspaces.value = res.workspaces || []
+      if (epoch === workspaceRegistryEpoch) workspaces.value = legacyWorkspaceList(res.workspaces)
       return res
     } catch (err) {
-      workspaces.value = previous
+      if (epoch === workspaceRegistryEpoch) workspaces.value = previous
       throw err
-    }
+    } finally { endWorkspaceMutation() }
   }
 
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
-    const res = await api.patch<WorkspacesResponse & { renamed?: { from: string; to: string } }>(
-      `/api/workspaces/${encodeURIComponent(name)}`,
-      payload,
-    )
-    workspaces.value = res.workspaces || []
-    workspaceProviderOptions.value = res.provider_options?.length
-      ? res.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
-    if (res.renamed && activeWorkspace.value === res.renamed.from) {
-      followRenamedWorkspace(res.renamed.from, res.renamed.to)
-    }
-    if (activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
-      activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
-    }
-    return res
+    const selectionEpoch = workspaceSelectionEpoch
+    const epoch = beginWorkspaceMutation()
+    try {
+      const res = await api.patch<WorkspacesResponse & { renamed?: { from: string; to: string } }>(
+        `/api/workspaces/${encodeURIComponent(name)}`,
+        payload,
+      )
+      if (res.renamed && res.renamed.from === name && activeWorkspace.value === name && selectionEpoch === workspaceSelectionEpoch) {
+        followRenamedWorkspace(res.renamed.from, res.renamed.to)
+      }
+      if (epoch === workspaceRegistryEpoch) {
+        workspaces.value = legacyWorkspaceList(res.workspaces)
+        if (epoch !== workspaceRegistryEpoch) return res
+        workspaceProviderOptions.value = res.provider_options?.length
+          ? res.provider_options
+          : [{ value: 'claude', label: 'Claude' }]
+        claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
+        if (epoch !== workspaceRegistryEpoch) return res
+        if (epoch === workspaceRegistryEpoch && activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
+          activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
+        }
+      }
+      return res
+    } finally { endWorkspaceMutation() }
   }
 
   // A rename keeps the workspace selected under its new name. Persisted so a
@@ -2843,43 +2948,55 @@ export const useProjectStore = defineStore('projects', () => {
   // projects leave through `project_deleted` events; they and their chats are
   // also dropped here so a missed frame cannot leave them in the sidebar.
   async function archiveWorkspace(name: WorkspaceName) {
-    // Captured before the request: the `project_deleted` frames can land
-    // while it is in flight and remove the projects and chats this needs.
-    const projectIds = new Set(
-      projects.value.filter(p => p.workspace === name).map(p => p.project_id),
-    )
-    const selectedChatId = activeChatId.value
-    const selected = activeChat.value
-    const selectedInWorkspace = !!selected && projectIds.has(selected.project_id)
-    const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
-      `/api/workspaces/${encodeURIComponent(name)}/archive`,
-    )
-    workspaces.value = res.workspaces || []
-    workspaceProviderOptions.value = res.provider_options?.length
-      ? res.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
-    if (activeWorkspace.value === name) {
-      activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
-    }
-    projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
-    projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
-    projectIds.forEach(clearDraftsForProject)
-    // The archived workspace's chats go with it, and so do their commands.
-    clearChatActionsForProjects(projectIds)
-    chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
-    if (selectedInWorkspace && selectedChatId) {
-      disconnectWs(selectedChatId)
-      if (activeChatId.value === selectedChatId) activeChatId.value = null
-      persistState()
-      // Leave Settings where it is; only a view of the archived chat itself
-      // has to move somewhere valid.
-      const { router } = await import('../router')
-      if (router.currentRoute.value.params.chatId === selectedChatId) {
-        await transitionToFirstChat()
+    const epoch = beginWorkspaceMutation()
+    let mutationSettled = false
+    try {
+      // Captured before the request: the `project_deleted` frames can land
+      // while it is in flight and remove the projects and chats this needs.
+      const projectIds = new Set(
+        projects.value.filter(p => p.workspace === name).map(p => p.project_id),
+      )
+      const selectedChatId = activeChatId.value
+      const selected = activeChat.value
+      const selectedInWorkspace = !!selected && projectIds.has(selected.project_id)
+      const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
+        `/api/workspaces/${encodeURIComponent(name)}/archive`,
+      )
+      if (epoch === workspaceRegistryEpoch) {
+        workspaces.value = legacyWorkspaceList(res.workspaces)
+        if (epoch === workspaceRegistryEpoch) {
+          workspaceProviderOptions.value = res.provider_options?.length
+            ? res.provider_options
+            : [{ value: 'claude', label: 'Claude' }]
+          claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
+          if (epoch === workspaceRegistryEpoch && activeWorkspace.value === name) {
+            activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
+          }
+        }
       }
+      projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
+      projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
+      projectIds.forEach(clearDraftsForProject)
+      // The archived workspace's chats go with it, and so do their commands.
+      clearChatActionsForProjects(projectIds)
+      chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
+      if (selectedInWorkspace && selectedChatId) {
+        disconnectWs(selectedChatId)
+        if (activeChatId.value === selectedChatId) activeChatId.value = null
+        persistState()
+        // Leave Settings where it is; only a view of the archived chat itself
+        // has to move somewhere valid.
+        mutationSettled = true
+        endWorkspaceMutation()
+        const { router } = await import('../router')
+        if (router.currentRoute.value.params.chatId === selectedChatId) {
+          await transitionToFirstChat()
+        }
+      }
+      return res
+    } finally {
+      if (!mutationSettled) endWorkspaceMutation()
     }
-    return res
   }
 
   async function fetchArchivedWorkspaces(): Promise<ArchivedWorkspace[]> {
@@ -2888,15 +3005,21 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function restoreArchivedWorkspace(id: string) {
-    const res = await api.post<WorkspacesResponse & {
-      restored?: { schedules_paused?: number; schedules_dropped?: number }
-    }>('/api/workspaces/archived/restore', { id })
-    workspaces.value = res.workspaces || []
-    workspaceProviderOptions.value = res.provider_options?.length
-      ? res.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
-    return res
+    const epoch = beginWorkspaceMutation()
+    try {
+      const res = await api.post<WorkspacesResponse & {
+        restored?: { schedules_paused?: number; schedules_dropped?: number }
+      }>('/api/workspaces/archived/restore', { id })
+      if (epoch === workspaceRegistryEpoch) {
+        workspaces.value = legacyWorkspaceList(res.workspaces)
+        if (epoch !== workspaceRegistryEpoch) return res
+        workspaceProviderOptions.value = res.provider_options?.length
+          ? res.provider_options
+          : [{ value: 'claude', label: 'Claude' }]
+        claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
+      }
+      return res
+    } finally { endWorkspaceMutation() }
   }
 
   // ── Project actions ─────────────────────────────────────────────────
@@ -5585,6 +5708,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'workspaces_changed': {
+        invalidateWorkspaceRegistry()
         // A workspace was archived, restored, renamed or reordered in another tab or
         // device. Refetch the registry so the sidebar and pickers stop
         // offering it (or show it again) without a reload. A rename also
@@ -7491,7 +7615,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceRegistryStatus, workspaceRegistryError, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions, pendingChatModeWrites,
