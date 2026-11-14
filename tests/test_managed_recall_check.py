@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 import pytest
 import httpx
+import ciao.mcp_server as mcp_server
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -2654,7 +2656,9 @@ async def test_aggregate_refusals_use_trusted_private_route_envelopes(
     monkeypatch, tmp_path, caplog, denial, code, message,
 ) -> None:
     cp, _principal, turn, driver = _domain_fixture()
-    private_chat_id = "chat_PRIVATE_8f32c1"
+    # The standard request identifier may coincidentally contain the private
+    # admission count's digits; it is not an admission-count disclosure.
+    private_chat_id = "chat_PRIVATE_8f3212"
     private_project_id = "project_PRIVATE_8f32c1"
     private_workspace = "workspace_PRIVATE_8f32c1"
     cp._fixture_chats.pop("chat")
@@ -2673,12 +2677,19 @@ async def test_aggregate_refusals_use_trusted_private_route_envelopes(
     runtime.mkdir()
     service = CiaoMcpService(SimpleNamespace(state_path=runtime / "state.json", pwa_port=18443))
     service.bind(cp)
-    token, _ = service.registry.issue(
+    token, telemetry_principal = service.registry.issue(
         chat_id=private_chat_id, project_id=private_project_id,
         workspace=private_workspace, provider="claude",
     )
     app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
     app.state.mcp_service = service
+    # Isolate the telemetry clock so asyncio and pytest keep real time.
+    perf_counter_values = iter((10.0, 10.037))
+    monkeypatch.setattr(
+        mcp_server, "time", SimpleNamespace(
+            perf_counter=lambda: next(perf_counter_values), time=time.time,
+        ),
+    )
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
     monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
     private_count = 12
@@ -2733,14 +2744,28 @@ async def test_aggregate_refusals_use_trusted_private_route_envelopes(
         telemetry_records = [json.loads(line) for line in telemetry.splitlines()]
         assert telemetry_records
         assert all(record.get("chat_id") == private_chat_id for record in telemetry_records)
+        expected_telemetry_fields = {
+            "timestamp", "surface", "tool", "token_id", "chat_id",
+            "provider", "status", "error_code", "duration_ms",
+        }
         for record in telemetry_records:
-            assert not {
-                "claims", "notes", "paths", "result_paths", "admissions",
-                "admission_count", "window_count", "timestamp_window",
-            } & record.keys()
+            assert set(record) == expected_telemetry_fields
+            assert record["surface"] == "cli"
+            assert record["tool"] == "vault_recall_check"
+            assert record["provider"] == "claude"
+            assert record["status"] == "error"
+            assert record["error_code"] == code
+            assert record["token_id"] == telemetry_principal.token_id
+            assert record["chat_id"] == private_chat_id
+            assert record["duration_ms"] == 37
+            assert record["duration_ms"] != private_count
+            timestamp = datetime.fromisoformat(record["timestamp"])
+            assert timestamp.tzinfo is not None
+            # The private admission-window clock must never be recorded as telemetry.
+            assert record["timestamp"] != private_timestamp
+            assert timestamp.timestamp() != private_timestamp
         for private_value in (
-            private_project_id, private_workspace, str(private_count),
-            f"{private_timestamp:.3f}", private_path, "claim_1",
+            private_project_id, private_workspace, private_path, "claim_1",
         ):
             assert private_value not in telemetry
     finally:
