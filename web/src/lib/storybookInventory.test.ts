@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type { Dirent } from 'node:fs'
 import { filterInventory, inventory } from '../stories/inventory'
 import type { InventoryEntry, InventoryFilters } from '../stories/inventory'
+import { checkStorybookIndex } from '../../scripts/check-storybook-index'
 
 const src = fileURLToPath(new URL('../', import.meta.url))
 const root = resolve(src, '../..')
@@ -53,6 +54,26 @@ function assertSourcePath(base: string, path: string, ops: PathOps = fsOps) {
 }
 
 const covered: Record<string, string> = { default: 'foundation-tab-bar--default', counts: 'foundation-tab-bar--counts', 'long-content': 'foundation-tab-bar--long-labels', narrow: 'foundation-tab-bar--narrow-pane' }
+const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
+  'web/src/components/TabBar.vue': Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])),
+  'web/src/components/SidebarRow.vue': {
+    default: ['foundation-sidebar-row--default'],
+    active: ['foundation-sidebar-row--active'],
+    unread: ['foundation-sidebar-row--unread'],
+    muted: ['foundation-sidebar-row--muted'],
+    pending: ['foundation-sidebar-row--pending'],
+    'long-content': ['foundation-sidebar-row--long-content'],
+  },
+  'web/src/components/SidebarListSkeleton.vue': {
+    loading: ['foundation-sidebar-list-skeleton--loading'],
+    nested: ['foundation-sidebar-list-skeleton--nested'],
+  },
+}
+const coveredOwners: Record<string, string> = {
+  'web/src/components/TabBar.vue': 'components-tab-bar',
+  'web/src/components/SidebarRow.vue': 'components-sidebar-row',
+  'web/src/components/SidebarListSkeleton.vue': 'components-sidebar-list-skeleton',
+}
 function assertCoverage(entries: InventoryEntry[]) {
   const ids = new Set<string>()
   for (const entry of entries) {
@@ -66,12 +87,20 @@ function assertCoverage(entries: InventoryEntry[]) {
     expect(['unassessed', 'retained', 'planned', 'migrated']).toContain(entry.migration.status)
     if (entry.kind === 'composition') expect(entry.rationale?.trim()).toBeTruthy()
     expect(entry.states.length).toBeGreaterThan(0)
-    expect(new Set(entry.states.map((state) => state.name)).size).toBe(entry.states.length)
+    if (new Set(entry.states.map((state) => state.name)).size !== entry.states.length) throw new Error(`Duplicate state: ${entry.id}`)
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage === 'covered') {
-        if (entry.id !== 'components-tab-bar' || entry.kind !== 'component' || entry.owner.path !== 'web/src/components/TabBar.vue' || !covered[state.name] || JSON.stringify(state.storyIds) !== JSON.stringify([covered[state.name]])) throw new Error(`Invalid covered state: ${entry.id}/${state.name}`)
+        const expected = expectedCoverage[entry.owner.path]?.[state.name]
+        if (entry.id !== coveredOwners[entry.owner.path] || entry.kind !== 'component' || !expected?.length || JSON.stringify([...state.storyIds].sort()) !== JSON.stringify([...expected].sort()) || new Set(state.storyIds).size !== state.storyIds.length) throw new Error(`Invalid covered state: ${entry.id}/${state.name}`)
       } else if (state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
+    }
+  }
+  for (const [path, states] of Object.entries(expectedCoverage)) {
+    const owners = entries.filter((entry) => entry.kind === 'component' && entry.owner.path === path)
+    if (owners.length !== 1) throw new Error(`Missing or duplicate covered owner: ${path}`)
+    for (const name of Object.keys(states)) {
+      if (owners[0].states.filter((state) => state.name === name && state.coverage === 'covered').length !== 1) throw new Error(`Missing covered state: ${path}/${name}`)
     }
   }
 }
@@ -156,7 +185,19 @@ describe('production ownership', () => {
     expect(() => assertSourcePath(source, 'web/src/deleted.vue')).toThrow('deleted.vue')
   }))
 
-  it('allows only the four exact TabBar story states', () => {
+  it('covers every required owner/state with exactly its approved IDs', () => {
+    for (const [path, states] of Object.entries(expectedCoverage)) {
+      const owners = inventory.filter((entry) => entry.owner.path === path && entry.kind === 'component')
+      expect(owners, path).toHaveLength(1)
+      for (const [name, storyIds] of Object.entries(states)) {
+        expect(owners[0].states.filter((state) => state.name === name), `${path}/${name}`).toEqual([
+          expect.objectContaining({ name, coverage: 'covered', storyIds }),
+        ])
+      }
+    }
+  })
+
+  it('allows only the exact approved story states', () => {
     assertCoverage(inventory)
     const tab = inventory.find((entry) => entry.id === 'components-tab-bar')!
     expect(Object.fromEntries(tab.states.filter((state) => state.coverage === 'covered').map((state) => [state.name, state.storyIds[0]]))).toEqual(covered)
@@ -167,6 +208,51 @@ describe('production ownership', () => {
     }
     expect(() => assertCoverage([tab, tab])).toThrow(`Duplicate ID: ${tab.id}`)
     expect(() => assertCoverage([{ ...tab, states: [{ ...tab.states[0], coverage: 'uncovered' }] }])).toThrow('Noncovered state')
+  })
+
+  it('rejects valid but unrelated IDs, wrong owners, duplicate and omitted states', () => {
+    const corrupt = (change: (entries: InventoryEntry[]) => void, error: string) => {
+      const entries = structuredClone(inventory)
+      change(entries)
+      expect(() => assertCoverage(entries)).toThrow(error)
+    }
+    const row = (entries: InventoryEntry[]) => entries.find((entry) => entry.id === 'components-sidebar-row')!
+    const skeleton = (entries: InventoryEntry[]) => entries.find((entry) => entry.id === 'components-sidebar-list-skeleton')!
+    corrupt((entries) => { skeleton(entries).states[0].storyIds.push('foundation-sidebar-row--pending') }, 'Invalid covered state')
+    corrupt((entries) => { entries.find((entry) => entry.kind === 'css')!.states[0] = { name: 'default', coverage: 'covered', storyIds: ['foundation-tab-bar--default'], note: 'Not its owner' } }, 'Invalid covered state')
+    for (const id of ['foundation-tab-bar--default', 'foundation-settings-switch--default', 'nonexistent--story', 'foundation-sidebar-row--docs', 'inventory--all', '']) {
+      corrupt((entries) => { row(entries).states[0].storyIds = [id] }, 'Invalid covered state')
+    }
+    corrupt((entries) => { row(entries).states[0].storyIds.push('foundation-tab-bar--default') }, 'Invalid covered state')
+    corrupt((entries) => { row(entries).states[0].storyIds = [] }, 'Invalid covered state')
+    corrupt((entries) => { row(entries).states.push(row(entries).states[0]) }, 'Duplicate state')
+    corrupt((entries) => { row(entries).states = row(entries).states.filter((state) => state.name !== 'pending') }, 'Missing covered state')
+    corrupt((entries) => { row(entries).states[0].coverage = 'uncovered'; row(entries).states[0].storyIds = [] }, 'Missing covered state')
+    corrupt((entries) => { entries.splice(entries.indexOf(row(entries)), 1) }, 'Missing or duplicate covered owner')
+    for (const kind of ['css', 'inline', 'composition'] as const) {
+      corrupt((entries) => { row(entries).kind = kind; row(entries).rationale = 'Not a component owner' }, 'Invalid covered state')
+    }
+  })
+
+  it('checks built story existence and type independently of owner policy', () => {
+    const entry = structuredClone(inventory.find((entry) => entry.id === 'components-sidebar-row')!)
+    entry.states = [entry.states[0]]
+    const id = entry.states[0].storyIds[0]
+    expect(() => checkStorybookIndex([entry], { [id]: { type: 'story' } })).not.toThrow()
+    for (const entries of [{}, { [id]: { type: 'docs' } }, { [id]: {} }]) {
+      expect(() => checkStorybookIndex([entry], entries)).toThrow(`SidebarRow.vue/default: invalid or missing story ${id}`)
+    }
+    for (const bad of ['', 'foundation-sidebar-row--docs', 'inventory--all']) {
+      entry.states[0].storyIds = [bad]
+      expect(() => checkStorybookIndex([entry], { [bad]: { type: 'story' } })).toThrow('invalid or missing story')
+    }
+    entry.states[0].storyIds = []
+    expect(() => checkStorybookIndex([entry], {})).toThrow('covered state has no story IDs')
+    entry.states[0].coverage = 'uncovered'
+    entry.states[0].storyIds = [id]
+    expect(() => checkStorybookIndex([entry], { [id]: { type: 'story' } })).toThrow('noncovered state has story IDs')
+    const stories = Object.fromEntries(inventory.flatMap((entry) => entry.states.flatMap((state) => state.storyIds.map((id) => [id, { type: 'story' }]))))
+    expect(() => checkStorybookIndex(inventory, stories)).not.toThrow()
   })
 
   it('documents the completion sheet rather than completion history', () => {

@@ -371,6 +371,37 @@ reported as an error, not a failure, and does not fail the file count.
 
 ## 7. Checklist for any UI change
 
+### Isolated workshop coverage
+
+Storybook imports the production components and `styles/app.css`, without the
+application bootstrap or an engine. Inventory coverage is an exact
+owner → state → story-ID contract, not migration or fidelity completion.
+The existing four TabBar mappings remain unchanged.
+
+| Production owner | State | Story ID |
+|---|---|---|
+| `web/src/components/SidebarRow.vue` | default | `foundation-sidebar-row--default` |
+| same | active | `foundation-sidebar-row--active` |
+| same | unread | `foundation-sidebar-row--unread` |
+| same | muted | `foundation-sidebar-row--muted` |
+| same | pending | `foundation-sidebar-row--pending` |
+| same | long-content | `foundation-sidebar-row--long-content` |
+| `web/src/components/SidebarListSkeleton.vue` | loading | `foundation-sidebar-list-skeleton--loading` |
+| same | nested | `foundation-sidebar-list-skeleton--nested` |
+
+Row stories omit `to`: they show the plain-div appearance, not navigation,
+focus, host controls, clicks, disabled state or every prop combination. Pending
+uses the real naming shimmer and screen-reader text. Long content uses a 240px
+wrapper with meta. Skeleton loading uses one group of three rows; nested uses
+two groups of two rows and one status announcement. Its composed placeholders
+do not separately mark SidebarRow's placeholder state covered. Other unknown
+or uncovered states stay open; no other skeleton or consumer gains coverage.
+
+The Node inventory tests reject wrong owners, states and exact ID sets.
+`npm run build-storybook` additionally checks all registry-linked IDs against
+the generated index and fails on missing stories, Docs or inventory IDs.
+This is not an automated browser interaction or visual-regression runner.
+
 - [ ] No hex/rgb/hsl literal; no hardcoded `font-size`, `border-radius`, or spacing
 - [ ] No container re-specifying a primitive (Rule L1.1)
 - [ ] Reused an L2 component if the fact it owns is being shown
