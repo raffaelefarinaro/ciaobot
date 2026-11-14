@@ -905,7 +905,7 @@
          replaced action is a new card. The stack folds several untouched
          sign-ins into one row and caps its height, so the transcript keeps
          its room. -->
-    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
