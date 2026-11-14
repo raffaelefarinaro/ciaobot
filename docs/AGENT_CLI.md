@@ -148,11 +148,12 @@ that mapping against the parser, so a verb added to the CLI without a row here
 fails rather than quietly becoming a command the telemetry and the behavioral
 evals cannot name.
 
-`vault recall-check` is registered but rollout-disabled; the default returns a
-static inactive refusal without reading vault evidence or invoking a helper.
-If enabled by a later rollout change, the caller supplies a UTF-8 JSON claims
-file and the operation is available only during a live foreground provider
-pass. It is model-invoked, not an automatic or guaranteed pre-final check.
+`vault recall-check` is enabled for a model-invoked best-effort check before
+answering a vault-recall question. The caller supplies a UTF-8 JSON claims file;
+the operation is available only during a live foreground provider pass. It is
+not a hard pre-final interception: invocation and temporary-file cleanup are not
+guaranteed. Prompt guidance cannot enforce that providers avoid retaining claim
+text in private traces.
 Findings return to the authenticated requester (normally as the ordinary tool
 result). The operation binds to the exact registry session presented at
 execution and refuses results if that session is revoked, chat-revoked, rotated
@@ -166,10 +167,11 @@ vault-verification opt-out. The operation has a cooperative 45-second server
 deadline while the CLI HTTP timeout remains 60 seconds; a client timeout or
 disconnect does not guarantee cancellation. The reader's resolve/stat/open/
 fstat sequence has a TOCTOU window and assumes a non-hostile local filesystem.
-No verification-specific message, notification, persisted verdict or stream
-event is produced. Existing post-answer verification, badge and Settings
-behavior are unchanged. Ordinary tool transcripts can contain the request and
-result; this is not an invisible or zero-retention path.
+No verification-specific message, notification or stream event is produced
+for this model-invoked check. The existing post-answer verifier and its
+historical verdicts remain available; the badge and Settings card are removed
+atomically with activation. Ordinary tool transcripts can contain the request
+and result; this is not an invisible or zero-retention path.
 
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell
@@ -305,8 +307,7 @@ surface usable.
 
 ### Managed vault-recall checks
 
-The managed `vault_recall_check` operation remains rollout-disabled by default.
-If enabled, engine-local admission allows at most two unfinished checker tasks
+The enabled managed `vault_recall_check` operation uses engine-local admission allowing at most two unfinished checker tasks
 and twelve admissions per trailing 60 seconds across managed-recall callers.
 Busy and rate-limit denials refund the provisional provider-pass attempt; an
 immediate pre-checker authorization failure remains charged, and an admitted
