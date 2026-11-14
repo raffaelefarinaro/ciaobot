@@ -702,8 +702,8 @@ def test_the_unattended_guard_is_read_off_the_run_not_a_caller_flag(tmp_path: Pa
     """
     config = _config(tmp_path, "work")
     assert upstream_drafts.unattended_run(config, "work") == ""
-    _lease_the_vault(config, "work")
-    assert upstream_drafts.unattended_run(config, "work") == "nightly:1"
+    holder = _lease_the_vault(config, "work")
+    assert upstream_drafts.unattended_run(config, "work") == holder
 
 
 def test_an_unattended_run_cannot_file_create_or_settle(tmp_path: Path) -> None:
@@ -748,8 +748,8 @@ def test_a_released_lease_makes_the_decision_attended_again(tmp_path: Path) -> N
 
     config = _config(tmp_path, "work")
     draft = file_draft(config, "work", **_stock_draft())
-    _lease_the_vault(config, "work")
-    end_run(Path(config.workspace_vault_root("work")), holder="nightly:1")
+    holder = _lease_the_vault(config, "work")
+    end_run(Path(config.workspace_vault_root("work")), holder=holder)
 
     github = _Github()
     stored = approve_draft(config, draft.id, search=github.search, create=github.create)

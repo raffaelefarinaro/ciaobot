@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import socket
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -1856,7 +1857,7 @@ def begin_run(
                 f"{held.get('expires_at', 'its lease expires')}"
             )
         lease = Lease(
-            holder=holder,
+            holder=f"{holder}:{uuid.uuid4()}",
             started_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             expires_at=(now + timedelta(seconds=max(1.0, ttl_s)))
             .replace(microsecond=0)
