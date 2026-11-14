@@ -1108,14 +1108,132 @@ def test_cli_posts_the_operation_with_the_bearer_token(
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+#: Every unique reference `ciao help` assembles, in the documented order. Named
+#: independently of the production mapping so a reordering or a dropped file
+#: fails here.
+_CLI_REFERENCE_ORDER = (
+    "references/memory-and-review.md",
+    "references/workspace-operations.md",
+    "references/tasks.md",
+    "references/automation-and-status.md",
+    "reference.md",
+)
+#: Every accepted `ciao help <topic>` alias and the file it must print.
+_CLI_TOPIC_REFERENCES = {
+    "memory": "references/memory-and-review.md",
+    "vault": "references/memory-and-review.md",
+    "queues": "references/memory-and-review.md",
+    "note": "references/workspace-operations.md",
+    "file": "references/workspace-operations.md",
+    "chat": "references/workspace-operations.md",
+    "project": "references/workspace-operations.md",
+    "task": "references/tasks.md",
+    "schedule": "references/automation-and-status.md",
+    "webhook": "references/automation-and-status.md",
+    "context": "references/automation-and-status.md",
+    "stats": "references/automation-and-status.md",
+    "gws": "references/automation-and-status.md",
+    "workspace": "references/automation-and-status.md",
+    "repo": "references/automation-and-status.md",
+    "examples": "reference.md",
+}
+
+
+def _cli_reference_text(relative: str) -> str:
+    return (agent_cli._SKILL_PATH.parent / relative).read_text(encoding="utf-8")
+
+
+def _expected_help(relatives: tuple[str, ...] = _CLI_REFERENCE_ORDER) -> str:
+    return agent_cli._SKILL_PATH.read_text(encoding="utf-8") + "".join(
+        "\n" + _cli_reference_text(relative) for relative in relatives
+    )
+
+
 def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) -> None:
-    entry = agent_cli._SKILL_PATH.read_text(encoding="utf-8")
-    reference = agent_cli._SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8")
     assert agent_cli.main(["help"]) == 0
     out = capsys.readouterr().out
-    assert out == entry + "\n" + reference
+    assert out == _expected_help()
     assert out.startswith("---\nname: ciao-cli")
     assert "vault search" in out
+    assert out.count("# ciao CLI reference") == 1
+    for heading in (
+        "## Memory", "## Vault", "## Review queues", "## Notes", "## Files",
+        "## Chats", "## Reloading tools", "## Projects", "## Tasks",
+        "## Schedules", "## Webhook triggers", "## Workspace and status",
+        "## Worked examples", "## Common mistakes", "## Long-running commands",
+    ):
+        assert heading in out, heading
+    for relative in _CLI_REFERENCE_ORDER:
+        assert out.count(_cli_reference_text(relative)) == 1, relative
+
+
+@pytest.mark.parametrize(("topic", "reference"), sorted(_CLI_TOPIC_REFERENCES.items()))
+def test_cli_help_topic_routes_to_expected_reference(
+    topic: str, reference: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert agent_cli.main(["help", topic]) == 0
+    out = capsys.readouterr().out
+    assert out == _expected_help((reference,))
+    assert out.startswith("---\nname: ciao-cli")
+
+
+def test_cli_help_topic_does_not_read_unrelated_references(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = agent_cli._SKILL_PATH.parent
+    watched = {agent_cli._SKILL_PATH, *(base / relative for relative in _CLI_REFERENCE_ORDER)}
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def spy_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in watched:
+            reads.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+    assert agent_cli.main(["help", "task"]) == 0
+    capsys.readouterr()
+    assert reads == [agent_cli._SKILL_PATH, base / "references/tasks.md"]
+
+
+def test_cli_help_topics_fit_context_budget(capsys: pytest.CaptureFixture[str]) -> None:
+    for topic in _CLI_TOPIC_REFERENCES:
+        assert agent_cli.main(["help", topic]) == 0
+        out = capsys.readouterr().out
+        size = len(out.encode("utf-8"))
+        assert size <= 16_000, f"ciao help {topic} is {size} bytes"
+
+
+def test_cli_help_budget_is_measured_in_utf8_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill = tmp_path / "SKILL.md"
+    entry = "---\nname: ciao-cli\n---\n"
+    skill.write_text(entry, encoding="utf-8")
+    reference = tmp_path / "references" / "tasks.md"
+    reference.parent.mkdir()
+    reference.write_text("é" * 8_001, encoding="utf-8")
+    monkeypatch.setattr(agent_cli, "_SKILL_PATH", skill)
+
+    assert agent_cli.main(["help", "task"]) == 0
+    out = capsys.readouterr().out
+    assert out == entry + "\n" + "é" * 8_001
+    assert len(out) == len(entry) + 1 + 8_001
+    assert len(out.encode("utf-8")) == len(entry.encode("utf-8")) + 1 + 16_002
+    assert len(out.encode("utf-8")) > 16_000
+
+
+def test_cli_help_unknown_topic_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["help", "not-a-topic"])
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'not-a-topic'" in capsys.readouterr().err
 
 
 def test_cli_help_is_available_without_an_agent_session(
@@ -1132,21 +1250,38 @@ def test_cli_help_is_available_without_an_agent_session(
     out = capsys.readouterr().out
     assert out.startswith("---\nname: ciao-cli")
     assert "## Worked examples" in out
+    assert agent_cli.main(["help", "task"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("---\nname: ciao-cli")
+    assert "task report" in out
 
 
-@pytest.mark.parametrize("failing_read", [1, 2])
+def test_cli_help_json_flag_remains_compatible(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent_cli.main(["help", "task", "--json"]) == 0
+    with_json = capsys.readouterr().out
+    assert agent_cli.main(["help", "task"]) == 0
+    assert with_json == capsys.readouterr().out
+    assert with_json.startswith("---\nname: ciao-cli")
+
+
+@pytest.mark.parametrize("failing_read", [1, 2, 3])
 def test_cli_help_preserves_missing_resource_fallback(
     failing_read: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    entry_path = agent_cli._SKILL_PATH
-    reference_path = entry_path.with_name("reference.md")
-    entry = entry_path.read_text(encoding="utf-8")
+    sequence = [
+        agent_cli._SKILL_PATH,
+        *(agent_cli._SKILL_PATH.parent / relative for relative in _CLI_REFERENCE_ORDER),
+    ]
+    written = ""
+    for index, path in enumerate(sequence[: failing_read - 1]):
+        text = path.read_text(encoding="utf-8")
+        written += text if index == 0 else "\n" + text
     parser_text = agent_cli.build_parser().format_help()
     reads: list[Path] = []
     original_read_text = Path.read_text
 
     def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if self in (entry_path, reference_path):
+        if self in sequence:
             reads.append(self)
             if len(reads) == failing_read:
                 raise OSError("missing packaged resource")
@@ -1160,9 +1295,75 @@ def test_cli_help_preserves_missing_resource_fallback(
     monkeypatch.setattr(agent_cli, "post", fail_post)
     assert agent_cli.main(["help"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == (parser_text if failing_read == 1 else entry + parser_text)
+    assert captured.out == written + parser_text
     assert captured.err == ""
-    assert reads == [entry_path, reference_path][:failing_read]
+    assert reads == sequence[:failing_read]
+
+
+def test_cli_help_topic_preserves_missing_reference_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    entry_path = agent_cli._SKILL_PATH
+    tasks_path = entry_path.parent / "references/tasks.md"
+    entry = entry_path.read_text(encoding="utf-8")
+    parser_text = agent_cli.build_parser().format_help()
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in (entry_path, tasks_path):
+            reads.append(self)
+            if self == tasks_path:
+                raise OSError("missing packaged resource")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    assert agent_cli.main(["help", "task"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == entry + parser_text
+    assert captured.err == ""
+    assert reads == [entry_path, tasks_path]
+
+
+def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture[str]) -> None:
+    def topic_help(topic: str) -> str:
+        assert agent_cli.main(["help", topic]) == 0
+        return capsys.readouterr().out
+
+    task = topic_help("task")
+    assert "task_revision_conflict" in task
+    assert "A finished turn is not a finished task." in task
+    assert "task report" in task and "task complete" in task
+    assert "Only when the user clearly said the task is done." in task
+    assert "the user approves those on the board" in task
+    assert "Destructive, with no trash" in task
+    assert "the record is permanently removed" in task
+
+    chat = topic_help("chat")
+    assert "You can never apply it yourself." in chat
+    assert "`/mcp`, `/reload-plugins`" in chat
+    assert "ciao chat reload" in chat
+    assert "Standalone `/mcp` is app navigation" in chat
+    assert "Chat details → MCP → Sign in" in chat
+    assert "ciao chat needs-action mcp_auth --server" in chat
+
+    webhook = topic_help("webhook")
+    assert "never save a copy in notes, memory or source files" in webhook
+
+    assert "--verification-file" in topic_help("queues")
+
+    examples = topic_help("examples")
+    assert "shared entry" in examples
+    assert "linked references" in examples
+    assert "ciao help <topic>" in examples
+    assert "one background run for the whole session" in examples
+    assert "SKILL.md` has the command syntax" not in examples
+    assert "prints both" not in examples
 
 
 def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
