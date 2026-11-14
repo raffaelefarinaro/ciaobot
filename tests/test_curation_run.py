@@ -1417,6 +1417,269 @@ def test_curation_begin_releases_the_lease_on_a_quiet_night(
     assert cr.active_lease(vault) is None
 
 
+def test_empty_begin_reports_busy_if_its_lease_is_lost_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    printed = _capture(monkeypatch)
+    def lose_lease(*args: object, **kwargs: object) -> object:
+        raise cr.CurationBusy("lease expired during planning")
+
+    monkeypatch.setattr(cr, "end_run", lose_lease)
+
+    assert _curation_begin_command(
+        _args(tmp_path, vault, guide, holder="nightly")
+    ) == CURATION_BUSY_EXIT
+    assert not printed
+    assert cr.active_lease(vault) is not None
+
+
+@pytest.mark.parametrize("during_scan", ["expired", "replaced"])
+def test_nonempty_begin_checks_ownership_after_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, during_scan: str
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    printed = _capture(monkeypatch)
+    category_output = vault / "Workspace" / "category-created-during-begin.txt"
+
+    def generate_category(*args: object, **kwargs: object) -> list[object]:
+        category_output.parent.mkdir(parents=True, exist_ok=True)
+        category_output.write_text("created before post-plan validation", encoding="utf-8")
+        return []
+
+    def replace_while_planning(*args: object, **kwargs: object):
+        state = cr.load_state(vault)
+        old = state.lease["holder"]
+        if during_scan == "expired":
+            state.lease["expires_at"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
+            cr._store(cr.state_path(vault), state)
+        else:
+            cr.end_run(vault, holder=old)
+            cr.begin_run(vault, holder="replacement")
+        return {"empty": False}, SimpleNamespace(items=[])
+
+    monkeypatch.setattr(cr, "_category_cluster_items", generate_category)
+    monkeypatch.setattr("ciao.cli._curation_plan", replace_while_planning)
+
+    assert _curation_begin_command(
+        _args(tmp_path, vault, guide, holder="nightly")
+    ) == CURATION_BUSY_EXIT
+    assert not printed
+    assert category_output.read_text(encoding="utf-8") == "created before post-plan validation"
+    active = cr.active_lease(vault)
+    if during_scan == "expired":
+        assert active is None
+    else:
+        assert (active or {})["holder"].startswith("replacement:")
+
+
+def test_successful_nonempty_begin_check_does_not_extend_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
+    printed = _capture(monkeypatch)
+    monkeypatch.setattr(cr, "_category_cluster_items", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "ciao.cli._curation_plan",
+        lambda *_args, **_kwargs: ({"empty": False}, SimpleNamespace(items=[])),
+    )
+
+    assert _curation_begin_command(
+        _args(tmp_path, vault, guide, holder="nightly")
+    ) == 0
+    payload = json.loads("".join(printed))
+    persisted = cr.load_state(vault).lease
+    assert payload["lease"]["expires_at"] == persisted["expires_at"]
+
+
+def test_progress_uses_atomic_record_done_ttl_without_separate_renew(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import _curation_progress_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    _capture(monkeypatch)
+
+    def record_done(*args: object, **kwargs: object) -> int:
+        assert kwargs["holder"] == lease.holder
+        assert kwargs["ttl_s"] == cr.RunBudget().max_seconds
+        return 1
+
+    def unexpected_renew(*args: object, **kwargs: object) -> bool:
+        pytest.fail("progress must renew in the record_done transaction")
+
+    monkeypatch.setattr(cr, "record_done", record_done)
+    monkeypatch.setattr(cr, "renew_run", unexpected_renew)
+
+    assert _curation_progress_command(
+        _args(tmp_path, vault, guide, holder=lease.holder, key=["progress"])
+    ) == 0
+
+
+def test_rejected_progress_returns_busy_without_success_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_progress_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    printed = _capture(monkeypatch)
+
+    def reject(*args: object, **kwargs: object) -> int:
+        raise cr.CurationBusy("lease expired")
+
+    monkeypatch.setattr(cr, "record_done", reject)
+
+    assert _curation_progress_command(
+        _args(tmp_path, vault, guide, holder=lease.holder, key=["progress"])
+    ) == CURATION_BUSY_EXIT
+    assert printed == []
+
+
+def test_cli_end_expired_unreplaced_holder_returns_busy_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    lease = cr.begin_run(vault, holder="nightly", ttl_s=3600)
+    state = cr.load_state(vault)
+    state.lease["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    cr._store(cr.state_path(vault), state)
+    before_state = cr.state_path(vault).read_bytes()
+    before_log = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
+    printed = _capture(monkeypatch)
+    monkeypatch.setattr(
+        "ciao.cli._curation_plan",
+        lambda _args: (
+            {"deferred_count": 0, "remaining_observed_count": 0},
+            SimpleNamespace(items=[]),
+        ),
+    )
+
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder=lease.holder)
+    ) == CURATION_BUSY_EXIT
+    assert printed == []
+    assert cr.state_path(vault).read_bytes() == before_state
+    assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before_log
+
+
+def test_cli_end_replacement_during_planning_preserves_replacement_state_and_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    first = cr.begin_run(vault, holder="run-a")
+    replacement = []
+    state_and_marker_after_replacement = []
+    printed = _capture(monkeypatch)
+
+    def replace_during_plan(_args):
+        cr.end_run(vault, holder=first.holder)
+        replacement.append(cr.begin_run(vault, holder="run-b"))
+        state_and_marker_after_replacement.append(
+            (
+                cr.state_path(vault).read_bytes(),
+                (vault / cr.CURATION_LOG_RELATIVE).read_bytes(),
+            )
+        )
+        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
+            items=[]
+        )
+
+    monkeypatch.setattr("ciao.cli._curation_plan", replace_during_plan)
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder=first.holder, status="ok")
+    ) == CURATION_BUSY_EXIT
+    assert replacement
+    assert len(state_and_marker_after_replacement) == 1
+    state_before_end, marker_before_end = state_and_marker_after_replacement[0]
+    assert cr.state_path(vault).read_bytes() == state_before_end
+    assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == marker_before_end
+    assert cr.load_state(vault).lease["holder"] == replacement[0].holder
+    assert printed == []
+
+
+def test_end_plans_without_holding_state_lock_and_rechecks_after_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    lease = cr.begin_run(vault, holder="nightly")
+    _capture(monkeypatch)
+    lock_held = False
+    original_lock = cr._state_lock
+
+    @contextmanager
+    def tracking_lock(root):
+        nonlocal lock_held
+        with original_lock(root):
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    def expire_during_scan(args):
+        assert not lock_held
+        state = cr.load_state(vault)
+        state.lease["expires_at"] = (
+            datetime.now(UTC) - timedelta(seconds=1)
+        ).isoformat()
+        cr._store(cr.state_path(vault), state)
+        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
+            items=[]
+        )
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cr, "_state_lock", tracking_lock)
+    monkeypatch.setattr("ciao.cli._curation_plan", expire_during_scan)
+
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder=lease.holder)
+    ) == CURATION_BUSY_EXIT
+    assert cr.load_state(vault).last_run == {}
+
+
 def test_empty_text_begin_does_not_disclose_released_lease_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

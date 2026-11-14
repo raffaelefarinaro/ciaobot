@@ -15,15 +15,17 @@ This module answers those questions in code. Three things come out of it:
 * a **budget**: a run takes at most ``max_items`` keys and lives at most
   ``max_seconds``. What the budget leaves behind is recorded, so the next run
   resumes instead of starting over at the top of pass 1;
-* a **lease**: one curation run per vault at a time, so two runs cannot
-  consolidate the same regions in each other's half-light.
+* a **lease**: successful acquisitions coordinate one curation run per vault,
+  while progress and finalization commits are fenced by the exact holder.
+  Category writes performed during begin planning are outside that fence.
 
 Why a lease rather than a lock held for the run's duration: a curation run is
 an agent turn spread over many separate CLI processes, so no single process
 lives long enough to hold an ``flock``. The lease is a TTL record instead,
 written under a short flock, and a run that crashes releases it by expiring.
-The TTL *is* the elapsed-time budget — one number, so a run cannot outlive the
-serialization it promised.
+The TTL is the elapsed-time budget and bounds how long a holder remains
+authorized. It does not prevent begin-time category writes from overlapping a
+later run after expiry.
 
 State lives at ``<vault>/Workspace/Curation-State.json``, beside the receipt
 journal, for the same reason that one is there: the cursor must survive a
@@ -1845,9 +1847,9 @@ def begin_run(
     now: datetime | None = None,
 ) -> Lease:
     """Take this vault's curation lease, or raise :class:`CurationBusy`."""
-    now = now or datetime.now(UTC)
     holder = holder or f"{socket.gethostname()}:{os.getpid()}"
     with _state_lock(vault_root):
+        now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is not None:
@@ -1878,8 +1880,8 @@ def renew_run(
     now: datetime | None = None,
 ) -> bool:
     """Extend the lease held by ``holder``. False when it is no longer theirs."""
-    now = now or datetime.now(UTC)
     with _state_lock(vault_root):
+        now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is None or held.get("holder") != holder:
@@ -1894,32 +1896,54 @@ def renew_run(
     return True
 
 
+def holder_is_live(
+    vault_root: Path, *, holder: str, now: datetime | None = None
+) -> bool:
+    """Check ownership under the state lock without renewing or changing state."""
+    with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        held = _live_lease(_load(state_path(vault_root)), effective_now)
+        return held is not None and held.get("holder") == holder
+
+
 def record_done(
     vault_root: Path,
     keys: list[str] | tuple[str, ...],
     *,
     holder: str = "",
     today: date | None = None,
+    ttl_s: float | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Mark keys finished so a later run does not redo them.
 
     Rejects keys when ``holder`` is given and no longer owns the lease: a run
-    whose lease expired has lost its serialization, and letting it keep
+    whose lease expired has lost authorization, and letting it keep
     stamping work done would tell the next run that items nobody verified were
     handled.
     """
-    stamp = (today or datetime.now(UTC).date()).isoformat()
+    if ttl_s is not None and not holder:
+        raise ValueError("a holder is required when renewing the lease")
     with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         if holder:
-            held = _live_lease(state, datetime.now(UTC))
+            held = _live_lease(state, effective_now)
             if held is None or held.get("holder") != holder:
                 raise CurationBusy("this run no longer holds the curation lease")
+        stamp = (today or effective_now.astimezone(UTC).date()).isoformat()
         added = 0
         for key in keys:
             if key not in state.done_keys:
                 added += 1
             state.done_keys[key] = stamp
+        if ttl_s is not None:
+            state.lease["expires_at"] = (
+                (effective_now + timedelta(seconds=max(1.0, ttl_s)))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         _store(state_path(vault_root), state)
     return added
 
@@ -1952,21 +1976,25 @@ def end_run(
     as ``full_pass_advanced``; the weekly checks gate it exactly as
     :func:`advance_full_pass` does.
     """
-    now = now or datetime.now(UTC)
     with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
-        held = _live_lease(state, now)
-        if holder and held is not None and held.get("holder") != holder:
+        held = _live_lease(state, effective_now)
+        if holder and (held is None or held.get("holder") != holder):
             raise CurationBusy("this run no longer holds the curation lease")
         advanced = False
         if advance_marker and status == "ok" and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
-            _write_full_pass_marker(Path(vault_root), today=today)
+            _write_full_pass_marker(
+                Path(vault_root), today=today or effective_now.astimezone(UTC).date()
+            )
             advanced = True
         if live_keys is not None:
             state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
         summary = {
             "status": status,
-            "finished_at": _now_iso(),
+            "finished_at": (
+                effective_now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            ),
             "planned": planned,
             "completed": completed,
             "deferred": deferred,
