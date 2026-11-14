@@ -333,6 +333,10 @@ Comment highlights inside an HTML artifact are painted with the CSS Custom Highl
 
 iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `readyState` may still report `OPEN` while no events flow. Listen for `visibilitychange` (visible) and `pageshow` (bfcache restore) on any view that depends on a WebSocket, and force-disconnect + reconnect.
 
+### Chat permission mode picker
+
+The normal chat composer model picker changes the saved permission mode for that chat through the existing chat update API. Changes apply to subsequent turns, not a reply already running; queued or external turns may start before the write settles. While pending, ordinary sends from that composer are paused without clearing the draft, while `/mcp`, Stop and recovery remain available. `touch-targets.spec.ts` covers the picker at constrained viewport sizes and touch targets; component coverage lives in `ChatPanelRetry.test.ts` and `ModelSelector.test.ts`.
+
 ### The browser terminal
 
 The chat's and the project's *Open in Terminal* opens a terminal **inside the

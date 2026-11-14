@@ -280,7 +280,70 @@ describe('ModelSelector', () => {
     await wrapper.find('.model-selector__search').trigger('keydown', { key: 'Escape' })
     await flushPromises()
 
-    expect(wrapper.emitted('close')).toEqual([[]])
+    expect(wrapper.emitted('close')).toEqual([['escape']])
+  })
+
+  it('keeps footer controls outside the listbox and keyboard operable', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const button = wrapper.get<HTMLButtonElement>('.footer-action')
+    expect(button.element.closest('[role="listbox"]')).toBeNull()
+    button.element.focus()
+    await button.trigger('keydown', { key: ' ' })
+    expect(wrapper.emitted('select')).toBeUndefined()
+    await button.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
+  it('preserves model arrow selection and Escape with a footer', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    search.element.focus()
+    await search.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(wrapper.get('.model-selector__item').element)
+    await wrapper.get('.model-selector__item').trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(wrapper.findAll('.model-selector__item')[1].element)
+    await wrapper.get('.model-selector__list').trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('close')).toEqual([['escape']])
+
+    const selected = mountSelector({ triggerless: true })
+    await flushPromises()
+    await selected.get('.model-selector__item').trigger('click')
+    expect(selected.emitted('close')).toEqual([['other']])
+  })
+
+  it('section disabled changes do not steal footer focus', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const button = wrapper.get<HTMLButtonElement>('.footer-action')
+    button.element.focus()
+    await wrapper.setProps({ sections: [{ ...SECTIONS[0], disabled: true }] })
+    await nextTick()
+    expect(document.activeElement).toBe(button.element)
+    expect(wrapper.get('.model-selector__item').attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ sections: [{ ...SECTIONS[0], label: 'Updated' }] })
+    await nextTick()
+    expect(document.activeElement).toBe(button.element)
+  })
+
+  it('opening and changing the search query retain search behavior', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    const scrollIntoView = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrollIntoView
+    const wrapper = mountSelector({ triggerless: true, modelValue: 'sonnet' })
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    expect(document.activeElement).toBe(search.element)
+    expect(scrollIntoView).toHaveBeenCalled()
+    await search.setValue('glm')
+    await flushPromises()
+    expect(wrapper.findAll('.model-selector__item')).toHaveLength(1)
+    expect(document.activeElement).toBe(search.element)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor)
+    else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
   })
 
   // The chat's recovery picker carries its heading and its warning in the
