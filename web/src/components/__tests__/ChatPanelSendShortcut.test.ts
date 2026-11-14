@@ -170,6 +170,17 @@ describe('ChatPanel send shortcut', () => {
     wrapper.unmount()
   })
 
+  it('opens MCP details through the exposed pane shortcut without sending', async () => {
+    const { wrapper, sendMessage } = await mountPanel()
+    await wrapper.get('textarea.chat-input').setValue('/mcp')
+    expect(wrapper.vm.handleSendShortcut()).toBe(true)
+    await flushPromises()
+    expect((wrapper.get('textarea.chat-input').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.find('.chat-rail').exists()).toBe(true)
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('declines with an empty composer so the key keeps its usual meaning', async () => {
     const { wrapper, sendMessage } = await mountPanel()
 

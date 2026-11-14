@@ -46,7 +46,6 @@ async function signIn(row: ChatMcpRow) {
   await startController.start()
 }
 function focusSection() { (root.value?.querySelector('.chat-mcp-heading') as HTMLElement | null)?.focus({ preventScroll: true }) }
-defineExpose({ focusSection })
 function revealDrawerAction() {
   if (props.prioritizeHeading) return
   const rail = root.value?.closest<HTMLElement>('.chat-rail--drawer')
@@ -58,6 +57,7 @@ function revealDrawerAction() {
     rail.scrollTo({ top: Math.max(0, rail.scrollTop + target.top - bounds.top), behavior: 'auto' })
   }
 }
+defineExpose({ focusSection, revealDrawerAction })
 onMounted(() => { void nextTick(revealDrawerAction) })
 watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (next, previous) => {
   const removed = new Set(previous.flatMap(([name, id]) => id && !next.some(([nextName, nextId]) => name === nextName && id === nextId) ? [id] : []))

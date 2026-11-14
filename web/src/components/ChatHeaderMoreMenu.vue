@@ -11,6 +11,7 @@
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
           <span v-if="inbox.count > 0" class="chat-more-dot" aria-hidden="true"></span>
+          <span v-if="mcpProblems > 0" class="chat-mcp-indicator" aria-hidden="true"></span>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuPortal>
@@ -25,11 +26,13 @@
         >
           <div class="chat-more-menu">
             <DropdownMenuItem as-child @select="emit('details')">
-              <button type="button">
+              <button type="button" :aria-describedby="mcpProblems > 0 ? mcpDescriptionId : undefined">
                 <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
                 <span>Chat details</span>
+                <span v-if="mcpProblems > 0" class="chat-mcp-count" aria-hidden="true"><span class="chat-mcp-diamond"></span> {{ mcpProblems }}</span>
               </button>
             </DropdownMenuItem>
+            <span v-if="mcpProblems > 0" :id="mcpDescriptionId" class="sr-only">{{ mcpDescription }}</span>
             <DropdownMenuItem as-child @select="requestSheet">
               <button type="button">
                 <svg class="chat-more-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M6 17V10a6 6 0 0 1 12 0v7" /><line x1="4" y1="17" x2="20" y2="17" /><line x1="10" y1="21" x2="14" y2="21" /></svg>
@@ -70,12 +73,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from 'reka-ui'
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, useId } from 'vue'
 import NotificationBell from './NotificationBell.vue'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { useHistoryNav } from '../composables/useHistoryNav'
 
-defineProps<{ canArchive: boolean }>()
+const props = withDefaults(defineProps<{ canArchive: boolean; mcpProblems?: number }>(), { mcpProblems: 0 })
 const emit = defineEmits<{ details: []; archive: [] }>()
 
 const inbox = useNotificationInboxStore()
@@ -86,9 +89,13 @@ const triggerEl = ref<HTMLButtonElement | null>(null)
 const bell = ref<InstanceType<typeof NotificationBell> | null>(null)
 let sheetRequested = false
 
-const triggerLabel = computed(() => (
-  inbox.count > 0 ? `More chat actions, ${inbox.count} unread notifications` : 'More chat actions'
-))
+const mcpDescriptionId = useId()
+const mcpDescription = computed(() => `${props.mcpProblems} MCP connections need attention`)
+const triggerLabel = computed(() => [
+  'More chat actions',
+  inbox.count > 0 ? `${inbox.count} unread notifications` : '',
+  props.mcpProblems > 0 ? mcpDescription.value : '',
+].filter(Boolean).join(', '))
 
 // Choosing Notifications closes the menu. Reka would then return focus to the
 // trigger, which would take it off the sheet that opens next, so that focus
@@ -112,6 +119,7 @@ defineExpose({ focusTrigger })
 </script>
 
 <style scoped>
+.chat-more-btn { position: relative; }
 /* The dot hangs off the glyph's top-right corner: the trigger is 44px with the
    18px icon centred, so the glyph corner sits 13px in from the box edge. */
 .chat-more-dot {
@@ -124,6 +132,27 @@ defineExpose({ focusTrigger })
   background: var(--accent);
   box-shadow: 0 0 0 2px var(--bg);
   pointer-events: none;
+}
+.chat-mcp-indicator, .chat-mcp-diamond {
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--accent);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.chat-mcp-indicator {
+  position: absolute;
+  right: 9px;
+  bottom: 9px;
+}
+.chat-mcp-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  color: var(--fg3);
+  font: 600 var(--text-xs) var(--font-mono);
 }
 .chat-more-menu {
   z-index: 100;
