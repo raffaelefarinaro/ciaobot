@@ -6,7 +6,7 @@
 // value and never writes. Leaving a workspace with unsaved edits asks first.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, disposePinia, getActivePinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
@@ -20,6 +20,10 @@ const state = vi.hoisted(() => ({
     resolve: (value: unknown) => void
     reject: (reason?: unknown) => void
   },
+  deferredMcp: [] as string[],
+  pendingMcp: [] as Array<{ workspace: string; resolve: (value: unknown) => void; reject: (reason: unknown) => void }>,
+  failedMcp: [] as string[],
+  mcpWorkspaceOverride: {} as Record<string, string>,
 }))
 
 vi.mock('../../lib/api', () => {
@@ -34,6 +38,16 @@ vi.mock('../../lib/api', () => {
       return Promise.resolve(state.workspaces)
     }
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
+    if (path.startsWith('/api/mcp/status')) {
+      const workspace = new URL(path, 'http://localhost').searchParams.get('workspace') || 'personal'
+      if (state.failedMcp.includes(workspace)) return Promise.reject(new Error('inventory unavailable'))
+      const result = { workspace: state.mcpWorkspaceOverride[workspace] || workspace, agent_root: `/${workspace}`, shell: { kind: 'posix', cd_prefix: '' }, providers: [
+        { provider: 'claude', available: true, inventory_state: 'loaded', servers: [] },
+        { provider: 'opencode', available: true, inventory_state: 'loaded', servers: [] },
+      ] }
+      if (state.deferredMcp.includes(workspace)) return new Promise((resolve, reject) => state.pendingMcp.push({ workspace, resolve: () => resolve(result), reject }))
+      return Promise.resolve(result)
+    }
     if (path.startsWith('/api/proposals/handover')) {
       return Promise.resolve({
         workspace: 'personal',
@@ -176,6 +190,10 @@ beforeEach(() => {
   state.error = null
   state.defer = false
   state.pending = null
+  state.deferredMcp = []
+  state.pendingMcp = []
+  state.failedMcp = []
+  state.mcpWorkspaceOverride = {}
   reduceMotion = false
   document.body.innerHTML = ''
   scrollTo = vi.fn()
@@ -198,7 +216,395 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  const pinia = getActivePinia()
+  if (pinia) disposePinia(pinia)
   document.body.innerHTML = ''
+})
+
+describe('serialized latest workspace', () => {
+  it('prevents a stale guarded switch and displays the latest workspace inventory', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    let answer!: (allow: boolean) => void
+    const guard = vi.fn(() => new Promise<boolean>(resolve => { answer = resolve }))
+    const remove = store.registerWorkspaceSwitchGuard(guard)
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(guard).toHaveBeenCalledOnce()
+      await router.push('/settings/mcp?workspace=personal&provider=claude')
+      await settle()
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      answer(true)
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      expect(wrapper.get('#mcp-tab-claude').attributes('aria-selected')).toBe('true')
+    } finally {
+      remove()
+      wrapper.unmount()
+    }
+  })
+  it('drains A/B/A after a real guard and leaves the final A globally active', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    let answer!: (allow: boolean) => void
+    const guard = vi.fn().mockImplementationOnce(() => new Promise<boolean>(resolve => { answer = resolve })).mockResolvedValue(true)
+    const remove = store.registerWorkspaceSwitchGuard(guard)
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      await router.push('/settings/mcp?workspace=personal&provider=claude')
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(guard).toHaveBeenCalledTimes(1)
+      answer(true)
+      await settle()
+      expect(guard).toHaveBeenCalledTimes(2)
+      expect(store.activeWorkspace).toBe('work')
+      expect(wrapper.get('#mcp-servers').text()).toContain('work')
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+    } finally { remove(); wrapper.unmount() }
+  })
+  it('reloads the shared inventory after completed personal, work, personal visits', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=personal&provider=claude')
+    const { api } = await import('../../lib/api')
+    const reads = (name: string) => vi.mocked(api.get).mock.calls.filter(([path]) => path === `/api/mcp/status?workspace=${name}`).length
+    try {
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      expect(wrapper.get('#mcp-tab-claude').attributes('aria-selected')).toBe('true')
+      const personalReads = reads('personal')
+      const workReads = reads('work')
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(reads('work')).toBe(workReads + 1)
+      expect(wrapper.get('#mcp-servers').text()).toContain('work')
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+      await router.push('/settings/mcp?workspace=personal&provider=opencode')
+      await settle()
+      expect(reads('personal')).toBe(personalReads + 1)
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+    } finally { wrapper.unmount() }
+  })
+  it('does not reuse a completed load after the shared inventory changes workspace', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=personal&provider=claude')
+    const { api } = await import('../../lib/api')
+    const reads = () => vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/mcp/status?workspace=personal').length
+    try {
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      state.mcpWorkspaceOverride.personal = 'work'
+      await wrapper.get('.mcp-refresh').trigger('click')
+      await settle()
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      const previousReads = reads()
+      delete state.mcpWorkspaceOverride.personal
+      await router.push('/settings/mcp?workspace=personal&provider=claude')
+      await settle()
+      expect(reads()).toBe(previousReads + 1)
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      expect(wrapper.get('#mcp-tab-claude').attributes('aria-selected')).toBe('true')
+    } finally { wrapper.unmount() }
+  })
+  it('does not reuse a completed load while a separate refresh has cleared the inventory', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=personal&provider=claude')
+    try {
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      state.deferredMcp = ['personal']
+      await wrapper.get('.mcp-refresh').trigger('click')
+      await settle()
+      expect(state.pendingMcp).toHaveLength(1)
+      await router.push('/settings/mcp?workspace=personal&provider=claude')
+      await settle()
+      expect(state.pendingMcp).toHaveLength(2)
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      const [older, latest] = state.pendingMcp.splice(0)
+      latest!.resolve(undefined)
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      older!.reject(new Error('stale refresh failed'))
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+      expect(wrapper.find('[role=alert]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+  it('waits for an already committed switch to settle before starting the latest switch', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    const actualSwitch = store.switchWorkspace.bind(store)
+    let finish!: () => void
+    const hold = new Promise<void>(resolve => { finish = resolve })
+    let outstanding = 0
+    let maximum = 0
+    const spy = vi.spyOn(store, 'switchWorkspace').mockImplementation(async (name, options) => {
+      maximum = Math.max(maximum, ++outstanding)
+      try {
+        const result = await actualSwitch(name, options)
+        if (name === 'work') await hold
+        return result
+      } finally { outstanding-- }
+    })
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work')
+      await settle()
+      expect(store.activeWorkspace).toBe('work')
+      await router.push('/settings/mcp?workspace=personal')
+      await settle()
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      finish()
+      await settle()
+      expect(maximum).toBe(1)
+      expect(store.activeWorkspace).toBe('personal')
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+    } finally { finish(); spy.mockRestore(); wrapper.unmount() }
+  })
+  it('withdraws a personal switch when the later work target is already active', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    await store.switchWorkspace('work', { transition: false })
+    let answer!: (allow: boolean) => void
+    const remove = store.registerWorkspaceSwitchGuard(() => new Promise(resolve => { answer = resolve }))
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=personal')
+      await settle()
+      await router.push('/settings/mcp?workspace=work')
+      await settle()
+      answer(true)
+      await settle()
+      expect(store.activeWorkspace).toBe('work')
+      expect(wrapper.get('#mcp-servers').text()).toContain('work')
+    } finally { remove(); wrapper.unmount() }
+  })
+  it('honours explicit relinks but refresh keeps a manual provider choice', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=personal&provider=opencode')
+    try {
+      await settle()
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+      await wrapper.get('#mcp-tab-claude').trigger('click')
+      await wrapper.get('.mcp-refresh').trigger('click')
+      await settle()
+      expect(wrapper.get('#mcp-tab-claude').attributes('aria-selected')).toBe('true')
+      await router.push('/settings/mcp?workspace=personal&provider=opencode')
+      await settle()
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+      await wrapper.get('#mcp-tab-claude').trigger('click')
+      await router.push({ path: '/settings/mcp', query: { workspace: 'personal', provider: 'opencode' }, force: true })
+      await settle()
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+    } finally { wrapper.unmount() }
+  })
+  it('shows an explicit failure and no inventory when the latest guard refuses', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    const remove = store.registerWorkspaceSwitchGuard(async () => false)
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(wrapper.get('[role=alert]').text()).toContain('was not opened')
+    } finally { remove(); wrapper.unmount() }
+  })
+  it('keeps A after an already-committed A is followed by refused B without displaying A as B', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    const actualSwitch = store.switchWorkspace.bind(store)
+    let finish!: () => void
+    const hold = new Promise<void>(resolve => { finish = resolve })
+    const spy = vi.spyOn(store, 'switchWorkspace').mockImplementation(async (name, options) => {
+      const result = await actualSwitch(name, options)
+      if (name === 'work') await hold
+      return result
+    })
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work')
+      await settle()
+      expect(store.activeWorkspace).toBe('work')
+      const remove = store.registerWorkspaceSwitchGuard(async () => false)
+      try {
+        await router.push('/settings/mcp?workspace=personal')
+        await settle()
+        finish()
+        await settle()
+        expect(store.activeWorkspace).toBe('work')
+        expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+        expect(wrapper.get('[role=alert]').text()).toContain('was not opened')
+      } finally { remove() }
+    } finally { finish(); spy.mockRestore(); wrapper.unmount() }
+  })
+  it('falls back to the workspace default for an invalid provider without changing the query', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=personal&provider=other')
+    try {
+      await settle()
+      expect(wrapper.get('#mcp-tab-claude').attributes('aria-selected')).toBe('true')
+      expect(router.currentRoute.value.query.provider).toBe('other')
+    } finally { wrapper.unmount() }
+  })
+  it('shows an explicit failure if the workspace guard errors', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    const remove = store.registerWorkspaceSwitchGuard(async () => { throw new Error('guard failed') })
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work')
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(wrapper.get('[role=alert]').text()).toContain('could not be opened')
+    } finally { remove(); wrapper.unmount() }
+  })
+  it('withdraws a pending switch on unmount', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    let answer!: (allow: boolean) => void
+    const remove = store.registerWorkspaceSwitchGuard(() => new Promise(resolve => { answer = resolve }))
+    await settle()
+    await router.push('/settings/mcp?workspace=work')
+    await settle()
+    wrapper.unmount()
+    answer(true)
+    await settle()
+    expect(store.activeWorkspace).toBe('personal')
+    remove()
+  })
+  it('hides stale inventory and drains the later workspace after a late inventory', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    try {
+      await settle()
+      state.deferredMcp = ['work']
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(store.activeWorkspace).toBe('work')
+      expect(state.pendingMcp.length).toBeGreaterThan(0)
+      state.deferredMcp = ['work', 'personal']
+      await router.push('/settings/mcp?workspace=personal&provider=claude')
+      await settle()
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      state.pendingMcp.splice(0).forEach(pending => pending.resolve(undefined))
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(state.pendingMcp.some(pending => pending.workspace === 'personal')).toBe(true)
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      state.deferredMcp = []
+      state.pendingMcp.splice(0).forEach(pending => pending.resolve(undefined))
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(wrapper.get('#mcp-servers').text()).toContain('personal')
+    } finally { wrapper.unmount() }
+  })
+  it('shares the drain with File access links', async () => {
+    const { wrapper, router } = await mountSettings('/settings/mcp')
+    const { useProjectStore } = await import('../../stores/projects')
+    const store = useProjectStore()
+    let answer!: (allow: boolean) => void
+    const remove = store.registerWorkspaceSwitchGuard(() => new Promise(resolve => { answer = resolve }))
+    try {
+      await settle()
+      await router.push('/settings/mcp?workspace=work')
+      await settle()
+      await router.push(target('personal'))
+      await settle()
+      answer(true)
+      await settle()
+      expect(store.activeWorkspace).toBe('personal')
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      expect(document.activeElement?.id).toBe('workspace-file-access-personal')
+    } finally { remove(); wrapper.unmount() }
+  })
+  it.each(['/settings/mcp?workspace=missing', '/settings/mcp?workspace=work&workspace=personal'])('refuses invalid target %s', async path => {
+    const { wrapper } = await mountSettings(path)
+    try {
+      await settle()
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(wrapper.get('[role=alert]').text()).toContain('workspace')
+      expect(await activeWorkspace()).toBe('personal')
+    } finally { wrapper.unmount() }
+  })
+  it('reports workspace-list or inventory load failure rather than showing another workspace', async () => {
+    state.error = new Error('registry unavailable')
+    const first = await mountSettings('/settings/mcp?workspace=work')
+    try {
+      await settle()
+      expect(first.wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(first.wrapper.get('[role=alert]').text()).toContain('Could not load workspaces')
+    } finally { first.wrapper.unmount() }
+    state.error = null
+    state.failedMcp = ['work']
+    const second = await mountSettings('/settings/mcp?workspace=work')
+    try {
+      await settle()
+      expect(second.wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(second.wrapper.get('[role=alert]').text()).toContain('Could not load MCP settings')
+    } finally { second.wrapper.unmount() }
+  })
+  it('retries a failed inventory only when the same explicit link is revisited', async () => {
+    state.failedMcp = ['work']
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=work&provider=opencode')
+    const { api } = await import('../../lib/api')
+    const reads = () => vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/mcp/status?workspace=work').length
+    try {
+      await settle()
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      expect(wrapper.get('[role=alert]').text()).toContain('Could not load MCP settings')
+      const failedReads = reads()
+      expect(failedReads).toBeGreaterThan(0)
+      state.failedMcp = []
+      await settle()
+      expect(reads()).toBe(failedReads)
+      await router.push('/settings/mcp?workspace=work&provider=opencode')
+      await settle()
+      expect(reads()).toBe(failedReads + 1)
+      expect(wrapper.get('#mcp-servers').text()).toContain('work')
+      expect(wrapper.get('#mcp-tab-opencode').attributes('aria-selected')).toBe('true')
+    } finally { wrapper.unmount() }
+  })
+  it.each(['identical', 'provider change'] as const)('retries a stale failed in-flight inventory after %s', async kind => {
+    state.deferredMcp = ['work']
+    const { wrapper, router } = await mountSettings('/settings/mcp?workspace=work&provider=claude')
+    const { api } = await import('../../lib/api')
+    const reads = () => vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/mcp/status?workspace=work').length
+    try {
+      await settle()
+      expect(state.pendingMcp).toHaveLength(1)
+      const before = reads()
+      const first = state.pendingMcp.shift()!
+      const provider = kind === 'identical' ? 'claude' : 'opencode'
+      await router.push(`/settings/mcp?workspace=work&provider=${provider}`)
+      await settle()
+      expect(reads()).toBe(before)
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      first.reject(new Error('first inventory failed'))
+      await settle()
+      expect(reads()).toBe(before + 1)
+      expect(state.pendingMcp).toHaveLength(1)
+      expect(wrapper.find('#mcp-servers').exists()).toBe(false)
+      state.pendingMcp.shift()!.resolve(undefined)
+      await settle()
+      expect(wrapper.get('#mcp-servers').text()).toContain('work')
+      expect(wrapper.get(`#mcp-tab-${provider}`).attributes('aria-selected')).toBe('true')
+      expect(wrapper.find('[role=alert]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
 })
 
 describe('Settings > Workspace File access deep link', () => {

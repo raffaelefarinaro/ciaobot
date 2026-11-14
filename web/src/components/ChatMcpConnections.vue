@@ -11,6 +11,7 @@ const props = defineProps<{
   chatId: string
   provider: 'claude' | 'opencode'
   controller: ReturnType<typeof import('../composables/useChatMcpConnections').useChatMcpConnections>
+  prioritizeHeading?: boolean
 }>()
 const emit = defineEmits<{ settings: [] }>()
 const store = useProjectStore()
@@ -44,11 +45,18 @@ async function signIn(row: ChatMcpRow) {
   serverName.value = row.name
   await startController.start()
 }
-function focusSection() { (root.value?.querySelector('.chat-mcp-heading') as HTMLElement | null)?.focus() }
+function focusSection() { (root.value?.querySelector('.chat-mcp-heading') as HTMLElement | null)?.focus({ preventScroll: true }) }
 defineExpose({ focusSection })
 function revealDrawerAction() {
-  if (!root.value?.closest('.chat-rail--drawer')) return
-  root.value.querySelector<HTMLElement>('.needs-you-card')?.scrollIntoView({ block: 'nearest' })
+  if (props.prioritizeHeading) return
+  const rail = root.value?.closest<HTMLElement>('.chat-rail--drawer')
+  const card = root.value?.querySelector<HTMLElement>('.needs-you-card')
+  if (!rail || !card) return
+  const bounds = rail.getBoundingClientRect()
+  const target = card.getBoundingClientRect()
+  if (target.top < bounds.top || target.bottom > bounds.bottom) {
+    rail.scrollTo({ top: Math.max(0, rail.scrollTop + target.top - bounds.top), behavior: 'auto' })
+  }
 }
 onMounted(() => { void nextTick(revealDrawerAction) })
 watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (next, previous) => {
@@ -72,7 +80,7 @@ watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (n
       <span v-if="controller.problemCount.value" class="cd-count">{{ controller.problemCount.value }}</span>
       <span class="chat-mcp-provider">{{ provider === 'claude' ? 'Claude' : 'OpenCode' }}</span>
       <button type="button" class="cd-action chat-mcp-refresh" @click="controller.refresh">Refresh</button>
-      <button type="button" class="cd-action chat-mcp-settings" title="Opens MCP settings for the selected workspace" @click="emit('settings')">Selected workspace MCP settings</button>
+      <button type="button" class="cd-action chat-mcp-settings" title="Opens MCP settings for this chat's workspace and CLI" @click="emit('settings')">Chat workspace MCP settings</button>
     </div>
     <p v-if="controller.loading.value && !controller.status.value" class="chat-mcp-message" role="status">Loading MCP connections…</p>
     <p v-if="controller.error.value" class="chat-mcp-message" role="status">{{ controller.error.value }} <button class="cd-action" @click="controller.refresh">Retry</button></p>
