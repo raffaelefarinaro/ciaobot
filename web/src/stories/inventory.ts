@@ -414,6 +414,75 @@ export const inventory: InventoryEntry[] = [
     "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
   },
   {
+    "id": "components-chat-mcp-connections",
+    "name": "ChatMcpConnections",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "composition",
+    "owner": {
+      "path": "web/src/components/ChatMcpConnections.vue",
+      "anchor": "<template>"
+    },
+    "sources": [
+      "web/src/components/NeedsYouCard.vue",
+      "web/src/components/chatDetails.css",
+      "web/src/composables/useChatMcpConnections.ts",
+      "web/src/composables/useMcpAuthStart.ts",
+      "web/src/lib/chatActions.ts",
+      "web/src/stores/projects.ts"
+    ],
+    "consumers": [
+      "web/src/components/ChatPanel.vue"
+    ],
+    "variants": [
+      "claude",
+      "opencode",
+      "connection-rows",
+      "managed-sign-in"
+    ],
+    "variantNotes": "Provider-specific chat inventory and action cards; rows can be connected, need sign-in, failed, disabled, blocked or unchecked.",
+    "states": [
+      {
+        "name": "loading",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Initial inventory loading is rendered in ChatMcpConnections.vue; no rendered-state story exists."
+      },
+      {
+        "name": "inventory",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Loaded, empty, unavailable and unchecked inventories have no rendered-state story."
+      },
+      {
+        "name": "connection",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Connection rows and their permission and configuration notes have no rendered-state story."
+      },
+      {
+        "name": "managed-sign-in",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Eligible sign-in and NeedsYouCard action states have no rendered-state story."
+      },
+      {
+        "name": "error",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Inventory and sign-in error or notice feedback has no rendered-state story."
+      }
+    ],
+    "loading": {
+      "status": "known",
+      "detail": "Initial inventory loading shows a message; refresh retains existing status and rows while the observer fetches."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    },
+    "rationale": "Connected chat-details host composes observer state, project-store actions and NeedsYouCard; isolate those seams before rendering it in the workshop."
+  },
+  {
     "id": "components-chat-pane-skeleton",
     "name": "ChatPaneSkeleton",
     "family": "Root, navigation and common presentation",
