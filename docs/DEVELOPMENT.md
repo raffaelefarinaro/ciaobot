@@ -1527,6 +1527,37 @@ the parent to assign its Job Object before it can launch the requested command.
 The bootstrap ordering is exercised with owned test processes; native Windows
 process and Job behavior still requires the Windows-full CI gate.
 
+Candidate staging is an internal helper called with the update lock held, not an
+activation path. It rechecks the approved preflight, installs the selected exact
+native package with scripts disabled into `provider-candidate-work` under the
+staged engine, and publishes only `provider-candidate/opencode[.exe]` and
+`candidate.json`. POSIX directories and executable are 0700 and the descriptor
+is 0600; Windows uses owner-only ACLs. It uses a private cwd, cache and empty npm
+configuration. On Windows, this run's inherited owner-only output is validated
+as a whole before its entries receive protected DACLs; unsafe entries are not repaired.
+It uses an allowlisted child environment, a 600 second deadline and a
+16 KiB combined output limit. The shared CLI and active provider remain unchanged.
+Normal completion removes only this invocation's work before returning success.
+Handled failures also clean its identity-checked work and temporary candidate
+when both trees pass validation, retaining the original failure for retry.
+The entire work tree is checked for allowed types, ownership and ACLs before
+candidate creation and before the first deletion; links, multiply linked files,
+special files, foreign entries and POSIX group/other-writable entries require recovery
+and remain untouched. Installed package directories are checked too.
+POSIX file traversal, exclusive creation, publication and cleanup use directory
+descriptors and refuse links; Windows uses private DACLs, reparse checks and
+no-replace rename. A replaced work root is never cleaned. Unsafe, interrupted or
+failed cleanup can leave work requiring inspection and manual recovery; retries refuse
+those remnants without invoking npm. An already published candidate can be
+reverified and reused after recovery. Never delete unrecognized files automatically.
+Owner-private directories and the caller's lock exclude other accounts and
+cooperating updates, not hostile same-account processes or compromised npm/Node.
+The external installer resolves ordinary absolute paths; descriptor-cwd startup
+is not a sandbox for npm or the downloaded executable. The npm trust boundary is registry TLS and
+integrity, not the signed engine wheel. Unit tests use fake installer/probes;
+real native package and Windows Job acceptance require separate disposable-device
+testing before shipping.
+
 For task progress/history changes, run `tests/test_task_updates.py`,
 `tests/test_task_log.py`, `tests/test_task_resolution.py`,
 `tests/test_task_markdown.py` and `tests/test_task_board_store.py`. Progress-note

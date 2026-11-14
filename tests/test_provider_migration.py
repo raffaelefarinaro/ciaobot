@@ -181,6 +181,104 @@ def test_probe_does_not_forward_credentials(monkeypatch):
     assert output.strip() == b"absent"
 
 
+def test_bounded_runner_explicit_environment_and_cwd(tmp_path, monkeypatch):
+    from ciao import provider_migration as migration
+    monkeypatch.setenv("RUNNER_INHERITED_SENTINEL", "must-not-leak")
+    env = {"RUNNER_SUPPLIED_SENTINEL": "present"}
+    code = "import os; print(os.getcwd()); print(os.getenv('RUNNER_INHERITED_SENTINEL', 'absent')); print(os.getenv('RUNNER_SUPPLIED_SENTINEL'))"
+    output = migration._run_bounded([sys.executable, "-c", code], 3, 4096, 4096, cwd=tmp_path, env=env)
+    assert output.decode().splitlines() == [str(tmp_path), "absent", "present"]
+
+
+def test_bounded_runner_directory_fd_survives_path_replacement(tmp_path):
+    import os
+    from ciao import provider_migration as migration
+    if os.name != "posix":
+        with pytest.raises(ValueError):
+            migration._run_bounded([sys.executable, "-c", "pass"], 3, 4096, 4096, cwd_fd=0)
+        return
+    directory = tmp_path / "work"
+    directory.mkdir()
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        directory.rename(tmp_path / "original")
+        directory.mkdir()
+        output = migration._run_bounded([sys.executable, "-c", "import os; print(os.stat('.').st_ino)"], 3, 4096, 4096, cwd_fd=fd)
+        assert int(output.strip()) == os.fstat(fd).st_ino
+        assert os.stat(directory).st_ino != os.fstat(fd).st_ino
+    finally:
+        os.close(fd)
+
+
+def test_bounded_runner_combined_limit_terminates_live_child(monkeypatch):
+    import time
+    from ciao import provider_migration as migration
+    children = []
+    popen = migration.subprocess.Popen
+    def spawn(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(migration.subprocess, "Popen", spawn)
+    code = "import os,time; os.write(1,b'x'*9000); os.write(2,b'y'*9000); time.sleep(30)"
+    started = time.monotonic()
+    with pytest.raises(ValueError):
+        migration._run_bounded([sys.executable, "-c", code], 8, 16384, 16384, combined_cap=16384)
+    assert time.monotonic() - started < 5
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_bounded_runner_combined_limit_terminates_descendant(tmp_path, monkeypatch):
+    import subprocess
+    from ciao import provider_migration as migration
+    children = []
+    popen = migration.subprocess.Popen
+    def spawn(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(migration.subprocess, "Popen", spawn)
+    marker = tmp_path / "descendant.pid"
+    code = ("import os,pathlib,subprocess,sys,time; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); "
+            "os.write(1,b'x'*9000); os.write(2,b'y'*9000); time.sleep(30)")
+    with pytest.raises(ValueError):
+        migration._run_bounded([sys.executable, "-c", code, str(marker)], 8, 16384, 16384, combined_cap=16384)
+    assert children[0].poll() is not None
+    pid = int(marker.read_text())
+    if sys.platform == "win32":
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel.OpenProcess(0x00100000, False, pid)
+        if handle:
+            try:
+                assert kernel.WaitForSingleObject(ctypes.c_void_p(handle), 2000) == 0
+            finally:
+                kernel.CloseHandle(ctypes.c_void_p(handle))
+    else:
+        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=3).stdout.strip()
+        assert not status or status.startswith("Z")
+
+
+def test_bounded_runner_gated_environment_cwd_and_failed_assignment(tmp_path, monkeypatch):
+    from ciao import provider_migration as migration
+    from ciao.os_support import processes
+    marker = tmp_path / "payload"
+    monkeypatch.setattr(migration, "_use_windows_bootstrap", lambda: True)
+    env = {"RUNNER_SENTINEL": "owned"}
+    code = "import os,pathlib; pathlib.Path('payload').write_text(os.environ['RUNNER_SENTINEL'])"
+    original_tree = processes.ProcessTree
+    monkeypatch.setattr(processes, "ProcessTree", lambda pid: (_ for _ in ()).throw(OSError("refused")))
+    with pytest.raises(ValueError):
+        migration._run_bounded([sys.executable, "-c", code], 3, 4096, 4096, cwd=tmp_path, env=env)
+    assert not marker.exists()
+    monkeypatch.setattr(processes, "ProcessTree", original_tree)
+    migration._run_bounded([sys.executable, "-c", code], 3, 4096, 4096, cwd=tmp_path, env=env)
+    assert marker.read_text() == "owned"
+
+
 def test_installer_capability_is_shared_read_only(tmp_path, monkeypatch):
     from ciao import provider_migration as migration
     from ciao import tool_path
@@ -748,6 +846,1167 @@ def test_invalid_operation_never_yields_a_snapshot(preflight, tmp_path):
     with pytest.raises(ValueError, match="invalid staged operation"):
         migration.provider_snapshot(op, frozenset(), state_dir=tmp_path)
     op.wheel = original_wheel
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", "../20261112T101500Z-1.2.3"),
+    ("id", "20261112T101500Z-1.2.4"),
+    ("stage_dir", "relative/1.2.3"),
+])
+def test_candidate_invalid_operation_refused_before_observation(preflight, tmp_path, monkeypatch, field, value):
+    op, _, migration, _, _ = preflight
+    setattr(op, field, value)
+    monkeypatch.setattr(migration, "_run_bounded", lambda *a, **kw: pytest.fail("unexpected process"))
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    with pytest.raises(ValueError):
+        migration.stage_opencode_candidate(op, "a" * 64, frozenset({"opencode"}), state_dir=tmp_path)
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+
+
+@pytest.fixture
+def published_candidate(preflight, tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    from ciao.os_support import private
+    op, _, migration, _, _ = preflight
+    private.make_private_dir(tmp_path)
+    stage = Path(op.stage_dir)
+    private.make_private_dir(stage)
+    candidate = stage / "provider-candidate"
+    candidate.mkdir(mode=0o700)
+    private.make_private_dir(candidate)
+    binary = candidate / ("opencode.exe" if sys.platform == "win32" else "opencode")
+    binary.write_bytes(b"owned candidate fixture")
+    if sys.platform == "win32":
+        private.make_private(binary)
+    else:
+        binary.chmod(0o700)
+    sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    metadata = candidate / "candidate.json"
+    metadata.write_text(json.dumps({"schema": 1, "operation_id": op.id, "package": "@opencode/cli-darwin-arm64", "version": "2.2.5", "sha256": sha, "relative_binary": binary.name}))
+    private.make_private(metadata)
+    original = migration._run_bounded
+    observations = []
+    def probe(argv, *args, **kwargs):
+        observations.append(argv)
+        if argv[0] == str(binary):
+            return b"2.2.5\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", probe)
+    return op, migration, binary, metadata, sha, observations
+
+
+def test_stage_candidate_fresh_and_retry(preflight, tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.os_support import private
+    op, _, migration, shared, _ = preflight
+    private.make_private_dir(tmp_path)
+    private.make_private_dir(Path(op.stage_dir))
+    approved = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    original = migration._run_bounded
+    calls = []
+    def runner(argv, *args, **kwargs):
+        if "install" in argv:
+            calls.append((argv, args, kwargs))
+            prefix = Path(argv[argv.index("--prefix") + 1])
+            package = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64"
+            (package / "bin").mkdir(parents=True)
+            (package / "package.json").write_text(json.dumps({"name": "@opencode/cli-darwin-arm64", "version": "2.2.5", "os": ["darwin"], "cpu": ["arm64"]}))
+            binary = package / "bin" / ("opencode.exe" if sys.platform == "win32" else "opencode")
+            binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"native fixture" * 30)
+            if sys.platform != "win32":
+                binary.chmod(0o700)
+            return b""
+        if Path(argv[0]).name in ("opencode", "opencode.exe") and argv[0] != str(shared):
+            return b"2.2.5\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    result = migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)
+    assert not (Path(op.stage_dir) / "provider-candidate-work").exists()
+    assert result["version"] == "2.2.5"
+    assert migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path) == result
+    assert len(calls) == 1
+    assert shared.read_bytes() == b"executable"
+
+
+def test_stage_stale_approval_does_not_write_or_install(preflight, tmp_path):
+    op, state, migration, _, _ = preflight
+    approved = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    state["candidate"] = "2.2.6"
+    with pytest.raises(ValueError, match="stale"):
+        migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+
+
+def test_stage_refuses_linked_stage_before_writes(preflight, tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.os_support import private
+    op, _, migration, _, _ = preflight
+    private.make_private_dir(tmp_path)
+    private.make_private_dir(Path(op.stage_dir))
+    approved = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    stage = Path(op.stage_dir)
+    displaced = stage.with_name("displaced-stage")
+    stage.rename(displaced)
+    stage.symlink_to(displaced, target_is_directory=True)
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    with pytest.raises(ValueError):
+        migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+
+
+def test_candidate_file_rejects_linked_parent(tmp_path):
+    import os
+    from ciao import provider_migration as migration
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises((OSError, ValueError)):
+        migration._open_candidate_file(tmp_path / "link" / "secret", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    assert not list(outside.iterdir())
+
+
+def test_candidate_cleanup_refuses_replaced_root(tmp_path):
+    from ciao import provider_migration as migration
+    work = tmp_path / "work"
+    work.mkdir()
+    identity = work.stat()
+    work.rename(tmp_path / "original")
+    work.mkdir()
+    (work / "foreign").write_bytes(b"preserve")
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._remove_candidate_work(work, identity)
+    assert (work / "foreign").read_bytes() == b"preserve"
+
+
+def test_candidate_cleanup_refuses_link_without_deleting_entries(tmp_path):
+    from ciao import provider_migration as migration
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_bytes(b"preserve")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "link").symlink_to(outside, target_is_directory=True)
+    (work / "first").write_bytes(b"also preserve")
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._remove_candidate_work(work, work.stat())
+    assert (work / "first").read_bytes() == b"also preserve"
+    assert (work / "link").is_symlink()
+    assert (outside / "sentinel").read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("fault", ["owner", "acl", "type"])
+def test_candidate_cleanup_prevalidates_all_entries(tmp_path, monkeypatch, fault):
+    import os
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    work = tmp_path / "work"
+    work.mkdir()
+    private.make_private_dir(work)
+    first, untrusted = work / "first", work / "untrusted"
+    first.write_bytes(b"preserve first")
+    untrusted.write_bytes(b"preserve untrusted")
+    private.make_private(first)
+    private.make_private(untrusted)
+    if sys.platform != "win32":
+        untrusted.chmod(0o640)
+    info = untrusted.stat()
+    inspected = []
+    if fault == "owner":
+        original = private.is_owned_descriptor
+        def owner(fd):
+            if os.fstat(fd).st_ino == info.st_ino:
+                inspected.append("owner")
+                return False
+            return original(fd)
+        monkeypatch.setattr(private, "is_owned_descriptor", owner)
+    elif fault == "acl":
+        name = "is_private_descriptor_strict" if sys.platform == "win32" else "descriptor_acl_grants_another_account"
+        original = getattr(private, name)
+        def acl(fd):
+            if os.fstat(fd).st_ino == info.st_ino:
+                inspected.append("acl")
+                return sys.platform != "win32"
+            return original(fd)
+        monkeypatch.setattr(private, name, acl)
+    else:
+        if sys.platform == "win32":
+            original_lstat = type(untrusted).lstat
+            def special_lstat(path, *args, **kwargs):
+                result = original_lstat(path, *args, **kwargs)
+                if path == untrusted:
+                    inspected.append("type")
+                    values = list(result)
+                    values[0] = migration.stat.S_IFIFO | 0o600
+                    return os.stat_result(values)
+                return result
+            monkeypatch.setattr(type(untrusted), "lstat", special_lstat)
+        else:
+            original = migration.stat.S_ISREG
+            monkeypatch.setattr(migration.stat, "S_ISREG", lambda mode: False if mode == info.st_mode else original(mode))
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._remove_candidate_work(work, work.stat())
+    if fault in ("owner", "acl"):
+        assert inspected == [fault]
+    elif sys.platform == "win32":
+        assert "type" in inspected
+    assert first.read_bytes() == b"preserve first"
+    assert untrusted.read_bytes() == b"preserve untrusted"
+
+
+def test_windows_cleanup_checks_each_file_dacl_before_deletion(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    private.make_private_dir(work)
+    first, unsafe = work / "first", work / "unsafe"
+    for path in (first, unsafe):
+        path.write_bytes(b"preserve")
+        private.make_private(path)
+    inode = unsafe.stat().st_ino
+    original = private.is_private_descriptor_strict
+    checked = []
+    def dacl(fd):
+        if os.fstat(fd).st_ino == inode:
+            checked.append("unsafe-file")
+            return False
+        return original(fd)
+    monkeypatch.setattr(private, "is_private_descriptor_strict", dacl)
+    # Only the module's branch selection changes, not the host OS or pathlib.
+    monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._remove_candidate_work(work, work.stat())
+    assert checked == ["unsafe-file"]
+    assert first.read_bytes() == unsafe.read_bytes() == b"preserve"
+
+
+def test_windows_secures_inherited_work_after_whole_tree_validation(tmp_path, monkeypatch):
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    work = tmp_path / "work"
+    work.mkdir()
+    private.make_private_dir(work)
+    child = work / "child"
+    child.mkdir()
+    file = child / "file"
+    file.write_bytes(b"sentinel")
+    secured = []
+    monkeypatch.setattr(private, "is_owned_path", lambda path: True)
+    monkeypatch.setattr(private, "is_private", lambda path: True)
+    monkeypatch.setattr(private, "is_owned_descriptor", lambda fd: True)
+    monkeypatch.setattr(private, "is_private_descriptor", lambda fd: True)
+    monkeypatch.setattr(private, "make_private_dir", lambda path: secured.append(path))
+    monkeypatch.setattr(private, "make_private", lambda path: secured.append(path))
+    migration._secure_windows_work(work, work.stat())
+    assert set(secured) == {child, file}
+    assert file.read_bytes() == b"sentinel"
+
+
+@pytest.mark.parametrize("fault", ["owner", "acl", "link", "special"])
+def test_windows_work_refuses_whole_tree_before_protecting(tmp_path, monkeypatch, fault):
+    import os
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    private.make_private_dir(work)
+    good = work / "good"
+    good.write_bytes(b"keep")
+    bad = work / "bad"
+    if fault == "link":
+        bad.symlink_to(good)
+    elif fault == "special":
+        if sys.platform != "win32":
+            os.mkfifo(bad)
+        else:
+            # Exercise the rejected-type seam without requiring a Windows FIFO API.
+            bad.write_bytes(b"preserve")
+            original_lstat = type(bad).lstat
+            def special_lstat(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if path == bad:
+                    values = list(info)
+                    values[0] = migration.stat.S_IFIFO | 0o600
+                    return os.stat_result(values)
+                return info
+            monkeypatch.setattr(type(bad), "lstat", special_lstat)
+    else:
+        bad.write_bytes(b"keep bad")
+    bad_inode = bad.lstat().st_ino
+    monkeypatch.setattr(private, "is_owned_path", lambda path: True)
+    monkeypatch.setattr(private, "is_private", lambda path: True)
+    monkeypatch.setattr(private, "is_owned_descriptor", lambda fd: fault != "owner" or os.fstat(fd).st_ino != bad_inode)
+    monkeypatch.setattr(private, "is_private_descriptor", lambda fd: fault != "acl" or os.fstat(fd).st_ino != bad_inode)
+    changed = []
+    monkeypatch.setattr(private, "make_private_dir", lambda path: changed.append(path))
+    monkeypatch.setattr(private, "make_private", lambda path: changed.append(path))
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._secure_windows_work(work, work.stat())
+    assert not changed
+    assert good.read_bytes() == b"keep"
+    if fault in ("owner", "acl"):
+        assert bad.read_bytes() == b"keep bad"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows inherited DACL")
+def test_windows_native_inherited_work_becomes_strictly_private(tmp_path):
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    work = tmp_path / "work"
+    work.mkdir()
+    private.make_private_dir(work)
+    directory = work / "npm-output"
+    directory.mkdir()
+    file = directory / "package.json"
+    file.write_bytes(b"sentinel")
+    assert private.is_private(directory) and private.is_private(file)
+    assert not private.is_private_strict(directory)
+    assert not private.is_private_strict(file)
+    migration._secure_windows_work(work, work.stat())
+    assert private.is_private_strict(directory)
+    assert private.is_private_strict(file)
+    migration._remove_candidate_work(work, work.stat())
+    assert not work.exists()
+
+
+def test_windows_work_refuses_external_hardlink_before_permission_changes(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    from ciao import provider_migration as migration
+    from ciao.os_support import private
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"external private data")
+    private.make_private(outside)
+    work = tmp_path / "work"
+    work.mkdir()
+    private.make_private_dir(work)
+    good = work / "good"
+    good.write_bytes(b"keep")
+    private.make_private(good)
+    alias = work / "alias"
+    os.link(outside, alias)
+    assert alias.stat().st_ino == outside.stat().st_ino
+    before = outside.stat()
+    acl = subprocess.check_output(["icacls", str(outside)]) if sys.platform == "win32" else None
+    changed = []
+    monkeypatch.setattr(private, "make_private", lambda path: changed.append(path))
+    monkeypatch.setattr(private, "make_private_dir", lambda path: changed.append(path))
+    with pytest.raises(ValueError, match="manual recovery"):
+        migration._secure_windows_work(work, work.stat())
+    assert not changed
+    assert good.read_bytes() == b"keep"
+    assert outside.read_bytes() == alias.read_bytes() == b"external private data"
+    assert outside.stat().st_mode == before.st_mode
+    assert outside.stat().st_nlink == before.st_nlink
+    if acl is not None:
+        assert subprocess.check_output(["icacls", str(outside)]) == acl
+
+
+def test_candidate_publication_does_not_replace_destination(tmp_path):
+    from ciao import provider_migration as migration
+    source, destination = tmp_path / "temp", tmp_path / "candidate"
+    source.mkdir()
+    destination.mkdir()
+    (destination / "foreign").write_bytes(b"preserve")
+    with pytest.raises(OSError):
+        migration._publish_candidate(source, destination)
+    assert (destination / "foreign").read_bytes() == b"preserve"
+    assert source.is_dir()
+
+
+@pytest.fixture
+def stage_installer(preflight, tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.os_support import private
+    op, state, migration, shared, _ = preflight
+    private.make_private_dir(tmp_path)
+    private.make_private_dir(Path(op.stage_dir))
+    approval = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    original = migration._run_bounded
+    setup = {"metadata": {"name": "@opencode/cli-darwin-arm64", "version": "2.2.5", "os": ["darwin"], "cpu": ["arm64"]}, "binary": b"\xcf\xfa\xed\xfe" + b"fixture" * 50, "calls": []}
+    def runner(argv, *args, **kwargs):
+        if "install" in argv:
+            setup["calls"].append((argv, args, kwargs))
+            prefix = Path(argv[argv.index("--prefix") + 1])
+            package = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64"
+            (package / "bin").mkdir(parents=True)
+            data = setup["metadata"]
+            (package / "package.json").write_text(json.dumps(data) if isinstance(data, dict) else data)
+            binary = package / "bin" / ("opencode.exe" if sys.platform == "win32" else "opencode")
+            binary.write_bytes(setup["binary"])
+            if sys.platform != "win32":
+                binary.chmod(0o700)
+            if setup.get("symlink"):
+                binary.unlink()
+                binary.symlink_to(package / "package.json")
+            if setup.get("after_install"):
+                setup["after_install"](prefix)
+            return b""
+        if Path(argv[0]).name in ("opencode", "opencode.exe") and argv[0] != str(shared):
+            return b"2.2.5\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    def stage():
+        return migration.stage_opencode_candidate(op, approval, frozenset({"opencode"}), state_dir=tmp_path)
+    return op, state, migration, setup, stage
+
+
+@pytest.mark.parametrize("fault", ["duplicate", "oversize", "name", "version", "os", "cpu", "scripts", "type", "stub", "wrong_format", "symlink"])
+def test_stage_rejects_bad_installed_package(stage_installer, tmp_path, monkeypatch, fault):
+    op, _, migration, setup, stage = stage_installer
+    original_open = migration._open_candidate_file
+    inspected = []
+    def observe(path, *args, **kwargs):
+        inspected.append(path.name)
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(migration, "_open_candidate_file", observe)
+    data = setup["metadata"]
+    if fault == "duplicate":
+        setup["metadata"] = '{"name":"evil","name":"@opencode/cli-darwin-arm64","version":"2.2.5","os":["darwin"],"cpu":["arm64"]}'
+    elif fault == "oversize":
+        setup["metadata"] = " " * 65537
+    elif fault in ("name", "version", "os", "cpu", "scripts"):
+        data[fault] = {"name": "bad", "version": "2.2.6", "os": ["linux"], "cpu": ["x64"], "scripts": {"postinstall": "bad"}}[fault]
+    elif fault == "type":
+        data["scripts"] = []
+    elif fault == "stub":
+        setup["binary"] = b"#!/usr/bin/env node\n" + b"x" * 300
+    elif fault == "wrong_format":
+        setup["binary"] = b"\x7fELF" + b"x" * 350
+    else:
+        setup["symlink"] = True
+    if fault == "symlink":
+        with pytest.raises(ValueError, match="manual recovery"):
+            stage()
+    else:
+        reason = ("duplicate package metadata key" if fault == "duplicate" else
+                  "invalid native executable" if fault in ("stub", "wrong_format") else
+                  "invalid package metadata")
+        with pytest.raises(ValueError, match="^" + reason + "$"):
+            stage()
+    assert len(setup["calls"]) == 1
+    if fault != "symlink":
+        assert "package.json" in inspected
+    if fault in ("stub", "wrong_format"):
+        assert ("opencode.exe" if sys.platform == "win32" else "opencode") in inspected
+    assert not (tmp_path / "1.2.3" / "provider-candidate").exists()
+
+
+def test_stage_refuses_unfinished_without_modifying_it(stage_installer, tmp_path):
+    _, _, _, _, stage = stage_installer
+    work = tmp_path / "1.2.3" / "provider-candidate-work"
+    work.mkdir()
+    marker = work / "foreign"
+    marker.write_bytes(b"preserve")
+    before = work.stat().st_mode
+    with pytest.raises(ValueError, match="manual recovery"):
+        stage()
+    assert marker.read_bytes() == b"preserve" and work.stat().st_mode == before
+
+
+@pytest.mark.parametrize("fault", ["owner", "acl"])
+def test_stage_checks_package_directory_permissions(stage_installer, monkeypatch, fault):
+    import os
+    from ciao.os_support import private
+    op, _, migration, setup, stage = stage_installer
+    seen = []
+    before_cleanup = []
+    remove = migration._remove_candidate_work
+    def observe_cleanup(*args):
+        before_cleanup.append(list(seen))
+        return remove(*args)
+    monkeypatch.setattr(migration, "_remove_candidate_work", observe_cleanup)
+    def after_install(prefix):
+        directory = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64" / "bin"
+        inode = directory.stat().st_ino
+        if sys.platform == "win32":
+            original = private.is_private_strict
+            def strict(path):
+                if migration.Path(path) == directory:
+                    seen.append(fault)
+                    return False
+                return original(path)
+            monkeypatch.setattr(private, "is_private_strict", strict)
+        else:
+            name = "is_owned_descriptor" if fault == "owner" else "descriptor_acl_grants_another_account"
+            original = getattr(private, name)
+            def permission(fd):
+                if os.fstat(fd).st_ino == inode:
+                    seen.append(fault)
+                    return fault == "acl"
+                return original(fd)
+            monkeypatch.setattr(private, name, permission)
+    setup["after_install"] = after_install
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    assert seen and all(value == fault for value in seen)
+    assert before_cleanup and before_cleanup[-1] == [fault]
+    assert (migration.Path(op.stage_dir) / "provider-candidate-work").is_dir()
+    assert not (migration.Path(op.stage_dir) / "provider-candidate").exists()
+
+
+@pytest.mark.parametrize("entry", ["metadata", "binary"])
+def test_windows_stage_checks_installed_file_dacl(stage_installer, monkeypatch, entry):
+    import os
+    from types import SimpleNamespace
+    from ciao.os_support import private
+    op, _, migration, setup, stage = stage_installer
+    inspected = []
+    before_cleanup = []
+    remove = migration._remove_candidate_work
+    def observe_cleanup(*args):
+        before_cleanup.append(list(inspected))
+        return remove(*args)
+    monkeypatch.setattr(migration, "_remove_candidate_work", observe_cleanup)
+    selected_inode = []
+    original = private.is_private_descriptor_strict
+    if sys.platform != "win32":
+        # Model Windows owner-only ACEs independently of the strict DACL fault.
+        monkeypatch.setattr(private, "is_private_descriptor", lambda fd: True)
+    def dacl(fd):
+        if selected_inode and os.fstat(fd).st_ino == selected_inode[0]:
+            inspected.append(entry)
+            return False
+        return original(fd)
+    monkeypatch.setattr(private, "is_private_descriptor_strict", dacl)
+    def after_install(prefix):
+        for path in (prefix, *prefix.rglob("*")):
+            if path.is_dir():
+                private.make_private_dir(path)
+        package = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64"
+        binary = package / "bin" / ("opencode.exe" if sys.platform == "win32" else "opencode")
+        if binary.name != "opencode.exe":
+            binary = binary.rename(binary.with_name("opencode.exe"))
+        metadata = package / "package.json"
+        private.make_private(metadata)
+        selected_inode.append((metadata if entry == "metadata" else binary).stat().st_ino)
+        monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+    setup["after_install"] = after_install
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    assert inspected and all(value == entry for value in inspected)
+    assert before_cleanup and before_cleanup[0] == [entry]
+    assert (migration.Path(op.stage_dir) / "provider-candidate-work").is_dir()
+    assert len(setup["calls"]) == 1
+    assert not (migration.Path(op.stage_dir) / "provider-candidate").exists()
+
+
+def test_windows_stage_secures_inherited_output_and_cleans_work(stage_installer, monkeypatch):
+    from types import SimpleNamespace
+    from ciao.os_support import private
+    op, _, migration, setup, stage = stage_installer
+    protected = set()
+    monkeypatch.setattr(private, "is_owned_path", lambda path: True)
+    monkeypatch.setattr(private, "is_private", lambda path: True)
+    monkeypatch.setattr(private, "is_private_descriptor", lambda fd: True)
+    monkeypatch.setattr(private, "is_private_strict", lambda path: True)
+    monkeypatch.setattr(private, "is_private_descriptor_strict", lambda fd: True)
+    original_file, original_dir = private.make_private, private.make_private_dir
+    def secure_file(path):
+        protected.add(path)
+        original_file(path)
+    def secure_dir(path):
+        protected.add(path)
+        original_dir(path)
+    monkeypatch.setattr(private, "make_private", secure_file)
+    monkeypatch.setattr(private, "make_private_dir", secure_dir)
+    def after_install(prefix):
+        binary = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64" / "bin" / "opencode"
+        if binary.exists():
+            binary.rename(binary.with_name("opencode.exe"))
+        monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+    setup["after_install"] = after_install
+    result = stage()
+    work = migration.Path(op.stage_dir) / "provider-candidate-work"
+    assert result["version"] == "2.2.5"
+    assert work / "prefix" in protected
+    assert work / "prefix" / "node_modules" / "@opencode" / "cli-darwin-arm64" / "bin" / "opencode.exe" in protected
+    assert not work.exists()
+
+
+@pytest.mark.parametrize("fault", ["symlink", "hardlink", "writable-root", "writable-dir", "writable-file"])
+def test_installer_rejects_unsafe_unrelated_work_before_payload(stage_installer, preflight, tmp_path, monkeypatch, fault):
+    import os
+    from ciao.os_support import private
+    op, _, migration, setup, stage = stage_installer
+    shared = preflight[3]
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    private.make_private(outside)
+    saved = []
+    original = migration._run_bounded
+    make_directory = migration._make_candidate_directory
+    temporary = []
+    payload = []
+    def snapshot(work):
+        paths = [work, *work.rglob("*")]
+        return sorted((str(p.relative_to(work)), p.lstat().st_mode, p.lstat().st_dev, p.lstat().st_ino,
+                       p.lstat().st_nlink, os.readlink(p) if p.is_symlink()
+                       else p.read_bytes() if p.is_file() else None) for p in paths)
+    def after_install(prefix):
+        work = prefix.parent
+        cache = work / "cache"
+        cache.mkdir()
+        item = cache / "entry"
+        if fault == "symlink":
+            item.symlink_to(outside)
+        elif fault == "hardlink":
+            os.link(outside, item)
+        else:
+            if fault == "writable-dir":
+                item.mkdir()
+                target = item
+            elif fault == "writable-file":
+                item.write_bytes(b"unsafe")
+                target = item
+            else:
+                target = work
+            if sys.platform == "win32":
+                if fault == "writable-file":
+                    inode = target.stat().st_ino
+                    previous_fd = private.is_private_descriptor
+                    monkeypatch.setattr(private, "is_private_descriptor", lambda fd: False if os.fstat(fd).st_ino == inode else previous_fd(fd))
+                else:
+                    name = "is_private_strict" if target == work else "is_private"
+                    previous = getattr(private, name)
+                    monkeypatch.setattr(private, name, lambda p: False if migration.Path(p) == target else previous(p))
+            else:
+                target.chmod(0o777)
+        saved.append(snapshot(work))
+    setup["after_install"] = after_install
+    def runner(argv, *args, **kwargs):
+        if "provider-candidate-tmp-" in argv[0]:
+            payload.append(argv)
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    def observe_directory(path):
+        if path.name.startswith("provider-candidate-tmp-"):
+            temporary.append(path)
+        return make_directory(path)
+    monkeypatch.setattr(migration, "_make_candidate_directory", observe_directory)
+    with pytest.raises(ValueError, match="manual recovery"):
+        stage()
+    work = migration.Path(op.stage_dir) / "provider-candidate-work"
+    assert snapshot(work) == saved[0]
+    assert not payload
+    assert not temporary
+    assert not (migration.Path(op.stage_dir) / "provider-candidate").exists()
+    assert shared.read_bytes() == b"executable"
+
+
+def test_installer_accepts_ordinary_readable_work_entries(stage_installer):
+    from ciao.os_support import private
+    _, _, _, setup, stage = stage_installer
+    def after_install(prefix):
+        directory = prefix.parent / "cache"
+        directory.mkdir()
+        file = directory / "entry"
+        file.write_bytes(b"npm cache")
+        if sys.platform == "win32":
+            private.make_private_dir(directory)
+            private.make_private(file)
+        else:
+            directory.chmod(0o755)
+            file.chmod(0o644)
+    setup["after_install"] = after_install
+    assert stage()["version"] == "2.2.5"
+
+
+def test_failed_installer_cleans_owned_work_and_allows_retry(stage_installer, preflight, tmp_path, monkeypatch):
+    op, _, migration, setup, stage = stage_installer
+    shared = preflight[3]
+    original = migration._run_bounded
+    failed = []
+    def runner(argv, *args, **kwargs):
+        if "install" in argv and not failed:
+            failed.append(True)
+            work = migration.Path(op.stage_dir) / "provider-candidate-work"
+            (work / "partial").write_bytes(b"safe output")
+            raise ValueError("installer failed")
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    with pytest.raises(ValueError, match="^installer failed$"):
+        stage()
+    assert not (migration.Path(op.stage_dir) / "provider-candidate-work").exists()
+    assert not list(migration.Path(op.stage_dir).glob("provider-candidate-tmp-*"))
+    assert not (migration.Path(op.stage_dir) / "provider-candidate").exists()
+    assert stage()["version"] == "2.2.5"
+    assert shared.read_bytes() == b"executable"
+
+
+def test_windows_failed_installer_secures_inherited_output_before_cleanup(stage_installer, monkeypatch):
+    from types import SimpleNamespace
+    from ciao.os_support import private
+    op, _, migration, _, stage = stage_installer
+    original_runner, original_sys = migration._run_bounded, migration.sys
+    original_private = private.make_private
+    secured = []
+    failed = []
+    if sys.platform != "win32":
+        monkeypatch.setattr(private, "is_private_descriptor", lambda fd: True)
+    def protect(path):
+        secured.append(path)
+        original_private(path)
+    def runner(argv, *args, **kwargs):
+        if "install" in argv and not failed:
+            failed.append(True)
+            work = migration.Path(op.stage_dir) / "provider-candidate-work"
+            (work / "partial").write_bytes(b"safe inherited output")
+            monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+            raise ValueError("installer failed")
+        return original_runner(argv, *args, **kwargs)
+    monkeypatch.setattr(private, "make_private", protect)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    with pytest.raises(ValueError, match="^installer failed$"):
+        stage()
+    work = migration.Path(op.stage_dir) / "provider-candidate-work"
+    assert work / "partial" in secured
+    assert not work.exists()
+    monkeypatch.setattr(migration, "sys", original_sys)
+    assert stage()["version"] == "2.2.5"
+
+
+def test_failed_candidate_verification_cleans_owned_work_and_temp_and_allows_retry(stage_installer, preflight, monkeypatch):
+    op, _, migration, _, stage = stage_installer
+    shared = preflight[3]
+    original = migration._run_bounded
+    failed = []
+    def runner(argv, *args, **kwargs):
+        if "provider-candidate-tmp-" in argv[0] and not failed:
+            failed.append(True)
+            return b"wrong version\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    with pytest.raises(ValueError, match="^candidate verification failed$"):
+        stage()
+    directory = migration.Path(op.stage_dir)
+    assert not (directory / "provider-candidate-work").exists()
+    assert not list(directory.glob("provider-candidate-tmp-*"))
+    assert not (directory / "provider-candidate").exists()
+    assert stage()["version"] == "2.2.5"
+    assert shared.read_bytes() == b"executable"
+
+
+def test_failed_verification_preserves_both_trees_if_temp_has_external_hardlink(stage_installer, tmp_path, monkeypatch):
+    import os
+    from ciao.os_support import private
+    op, _, migration, _, stage = stage_installer
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"external")
+    private.make_private(outside)
+    original = migration._run_bounded
+    def runner(argv, *args, **kwargs):
+        if "provider-candidate-tmp-" in argv[0]:
+            temp = migration.Path(argv[0]).parent
+            os.link(outside, temp / "external-link")
+            return b"wrong version\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    directory = migration.Path(op.stage_dir)
+    work = directory / "provider-candidate-work"
+    temps = list(directory.glob("provider-candidate-tmp-*"))
+    assert work.is_dir() and (work / "user.npmrc").exists()
+    assert len(temps) == 1 and (temps[0] / "external-link").read_bytes() == b"external"
+    assert outside.read_bytes() == b"external"
+    assert not (directory / "provider-candidate").exists()
+
+
+@pytest.mark.parametrize("unsafe", ["work", "temp"])
+def test_windows_failed_verification_prevalidates_both_trees_before_mutation(stage_installer, tmp_path, monkeypatch, unsafe):
+    import os
+    import subprocess
+    from types import SimpleNamespace
+    from ciao.os_support import private
+    op, _, migration, _, stage = stage_installer
+    outside = tmp_path / "external"
+    outside.write_bytes(b"external")
+    private.make_private(outside)
+    original_runner = migration._run_bounded
+    original_remove = migration._remove_candidate_work
+    mutations = []
+    before = []
+    def snapshot(work, temp):
+        result = []
+        for root in (work, temp):
+            for path in (root, *root.rglob("*")):
+                info = path.lstat()
+                acl = subprocess.check_output(["icacls", str(path)]) if sys.platform == "win32" else None
+                result.append((str(path), info.st_mode, info.st_dev, info.st_ino, info.st_nlink,
+                               path.read_bytes() if path.is_file() else None, acl))
+        return sorted(result)
+    def runner(argv, *args, **kwargs):
+        if "provider-candidate-tmp-" in argv[0]:
+            temp = migration.Path(argv[0]).parent
+            work = migration.Path(op.stage_dir) / "provider-candidate-work"
+            os.link(outside, (work if unsafe == "work" else temp) / "unsafe")
+            before.append(snapshot(work, temp))
+            for name in ("make_private", "make_private_dir"):
+                original = getattr(private, name)
+                def protect(path, original=original, name=name):
+                    mutations.append(name)
+                    return original(path)
+                monkeypatch.setattr(private, name, protect)
+            def remove(path, identity, validate_only=False):
+                if not validate_only:
+                    mutations.append("delete")
+                return original_remove(path, identity, validate_only)
+            monkeypatch.setattr(migration, "_remove_candidate_work", remove)
+            if sys.platform != "win32":
+                monkeypatch.setattr(private, "is_private", lambda path: True)
+                monkeypatch.setattr(private, "is_owned_path", lambda path: True)
+                monkeypatch.setattr(private, "is_private_descriptor", lambda fd: True)
+                monkeypatch.setattr(private, "is_private_descriptor_strict", lambda fd: True)
+            monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+            return b"wrong version\n"
+        return original_runner(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    with pytest.raises(ValueError, match="manual recovery"):
+        stage()
+    directory = migration.Path(op.stage_dir)
+    work = directory / "provider-candidate-work"
+    temps = list(directory.glob("provider-candidate-tmp-*"))
+    assert len(temps) == 1 and snapshot(work, temps[0]) == before[0]
+    assert mutations == []
+    assert outside.read_bytes() == b"external"
+    assert not (directory / "provider-candidate").exists()
+
+
+def test_failed_verification_reports_cleanup_failure_and_preserves_trees(stage_installer, monkeypatch):
+    op, _, migration, _, stage = stage_installer
+    runner = migration._run_bounded
+    remove = migration._remove_candidate_work
+    def wrong_version(argv, *args, **kwargs):
+        if "provider-candidate-tmp-" in argv[0]:
+            return b"wrong version\n"
+        return runner(argv, *args, **kwargs)
+    def fail_deletion(path, identity, validate_only=False):
+        if not validate_only:
+            raise OSError("injected deletion failure")
+        return remove(path, identity, validate_only)
+    monkeypatch.setattr(migration, "_run_bounded", wrong_version)
+    monkeypatch.setattr(migration, "_remove_candidate_work", fail_deletion)
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    directory = migration.Path(op.stage_dir)
+    assert (directory / "provider-candidate-work" / "user.npmrc").exists()
+    temps = list(directory.glob("provider-candidate-tmp-*"))
+    assert len(temps) == 1 and (temps[0] / "candidate.json").exists()
+    assert not (directory / "provider-candidate").exists()
+
+
+def test_stage_installer_environment_and_arguments(stage_installer, tmp_path, monkeypatch):
+    _, _, _, setup, stage = stage_installer
+    for name in ("NODE_OPTIONS", "NODE_PATH", "HTTPS_PROXY", "NPM_CONFIG_REGISTRY"):
+        monkeypatch.setenv(name, "hostile")
+    assert stage()["version"] == "2.2.5"
+    argv, limits, options = setup["calls"][0]
+    work = tmp_path / "1.2.3" / "provider-candidate-work"
+    assert argv[1:] == ["install", "--prefix", str(work / "prefix"), "--cache", str(work / "cache"), "--ignore-scripts", "--no-save", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org/", "@opencode/cli-darwin-arm64@2.2.5"]
+    assert limits == (600, 16384, 16384)
+    assert options["cwd"] == work and options["combined_cap"] == 16384
+    assert not ({"NODE_OPTIONS", "NODE_PATH", "HTTPS_PROXY", "NPM_CONFIG_REGISTRY"} & options["env"].keys())
+    assert options["env"]["NPM_CONFIG_USERCONFIG"] == str(work / "user.npmrc")
+
+
+@pytest.mark.parametrize("npm_os", ["win32", "windows"])
+def test_stage_windows_installer_command_and_environment(preflight, tmp_path, monkeypatch, npm_os):
+    import os
+    from pathlib import Path
+    from ciao.os_support import private
+    op, _, migration, shared, _ = preflight
+    private.make_private_dir(tmp_path)
+    private.make_private_dir(Path(op.stage_dir))
+    node, script = tmp_path / "node.exe", tmp_path / "npm-cli.js"
+    node.write_bytes(b"node")
+    script.write_bytes(b"npm")
+    capability = {"state": "ready", "package": "@opencode/cli-windows-arm64", "npm_argv": [str(node), str(script)], "reason": ""}
+    monkeypatch.setattr(migration, "installer_capability", lambda **_: capability)
+    for key in ("NODE_OPTIONS", "NODE_PATH", "HTTPS_PROXY", "NPM_CONFIG_REGISTRY"):
+        monkeypatch.setenv(key, "hostile")
+    approved = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    original = migration._run_bounded
+    calls = []
+    def runner(argv, *args, **kwargs):
+        if "install" in argv:
+            calls.append((argv, args, kwargs))
+            prefix = Path(argv[argv.index("--prefix") + 1])
+            package = prefix / "node_modules" / "@opencode" / "cli-windows-arm64"
+            (package / "bin").mkdir(parents=True)
+            (package / "package.json").write_text(json.dumps({"name": capability["package"], "version": "2.2.5", "os": [npm_os], "cpu": ["arm64"]}))
+            binary = package / "bin" / ("opencode.exe" if sys.platform == "win32" else "opencode")
+            binary.write_bytes(b"MZ" + b"x" * 350)
+            if sys.platform != "win32":
+                binary.chmod(0o700)
+            return b""
+        if Path(argv[0]).name in ("opencode", "opencode.exe") and argv[0] != str(shared):
+            return b"2.2.5\n"
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", runner)
+    if npm_os == "win32":
+        assert migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)["version"] == "2.2.5"
+    else:
+        with pytest.raises(ValueError, match="^invalid package metadata$"):
+            migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)
+    work = Path(op.stage_dir) / "provider-candidate-work"
+    argv, limits, options = calls[0]
+    assert argv == [str(node), str(script), "install", "--prefix", str(work / "prefix"), "--cache", str(work / "cache"), "--ignore-scripts", "--no-save", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org/", "@opencode/cli-windows-arm64@2.2.5"]
+    assert limits == (600, 16384, 16384) and options["cwd"] == work and options["combined_cap"] == 16384
+    expected = {"PATH": str(node.parent) + os.pathsep + os.defpath, "HOME": str(work), "USERPROFILE": str(work), "TEMP": str(work), "TMP": str(work), "NPM_CONFIG_USERCONFIG": str(work / "user.npmrc"), "NPM_CONFIG_GLOBALCONFIG": str(work / "global.npmrc"), "NPM_CONFIG_UPDATE_NOTIFIER": "false"}
+    expected.update({key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR") if key in os.environ})
+    assert options["env"] == expected
+
+
+def test_stage_replaced_work_is_not_cleaned(stage_installer, tmp_path):
+    _, _, _, setup, stage = stage_installer
+    work = tmp_path / "1.2.3" / "provider-candidate-work"
+    def replace(_):
+        work.rename(work.with_name("displaced-work"))
+        work.mkdir()
+        (work / "foreign").write_bytes(b"preserve")
+    setup["after_install"] = replace
+    with pytest.raises((OSError, ValueError)):
+        stage()
+    assert (work / "foreign").read_bytes() == b"preserve"
+
+
+def test_stage_rejects_package_component_replacement(stage_installer, monkeypatch):
+    _, _, migration, _, stage = stage_installer
+    original = migration._open_candidate_file
+    def replace(path, *args, **kwargs):
+        fd = original(path, *args, **kwargs)
+        if path.name in ("opencode", "opencode.exe") and path.parent.name == "bin":
+            path.parent.rename(path.parent.with_name("old-bin"))
+            path.parent.mkdir()
+            (path.parent / "opencode").write_bytes(b"replacement")
+        return fd
+    monkeypatch.setattr(migration, "_open_candidate_file", replace)
+    with pytest.raises(ValueError):
+        stage()
+
+
+def test_stage_does_not_recursively_delete_by_path(stage_installer, tmp_path, monkeypatch):
+    import shutil
+    _, _, _, setup, stage = stage_installer
+    work = tmp_path / "1.2.3" / "provider-candidate-work"
+    sentinel = tmp_path / "unrelated"
+    sentinel.write_bytes(b"preserve")
+    original = shutil.rmtree
+    def replace_at_delete(path, *args, **kwargs):
+        if sys.platform != "win32":
+            pytest.fail("POSIX cleanup must use held directory descriptors")
+        assert path == work
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(shutil, "rmtree", replace_at_delete)
+    assert stage()["version"] == "2.2.5"
+    assert not work.exists()
+    assert sentinel.read_bytes() == b"preserve"
+
+
+def test_stage_accepts_ordinary_extra_npm_metadata(stage_installer):
+    op, _, migration, setup, stage = stage_installer
+    setup["metadata"].update(description="native package", license="MIT", extra={"nested": True})
+    assert stage()["version"] == "2.2.5"
+    assert json.loads((migration.Path(op.stage_dir) / "provider-candidate" / "candidate.json").read_text())["version"] == "2.2.5"
+
+
+def test_retained_work_blocks_success_and_retry_until_manual_recovery(stage_installer, tmp_path, monkeypatch):
+    op, _, migration, setup, stage = stage_installer
+    cleanup = migration._remove_candidate_work
+    def fail_cleanup(path, identity, validate_only=False):
+        if not validate_only:
+            raise OSError("injected cleanup failure")
+        return cleanup(path, identity, validate_only)
+    monkeypatch.setattr(migration, "_remove_candidate_work", fail_cleanup)
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    work = tmp_path / "1.2.3" / "provider-candidate-work"
+    candidate = tmp_path / "1.2.3" / "provider-candidate"
+    descriptor = json.loads((candidate / "candidate.json").read_text())
+    assert migration.verify_candidate(op, descriptor["sha256"], state_dir=tmp_path) == candidate / descriptor["relative_binary"]
+    marker = work / "sentinel"
+    marker.write_bytes(b"preserve")
+    before = [(str(p.relative_to(tmp_path)), p.lstat().st_mtime_ns) for p in tmp_path.rglob("*")]
+    with pytest.raises(ValueError, match="^candidate work requires manual recovery$"):
+        stage()
+    assert marker.read_bytes() == b"preserve"
+    assert before == [(str(p.relative_to(tmp_path)), p.lstat().st_mtime_ns) for p in tmp_path.rglob("*")]
+    assert len(setup["calls"]) == 1
+    assert not (tmp_path / "providers").exists()
+    shutil.rmtree(work)  # This fixture created this exact tree.
+    monkeypatch.setattr(migration, "_remove_candidate_work", cleanup)
+    result = stage()
+    assert result == {"version": descriptor["version"], "sha256": descriptor["sha256"], "relative_binary": descriptor["relative_binary"]}
+    assert len(setup["calls"]) == 1
+
+
+def test_candidate_descriptor_rejects_extra_key(published_candidate, tmp_path):
+    op, migration, _, metadata, sha, _ = published_candidate
+    data = json.loads(metadata.read_text())
+    data["extra"] = True
+    metadata.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="candidate verification failed"):
+        migration.verify_candidate(op, sha, state_dir=tmp_path)
+
+
+@pytest.mark.parametrize("fault", ["extra", "package", "version", "operation", "hash", "binary", "owner", "acl", "target", "checker", "capability"])
+def test_published_retry_rejects_tampering_without_install(published_candidate, tmp_path, monkeypatch, fault):
+    import os
+    from ciao.os_support import private
+    from ciao.providers import opencode
+    op, migration, binary, metadata, sha, observations = published_candidate
+    approved = migration.snapshot_id(migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=tmp_path))
+    data = json.loads(metadata.read_text())
+    inspected = []
+    if fault in ("extra", "package", "version", "operation", "hash"):
+        key, value = {"extra": ("extra", True), "package": ("package", "bad"), "version": ("version", "2.2.6"), "operation": ("operation_id", "other"), "hash": ("sha256", "a" * 64)}[fault]
+        data[key] = value
+        metadata.write_text(json.dumps(data))
+    elif fault == "binary":
+        binary.write_bytes(b"tampered")
+    elif fault == "owner":
+        original_owner = private.is_owned_descriptor
+        inode = binary.stat().st_ino
+        def owner(fd):
+            if os.fstat(fd).st_ino == inode:
+                inspected.append("binary-owner")
+                return False
+            return original_owner(fd)
+        monkeypatch.setattr(private, "is_owned_descriptor", owner)
+    elif fault == "acl":
+        original_acl = private.descriptor_acl_grants_another_account
+        inode = binary.stat().st_ino
+        def acl(fd):
+            if os.fstat(fd).st_ino == inode:
+                inspected.append("binary-acl")
+                return True
+            return original_acl(fd)
+        monkeypatch.setattr(private, "descriptor_acl_grants_another_account", acl)
+    elif fault == "target":
+        original = migration._target_probe
+        def target(*args):
+            result = original(*args)
+            if args[-1] == "2.2.5":
+                result["candidate_error"] = "rejected"
+            return result
+        monkeypatch.setattr(migration, "_target_probe", target)
+    elif fault == "checker":
+        original_check = opencode._server_version_error
+        def check(value):
+            if value.get("version") == "2.2.5":
+                inspected.append("running-checker")
+                return "rejected"
+            return original_check(value)
+        monkeypatch.setattr(opencode, "_server_version_error", check)
+    else:
+        original = migration._target_probe
+        def capability(*args):
+            result = original(*args)
+            if args[-1] == "2.2.5":
+                result["managed_resolver_version"] = 0
+            return result
+        monkeypatch.setattr(migration, "_target_probe", capability)
+    with pytest.raises(ValueError, match="^candidate verification failed$"):
+        if fault == "checker":
+            # Exercise the verifier, not preflight's stale-approval rejection.
+            migration.verify_candidate(op, sha, state_dir=tmp_path)
+        else:
+            migration.stage_opencode_candidate(op, approved, frozenset({"opencode"}), state_dir=tmp_path)
+    if fault in ("owner", "acl", "checker"):
+        assert inspected == [{"owner": "binary-owner", "acl": "binary-acl", "checker": "running-checker"}[fault]]
+    assert not any("install" in argv for argv in observations)
+
+
+def test_verify_candidate_accepts_private_executable_without_writes(published_candidate, tmp_path):
+    op, migration, binary, metadata, sha, observations = published_candidate
+    before = [(p, p.lstat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in tmp_path.rglob("*")]
+    assert migration.verify_candidate(op, sha, state_dir=tmp_path) == binary
+    assert observations
+    assert before == [(p, p.lstat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in tmp_path.rglob("*")]
+
+
+@pytest.mark.parametrize("fault", ["mode", "hash", "metadata", "symlink", "root", "id", "version", "acl"])
+def test_verify_candidate_refuses_untrusted_state(published_candidate, tmp_path, monkeypatch, fault):
+    import os
+    from ciao.os_support import private
+    op, migration, binary, metadata, sha, observations = published_candidate
+    inspected = []
+    if fault == "mode":
+        if sys.platform == "win32":
+            inode = binary.stat().st_ino
+            original = private.is_private_descriptor_strict
+            def binary_dacl(fd):
+                if os.fstat(fd).st_ino == inode:
+                    inspected.append("binary-dacl")
+                    return False
+                return original(fd)
+            monkeypatch.setattr(private, "is_private_descriptor_strict", binary_dacl)
+        else:
+            binary.chmod(0o600)
+    elif fault == "hash":
+        binary.write_bytes(b"replacement")
+    elif fault == "metadata":
+        metadata.write_text('{"schema":1,"schema":1}')
+    elif fault == "symlink":
+        binary.unlink()
+        binary.symlink_to(metadata)
+    elif fault == "root":
+        if sys.platform == "win32":
+            inode = tmp_path.stat().st_ino
+            original = private.is_private_strict
+            def root_dacl(path):
+                if path == tmp_path and path.stat().st_ino == inode:
+                    inspected.append("root-dacl")
+                    return False
+                return original(path)
+            monkeypatch.setattr(private, "is_private_strict", root_dacl)
+        else:
+            tmp_path.chmod(0o755)
+    elif fault == "id":
+        op.id = "../bad"
+    elif fault == "version":
+        data = json.loads(metadata.read_text())
+        data["version"] = "3.0.0"
+        metadata.write_text(json.dumps(data))
+    else:
+        inode = binary.stat().st_ino
+        original = private.descriptor_acl_grants_another_account
+        def binary_acl(fd):
+            if os.fstat(fd).st_ino == inode:
+                inspected.append("binary-acl")
+                return True
+            return original(fd)
+        monkeypatch.setattr(private, "descriptor_acl_grants_another_account", binary_acl)
+    with pytest.raises(ValueError, match="candidate verification failed"):
+        migration.verify_candidate(op, sha, state_dir=tmp_path)
+    if fault in ("id", "root"):
+        assert not observations
+    if fault == "acl":
+        assert inspected == ["binary-acl"]
+    if sys.platform == "win32" and fault in ("mode", "root"):
+        assert inspected == ["binary-dacl" if fault == "mode" else "root-dacl"]
+
+
+@pytest.mark.parametrize("change", ["operation", "metadata"])
+def test_verify_candidate_rejects_changes_during_probe(published_candidate, tmp_path, monkeypatch, change):
+    op, migration, binary, metadata, sha, _ = published_candidate
+    original = migration._run_bounded
+    def changed(argv, *args, **kwargs):
+        result = original(argv, *args, **kwargs)
+        if argv[0] == str(binary):
+            if change == "operation":
+                op.id = "20261112T101501Z-1.2.3"
+            else:
+                metadata.write_text(metadata.read_text() + " ")
+        return result
+    monkeypatch.setattr(migration, "_run_bounded", changed)
+    with pytest.raises(ValueError, match="candidate verification failed"):
+        migration.verify_candidate(op, sha, state_dir=tmp_path)
 
 
 def test_missing_target_record_does_not_claim_absent_provider_is_compatible(preflight, tmp_path, monkeypatch):
