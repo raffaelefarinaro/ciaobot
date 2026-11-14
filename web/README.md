@@ -461,6 +461,18 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 
 ### Layout traps
 
+`PaneHeader.vue` owns the shared page-chrome rule: at viewport widths ≥769px,
+`.chat-layout.sidebar-open` compacts page-tag headers that have no item-title
+slot. Their h2 stays in the accessibility tree using visually hidden CSS,
+never `display:none` or an `aria-hidden` ancestor. Actionless headers have no
+layout footprint; an actions slot retains a compact trailing toolbar with the
+page inset (Tasks' New task), including 44px coarse-pointer targets. Closing
+the sidebar restores the full desktop header. Widths ≤768px keep the existing
+mobile grid/lead/Back, with the bell still limited to ≤767px; item titles,
+detail actions and automation forms are unchanged. Wrap the entire
+ancestor/root/descendant selector in `:global(...)` inside scoped CSS: partial
+global selectors can lose their descendants during Vue compilation.
+
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
 - **Flex children with unbreakable content need `min-width: 0`.** Without it, a long unbreakable string (a URL, a model identifier, etc.) forces the flex parent wider than the viewport and breaks horizontal layout.
 - **Tap targets** must hit the `--touch: 44px` minimum (declared in `src/styles/app.css`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
@@ -480,7 +492,7 @@ CSS custom properties live in `src/styles/app.css` as `:root` declarations, load
 - **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
-- **Wordmark**: `BrandMark.vue` uses the supplied full wordmark in the sidebar and pane header, with a variant for each theme. The terminal-style `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` in StartupView, UpdateProgressView, and LoginView.
+- **Wordmark**: `BrandMark.vue` renders the supplied `/icons/icon-32.png` as a static 30×30px image with alt text “Ciaobot” in both themes, not a reload control; it has no cache or service-worker side effects. Only the expanded sidebar owns the mark. `PaneHeader.vue` has no mark or `brand` prop; it retains page tags, title/actions slots and mobile controls. A collapsed sidebar or closed phone drawer needs no logo: its toggle or hamburger still opens navigation. The terminal-style `.wordmark` (with size modifier `--lg|--md|--sm`) still renders `› word` in StartupView, UpdateProgressView, and LoginView.
 - **Caret**: `.caret` is a blinking accent terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body and scroll:** the normal app surface is clean (no CRT grain); startup/update/native surfaces retain the terminal texture. Scrollbars are thin and visible so long files, tables, tabs, and settings panes never hide the fact that more content exists. The chat footer's turn-facts strip is the one exception: it scrolls sideways without a visible bar, because a bar under a reply reads as a rule across the transcript.
 

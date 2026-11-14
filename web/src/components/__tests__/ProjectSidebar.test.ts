@@ -730,7 +730,7 @@ describe('ProjectSidebar global new chat', () => {
     const wrapper = await mountSidebar('chat')
     const row = wrapper.get('.sidebar-brand-row').element
     expect(wrapper.find('.sidebar-brand-mark').exists()).toBe(false)
-    expect(wrapper.get('.sidebar-brand .brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
+    expect(wrapper.get('img.sidebar-brand').attributes()).toMatchObject({ src: '/icons/icon-32.png', alt: 'Ciaobot' })
     const order = Array.from(row.children).map((el) =>
       el.classList.contains('sidebar-history') ? 'history'
         : el.classList.contains('history-divider') ? 'divider'

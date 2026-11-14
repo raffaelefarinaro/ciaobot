@@ -1,6 +1,6 @@
 <template>
   <div class="subagent-view">
-    <PaneHeader :brand="false" @open-sidebar="emit('open-sidebar')">
+    <PaneHeader @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <RouterLink

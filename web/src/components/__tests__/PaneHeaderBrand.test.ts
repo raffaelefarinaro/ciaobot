@@ -1,14 +1,5 @@
 // @vitest-environment jsdom
 
-/**
- * The pane header carries the brand mark and the page tag.
- *
- * The brand was moved out of the sidebar into the middle of this header, so what
- * these tests protect is (a) the reload behaviour survived the move intact, and
- * (b) the structure that makes the mark genuinely centred: the mark lives in its
- * own grid column, a sibling of the title, so no title length can move it.
- */
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -23,6 +14,7 @@ const LONG_TITLE = 'A chat title long enough to need every pixel of the header a
 
 describe('BrandMark', () => {
   const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')
+  const originalServiceWorker = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')
   let replace: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
@@ -35,79 +27,89 @@ describe('BrandMark', () => {
 
   afterEach(() => {
     if (originalLocation) Object.defineProperty(window, 'location', originalLocation)
+    if (originalServiceWorker) Object.defineProperty(navigator, 'serviceWorker', originalServiceWorker)
+    else Reflect.deleteProperty(navigator, 'serviceWorker')
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
-  it('renders the wordmark', () => {
+  it('renders the supplied static icon', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.attributes('aria-label')).toBe('Reload Ciaobot')
-    expect(wrapper.get('.brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
-    expect(wrapper.get('.brand-logo--light').attributes('src')).toBe('/brand/ciaobot-wordmark.png')
-    expect(wrapper.attributes('title')).toBe('Click to reload the latest app build')
-    expect(wrapper.attributes('aria-busy')).toBe('false')
+    expect(wrapper.element.tagName).toBe('IMG')
+    expect(wrapper.attributes('src')).toBe('/icons/icon-32.png')
+    expect(wrapper.attributes('alt')).toBe('Ciaobot')
     wrapper.unmount()
   })
 
-  it('reloads the latest build with a cache-busting query when clicked', async () => {
+  it('is not a focusable reload control', () => {
     const wrapper = mount(BrandMark)
-    await wrapper.trigger('click')
-    await flushPromises()
-
-    expect(replace).toHaveBeenCalledTimes(1)
-    const target = new URL(replace.mock.calls[0][0] as string)
-    expect(target.pathname).toBe('/chat/abc')
-    expect(target.searchParams.get('_r')).toMatch(/^\d+$/)
+    expect(wrapper.element.tagName).toBe('IMG')
+    expect(wrapper.attributes('tabindex')).toBeUndefined()
+    expect(wrapper.attributes('role')).toBeUndefined()
+    expect(wrapper.attributes('aria-label')).toBeUndefined()
+    expect(wrapper.attributes('aria-busy')).toBeUndefined()
+    expect(wrapper.attributes('title')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it('reports the reload as busy and refuses a second click', async () => {
+  it('does not navigate, clear caches or update service workers when clicked', async () => {
+    const update = vi.fn()
+    const deleteCache = vi.fn()
+    const keys = vi.fn().mockResolvedValue(['app'])
+    const getRegistrations = vi.fn().mockResolvedValue([{ update }])
+    vi.stubGlobal('caches', { keys, delete: deleteCache })
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true, value: Object.assign(new EventTarget(), { getRegistrations }),
+    })
     const wrapper = mount(BrandMark)
     await wrapper.trigger('click')
     await flushPromises()
-
-    expect(wrapper.attributes('aria-busy')).toBe('true')
-    expect(wrapper.classes()).toContain('brand--refreshing')
-    expect(wrapper.attributes('title')).toBe('Reloading...')
-
-    await wrapper.trigger('click')
-    await flushPromises()
-    expect(replace).toHaveBeenCalledTimes(1)
+    expect(replace).not.toHaveBeenCalled()
+    expect(keys).not.toHaveBeenCalled()
+    expect(deleteCache).not.toHaveBeenCalled()
+    expect(getRegistrations).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })
 
-describe('PaneHeader brand and page tag', () => {
+describe('PaneHeader page tag, title and controls', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('puts the brand in its own column, outside the title', () => {
+  it('keeps the page tag without owning a brand image or prop', () => {
     const wrapper = mount(PaneHeader, { props: { pageTag: 'home' } })
 
     const centre = wrapper.get('.header-center')
-    expect(centre.find('.brand').exists()).toBe(true)
-    // Sibling of the title, not inside it: this is what makes the centring hold.
-    expect(wrapper.find('.header-title .brand').exists()).toBe(false)
+    expect(centre.get('.page-tag').text()).toBe('home')
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.vm.$options.props).not.toHaveProperty('brand')
+    expect(wrapper.classes()).not.toContain('pane-header--no-center')
     expect(centre.element.parentElement).toBe(wrapper.get('.pane-header').element)
     wrapper.unmount()
   })
 
-  it('keeps the brand in the middle column when the title is very long', () => {
+  it('keeps a long title, page tag and working action in separate regions', async () => {
+    const action = vi.fn()
     const wrapper = mount(PaneHeader, {
       props: { pageTag: 'project' },
-      slots: { title: `<span class="pane-title">${LONG_TITLE}</span>` },
+      slots: {
+        title: `<span class="pane-title">${LONG_TITLE}</span>`,
+        actions: () => h('button', { onClick: action }, 'Run now'),
+      },
       global: { stubs: { transition: false } },
     })
 
-    // The long title is present, and the header still reads title | centre | trail
-    // in that order, with the brand in the centre column and nowhere else.
-    expect(wrapper.get('.pane-title').text().length).toBeGreaterThan(200)
+    expect(wrapper.get('.pane-title').text()).toBe(LONG_TITLE.trim())
     const columns = Array.from(wrapper.get('.pane-header').element.children)
       .map(el => el.className)
       .filter(name => !name.includes('header-lead'))
     expect(columns).toEqual(['header-title', 'header-center header-center--with-title', 'header-trail'])
-    expect(wrapper.findAll('.brand')).toHaveLength(1)
-    expect(wrapper.get('.header-center').find('.brand').exists()).toBe(true)
+    expect(wrapper.get('.header-center .page-tag').text()).toBe('project')
+    expect(wrapper.find('img').exists()).toBe(false)
+    await wrapper.get('.header-actions button').trigger('click')
+    expect(action).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
 
@@ -118,7 +120,8 @@ describe('PaneHeader brand and page tag', () => {
 
     const untagged = mount(PaneHeader)
     expect(untagged.find('.page-tag').exists()).toBe(false)
-    expect(untagged.find('.brand').exists()).toBe(true)
+    expect(untagged.find('img').exists()).toBe(false)
+    expect(untagged.classes()).toContain('pane-header--no-center')
     untagged.unmount()
   })
 
@@ -147,25 +150,79 @@ describe('PaneHeader brand and page tag', () => {
     overflow.unmount()
   })
 
-  it('drops the brand where a second mark would duplicate the main pane', () => {
-    const wrapper = mount(PaneHeader, { props: { brand: false } })
-    expect(wrapper.find('.brand').exists()).toBe(false)
+  it('gives an item title the no-center layout and retains mobile navigation', async () => {
+    const wrapper = mount(PaneHeader, {
+      slots: { title: '<h2 class="pane-title">An item</h2>' },
+    })
+    expect(wrapper.classes()).toContain('pane-header--no-center')
+    expect(wrapper.get('h2').text()).toBe('An item')
     expect(wrapper.find('.header-center').exists()).toBe(true)
+    expect(wrapper.find('img').exists()).toBe(false)
+    await wrapper.get('button[aria-label="Open sidebar"]').trigger('click')
+    expect(wrapper.emitted('open-sidebar')).toHaveLength(1)
+    expect(wrapper.find('.header-bell').exists()).toBe(true)
     wrapper.unmount()
   })
 })
 
+describe('PaneHeader compact page contract', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('marks a page-only header while retaining its dynamic semantic heading', async () => {
+    const wrapper = mount(PaneHeader, { props: { pageTag: 'Appearance' } })
+    expect(wrapper.classes()).toContain('pane-header--compact-page')
+    expect(wrapper.classes()).not.toContain('pane-header--page-actions')
+    expect(wrapper.get('h2.page-tag').text()).toBe('Appearance')
+    expect(wrapper.find('.header-title').exists()).toBe(false)
+    expect(wrapper.attributes('aria-hidden')).toBeUndefined()
+    await wrapper.setProps({ pageTag: 'Overview' })
+    expect(wrapper.get('h2.page-tag').text()).toBe('Overview')
+    await wrapper.get('button[aria-label="Open sidebar"]').trigger('click')
+    expect(wrapper.emitted('open-sidebar')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('marks the actions slot without replacing the page heading or its button', async () => {
+    const action = vi.fn()
+    const wrapper = mount(PaneHeader, {
+      props: { pageTag: 'Tasks' },
+      slots: { actions: () => h('button', { onClick: action }, 'New task') },
+    })
+    expect(wrapper.classes()).toContain('pane-header--compact-page')
+    expect(wrapper.classes()).toContain('pane-header--page-actions')
+    expect(wrapper.get('h2.page-tag').text()).toBe('Tasks')
+    await wrapper.get('.header-actions button').trigger('click')
+    expect(action).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it('never compacts an item title or an untagged header', () => {
+    const titled = mount(PaneHeader, {
+      props: { pageTag: 'Project' },
+      slots: { title: '<h2>Offsite</h2>', actions: '<button>Close project</button>' },
+    })
+    expect(titled.classes()).not.toContain('pane-header--compact-page')
+    expect(titled.get('.page-tag').element.tagName).toBe('SPAN')
+    expect(titled.get('h2').text()).toBe('Offsite')
+    titled.unmount()
+    const untagged = mount(PaneHeader)
+    expect(untagged.classes()).not.toContain('pane-header--compact-page')
+    untagged.unmount()
+  })
+})
+
 describe('page tag per view', () => {
-  const seen: { pageTag: string; brand: boolean }[] = []
+  const seen: { pageTag: string }[] = []
 
   const RecordingPaneHeader = defineComponent({
     name: 'PaneHeader',
     props: {
       pageTag: { type: String, default: '' },
-      brand: { type: Boolean, default: true },
     },
     setup(props) {
-      seen.push({ pageTag: props.pageTag, brand: props.brand })
+      seen.push({ pageTag: props.pageTag })
       return () => h('div', { class: 'pane-header-stub' })
     },
   })
@@ -227,7 +284,7 @@ describe('page tag per view', () => {
     await flushPromises()
     await nextTick()
 
-    expect(seen).toEqual([{ pageTag: 'Home', brand: true }])
+    expect(seen).toEqual([{ pageTag: 'Home' }])
     wrapper.unmount()
   })
 })
