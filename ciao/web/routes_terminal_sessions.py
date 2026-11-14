@@ -147,6 +147,10 @@ def _query_target(request: Request) -> tuple[TerminalTargetKind, str] | None:
     all, and both name two, and a caller may only ask about one.
     """
     params = request.query_params
+    if "workspace" in params:
+        if len(params.getlist("workspace")) != 1 or set(params) != {"workspace"}:
+            return None
+        return "workspace", params["workspace"]
     has_chat = "chat_id" in params
     has_project = "project_id" in params
     if has_chat == has_project:
@@ -187,6 +191,9 @@ def _body_target(
     if keys == {"project_id"}:
         value = payload["project_id"]
         return ("project", value, location) if isinstance(value, str) else None
+    if keys == {"workspace"}:
+        value = payload["workspace"]
+        return ("workspace", value, location) if isinstance(value, str) else None
     return None
 
 
@@ -214,6 +221,21 @@ def _resolve_target(
         return _fail("folder_missing", f"folder not found: {exc}", 409)
 
 
+def _workspace_root(request: Request, name: str) -> Path | JSONResponse:
+    if not name or name != name.strip():
+        return _fail("bad_request", "invalid workspace.", 400)
+    config = request.app.state.config
+    try:
+        if config.workspace(name) is None:
+            return _fail("not_found", "workspace not found.", 404)
+        root = Path(config.agent_root(name))
+    except ValueError:
+        return _fail("bad_request", "invalid workspace.", 400)
+    if not root.is_dir():
+        return _fail("folder_missing", "workspace folder unavailable.", 409)
+    return root.resolve()
+
+
 def _folder_for(
     request: Request,
     kind: TerminalTargetKind,
@@ -226,6 +248,13 @@ def _folder_for(
     from :func:`ciao.host_terminal.resolve_folder`, which is also what
     decides whether the target exists at all.
     """
+    if kind == "workspace":
+        root = _workspace_root(request, target_id)
+        if isinstance(root, JSONResponse):
+            return root
+        if location == "repo":
+            return _fail("folder_missing", "workspace folder unavailable.", 409)
+        return root
     result: Path | JSONResponse = _resolve_target(
         request, kind, target_id, host_terminal.resolve_folder, location=location
     )
@@ -240,6 +269,11 @@ def _choices_for(
     The same resolution as :func:`_folder_for`, so the list and the create
     agree on whether a target exists and where its shells start.
     """
+    if kind == "workspace":
+        root = _workspace_root(request, target_id)
+        if isinstance(root, JSONResponse):
+            return root
+        return {"workspace": root}
     result: dict[FolderLocation, Path] | JSONResponse = _resolve_target(
         request, kind, target_id, host_terminal.folder_choices
     )
@@ -298,7 +332,7 @@ async def terminal_sessions_list(request: Request) -> JSONResponse:
     target = _query_target(request)
     if target is None:
         return _fail(
-            "bad_request", "name exactly one of chat_id or project_id.", 400
+            "bad_request", "name exactly one of chat_id, project_id or workspace.", 400
         )
     kind, target_id = target
     choices = _choices_for(request, kind, target_id)
@@ -345,15 +379,29 @@ async def terminal_sessions_create(request: Request) -> JSONResponse:
         # `JSONDecodeError` and `UnicodeDecodeError` are both `ValueError`s:
         # a malformed body and one that is not UTF-8 are one refusal.
         return _fail("bad_request", "invalid json", 400)
+    if isinstance(payload, dict) and "workspace" in payload:
+        duplicate = False
+
+        def check_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            nonlocal duplicate
+            result = dict(pairs)
+            duplicate |= len(result) != len(pairs)
+            return result
+
+        json.loads(raw, object_pairs_hook=check_pairs)
+        if duplicate:
+            return _fail("bad_request", "duplicate json keys.", 400)
     target = _body_target(payload)
     if target is None:
         return _fail(
             "bad_request",
-            'send exactly {"chat_id": "<id>"} or {"project_id": "<id>"},'
+            'send exactly {"chat_id": "<id>"}, {"project_id": "<id>"} or {"workspace": "<name>"},'
             ' optionally with "location": "workspace" or "repo"',
             400,
         )
     kind, target_id, location = target
+    if kind == "workspace" and terminal_grant(request) is None:
+        return _fail("locked", _LOCKED, 403)
     folder = _folder_for(request, kind, target_id, location)
     if isinstance(folder, JSONResponse):
         return folder
@@ -361,6 +409,9 @@ async def terminal_sessions_create(request: Request) -> JSONResponse:
         info = await _manager(request).create(folder, kind, target_id)
     except TerminalSessionError as exc:
         return _manager_failure(exc)
+    if kind == "workspace" and terminal_grant(request) is None:
+        await _manager(request).end(info.session_id)
+        return _fail("locked", _LOCKED, 403)
     return _no_store(JSONResponse({"session": _info_json(info)}))
 
 

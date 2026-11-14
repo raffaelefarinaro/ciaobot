@@ -930,10 +930,11 @@
                         </DropdownMenuSubContent>
                       </DropdownMenuSub>
                       <DropdownMenuItem v-if="chatMenuChat?.retry?.status === 'pending'" as-child>
-                        <button @click="stopRetry(chatMenu!)">Stop trying</button>
+                        <button v-if="chatMenuChat.retry.mode !== 'continue_recovery' && chatMenuChat.retry.schedule_id" @click="stopLiteralRetry(chatMenu!, chatMenuChat.retry.schedule_id)">Stop trying</button>
+                        <button v-else disabled title="Open the chat to inspect this schedule">Inspect schedule in chat</button>
                       </DropdownMenuItem>
                       <DropdownMenuItem v-else as-child>
-                        <button @click="setRetry(chatMenu!)">Set to retry</button>
+                        <button @click="setRetry(chatMenu!)">Schedule literal rerun…</button>
                       </DropdownMenuItem>
                       <DropdownMenuItem v-if="chatMenuChat && !chatMenuChat.archived" as-child>
                         <button @click="doMarkUnread(chatMenu!)">Mark unread</button>
@@ -1924,26 +1925,30 @@ async function doArchiveChat(chatId: string) {
 
 async function setRetry(chatId: string) {
   closeChatMenus()
-  await store.loadMessages(chatId)
-  const msgs = store.messages[chatId] || []
-  const lastUser = [...msgs].reverse().find(m => m.role === 'user')
-  const text = lastUser?.content?.trim()
-  if (!text) {
-    // Not `alert`: it is a no-op in the desktop webview, so the menu entry
-    // looked broken rather than unavailable.
-    store.pushToast({
-      chat_id: '',
-      title: 'Nothing to retry',
-      body: 'Open the chat or send a message first — there is no user turn to retry.',
-    })
-    return
+  if (!await askConfirm('This schedules the last request and its images again, and may repeat actions already performed.', {
+    title: 'Schedule literal rerun?', confirmLabel: 'Schedule rerun',
+  })) return
+  try {
+    await store.loadMessages(chatId)
+    const lastUser = [...(store.messages[chatId] || [])].reverse().find(m => m.role === 'user')
+    const text = lastUser?.content?.trim()
+    if (!text) {
+      store.pushToast({ chat_id: '', title: 'Nothing to retry', body: 'Open the chat or send a message first — there is no user turn to retry.' })
+      return
+    }
+    await store.setChatRetry(chatId, text, lastUser?.images)
+  } catch (e) {
+    store.pushErrorToast('Could not schedule rerun', `The retry slot may have changed. Inspect the saved schedule. ${errorMessage(e)}`)
   }
-  await store.setChatRetry(chatId, text, lastUser?.images)
 }
 
-async function stopRetry(chatId: string) {
+async function stopLiteralRetry(chatId: string, scheduleId: string) {
   closeChatMenus()
-  await store.stopChatRetry(chatId)
+  if (!await askConfirm('Stop this scheduled prompt? A replacement schedule will not be stopped.', {
+    title: 'Stop scheduled prompt?', confirmLabel: 'Stop trying',
+  })) return
+  try { await store.stopChatRetry(chatId, scheduleId) }
+  catch (e) { store.pushErrorToast('Could not stop scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
 }
 
 async function confirmDeleteChat(chatId: string) {
