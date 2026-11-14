@@ -1595,9 +1595,27 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeTodayStats.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--default"],
+        "note": "Real owner, project store, memory RouterLink and stats normalization; synthetic GET fixture, no bootstrap."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--loading"],
+        "note": "Held initial stats read: six dashes, no averages. The owner has no loading announcement or skeleton."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--failed"],
+        "note": "Synthetic HTTP 503: six dashes, no averages. The owner catches the error and renders no distinct error message."
+      },
+      {
+        "name": "partial",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--partial"],
+        "note": "Real normalization of valid zeroes, missing and nonnumeric fields; only valid averages render."
       },
       {
         "name": "other states",
@@ -1607,8 +1625,8 @@ export const inventory: InventoryEntry[] = [
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeTodayStats.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeTodayStats clears values before each read: initial and workspace refresh show dashes. The held initial read is covered; loading and failure are visually identical. Other refresh/race states are not claimed."
     },
     "migration": {
       "status": "unassessed",

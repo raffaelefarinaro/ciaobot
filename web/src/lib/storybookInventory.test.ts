@@ -65,6 +65,12 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
     ['default', 'selected', 'expanded', 'selected-extra-collapsed', 'disabled', 'disabled-expanded', 'narrow']
       .map((state) => [state, [`settings-workspace-color-picker--${state}`]]),
   ),
+  'web/src/components/HomeTodayStats.vue': {
+    default: ['connected-home-today-stats--default'],
+    loading: ['connected-home-today-stats--loading'],
+    failed: ['connected-home-today-stats--failed'],
+    partial: ['connected-home-today-stats--partial'],
+  },
   'web/src/components/settings/SettingsSwitch.vue': switchCovered,
   'web/src/components/TabBar.vue': Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])),
   'web/src/components/SidebarRow.vue': {
@@ -82,6 +88,7 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
 }
 const coveredOwners: Record<string, string> = {
   'web/src/components/settings/WorkspaceColorPicker.vue': 'components-settings-workspace-color-picker',
+  'web/src/components/HomeTodayStats.vue': 'components-home-today-stats',
   'web/src/components/settings/SettingsSwitch.vue': 'components-settings-settings-switch',
   'web/src/components/TabBar.vue': 'components-tab-bar',
   'web/src/components/SidebarRow.vue': 'components-sidebar-row',
@@ -261,7 +268,7 @@ describe('production ownership', () => {
 
   it('keeps switch admission complete without dropping existing row and skeleton coverage', () => {
     const admitted = inventory.filter((entry) => entry.owner.path in expectedCoverage)
-    expect(admitted).toHaveLength(5)
+    expect(admitted).toHaveLength(6)
     assertCoverage(admitted)
     const mutateSwitch = (change: (entry: InventoryEntry) => void, error: string) => {
       const entries = structuredClone(admitted)

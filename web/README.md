@@ -100,6 +100,36 @@ states and four SettingsSwitch states (six stories) have rendered stories;
 other states and owners remain unassessed or uncovered. Adding an SFC requires a separate
 inventory row (and a rationale for a composition), not a complete story suite.
 
+**Connected / Home Today stats** is the bounded connected proof. Its four stories
+mount the production `HomeTodayStats.vue`, fresh real Pinia/project stores, a fresh
+memory router and the real `usageStats`/`api` normalization. `/stats` is an inert
+destination, not the Usage page. No app bootstrap, engine, provider or socket is
+started. The two synthetic workspaces are `storybook-alpha` and `storybook-beta`.
+Only exact GET `/api/stats?workspace=<one of those names>&range=30` is answered in
+memory; every other fetch (including same-origin assets), write, XHR, new
+WebSocket/EventSource and beacon is rejected without native fallback. Existing
+XHR open/send and WebSocket send are fenced too. The only native send exceptions
+are Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
+render lifecycle/heartbeat events on Storybook's established same-origin
+`/storybook-server-channel` with its exact preview page/token. Custom/invoke/save
+events are not allowed. Storybook's module/asset loading is infrastructure, not
+an API fixture.
+The visible request count and violation ledger remain observable when the owner
+catches an error. Teardown unmounts the isolated app, disposes its Pinia, settles
+held reads and restores transport descriptors. Concurrent mounts are refused;
+autodocs/inline docs are disabled for this owner.
+
+Default, held initial loading, HTTP failure and partial normalized data are
+rendered-state coverage only. Loading and failure both render six dashes with no
+averages: the component has no separate status/error UI. The fixture workspace
+selector exercises its real workspace watcher without invoking app-level
+`switchWorkspace` orchestration. This is a trusted-component transport harness,
+not a security sandbox for hostile code (DOM resource loads, workers and saved
+native references outside this fixture are not sandboxed). It does not prove
+the Home composition, Usage page, live engine, stale-response races, keyboard,
+reduced-motion or responsive-state coverage. Focused tests live in
+`src/stories/connectedStats.test.ts`.
+
 `npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
 after building. Every registry-linked ID must exist as a story, not Docs or
 the inventory page; missing/malformed output fails the command. Run the check
