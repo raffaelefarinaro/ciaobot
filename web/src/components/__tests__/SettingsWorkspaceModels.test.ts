@@ -139,6 +139,19 @@ describe('SettingsWorkspaceModels', () => {
     expect(form().provider_overrides).toEqual({})
   })
 
+  it('rejects a detached thinking change after a provider round trip', async () => {
+    const view = await mountCard()
+    const oldSelect = select(view, 'thinking').element as HTMLSelectElement
+    oldSelect.value = 'high'
+    form().default_provider = 'opencode'
+    await nextTick()
+    form().default_provider = 'claude'
+    await nextTick()
+    expect(select(view, 'thinking').element).not.toBe(oldSelect)
+    oldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(form().provider_overrides).toEqual({})
+  })
+
   it.each([0, 1])('rejects picker %i events after a provider switch before rendering', async (index) => {
     const view = await mountCard()
     const picker = view.findAllComponents(ModelSelector)[index]

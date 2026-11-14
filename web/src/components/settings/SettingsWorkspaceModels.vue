@@ -53,9 +53,10 @@
       <label class="set-subrow">
         <span class="ws-label set-subrow-label">Thinking</span>
         <select
-          :key="generation"
+          :key="`${generation}:${providerGeneration}`"
           :id="`ws-override-thinking-${provider}`"
           :data-generation="generation"
+          :data-provider-generation="providerGeneration"
           :data-workspace="form.name"
           :data-provider="provider"
           class="routine-select set-subrow-control"
@@ -212,7 +213,8 @@ const modelSelection = computed(() => selection('model'))
 const insightsSelection = computed(() => selection('insights_model'))
 function thinkingChange(event: Event): void {
   const select = event.currentTarget as HTMLSelectElement
-  if (select.dataset.generation === String(generation.value) && select.dataset.workspace === form.value?.name &&
+  if (select.dataset.generation === String(generation.value) && select.dataset.providerGeneration === String(providerGeneration.value) &&
+      select.dataset.workspace === form.value?.name &&
       select.dataset.provider === provider.value && models.value && !saving.value) {
     setField('thinking', select.value)
   }
