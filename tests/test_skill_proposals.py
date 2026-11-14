@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao import agent_cli
 from ciao import skill_proposals
 from ciao import skill_proposals as sp
 from ciao.config import CiaoConfig, WorkspaceConfig
@@ -1254,7 +1255,6 @@ def test_a_proposal_without_learnings_has_no_verification_step(
     [
         "ciao/stock/skills/ciao-memory/SKILL.md",
         "docs/AGENT_CLI.md",
-        "ciao/stock/skills/ciao-cli/SKILL.md",
     ],
 )
 def test_the_docs_name_the_verification_file(doc: str) -> None:
@@ -1262,10 +1262,18 @@ def test_the_docs_name_the_verification_file(doc: str) -> None:
 
     A readback is free text, and free text has no shell-neutral quoting: a doc
     that pastes the lines onto a command line has to teach POSIX-only escaping
-    that is wrong in PowerShell. All three have to name the flag that carries
-    the readback in a file instead.
+    that is wrong in PowerShell. Both of these have to name the flag that
+    carries the readback in a file instead.
     """
     text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
+
+    assert "--verification-file" in text
+    assert "'\\''" not in text
+
+
+def test_the_complete_cli_help_names_the_verification_file() -> None:
+    """The complete `ciao help` reference names the quoting-safe flag too."""
+    text = agent_cli._help_text()
 
     assert "--verification-file" in text
     assert "'\\''" not in text

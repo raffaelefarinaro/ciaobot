@@ -5,6 +5,7 @@ These assertions check the shipped instructions, not a model's compliance.
 
 from importlib import resources
 
+from ciao import agent_cli
 from ciao.core_prompt import _system_instructions
 from ciao.local_session import MERGE_PROMPT
 
@@ -230,7 +231,7 @@ def test_dev_server_guidance_keeps_one_auto_reload_run() -> None:
     chat with notices that carry no information.
     """
     assert "dev server: one auto-reload run" in _system_instructions()
-    skill = _stock("skills", "ciao-cli", "SKILL.md")
+    skill = agent_cli._help_text()
     assert "A dev or preview server is one background run for the whole session." in skill
     assert "auto-reload" in skill and "`uvicorn --reload`" in skill
     assert "Restart it only when the server itself has to change" in skill
