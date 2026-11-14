@@ -13,6 +13,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import McpAuthBody from '../McpAuthBody.vue'
 import { mcpTurnOffErrorText, mcpTurnOffScopeText } from '../../../lib/chatActions'
 import type { ChatAction } from '../../../lib/types'
+import { useProjectStore } from '../../../stores/projects'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -45,6 +46,7 @@ let wrapper: VueWrapper | null = null
 function mountBody(a: ChatAction) {
   const pinia = createPinia()
   setActivePinia(pinia)
+  useProjectStore().chatActions[CHAT_ID] = [a]
   wrapper = mount(McpAuthBody, {
     props: { chatId: CHAT_ID, action: a },
     attachTo: document.body,
@@ -140,6 +142,7 @@ describe('McpAuthBody paste-back field', () => {
     document.body.appendChild(card)
     const pinia = createPinia()
     setActivePinia(pinia)
+    useProjectStore().chatActions[CHAT_ID] = [action()]
     wrapper = mount(McpAuthBody, {
       props: { chatId: CHAT_ID, action: action() },
       attachTo: card,
@@ -149,6 +152,7 @@ describe('McpAuthBody paste-back field', () => {
     input.focus()
     expect(document.activeElement).toBe(input)
 
+    useProjectStore().chatActions[CHAT_ID] = [action({ params: { server: 'notion', provider: 'claude', url: 'https://mcp.notion.com/authorize?a=1', session_id: 's1', callback_used: '1' } })]
     await wrapper.setProps({
       action: action({ params: { server: 'notion', provider: 'claude', url: 'https://mcp.notion.com/authorize?a=1', session_id: 's1', callback_used: '1' } }),
     })
@@ -254,6 +258,7 @@ describe('McpAuthBody opens the sign-in page', () => {
     await flushPromises()
     expect(tab.location.href).toBe('')
 
+    useProjectStore().chatActions[CHAT_ID] = [claude('waiting', { url: URL_A })]
     await w.setProps({ action: claude('waiting', { url: URL_A }) })
     expect(tab.location.href).toBe(URL_A)
     expect(tab.opener).toBeNull()
@@ -284,6 +289,7 @@ describe('McpAuthBody opens the sign-in page', () => {
 
     await signIn(w)
     await flushPromises()
+    useProjectStore().chatActions[CHAT_ID] = [claude('waiting', { url: URL_A })]
     await w.setProps({ action: claude('waiting', { url: URL_A }) })
 
     expect(steps(w)[0].text()).toBe('Open the sign-in page')
@@ -305,6 +311,7 @@ describe('McpAuthBody opens the sign-in page', () => {
       const w = mountBody(claude('open'))
       await signIn(w)
       await flushPromises()
+      useProjectStore().chatActions[CHAT_ID] = [claude('failed')]
       await w.setProps({ action: claude('failed') })
       expect(tab.close).toHaveBeenCalled()
     })

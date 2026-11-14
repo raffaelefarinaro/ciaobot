@@ -20,7 +20,9 @@ What is pinned, beyond the shapes:
 
 from __future__ import annotations
 
+import asyncio
 import time
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +36,8 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.terminal_auth import TERMINAL_COOKIE, TerminalGrantStore
+from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.workspace_reroot import write_receipt
 from ciao.terminal_sessions import (
     TERMINAL_MAX_SESSIONS,
     TerminalSessionError,
@@ -41,12 +45,13 @@ from ciao.terminal_sessions import (
 )
 from ciao.web.app import create_app
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
-from ciao.web.routes_terminal import terminal_unlock
+from ciao.web.routes_terminal import MAX_BODY_BYTES, terminal_unlock
 from ciao.web.routes_terminal_sessions import (
     terminal_sessions_create,
     terminal_sessions_end,
     terminal_sessions_list,
 )
+from ciao.web import routes_terminal_sessions
 
 SECRET = "test-secret"
 PASSWORD = "correct horse battery staple"
@@ -106,11 +111,13 @@ class FakeFactory:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.cwds: list[Path] = []
         self.processes: list[FakeProcess] = []
         self.error: BaseException | None = None
 
     def __call__(self, *, cwd: Path, cols: int = 80, rows: int = 24) -> FakeProcess:
         self.calls += 1
+        self.cwds.append(cwd)
         if self.error is not None:
             raise self.error
         process = FakeProcess(pid=4_000 + self.calls)
@@ -250,6 +257,254 @@ def _client(
 
 
 # ── the door: policy, session, grant ──────────────────────────────────────
+
+
+def test_workspace_target_lists_and_creates_at_registered_agent_root(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    app = _app(tmp_path, factory=factory)
+    app.state.config.workspace = lambda name: object() if name in ("one", "two") else None
+    app.state.project_chat_manager = None
+    with _client(app) as client:
+        created = {}
+        for name in ("one", "two"):
+            response = client.post(SESSIONS, json={"workspace": name, "location": "workspace"}, headers=_origin())
+            assert response.status_code == 200
+            created[name] = response.json()["session"]["session_id"]
+        assert created["one"] != created["two"]
+        for name in ("one", "two"):
+            response = client.get(SESSIONS, params={"workspace": name}, headers=_origin())
+            assert response.status_code == 200
+            assert len(response.json()["sessions"]) == 1
+            assert response.json()["sessions"][0]["session_id"] == created[name]
+            assert len(response.json()["locations"]) == 1
+            assert Path(response.json()["locations"][0]["folder"]) == tmp_path.resolve()
+            assert response.json()["locations"][0]["location"] == "workspace"
+        assert all(not process.written for process in factory.processes)
+        assert factory.cwds == [tmp_path.resolve(), tmp_path.resolve()]
+
+
+def test_workspace_target_rejects_invalid_selectors_and_payloads(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    app = _app(tmp_path, factory=factory)
+    app.state.config.workspace = lambda name: object() if name == "one" else None
+    with _client(app) as client:
+        for query, status in (("workspace=", 400), ("workspace=%20one", 400),
+                              ("workspace=unknown", 404), ("workspace=%2Funknown", 404), ("workspace=one&workspace=one", 400),
+                              ("workspace=one&chat_id=c1", 400), ("workspace=one&path=x", 400)):
+            response = client.get(f"{SESSIONS}?{query}", headers=_origin())
+            assert response.status_code == status
+            assert response.headers["cache-control"] == "no-store"
+        for body, status in ((b'{"workspace":"one","workspace":"one"}', 400),
+                             (b'{"workspace":"one","work\\u0073pace":"one"}', 400),
+                             (b'{"workspace":"one","command":"ls"}', 400),
+                             (b'{"workspace":"one","path":"/"}', 400),
+                             (b'{"workspace":"one","argv":[]}', 400),
+                             (b'{"workspace":null}', 400),
+                             (b'{"workspace":"one","project_id":"p1"}', 400),
+                             (b'{"workspace":"unknown","location":"repo"}', 404),
+                             (b'{"workspace":"","location":"repo"}', 400),
+                             (b'{"workspace":"one","location":"repo"}', 409)):
+            response = client.post(SESSIONS, content=body, headers=_origin())
+            assert response.status_code == status
+            assert response.headers["cache-control"] == "no-store"
+        response = client.post(SESSIONS, content=b" " * (MAX_BODY_BYTES + 1), headers=_origin())
+        assert response.status_code == 413
+        app.state.config.agent_root = lambda name: tmp_path / "missing"
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        assert response.status_code == 409
+        missing = tmp_path / "file"
+        missing.write_text("not a directory")
+        app.state.config.agent_root = lambda name: missing
+        assert client.get(SESSIONS, params={"workspace": "one"}, headers=_origin()).status_code == 409
+        assert factory.calls == 0
+
+
+def test_workspace_target_uses_real_config_roots(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    for name in ("one", "two"):
+        (tmp_path / name / "memory-vault").mkdir(parents=True)
+    config = CiaoConfig(
+        pwa_auth_token=PASSWORD, workspace_root=tmp_path, state_path=runtime / "state.json",
+        media_root=runtime / "media", vault_root=tmp_path / "memory-vault",
+        workspaces={name: WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault") for name in ("one", "two")},
+    )
+    factory = FakeFactory()
+    app = _app(tmp_path, factory=factory)
+    app.state.config = config
+    app.state.project_chat_manager = None
+    reset_reroot_cache()
+    try:
+        with _client(app) as client:
+            assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 200
+            assert factory.cwds[-1] == tmp_path.resolve()
+            write_receipt(runtime, {"status": "migrated", "workspaces": ["one", "two"]})
+            reset_reroot_cache()
+            assert client.post(SESSIONS, json={"workspace": "two"}, headers=_origin()).status_code == 200
+            assert factory.cwds[-1] == (tmp_path / "two").resolve()
+    finally:
+        reset_reroot_cache()
+
+
+def test_removed_and_recreated_workspace_keeps_existing_session_semantics(tmp_path: Path) -> None:
+    names = {"one"}
+    app = _app(tmp_path)
+    app.state.config.workspace = lambda name: object() if name in names else None
+    with _client(app) as client:
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        session_id = response.json()["session"]["session_id"]
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        remaining_id = response.json()["session"]["session_id"]
+        names.clear()
+        assert client.get(SESSIONS, params={"workspace": "one"}, headers=_origin()).status_code == 404
+        assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 404
+        app.state.terminal_grants.revoke_all()
+        assert client.post(UNLOCK, headers=_origin()).status_code == 200
+        assert client.delete(f"{SESSIONS}/{session_id}", headers=_origin()).status_code == 200
+        names.add("one")
+        response = client.get(SESSIONS, params={"workspace": "one"}, headers=_origin())
+        assert response.json()["sessions"][0]["session_id"] == remaining_id
+        assert client.delete(f"{SESSIONS}/{remaining_id}", headers=_origin()).status_code == 200
+
+
+def test_workspace_terminal_uses_existing_security_gates(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    def new_app() -> Starlette:
+        app = _app(tmp_path, factory=factory)
+        app.state.config.workspace = lambda name: object() if name == "one" else None
+        return app
+
+    with _client(new_app(), signed_in=False, unlocked=False) as client:
+        assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 401
+    with _client(new_app(), unlocked=False) as client:
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        assert response.status_code == 403
+        assert response.headers["cache-control"] == "no-store"
+    app = new_app()
+    with _client(app) as client:
+        assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin("http://evil.example")).status_code == 403
+        app.state.terminal_grants.revoke_all()
+        assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 403
+    remote_app = new_app()
+    with _client(remote_app, peer="192.0.2.1", unlocked=False) as client:
+        token, _ = remote_app.state.terminal_grants.issue(client.cookies.get(SESSION_COOKIE))
+        client.cookies.set(TERMINAL_COOKIE, token)
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        assert response.status_code == 403
+        assert response.json()["reason"] == "https_required"
+    assert factory.calls == 0
+    with _client(new_app(), peer="192.0.2.1", base_url="https://example.test") as client:
+        response = client.post(SESSIONS, json={"workspace": "one"}, headers=_origin("https://example.test"))
+        assert response.status_code == 200
+        assert set(response.json()["session"]) == _INFO_KEYS
+
+
+def test_workspace_missing_at_spawn_is_sanitized_and_releases_capacity(tmp_path: Path) -> None:
+    root = tmp_path / "private-root-sentinel"
+    root.mkdir()
+
+    class DisappearingFactory(FakeFactory):
+        disappear = True
+
+        def __call__(self, *, cwd: Path, cols: int = 80, rows: int = 24) -> FakeProcess:
+            if self.disappear:
+                self.calls += 1
+                cwd.rmdir()
+                raise FileNotFoundError(f"private-root-sentinel {cwd}")
+            return super().__call__(cwd=cwd, cols=cols, rows=rows)
+
+    factory = DisappearingFactory()
+    app = _app(tmp_path, factory=factory)
+    app.state.config.workspace = lambda name: object() if name == "registered-selector-sentinel" else None
+    app.state.config.agent_root = lambda name: root
+    with _client(app) as client:
+        response = client.post(SESSIONS, json={"workspace": "registered-selector-sentinel"}, headers=_origin())
+        assert response.status_code == 500
+        assert response.json()["reason"] == "spawn_failed"
+        assert "private-root-sentinel" not in response.text
+        assert "registered-selector-sentinel" not in response.text
+        assert response.headers["cache-control"] == "no-store"
+        assert app.state.terminal_sessions.retained_count() == 0
+        root.mkdir()
+        factory.disappear = False
+        for _ in range(TERMINAL_MAX_SESSIONS):
+            assert client.post(SESSIONS, json={"workspace": "registered-selector-sentinel"}, headers=_origin()).status_code == 200
+
+
+def test_workspace_refusals_do_not_echo_selectors_or_roots(tmp_path: Path) -> None:
+    root = tmp_path / "private-root-sentinel"
+    app = _app(tmp_path)
+    app.state.config.workspace = lambda name: object() if name == "registered-selector-sentinel" else None
+    app.state.config.agent_root = lambda name: root
+    with _client(app) as client:
+        response = client.post(SESSIONS, json={"workspace": "unknown-selector-sentinel"}, headers=_origin())
+        assert response.status_code == 404
+        assert "unknown-selector-sentinel" not in response.text
+        response = client.post(SESSIONS, json={"workspace": "registered-selector-sentinel"}, headers=_origin())
+        assert response.status_code == 409
+        assert "private-root-sentinel" not in response.text
+        assert "registered-selector-sentinel" not in response.text
+
+
+def test_workspace_grant_revoked_during_create(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    body_started = threading.Event()
+    body_release = threading.Event()
+    original_read = routes_terminal_sessions._read_bounded_body
+
+    async def held_body(request: Any) -> Any:
+        body_started.set()
+        assert await asyncio.to_thread(body_release.wait, 5)
+        return await original_read(request)
+
+    body_factory = FakeFactory()
+    body_app = _app(tmp_path, factory=body_factory)
+    body_app.state.config.workspace = lambda name: object() if name == "one" else None
+    with monkeypatch.context() as patch:
+        patch.setattr(routes_terminal_sessions, "_read_bounded_body", held_body)
+        with _client(body_app) as client:
+            responses: list[Any] = []
+            thread = threading.Thread(target=lambda: responses.append(
+                client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+            ))
+            thread.start()
+            try:
+                assert body_started.wait(5)
+                body_app.state.terminal_grants.revoke_all()
+            finally:
+                body_release.set()
+                thread.join(5)
+            assert not thread.is_alive()
+            assert responses[0].status_code == 403
+            assert body_factory.calls == 0
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingFactory(FakeFactory):
+        def __call__(self, *, cwd: Path, cols: int = 80, rows: int = 24) -> FakeProcess:
+            started.set()
+            assert release.wait(5)
+            return super().__call__(cwd=cwd, cols=cols, rows=rows)
+
+    factory = BlockingFactory()
+    app = _app(tmp_path, factory=factory)
+    app.state.config.workspace = lambda name: object() if name == "one" else None
+    with _client(app) as client:
+        responses = []
+        thread = threading.Thread(target=lambda: responses.append(
+            client.post(SESSIONS, json={"workspace": "one"}, headers=_origin())
+        ))
+        thread.start()
+        try:
+            assert started.wait(5)
+            app.state.terminal_grants.revoke_all()
+        finally:
+            release.set()
+            thread.join(5)
+        assert not thread.is_alive()
+        assert responses[0].status_code == 403
+        assert factory.processes[0].closed
+        assert app.state.terminal_sessions.retained_count() == 0
 
 
 def test_a_request_without_a_session_is_refused(tmp_path: Path) -> None:

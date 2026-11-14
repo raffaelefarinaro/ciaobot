@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { onScopeDispose, ref } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef } from 'vue'
 import { api } from '../lib/api'
 import { requestTerminalPanel } from '../lib/terminalPanel'
 import {
@@ -49,7 +49,7 @@ import {
 export type { TerminalSessionInfo }
 
 /** What a terminal is scoped to: one chat, or one project. */
-export type TerminalTarget = { chatId: string } | { projectId: string }
+export type TerminalTarget = { chatId: string } | { projectId: string } | { workspace: string }
 
 /** Which of the engine's folders a new shell starts in. */
 export type TerminalLocation = 'workspace' | 'repo'
@@ -124,6 +124,8 @@ const READY_TIMEOUT_MS = 5000
 export const MAX_AUTO_RECONNECT_ATTEMPTS = 8
 /** Sessions the engine keeps for one scope. */
 const MAX_SESSIONS = 4
+const UNCONFIRMED_CREATE =
+  'The new terminal session could not be confirmed. Refresh the list to see whether it was created.'
 
 // ── Response validation ──────────────────────────────────────────────────
 //
@@ -233,14 +235,16 @@ function parseOk(value: unknown): boolean {
 
 /** The scope key: the same scope must not be mistaken for another one. */
 function scopeKey(scope: TerminalTarget): string {
-  return 'chatId' in scope ? `chat:${scope.chatId}` : `project:${scope.projectId}`
+  return 'chatId' in scope ? `chat:${scope.chatId}`
+    : 'projectId' in scope ? `project:${scope.projectId}` : `workspace:${scope.workspace}`
 }
 
 /** The one query parameter a session list is scoped by. */
 function scopeQuery(scope: TerminalTarget): string {
   const params = new URLSearchParams()
   if ('chatId' in scope) params.set('chat_id', scope.chatId)
-  else params.set('project_id', scope.projectId)
+  else if ('projectId' in scope) params.set('project_id', scope.projectId)
+  else params.set('workspace', scope.workspace)
   return params.toString()
 }
 
@@ -251,8 +255,9 @@ function scopeQuery(scope: TerminalTarget): string {
 function scopeBody(
   scope: TerminalTarget,
   location?: TerminalLocation,
-): { chat_id: string; location?: TerminalLocation } | { project_id: string; location?: TerminalLocation } {
-  const body = 'chatId' in scope ? { chat_id: scope.chatId } : { project_id: scope.projectId }
+): { chat_id: string; location?: TerminalLocation } | { project_id: string; location?: TerminalLocation } | { workspace: string; location?: TerminalLocation } {
+  const body = 'chatId' in scope ? { chat_id: scope.chatId }
+    : 'projectId' in scope ? { project_id: scope.projectId } : { workspace: scope.workspace }
   return location ? { ...body, location } : body
 }
 
@@ -273,14 +278,29 @@ export const useTerminalStore = defineStore('terminal', () => {
   const phase = ref<TerminalPhase>('closed')
   /** A friendly message for the pane. Never a payload, never a credential. */
   const error = ref('')
+  const globalCapacity = ref(false)
+  const workspaceListAccepted = ref(false)
+  const capacityError = computed(() => {
+    if (target.value && 'workspace' in target.value && workspaceListAccepted.value
+      && !activeSession.value && sessions.value.length === MAX_SESSIONS
+      && sessions.value.every((session) => session.exited)) {
+      return 'All four terminal slots are occupied. End a session in this workspace, then try again.'
+    }
+    return globalCapacity.value
+      ? 'All four terminal slots are occupied. End a terminal session in its chat, project, or workspace, then try again.'
+      : ''
+  })
+  const focusOpen = shallowRef<{ token: number; opener: HTMLElement | null } | null>(null)
+  const focusGeneration = ref(0)
   /** A friendly note that is not a failure, such as a truncated replay. */
   const warning = ref('')
   /** True once the engine reported that its retained stream lost bytes. */
   const truncated = ref(false)
   /** True while the terminal grant in the cookie is live. */
   const unlocked = ref(false)
-  /** True while a session creation is in flight, so a second click is refused. */
-  const creating = ref(false)
+  /** A pending create blocks only another create in the same scope. */
+  const creatingScopes = ref(new Set<string>())
+  const creating = computed(() => target.value !== null && creatingScopes.value.has(scopeKey(target.value)))
   /** True while a session is being ended. */
   const ending = ref(false)
   /**
@@ -305,6 +325,10 @@ export const useTerminalStore = defineStore('terminal', () => {
    * pane was reopened, and the older answer is about a pane that is gone.
    */
   let openEpoch = 0
+  let interactionEpoch = 0
+  let selectionEpoch = 0
+  let createSettlementEpoch = 0
+  const unconfirmedScopes = new Set<string>()
   /**
    * Bumped when the session list is read again, so a reply for an earlier
    * read cannot land on a newer one.
@@ -1013,13 +1037,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     next: TerminalTarget,
     options: { ensureSession?: boolean; fromChatSwitch?: boolean } = {},
   ): Promise<void> {
-    const id = 'chatId' in next ? next.chatId : next.projectId
+    if ('workspace' in next && (!next.workspace || next.workspace !== next.workspace.trim())) return
+    const id = 'chatId' in next ? next.chatId : 'projectId' in next ? next.projectId : next.workspace
     if (!id || !id.trim()) {
       error.value = 'The terminal needs a chat or a project to run in.'
       phase.value = 'error'
       return
     }
     chatSwitch.value = options.fromChatSwitch === true
+    const focusToken = ++focusGeneration.value
+    focusOpen.value = options.fromChatSwitch ? null : {
+      token: focusToken,
+      opener: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }
     // The pane is a chunk of its own, mounted by the shell the first time a
     // terminal is asked for. Asking for it here keeps every way into the
     // terminal — the chat's button, the project's button, a future deep link
@@ -1032,6 +1062,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     target.value = next
     if (scopeChanged) {
       scopeEpoch += 1
+      globalCapacity.value = false
+      workspaceListAccepted.value = false
       sessions.value = []
       locations.value = []
       activeSession.value = null
@@ -1041,16 +1073,17 @@ export const useTerminalStore = defineStore('terminal', () => {
     // that opens gets a whole budget of its own, and the chain the
     // previous one left behind is stale (its connection epoch is gone).
     reconnectAttempts = 0
-    error.value = ''
+    error.value = target.value && unconfirmedScopes.has(scopeKey(target.value)) ? UNCONFIRMED_CREATE : ''
     warning.value = ''
     phase.value = 'loading'
     const shown = currentSurface()
     if (shown && reportStalledWrite(shown)) return
     const myScope = scopeEpoch
     const myOpen = ++openEpoch
+    const myInteraction = interactionEpoch
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/status`)
-      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+      if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return
       const parsed = parseStatus(raw)
       if (!parsed) {
         error.value = 'The engine did not report a terminal status this app understands.'
@@ -1072,7 +1105,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         // No grant yet. A signed-in, same-origin browser gets one on its
         // own, so the pane opens without asking for anything.
         const granted = await acquireGrant()
-        if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+        if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return
         if (!granted) {
           // The engine would not give us a grant. There is no form for the
           // user to fill in any more, so the next attempt asks again, on
@@ -1082,24 +1115,31 @@ export const useTerminalStore = defineStore('terminal', () => {
           scheduleTimer(() => {
             if (myScope !== scopeEpoch || myOpen !== openEpoch) return
             if (!visible.value) return
-            void scheduleOpenRetry()
+            void scheduleOpenRetry(myScope, myOpen, myInteraction, options.ensureSession === true)
           }, terminalReconnectDelayMs(reconnectAttempts + 1))
           return
         }
       }
       phase.value = 'ready'
-      const listed = await refreshSessions()
-      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
-      if (options.ensureSession && listed && needsFirstShell()) {
-        await createSession()
-        return
-      }
-      maybeConnect()
+      const listed = await listForOpen(myScope, myOpen)
+      await finishOpen(myScope, myOpen, myInteraction, options.ensureSession === true, listed)
     } catch {
-      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+      if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return
       error.value = 'The engine could not be asked whether the terminal is available.'
       phase.value = 'error'
     }
+  }
+
+  async function openWorkspaceForSettings(workspace: string): Promise<'opened' | 'busy' | 'invalid'> {
+    if (!workspace || workspace !== workspace.trim()) return 'invalid'
+    if (visible.value) {
+      return target.value && 'workspace' in target.value && target.value.workspace === workspace
+        ? 'opened' : 'busy'
+    }
+    // The lazy pane may mount after Settings has already been left.
+    if (shownChat === null) shownChat = ''
+    await open({ workspace }, { ensureSession: true })
+    return 'opened'
   }
 
   /**
@@ -1116,15 +1156,22 @@ export const useTerminalStore = defineStore('terminal', () => {
    * pane that has just opened does not have — `open` stopped before the
    * session list.
    */
-  async function scheduleOpenRetry(): Promise<void> {
+  async function finishOpen(myScope: number, myOpen: number, myInteraction: number, ensure: boolean, listed: boolean): Promise<void> {
+    if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return
+    if (ensure && listed && myInteraction === interactionEpoch && needsFirstShell()) {
+      await createSession()
+      return
+    }
+    maybeConnect()
+  }
+
+  async function scheduleOpenRetry(myScope: number, myOpen: number, myInteraction: number, ensure: boolean): Promise<void> {
     reconnectAttempts += 1
     if (reconnectAttempts > MAX_AUTO_RECONNECT_ATTEMPTS) {
       phase.value = 'error'
       error.value = 'The terminal connection could not be re-established.'
       return
     }
-    const myScope = scopeEpoch
-    const myOpen = openEpoch
     const granted = await acquireGrant()
     if (myScope !== scopeEpoch || myOpen !== openEpoch) return
     // A hidden pane asks for nothing and says nothing: the chain stops
@@ -1136,17 +1183,15 @@ export const useTerminalStore = defineStore('terminal', () => {
       scheduleTimer(() => {
         if (myScope !== scopeEpoch || myOpen !== openEpoch) return
         if (!visible.value) return
-        void scheduleOpenRetry()
+        void scheduleOpenRetry(myScope, myOpen, myInteraction, ensure)
       }, terminalReconnectDelayMs(reconnectAttempts))
       return
     }
     // The grant is here: the pane resumes where `open` stopped.
     phase.value = 'ready'
-    error.value = ''
-    await refreshSessions()
-    if (myScope !== scopeEpoch || myOpen !== openEpoch) return
-    if (!visible.value) return
-    maybeConnect()
+    error.value = target.value && unconfirmedScopes.has(scopeKey(target.value)) ? UNCONFIRMED_CREATE : ''
+    const listed = await listForOpen(myScope, myOpen)
+    await finishOpen(myScope, myOpen, myInteraction, ensure, listed)
   }
 
   /**
@@ -1166,7 +1211,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const myOpen = openEpoch
     try {
       const raw = await api.post<unknown>(`${TERMINAL_API}/unlock`)
-      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return false
       const expires = parseUnlock(raw)
       if (expires === null) {
         unlocked.value = false
@@ -1177,7 +1222,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       unlocked.value = true
       return true
     } catch {
-      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      if (myScope !== scopeEpoch || myOpen !== openEpoch || !visible.value) return false
       unlocked.value = false
       phase.value = 'locked'
       error.value = 'The terminal grant could not be obtained.'
@@ -1205,7 +1250,10 @@ export const useTerminalStore = defineStore('terminal', () => {
    */
   function hide(options: { fromChatSwitch?: boolean } = {}): void {
     chatSwitch.value = options.fromChatSwitch === true
+    // A pending create is not repeated; the next open lists any shell it started.
+    openEpoch += 1
     visible.value = false
+    focusOpen.value = null
     invalidateWorld()
     removeListeners()
     const surface = currentSurface()
@@ -1247,7 +1295,21 @@ export const useTerminalStore = defineStore('terminal', () => {
    * A refresh that started before a *later* refresh is stale whatever the
    * scope, so the newest request is the one that answers.
    */
+  async function listForOpen(myScope: number, myOpen: number): Promise<boolean> {
+    while (visible.value && myScope === scopeEpoch && myOpen === openEpoch) {
+      const settlement = createSettlementEpoch
+      const listed = await refreshSessionsOwned({ myOpen, settlement })
+      if (!visible.value || myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      if (settlement === createSettlementEpoch) return listed
+    }
+    return false
+  }
+
   async function refreshSessions(): Promise<boolean> {
+    return refreshSessionsOwned()
+  }
+
+  async function refreshSessionsOwned(owner?: { myOpen: number; settlement: number }): Promise<boolean> {
     const scope = target.value
     if (!scope) return false
     const myScope = scopeEpoch
@@ -1255,13 +1317,16 @@ export const useTerminalStore = defineStore('terminal', () => {
     const selectedAtStart = activeSession.value?.session_id
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/sessions?${scopeQuery(scope)}`)
-      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return false
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch
+        || (owner && (!visible.value || owner.myOpen !== openEpoch || owner.settlement !== createSettlementEpoch))) return false
       const parsed = parseSessionList(raw)
       if (!parsed) {
-        error.value = 'The engine did not report a session list this app understands.'
+        const message = 'The engine did not report a session list this app understands.'
+        error.value = unconfirmedScopes.has(scopeKey(scope)) ? `${UNCONFIRMED_CREATE} ${message}` : message
         return false
       }
       sessions.value = parsed
+      workspaceListAccepted.value = 'workspace' in scope
       locations.value = parseLocations(raw)
       const current = activeSession.value
       if (current) {
@@ -1281,8 +1346,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     } catch {
       // A failure that belongs to a read that has been superseded is not
       // the newer one's error to show.
-      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return false
-      error.value = 'The terminal sessions could not be listed.'
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch
+        || (owner && (!visible.value || owner.myOpen !== openEpoch || owner.settlement !== createSettlementEpoch))) return false
+      const message = 'The terminal sessions could not be listed.'
+      error.value = unconfirmedScopes.has(scopeKey(scope)) ? `${UNCONFIRMED_CREATE} ${message}` : message
       return false
     }
   }
@@ -1292,6 +1359,7 @@ export const useTerminalStore = defineStore('terminal', () => {
    * one in, so opening the pane may start it without asking.
    */
   function needsFirstShell(): boolean {
+    if (target.value && unconfirmedScopes.has(scopeKey(target.value))) return false
     if (activeSession.value || sessions.value.some((session) => !session.exited)) return false
     // The engine keeps at most four sessions, exited ones included: a full
     // list would only earn a capacity refusal.
@@ -1310,22 +1378,36 @@ export const useTerminalStore = defineStore('terminal', () => {
    * engine's default folder is used.
    */
   async function createSession(location?: TerminalLocation): Promise<boolean> {
+    interactionEpoch += 1
+    if (chatSwitch.value && visible.value) {
+      focusOpen.value = {
+        token: ++focusGeneration.value,
+        opener: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      }
+    }
     chatSwitch.value = false
     const scope = target.value
     if (!scope) return false
-    if (creating.value) return false
-    creating.value = true
+    const creatingKey = scopeKey(scope)
+    if (creatingScopes.value.has(creatingKey)) return false
+    creatingScopes.value.add(creatingKey)
     error.value = ''
     const myScope = scopeEpoch
+    const myOpen = openEpoch
+    const mySelection = selectionEpoch
     const selectedAtStart = activeSession.value?.session_id
+    let unconfirmed = true
     try {
       const raw = await api.post<unknown>(`${TERMINAL_API}/sessions`, scopeBody(scope, location))
-      if (myScope !== scopeEpoch) return false
       const session = parseSessionEnvelope(raw)
+      unconfirmed = !session
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
       if (!session) {
         error.value = 'The engine did not report the new session.'
         return false
       }
+      unconfirmedScopes.delete(scopeKey(scope))
+      globalCapacity.value = false
       sessions.value = [
         ...sessions.value.filter((existing) => existing.session_id !== session.session_id),
         session,
@@ -1344,22 +1426,43 @@ export const useTerminalStore = defineStore('terminal', () => {
       maybeConnect()
       return true
     } catch (caught) {
+      unconfirmed = !isRefusal(caught)
       // A failure that belongs to a session that is no longer selected is
       // not the successor's error to show.
-      if (myScope !== scopeEpoch) return false
-      if (activeSession.value?.session_id !== selectedAtStart) return false
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      if (mySelection !== selectionEpoch || activeSession.value?.session_id !== selectedAtStart) return false
+      if ('workspace' in scope && isRecord(caught) && caught.status === 409 && isRecord(caught.payload)
+        && caught.payload.reason === 'capacity') {
+        globalCapacity.value = true
+        return false
+      }
       if (isRefusal(caught)) {
         error.value = 'The engine refused to start a terminal session.'
       } else {
         // The answer never arrived, so whether the session exists is unknown.
         // The request is not repeated: a second POST could start a second
         // shell. The list is refreshed instead.
-        error.value =
-          'The new terminal session could not be confirmed. Refresh the list to see whether it was created.'
+        error.value = UNCONFIRMED_CREATE
       }
       return false
     } finally {
-      creating.value = false
+      creatingScopes.value.delete(creatingKey)
+      createSettlementEpoch += 1
+      if (unconfirmed) unconfirmedScopes.add(scopeKey(scope))
+      if (myOpen !== openEpoch && target.value && scopeKey(target.value) === scopeKey(scope)) {
+        // The successor must list the settled request, not start another shell.
+        interactionEpoch += 1
+        if (visible.value && unconfirmed && !error.value) {
+          error.value = UNCONFIRMED_CREATE
+        }
+        if (visible.value && unlocked.value && phase.value !== 'loading'
+          && phase.value !== 'locked' && phase.value !== 'error') {
+          const successorScope = scopeEpoch
+          const successor = openEpoch
+          const listed = await listForOpen(successorScope, successor)
+          if (listed && visible.value && successorScope === scopeEpoch && successor === openEpoch) maybeConnect()
+        }
+      }
     }
   }
 
@@ -1380,9 +1483,17 @@ export const useTerminalStore = defineStore('terminal', () => {
    * first one showed.
    */
   function selectSession(sessionId: string): boolean {
+    interactionEpoch += 1
+    if (chatSwitch.value && visible.value) {
+      focusOpen.value = {
+        token: ++focusGeneration.value,
+        opener: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      }
+    }
     chatSwitch.value = false
     const session = sessions.value.find((entry) => entry.session_id === sessionId)
     if (!session) return false
+    selectionEpoch += 1
     if (activeSession.value?.session_id === sessionId) return true
     invalidateWorld()
     activeSession.value = session
@@ -1409,16 +1520,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     error.value = ''
     const myScope = scopeEpoch
     const endedId = session.session_id
+    const selectedAtStart = activeSession.value?.session_id
     try {
       const raw = await api.del<unknown>(
         `${TERMINAL_API}/sessions/${encodeURIComponent(endedId)}`,
       )
       if (myScope !== scopeEpoch) return false
       if (!parseOk(raw)) {
-        if (activeSession.value?.session_id !== endedId) return false
+        if (activeSession.value?.session_id !== selectedAtStart) return false
         error.value = 'The engine did not confirm the end of the session.'
         return false
       }
+      // A list started before this confirmed End cannot restore the removed row.
+      refreshEpoch += 1
       sessions.value = sessions.value.filter((entry) => entry.session_id !== endedId)
       // Only the session that was asked about is torn down. A successor that
       // was selected while the request was open keeps its own socket.
@@ -1431,7 +1545,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       // A failure that belongs to a session that is no longer selected is
       // not the successor's error to show.
       if (myScope !== scopeEpoch) return false
-      if (activeSession.value?.session_id !== endedId) return false
+      if (activeSession.value?.session_id !== selectedAtStart) return false
       error.value = 'The terminal session could not be ended.'
       return false
     } finally {
@@ -1588,6 +1702,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     locations,
     phase,
     error,
+    capacityError,
+    focusOpen,
+    focusGeneration,
     warning,
     truncated,
     unlocked,
@@ -1596,6 +1713,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     chatSwitch,
     // actions
     open,
+    openWorkspaceForSettings,
     hide,
     followChat,
     refreshSessions,

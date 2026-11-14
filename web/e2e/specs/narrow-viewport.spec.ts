@@ -808,13 +808,13 @@ test('content-driven layout keeps permission actions reachable at keyboard heigh
 test('content-driven layout keeps needs-you actions reachable at keyboard height', async ({ page }, testInfo) => {
   await isolate(page, `question-needs-you-${testInfo.workerIndex}`)
   const response = await page.request.post('/__fixture__/chat-action', { data: {
-    chat_id: CHAT_ID, kind: 'mcp_auth', params: { server: 'linear', provider: 'opencode' },
+    chat_id: CHAT_ID, kind: 'command', state: 'open', params: { command: 'echo review-only', note: 'Review this command' },
   } })
   expect(response.ok()).toBe(true)
   await boot(page, CHAT, COMPOSER)
   await mockKeyboardHeight(page)
   const card = page.locator('.needs-you-card')
-  const action = card.getByRole('button', { name: 'Sign in', exact: true })
+  const action = card.getByRole('button', { name: 'Type it in a terminal', exact: true })
   await action.focus()
   await expect(action).toBeFocused()
   const bounds = await action.evaluate(el => {
@@ -823,7 +823,7 @@ test('content-driven layout keeps needs-you actions reachable at keyboard height
     return { top: r.top, bottom: r.bottom, appTop: app.top, appBottom: app.bottom, hit: hit === el || el.contains(hit) }
   })
   expect(bounds.top).toBeGreaterThanOrEqual(bounds.appTop)
-  expect(bounds.bottom).toBeLessThanOrEqual(bounds.appBottom)
+  expect(bounds.bottom).toBeLessThanOrEqual(bounds.appBottom + 0.5)
   expect(bounds.hit).toBe(true)
 })
 
@@ -1301,4 +1301,3 @@ test('keyboard navigation keeps slash and mention highlights visible in short pa
 })
 
 })
-

@@ -1,26 +1,45 @@
+import { existsSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, settled } from '../support/app'
 
 /**
  * The needs-you card, in a real browser.
  *
- * An OpenCode MCP server that needs a sign-in puts a card above the composer.
- * The user signs in in a new tab, the card shows the wait and a working link,
- * and Not now takes the card away. jsdom cannot answer the layout, the pop-up
- * or the touch targets, so this is a browser spec.
+ * A Claude MCP server that needs a sign-in shows sidebar-managed OAuth.
+ * jsdom cannot answer the layout, the pop-up or touch targets.
  */
 const CHAT_PATH = '/chat/alpha-chat-1'
 const CHAT_ID = 'alpha-chat-1'
 const TOUCH_MIN = 44
+const HAS_MCP_SIDEBAR = existsSync(new URL('../../src/components/ChatMcpConnections.vue', import.meta.url))
 
 /** Put an `mcp_auth` action on the chat, before the app boots. */
 async function raiseSignIn(page: Page, state?: 'waiting'): Promise<void> {
-  const params: Record<string, string> = { server: 'linear', provider: 'opencode' }
+  const params: Record<string, string> = { server: 'linear', provider: 'claude' }
   if (state === 'waiting') params.url = 'https://auth.example.invalid/authorize?state=waiting'
   const res = await page.request.post('/__fixture__/chat-action', {
     data: { chat_id: CHAT_ID, kind: 'mcp_auth', state, params },
   })
   expect(res.ok(), 'the fixture refused the action').toBe(true)
+}
+
+async function openMcpTestSurface(page: Page): Promise<{ root: ReturnType<Page['locator']>; sidebar: boolean }> {
+  const detailsAside = page.locator('aside').filter({ has: page.getByRole('heading', { name: 'Chat details' }) })
+  const hideDetails = detailsAside.getByRole('button', { name: 'Hide chat details' })
+  if (!(await detailsAside.isVisible())) {
+    await settled(page.locator('.chat-layout'))
+    if (!(await detailsAside.isVisible())) await openChatDetails(page)
+    await expect(detailsAside).toBeVisible()
+  }
+  await expect(hideDetails).toBeVisible()
+  const rail = detailsAside.locator('.chat-mcp-connections')
+  if (HAS_MCP_SIDEBAR) {
+    await expect(rail).toBeVisible()
+    return { root: rail, sidebar: true }
+  }
+  await expect(rail).toHaveCount(0)
+  await hideDetails.click()
+  return { root: page.locator('.chat-column .needs-you-stack'), sidebar: false }
 }
 
 interface PopupRecord { args: unknown[]; href: string; opener: boolean }
@@ -46,7 +65,7 @@ async function popups(page: Page): Promise<PopupRecord[]> {
   })
 }
 
-test.describe('the needs-you card', () => {
+test.describe('sidebar-managed OAuth', () => {
   test.use({ viewport: { width: 1440, height: 900 } })
 
   test('asks for a sign-in, waits for it, and goes when dismissed', async ({ page }, testInfo) => {
@@ -55,13 +74,20 @@ test.describe('the needs-you card', () => {
     await raiseSignIn(page)
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const card = page.locator('.needs-you-card')
+    const { root, sidebar } = await openMcpTestSurface(page)
+    const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     await expect(card.locator('.needs-you-card-title')).toHaveText('Sign in to linear')
-    // The card sits above the composer, where the user is about to type.
-    const cardBox = await card.boundingBox()
-    const composerBox = await page.locator(COMPOSER).boundingBox()
-    expect(cardBox!.y + cardBox!.height).toBeLessThanOrEqual(composerBox!.y + 1)
+    if (sidebar) {
+      const rail = await root.boundingBox()
+      const box = await card.boundingBox()
+      expect(box!.y).toBeGreaterThanOrEqual(rail!.y)
+      expect(box!.y + box!.height).toBeLessThanOrEqual(rail!.y + rail!.height)
+    } else {
+      const cardBox = await card.boundingBox()
+      const composerBox = await page.locator(COMPOSER).boundingBox()
+      expect(cardBox!.y + cardBox!.height).toBeLessThanOrEqual(composerBox!.y + 1)
+    }
 
     await card.getByRole('button', { name: 'Sign in', exact: true }).click()
 
@@ -74,10 +100,10 @@ test.describe('the needs-you card', () => {
 
     // The wait is shown, with a link the user can use again.
     await expect(card.locator('.needs-you-card-title')).toHaveText('Waiting for linear to connect…')
-    await expect(card.getByRole('link', { name: 'Open the sign-in page again' })).toHaveAttribute('target', '_blank')
+    await expect(card.getByRole('link', { name: 'Open the sign-in page' })).toHaveAttribute('target', '_blank')
 
     await card.getByRole('button', { name: 'Not now', exact: true }).click()
-    await expect(page.locator('.needs-you-card')).toHaveCount(0)
+    await expect(root.locator('.needs-you-card')).toHaveCount(0)
   })
 
   test('Turn off takes the card away', async ({ page }, testInfo) => {
@@ -85,17 +111,18 @@ test.describe('the needs-you card', () => {
     await raiseSignIn(page)
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const card = page.locator('.needs-you-card')
+    const { root } = await openMcpTestSurface(page)
+    const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     await expect(card.getByRole('button', { name: 'Turn off linear' })).toBeVisible()
-    await expect(card.locator('.needs-you-turn-off-scope')).toContainText('OpenCode config file')
+    await expect(card.locator('.needs-you-turn-off-scope')).toContainText('Claude Code')
 
     await card.getByRole('button', { name: 'Turn off linear' }).click()
-    await expect(page.locator('.needs-you-card')).toHaveCount(0)
+    await expect(root.locator('.needs-you-card')).toHaveCount(0)
   })
 })
 
-test.describe('the needs-you card on a phone', () => {
+test.describe('sidebar-managed OAuth on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })
 
   test('offers 44px controls and does not scroll sideways', async ({ page }, testInfo) => {
@@ -106,7 +133,8 @@ test.describe('the needs-you card on a phone', () => {
     // A coarse pointer, so the touch rules are the ones under test.
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
 
-    const card = page.locator('.needs-you-card')
+    const { root } = await openMcpTestSurface(page)
+    const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(
@@ -129,7 +157,8 @@ test.describe('the needs-you card on a phone', () => {
     await raiseSignIn(page, 'waiting')
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const card = page.locator('.needs-you-card')
+    const { root } = await openMcpTestSurface(page)
+    const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(

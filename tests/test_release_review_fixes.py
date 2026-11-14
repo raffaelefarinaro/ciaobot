@@ -104,8 +104,10 @@ class _FakeManager:
     from ciao.web.project_chats import ProjectChatManager
 
     archive_chat = ProjectChatManager.archive_chat
+    _chat_lifecycle_guard = ProjectChatManager._chat_lifecycle_guard
 
     def __init__(self, running: list[int], peak: list[int]) -> None:
+        self._path = None
         self._archive_locks: dict[str, asyncio.Lock] = {}
         self._archive_lock_users: dict[str, int] = {}
         self._chats = {"c1": type("C", (), {"archived": False})()}

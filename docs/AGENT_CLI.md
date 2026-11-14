@@ -132,7 +132,7 @@ runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the command reference and
 `GET /api/agent/status` reports the live operation list. The catalog covers
 application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
-`ciao vault review …`), projects (`ciao project …`), workspaces
+`ciao vault recall-check --claims-file FILE`, `ciao vault review …`), projects (`ciao project …`), workspaces
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
 (`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
@@ -147,6 +147,29 @@ operation it dispatches. `tests/test_agent_surface.py` pins both directions of
 that mapping against the parser, so a verb added to the CLI without a row here
 fails rather than quietly becoming a command the telemetry and the behavioral
 evals cannot name.
+
+`vault recall-check` is registered but rollout-disabled; the default returns a
+static inactive refusal without reading vault evidence or invoking a helper.
+If enabled by a later rollout change, the caller supplies a UTF-8 JSON claims
+file and the operation is available only during a live foreground provider
+pass. It is model-invoked, not an automatic or guaranteed pre-final check.
+Findings return to the authenticated requester (normally as the ordinary tool
+result). The operation binds to the exact registry session presented at
+execution and refuses results if that session is revoked, chat-revoked, rotated
+or expired while the request is pending. A 250 ms polling watcher is cooperative,
+not a hard cancellation deadline; synchronous checks also guard helper admission
+and result delivery. This proves live chat-capability validity, not which turn
+or process made the request: a still-valid same-scope token from an earlier pass
+is indistinguishable from a token used by the current pass and can use the current
+pass's unspent attempt. It allows one attempt per provider pass and honors the existing
+vault-verification opt-out. The operation has a cooperative 45-second server
+deadline while the CLI HTTP timeout remains 60 seconds; a client timeout or
+disconnect does not guarantee cancellation. The reader's resolve/stat/open/
+fstat sequence has a TOCTOU window and assumes a non-hostile local filesystem.
+No verification-specific message, notification, persisted verdict or stream
+event is produced. Existing post-answer verification, badge and Settings
+behavior are unchanged. Ordinary tool transcripts can contain the request and
+result; this is not an invisible or zero-retention path.
 
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell

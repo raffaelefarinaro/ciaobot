@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate, quiesce, releasePointerInSameTask } from '../support/app'
+import { boot, isolate, quiesce } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -104,10 +104,25 @@ test.describe('sidebar project reordering', () => {
 
     // Move above Notes and release in one task: the drawn placeholder is still
     // at the old slot while targetAt recomputes for the new one.
-    const notes = (await page.locator(`[data-project-id="${NOTES}"]`).boundingBox())!
-    await releasePointerInSameTask(page.locator('.project-list'), {
-      x: notes.x + notes.width / 2,
-      y: notes.y + 8,
+    // Simulate an auto-scroll between Playwright tasks: the target must be
+    // measured in the same browser task as the release, not before this scroll.
+    await page.locator('.project-list').evaluate((list) => {
+      for (let el = list.parentElement; el; el = el.parentElement) {
+        if (el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto') {
+          el.scrollTop = 50
+          break
+        }
+      }
+    })
+    await page.locator(`[data-project-id="${NOTES}"]`).evaluate((notes) => {
+      const rect = notes.getBoundingClientRect()
+      const init: PointerEventInit = {
+        pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 1,
+        clientX: rect.x + rect.width / 2, clientY: rect.y + 8, bubbles: true, cancelable: true,
+      }
+      const list = notes.closest('.project-list')!
+      list.dispatchEvent(new PointerEvent('pointermove', init))
+      list.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
     })
     await page.mouse.up()
 

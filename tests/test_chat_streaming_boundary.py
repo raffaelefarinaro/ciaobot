@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from collections.abc import AsyncGenerator, Coroutine
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,119 @@ from ciao.models import (
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker
 from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost, StreamOutcome
 from ciao.web.project_chats import ChatInfo, ProjectChatManager
+from tests.test_start_stream_enospc_repro import admission_case, consume, driver_probe
+from tests.test_memory_pass import _admission_pass, passes_enabled
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+async def test_start_drive_registers_task_before_notifying_observers(admission_case, driver_probe, unattended):
+    manager, chat, _ = admission_case
+    probe = driver_probe(manager, chat)
+    observations = []
+    def observer(chat_id, stream):
+        task = manager._streaming.drive_task(chat_id, stream)
+        assert task is not None and not task.done()
+        assert not probe.calls
+        observations.append(stream)
+    manager.on_turn_started(observer)
+    stream = manager.start_stream(chat.chat_id, "owned first", unattended=unattended)
+    assert observations == ([] if unattended else [stream])
+    probe.release.set()
+    await consume(stream)
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("host_throws", [False, True])
+async def test_start_drive_notification_failure_cannot_orphan_committed_turn(
+    admission_case, driver_probe, monkeypatch, host_throws,
+):
+    manager, chat, _ = admission_case
+    probe = driver_probe(manager, chat)
+    observed = []
+    def fail(*args):
+        raise RuntimeError("synthetic observer failure")
+    manager.on_turn_started(fail)
+    manager.on_turn_started(lambda *args: observed.append(args))
+    if host_throws:
+        monkeypatch.setattr(manager, "notify_turn_started", fail)
+    stream = manager.start_stream(chat.chat_id, "accepted")
+    assert manager._streaming.drive_task(chat.chat_id, stream) is not None
+    if not host_throws:
+        assert len(observed) == 1  # manager isolates each subscriber
+    probe.release.set()
+    events = await consume(stream)
+    assert stream.done and any(event["type"] == "result" for event in events)
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("event_type", ["chat_postprocess", "chat_streaming_started"])
+async def test_postcommit_publication_failure_does_not_skip_driver_or_change_pending_retry(
+    tmp_path, passes_enabled, driver_probe, monkeypatch, event_type,
+):
+    manager, [(chat, source)], registry = _admission_pass(tmp_path)
+    chat.retry_status, chat.retry_prompt = "pending", "previous"
+    chat.pending_queue = [{"id": "parked", "text": "later", "images": []}]
+    manager._save()
+    task = asyncio.create_task(asyncio.Event().wait())
+    manager._retry_tasks[chat.chat_id] = task
+    probe = driver_probe(manager, chat)
+    attempted = []
+    publish = manager._events.publish
+    def fail_one(event):
+        attempted.append(event["type"])
+        if event["type"] == event_type:
+            assert manager._streaming.drive_task(chat.chat_id) is not None
+            raise RuntimeError("synthetic publication failure")
+        publish(event)
+    monkeypatch.setattr(manager._events, "publish", fail_one)
+    try:
+        stream = manager.start_stream(chat.chat_id, "continue")
+        assert task.cancelling() == 0 and manager._retry_tasks[chat.chat_id] is task
+        assert stream.retry_generation == -1
+        assert chat.retry_status == "pending" and chat.retry_prompt == "previous"
+        assert attempted == ["chat_postprocess", "chat_streaming_started"]
+        assert chat.helper["state"] == "running" and chat.user_turn_count == 1
+        assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+        assert json.loads(registry.read_bytes())["chats"][chat.chat_id]["user_turn_count"] == 1
+        monkeypatch.setattr(manager._events, "publish", publish)
+        probe.release.set()
+        events = await consume(stream)
+        assert any(event["type"] == "queue_state" for event in events)
+        assert len(probe.calls) == 1
+        assert task.cancelling() == 0 and manager._retry_tasks[chat.chat_id] is task
+        assert chat.retry_status == "pending" and chat.retry_prompt == "previous"
+    finally:
+        monkeypatch.setattr(manager._events, "publish", publish)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_explicit_retry_clear_publication_failure_still_invalidates_owner_and_cancels_timer(
+    admission_case, monkeypatch,
+):
+    manager, chat, _ = admission_case
+    chat.retry_status, chat.retry_prompt = "pending", "previous"
+    manager._save()
+    task = asyncio.create_task(asyncio.Event().wait())
+    manager._retry_tasks[chat.chat_id] = task
+    generation = manager._retry_generations.get(chat.chat_id, 0)
+
+    def fail_publish(event):
+        assert event["type"] == "chat_retry"
+        raise RuntimeError("synthetic retry publication failure")
+
+    monkeypatch.setattr(manager._events, "publish", fail_publish)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic retry publication failure"):
+            manager._clear_chat_retry(chat)
+        assert manager._retry_generations[chat.chat_id] == generation + 1
+        assert task.cancelling() == 1 and chat.chat_id not in manager._retry_tasks
+        assert chat.retry_status == "" and chat.retry_prompt == ""
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 class _Provider:
@@ -355,6 +469,7 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
             "project_id": "project-1",
             "is_error": False,
             "last_error": "",
+            "failure_id": "",
         }
     ]
     assert host.drain_awaits == ["chat-1"]

@@ -213,6 +213,8 @@ def _app(tmp_path: Path, *, factory: FakeFactory | None = None) -> Starlette:
         pwa_auth_token=PASSWORD,
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
+        workspace=lambda name: object() if name == "work" else None,
+        agent_root=lambda name: tmp_path,
     )
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
@@ -319,6 +321,41 @@ def _replay(ws: Any) -> list[dict[str, Any]]:
 
 
 # ── the door: policy, session, grant ──────────────────────────────────────
+
+
+def test_workspace_session_stream_uses_existing_grant_and_replay(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    app = _app(tmp_path, factory=factory)
+    with _client(app) as client:
+        response = client.post(SESSIONS, json={"workspace": "work"}, headers=_origin())
+        assert response.status_code == 200
+        session_id = response.json()["session"]["session_id"]
+        url = f"{WS_BASE}{STREAM}/{session_id}"
+        assert not factory.process.written
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(url, headers=_origin("http://evil.example:8443")):
+                pass
+        assert exc.value.code == CLOSE_POLICY
+        with client.websocket_connect(url, headers=_origin()) as ws:
+            _attach(ws)
+            _replay(ws)
+            assert not factory.process.written
+            factory.process.say(b"hello")
+            assert base64.b64decode(ws.receive_json()["data"]) == b"hello"
+            ws.send_json({"type": "input", "data": base64.b64encode(b"x").decode()})
+            _wait_until(lambda: factory.process.written == b"x")
+        _wait_until(lambda: not app.state.terminal_sessions.get(session_id).attached)
+        with client.websocket_connect(url, headers=_origin()) as ws:
+            assert _attach(ws)["seq"] == 5
+            frames = _replay(ws)
+            assert base64.b64decode(frames[0]["data"]) == b"hello"
+            app.state.terminal_grants.revoke_all()
+            assert _close_code(ws) == CLOSE_UNAUTHORIZED
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(url, headers=_origin()):
+                pass
+        assert exc.value.code == CLOSE_UNAUTHORIZED
+        assert not factory.process.closed
 
 
 def test_a_foreign_origin_is_refused_before_the_socket_is_accepted(

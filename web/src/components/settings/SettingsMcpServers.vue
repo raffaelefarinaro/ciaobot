@@ -108,7 +108,7 @@
             <p v-if="!server.applies_to && server.scope === 'managed'" class="hint">Managed by your organization; it can’t be turned off here.</p>
             <p v-if="!isClaudeAi(server) && !manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
             <p v-if="signInError === moreKey(server)" class="action-result --error" role="alert">{{ SIGN_IN_ERROR }}</p>
-            <p v-if="needsAuth(server) && !isClaudeAi(server) && manageable(server)" class="hint">Sign-in required. Sign in finishes in the open chat, which connects as soon as you complete it; a sign-in in the terminal only reaches chats started after it.</p>
+            <p v-if="needsAuth(server) && !isClaudeAi(server) && manageable(server)" class="hint">Sign-in required. Open the chat's MCP section to finish sign-in.</p>
           </li>
         </ul>
         <p v-if="toggleNote && toggleFor === current.provider" class="hint mcp-toggle-note" role="status">{{ toggleNote }}</p>
@@ -158,7 +158,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import TabBar from '../TabBar.vue'
 import type { McpServersController } from '../../composables/useMcpServers'
 import { useRunInTerminal } from '../../composables/useRunInTerminal'
-import { safeExternalUrl } from '../../lib/chatActions'
 import { writeClipboard } from '../../lib/codeCopy'
 import { errorMessage } from '../../lib/errorMessage'
 import { groupMcpConnections } from '../../lib/mcpConnections'
@@ -168,7 +167,7 @@ import { useProjectStore } from '../../stores/projects'
 
 type Provider = McpProviderInventory['provider']
 
-const props = defineProps<{ mcp: McpServersController; defaultProvider?: string }>()
+const props = defineProps<{ mcp: McpServersController; defaultProvider?: string; targetProvider?: Provider; targetProviderKey?: number }>()
 const emit = defineEmits<{ (e: 'ask-ciao'): void }>()
 const { status, loading, error, fetchStatus } = props.mcp
 const terminal = useRunInTerminal()
@@ -182,9 +181,21 @@ const tabs = computed(() => providers.value.map(p => ({ key: p.provider, label: 
 const selected = ref<Provider>('claude')
 // Re-pick only when the set of providers or the default changes, so a Refresh
 // does not throw the user back to the first tab.
+let previousProviders = ''
+let previousTargetKey: number | undefined
+let previousTargetProvider: Provider | undefined
 watch(
-  () => `${props.defaultProvider ?? ''}|${providers.value.map(p => p.provider).join(',')}`,
-  () => { if (providers.value[0]) selected.value = providers.value[0].provider },
+  () => [props.defaultProvider, providers.value.map(p => p.provider).join(','), props.targetProvider, props.targetProviderKey] as const,
+  ([defaultProvider, available, targetProvider, targetKey]) => {
+    if (!available) return
+    const signature = `${defaultProvider ?? ''}|${available}`
+    if (signature !== previousProviders || targetKey !== previousTargetKey || targetProvider !== previousTargetProvider) {
+      selected.value = providers.value.find(p => p.provider === targetProvider)?.provider ?? providers.value[0]!.provider
+      previousProviders = signature
+      previousTargetKey = targetKey
+      previousTargetProvider = targetProvider
+    }
+  },
   { immediate: true },
 )
 const current = computed(() => providers.value.find(p => p.provider === selected.value) ?? providers.value[0])
@@ -257,25 +268,18 @@ function signInChat(server: McpNativeServer): string | null {
 const signingIn = ref<string | null>(null)
 const signInError = ref<string | null>(null)
 const SIGN_IN_ERROR = 'The sign-in could not be started. Open the chat and try again.'
-/** Sign in through the chat's own live session, using its needs-you card, then go to that card. */
+/** Raise the action; the chat's own sign-in button starts it on a user gesture. */
 async function signInInChat(provider: Provider, serverName: string, chatId: string): Promise<void> {
   if (signingIn.value) return
   const key = menuKey(provider, serverName)
   signingIn.value = key
   signInError.value = null
   try {
-    let action = await projectStore.requestMcpAuth(chatId, serverName)
-    if (action && (action.state === 'open' || action.state === 'failed')) {
-      try {
-        action = await projectStore.startChatAction(chatId, action.id)
-      } catch {
-        // The card in the chat shows why it failed.
-      }
-    }
-    const target = action?.state === 'waiting' ? safeExternalUrl(action.params.url) : null
-    if (target) window.open(target, '_blank', 'noopener,noreferrer')
+    const action = await projectStore.requestMcpAuth(chatId, serverName)
+    if (!action) throw new Error('Sign-in action unavailable')
     const { router } = await import('../../router')
-    await router.push(`/chat/${encodeURIComponent(chatId)}`)
+    const failure = await router.push(`/chat/${encodeURIComponent(chatId)}?details=mcp`)
+    if (failure) throw failure
   } catch {
     signInError.value = key
   } finally {

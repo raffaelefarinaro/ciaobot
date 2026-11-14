@@ -62,6 +62,13 @@ from ciao.providers.opencode import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_auth_list(monkeypatch):
+    """Tests must never query the operator's OpenCode credentials."""
+    import ciao.providers.opencode as mod
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, b"[]"))
+
+
 def test_shell_and_subagent_calls_are_backgroundable(tmp_path: Path) -> None:
     provider = OpencodeProvider(tmp_path)
     for tool in ("shell", "subagent"):
@@ -3464,6 +3471,466 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
 # ── credential reporting ────────────────────────────────────────────────
 
 
+def test_bounded_auth_probe_process_lifecycle(monkeypatch):
+    import os
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import time
+    from ciao.os_support import processes as proc
+    from ciao.os_support.processes import bounded_output
+
+    spawned = []
+    reads = {}
+    popen = subprocess.Popen
+    read = os.read
+
+    def tracked_popen(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        spawned.append(child)
+        reads[child.stdout.fileno()] = 0
+        return child
+
+    def tracked_read(fd, count):
+        chunk = read(fd, count)
+        if fd in reads:
+            reads[fd] += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(proc.subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(proc.os, "read", tracked_read)
+
+    def run(code, cap=1024 * 1024, timeout=3.0):
+        reads.clear()
+        result = bounded_output([sys.executable, "-c", code], timeout=timeout, max_stdout=cap)
+        assert all(count <= cap + 1 for count in reads.values())
+        return result
+
+    descendant = None
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.settimeout(2)
+        port = listener.getsockname()[1]
+        try:
+            assert run("import sys; sys.stdout.buffer.write(b'x' * 1048576)") == (0, b"x" * 1048576)
+            assert run("import sys; sys.stdout.buffer.write(b'x' * 1048577)") is None
+            assert run("import sys; sys.stdout.buffer.write(b'\\xff')") == (0, b"\xff")
+            assert run("import sys; sys.stderr.buffer.write(b'\\xff' * 1048577); sys.stdout.buffer.write(b'ok'); sys.exit(3)") == (3, b"ok")
+            assert run("import time; time.sleep(2)", timeout=0.1) is None
+            code = (
+                "import socket,subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)']); "
+                f"socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(str(p.pid).encode(),('127.0.0.1',{port}))"
+            )
+            started = time.monotonic()
+            assert run(code, timeout=1.5) is None
+            assert time.monotonic() - started < 4.0
+            assert spawned[-1].returncode == 0
+            descendant = int(listener.recv(64))
+        finally:
+            # The PID travels over UDP, never through captured probe output or disk.
+            if descendant is None:
+                try:
+                    descendant = int(listener.recv(64))
+                except (TimeoutError, ValueError):
+                    pass
+            if descendant is not None:
+                try:
+                    os.kill(descendant, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            for child in spawned:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+                assert child.stdout is None or child.stdout.closed
+                assert child.returncode is not None
+
+
+def test_bounded_auth_probe_no_post_reap_group_signal(monkeypatch):
+    import errno
+    import os
+    from ciao.os_support import processes as proc
+
+    signals = []
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+
+    class Child:
+        pid = 123
+        stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def poll(self):
+            return 0
+
+    class Tree:
+        def __init__(self, pid):
+            pass
+
+        def kill(self):
+            signals.append("kill")
+            raise AssertionError("signalled after reap")
+
+        def kill_descendants(self):
+            signals.append("kill_descendants")
+            raise AssertionError("signalled after reap")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: Child())
+    monkeypatch.setattr(proc, "ProcessTree", Tree)
+    if proc.sys.platform != "win32":
+        monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
+    assert proc.bounded_output(["synthetic"], timeout=1, max_stdout=10) == (0, b"")
+    assert signals == []
+
+    # The leader is already reaped but another writer retains the pipe.
+    read_fd, write_fd = os.pipe()
+    held_child = Child()
+    held_child.stdout = os.fdopen(read_fd, "rb", buffering=0)
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: held_child)
+    try:
+        assert proc.bounded_output(["synthetic"], timeout=0.1, max_stdout=10) is None
+        assert held_child.stdout is None
+        assert signals == []
+    finally:
+        os.close(write_fd)
+
+    read_fd, write_fd = os.pipe()
+    events = []
+
+    class LiveChild:
+        pid = 123
+        stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def poll(self):
+            events.append("poll")
+            return None
+
+        def kill(self):
+            events.append("leader kill")
+
+        def wait(self, timeout):
+            events.append("wait")
+            return 0
+
+    class LiveTree(Tree):
+        def kill(self):
+            events.append("group kill")
+            raise OSError(errno.ESRCH, "gone")
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: LiveChild())
+    monkeypatch.setattr(proc, "ProcessTree", LiveTree)
+    try:
+        assert proc.bounded_output(["synthetic"], timeout=0, max_stdout=10) is None
+        assert events == ["poll", "group kill", "leader kill", "wait"]
+    finally:
+        os.close(write_fd)
+
+
+def test_bounded_auth_probe_cleanup_failures(monkeypatch):
+    import os
+    import sys
+    from ciao.os_support import processes as proc
+
+    original_tree = proc.ProcessTree
+    signals = []
+
+    class CloseFailure:
+        def __init__(self, pid):
+            self.tree = original_tree(pid)
+
+        def kill(self):
+            signals.append("kill")
+            raise AssertionError("must not signal reaped leader")
+
+        def kill_descendants(self):
+            signals.append("kill_descendants")
+            raise AssertionError("must not signal reaped leader")
+
+        def close(self):
+            self.tree.close()
+            raise OSError("injected")
+
+    monkeypatch.setattr(proc, "ProcessTree", CloseFailure)
+    if sys.platform != "win32":
+        monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
+    assert proc.bounded_output(
+        [sys.executable, "-c", "print('ok')"], timeout=3, max_stdout=100
+    ) is None
+    assert signals == []
+
+    events = []
+    read_fd, write_fd = os.pipe()
+
+    class Child:
+        pid = 123
+        stdout = os.fdopen(read_fd, "rb", buffering=0)
+        stdin = stderr = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            events.append("leader kill")
+
+        def wait(self, timeout):
+            events.append("wait")
+            raise TimeoutError()
+
+    child = Child()
+
+    def failed_attach(pid):
+        raise OSError("injected attach failure")
+
+    def handoff(*, target, args, daemon):
+        assert target is proc._reap_process
+        assert args == (child,) and daemon
+        assert child.stdout is None and child.stdin is None and child.stderr is None
+        events.append("handoff")
+        return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: child)
+    monkeypatch.setattr(proc, "ProcessTree", failed_attach)
+    monkeypatch.setattr(proc.threading, "Thread", handoff)
+    try:
+        assert proc.bounded_output(["synthetic"], timeout=1, max_stdout=10) is None
+        assert events == ["leader kill", "wait", "handoff"]
+    finally:
+        os.close(write_fd)
+
+
+def test_bounded_auth_probe_reaper_start_failure_closes_tree(monkeypatch):
+    import os
+    from ciao.os_support import processes as proc
+
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    events = []
+
+    class Child:
+        pid = 123
+        stdout = stream
+        stdin = stderr = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            events.append("leader kill")
+
+        def wait(self, timeout):
+            assert timeout <= 1
+            events.append("wait")
+            raise TimeoutError()
+
+    child = Child()
+
+    class Tree:
+        def __init__(self, pid):
+            pass
+
+        def kill(self):
+            events.append("group kill")
+
+        def close(self):
+            events.append("close")
+
+    def thread(*, target, args, daemon):
+        assert target is proc._reap_process and args == (child,) and daemon
+        assert stream.closed and child.stdout is None
+        def fail_start():
+            events.append("start")
+            raise RuntimeError("cannot start thread")
+        return SimpleNamespace(start=fail_start)
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: child)
+    monkeypatch.setattr(proc, "ProcessTree", Tree)
+    monkeypatch.setattr(proc.threading, "Thread", thread)
+    try:
+        assert proc.bounded_output(["synthetic"], timeout=0, max_stdout=10) is None
+        assert events == ["group kill", "leader kill", "wait", "start", "close"]
+        assert stream.closed and child.stdout is None
+    finally:
+        os.close(write_fd)
+        stream.close()
+
+
+def test_bounded_auth_probe_eof_after_deadline_is_unknown(monkeypatch):
+    import os
+    from ciao.os_support import processes as proc
+
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    events = []
+
+    class Child:
+        pid = 123
+        stdout = stream
+
+        def poll(self):
+            return 0
+
+    class Tree:
+        def __init__(self, pid):
+            pass
+
+        def kill(self):
+            events.append("kill")
+
+        def close(self):
+            events.append("close")
+
+    clock = iter([0.0, 0.5, 1.1])
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: Child())
+    monkeypatch.setattr(proc, "ProcessTree", Tree)
+    with monkeypatch.context() as patch:
+        patch.setattr(proc.time, "monotonic", lambda: next(clock))
+        assert proc.bounded_output(["synthetic"], timeout=1, max_stdout=10) is None
+    assert events == ["close"]
+    assert stream.closed
+
+
+@pytest.mark.parametrize("failure", ["read", "kill", "wait"])
+def test_bounded_auth_probe_injected_failures_close_and_reap(monkeypatch, failure):
+    import os
+    import time
+    from ciao.os_support import processes as proc
+
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    events = []
+
+    class Child:
+        pid = 123
+        stdout = stream
+        stdin = stderr = None
+
+        def poll(self):
+            events.append("poll")
+            return None
+
+        def kill(self):
+            events.append("leader kill")
+
+        def wait(self, timeout):
+            assert timeout <= 1
+            events.append("wait")
+            if failure == "wait":
+                raise TimeoutError()
+            return 0
+
+    child = Child()
+
+    class Tree:
+        def __init__(self, pid):
+            assert pid == child.pid
+
+        def kill(self):
+            events.append("group kill")
+            if failure == "kill":
+                raise OSError("injected group kill failure")
+
+        def close(self):
+            events.append("close")
+
+    def handoff(*, target, args, daemon):
+        assert target is proc._reap_process and args == (child,) and daemon
+        assert stream.closed and child.stdout is None
+        assert child.stdin is None and child.stderr is None
+        events.append("handoff")
+        return SimpleNamespace(start=lambda: None)
+
+    real_read = os.read
+
+    def fail_read(fd, count):
+        if fd == read_fd and failure == "read":
+            events.append("read failure")
+            raise OSError("injected read failure")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: child)
+    monkeypatch.setattr(proc, "ProcessTree", Tree)
+    monkeypatch.setattr(proc.threading, "Thread", handoff)
+    monkeypatch.setattr(proc.os, "read", fail_read)
+    try:
+        if failure == "read":
+            os.write(write_fd, b"x")
+        start = time.monotonic()
+        assert proc.bounded_output(
+            ["synthetic"], timeout=1 if failure == "read" else 0, max_stdout=10
+        ) is None
+        assert time.monotonic() - start < 3
+        assert stream.closed and child.stdout is None
+        assert events.index("poll") < events.index("group kill") < events.index("leader kill") < events.index("wait")
+        assert events.count("poll") == 1
+        assert events[-1] == "close"
+        if failure == "read":
+            assert events.index("read failure") < events.index("group kill")
+        assert ("handoff" in events) == (failure == "wait")
+    finally:
+        os.close(write_fd)
+        stream.close()
+
+
+def test_credential_count_bounded_failures_and_legacy_fallback(monkeypatch, caplog):
+    import re
+    import sys
+    import ciao.providers.opencode as mod
+
+    outputs = iter([(7, b'[{"connections":[1]}]')])
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: next(outputs))
+    assert mod._credential_count("synthetic", timeout=1) == 1
+    for text in ["1credential", "٢\u2003credentıals", "3 credential 4 credentials",
+                 "42 CREDENTIALS!", "5 credentialsx", "7 credential"]:
+        match = re.search(r"(\d+)\s+credentials?\b", text, re.IGNORECASE)
+        expected = int(match.group(1)) if match else None
+        outputs = iter([(0, b"not json"), (0, text.encode())])
+        assert mod._credential_count("synthetic", timeout=1) == expected
+    old_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        outputs = iter([(0, b"not json"), (0, b"9" * 10000 + b" credentials")])
+        assert mod._credential_count("synthetic", timeout=1) is None
+    finally:
+        sys.set_int_max_str_digits(old_limit)
+    outputs = iter([(0, b"[" * 2000), (0, b"7 credentials")])
+    assert mod._credential_count("synthetic", timeout=1) == 7
+    outputs = iter([(0, b'{"not":"a list"}'), (9, b"8 credentials")])
+    assert mod._credential_count("synthetic", timeout=1) == 8
+    outputs = iter([(0, b"not json"), (0, b"\xff")])
+    assert mod._credential_count("synthetic", timeout=1) is None
+    outputs = iter([(0, b"\xff")])
+    assert mod._credential_count("synthetic", timeout=1) is None
+    outputs = iter([None])
+    assert mod._credential_count("synthetic", timeout=1) is None
+    assert not caplog.records
+
+
+def test_credential_count_digit_scan_is_linear(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    class CountedText(str):
+        visits = 0
+
+        def __getitem__(self, key):
+            type(self).visits += 1
+            return super().__getitem__(key)
+
+    class Ansi:
+        def sub(self, replacement, text):
+            return CountedText(text)
+
+    outputs = iter([(0, b"invalid"), (0, b"9" * (1024 * 1024 - 1))])
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: next(outputs))
+    monkeypatch.setattr(mod, "_ANSI_RE", Ansi())
+    assert mod._credential_count("synthetic", timeout=1) is None
+    assert CountedText.visits <= 3 * (1024 * 1024)
+
+
 def test_credential_count_reads_the_reported_number(monkeypatch):
     """Captured verbatim from `opencode auth list` with an empty store.
 
@@ -3471,25 +3938,21 @@ def test_credential_count_reads_the_reported_number(monkeypatch):
     box-drawing characters, so an empty store was reported as several
     authenticated providers.
     """
-    from types import SimpleNamespace
-
     import ciao.providers.opencode as mod
 
     output = "\x1b[0m\n┌  Credentials \x1b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n"
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout=output, returncode=0)
+        mod, "bounded_output", lambda *a, **k: (0, output.encode())
     )
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
 
 
 def test_credential_count_parses_a_populated_store(monkeypatch):
-    from types import SimpleNamespace
-
     import ciao.providers.opencode as mod
 
     output = "┌  Credentials\n│  anthropic\n│  openai\n└  2 credentials\n"
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout=output, returncode=0)
+        mod, "bounded_output", lambda *a, **k: (0, output.encode())
     )
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
 
@@ -3499,8 +3962,6 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
     listing is what gets counted. Shape captured from `auth list --format json`
     with identifiers removed."""
     import json as _json
-    from types import SimpleNamespace
-
     import ciao.providers.opencode as mod
 
     listing = [
@@ -3516,14 +3977,14 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 
     def fake_run(cmd, *a, **k):
         calls.append(cmd)
-        return SimpleNamespace(stdout=_json.dumps(listing), returncode=0)
+        return (0, _json.dumps(listing).encode())
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "bounded_output", fake_run)
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
     assert calls == [["/bin/opencode", "auth", "list", "--format", "json", "--standalone"]]
 
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="[]", returncode=0)
+        mod, "bounded_output", lambda *a, **k: (0, b"[]")
     )
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
 
@@ -3555,6 +4016,7 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
     monkeypatch.setattr(
         mod,
         "_fetch_inventory_rows",
@@ -3582,6 +4044,7 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
     monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, [], []))
 
     status = mod.opencode_login_status()
@@ -3812,10 +4275,7 @@ def test_system_skills_binary_error_is_empty(monkeypatch):
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
     import ciao.providers.opencode as mod
 
-    def boom(*_a, **_k):
-        raise OSError("nope")
-
-    monkeypatch.setattr("subprocess.run", boom)
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: None)
     assert mod._credential_count("/bin/opencode", timeout=1.0) is None
 
 

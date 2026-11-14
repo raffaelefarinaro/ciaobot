@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, disposePinia, getActivePinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, RouterLinkStub, type DOMWrapper } from '@vue/test-utils'
 import SettingsMcpServers from '../settings/SettingsMcpServers.vue'
 import { useMcpServers, type McpApiClient } from '../../composables/useMcpServers'
 import type { McpStatus } from '../../lib/types'
+import { useProjectStore } from '../../stores/projects'
 
 const runMock = vi.hoisted(() => vi.fn())
 const writeClipboard = vi.hoisted(() => vi.fn())
@@ -21,10 +22,14 @@ beforeEach(() => {
   apiPost.mockReset()
   routerPush.mockClear()
 })
+afterEach(() => {
+  const pinia = getActivePinia()
+  if (pinia) disposePinia(pinia)
+})
 
 const PREFIX = 'cd -- /workspace/personal && '
 
-function panel(change?: (status: McpStatus) => void, props: { defaultProvider?: string } = {}, post?: ReturnType<typeof vi.fn>) {
+function panel(change?: (status: McpStatus) => void, props: { defaultProvider?: string; targetProvider?: 'claude' | 'opencode'; targetProviderKey?: number } = {}, post?: ReturnType<typeof vi.fn>) {
   const status: McpStatus = { workspace: 'personal', agent_root: '/workspace/personal', shell: { kind: 'posix', cd_prefix: PREFIX }, providers: [
     { provider: 'claude', available: true, inventory_state: 'loaded', servers: [
       { name: 'notion', scope: 'project', source: '.mcp.json', allowed: false, applies_to: '/workspace', connections: [] },
@@ -115,6 +120,20 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.get('[role="tabpanel"]').attributes('aria-labelledby')).toBe(first.attributes('id'))
     wrapper.unmount()
   })
+  it('honours explicit provider links without resetting a manual selection on refresh', async () => {
+    const { wrapper } = panel(undefined, { defaultProvider: 'claude', targetProvider: 'opencode', targetProviderKey: 1 })
+    try {
+      expect(tab(wrapper, 'OpenCode').attributes('aria-selected')).toBe('true')
+      await tab(wrapper, 'Claude Code').trigger('click')
+      await wrapper.get('.mcp-refresh').trigger('click')
+      await flushPromises()
+      expect(tab(wrapper, 'Claude Code').attributes('aria-selected')).toBe('true')
+      await wrapper.setProps({ targetProviderKey: 2 })
+      expect(tab(wrapper, 'OpenCode').attributes('aria-selected')).toBe('true')
+    } finally {
+      wrapper.unmount()
+    }
+  })
   it('tabs are keyboard navigable', async () => {
     const { wrapper } = panel()
     const [first, second] = wrapper.findAll('[role="tab"]')
@@ -181,18 +200,17 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.findAll('.mcp-signin').map(b => b.text())).toEqual(['Sign in'])
     expect(button(wrapper, 'Sign in')!.classes()).toEqual(expect.arrayContaining(['btn-primary', 'btn-small']))
     expect(wrapper.text()).toContain('Sign-in required')
-    expect(wrapper.text()).toContain('only reaches chats started after it')
+    expect(wrapper.text()).toContain("Open the chat's MCP section to finish sign-in.")
     apiPost
       .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'notion', provider: 'opencode' }, error: '', created_at: 1 } })
-      .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'waiting', params: { server: 'notion', provider: 'opencode', url: 'https://auth.example/authorize' }, error: '', created_at: 1 } })
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
     runMock.mockClear()
     await button(wrapper, 'Sign in')!.trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenNthCalledWith(1, '/api/chats/chat-two/actions/mcp-auth', { server: 'notion' })
-    expect(apiPost).toHaveBeenNthCalledWith(2, '/api/chats/chat-two/actions/a1/start', {})
-    expect(open).toHaveBeenCalledWith('https://auth.example/authorize', '_blank', 'noopener,noreferrer')
-    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(open).not.toHaveBeenCalled()
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two?details=mcp')
     expect(runMock).not.toHaveBeenCalled()
     open.mockRestore()
     wrapper.unmount()
@@ -205,24 +223,93 @@ describe('Settings MCP native inventory', () => {
     await button(wrapper, 'Sign in')!.trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledTimes(1)
-    expect(open).toHaveBeenCalledWith('https://auth.example/authorize', '_blank', 'noopener,noreferrer')
-    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    expect(open).not.toHaveBeenCalled()
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two?details=mcp')
     open.mockRestore()
     wrapper.unmount()
   })
-  it('still goes to the chat when the start is refused', async () => {
-    apiPost
-      .mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'notion', provider: 'opencode' }, error: '', created_at: 1 } })
-      .mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
+  it('reports a rejected navigation', async () => {
+    apiPost.mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'notion', provider: 'opencode' }, error: '', created_at: 1 } })
+    routerPush.mockRejectedValueOnce(new Error('navigation refused'))
     const { wrapper } = panel()
     await tab(wrapper, 'OpenCode').trigger('click')
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
     await button(wrapper, 'Sign in')!.trigger('click')
     await flushPromises()
     expect(open).not.toHaveBeenCalled()
-    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two')
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-two?details=mcp')
+    expect(wrapper.get('[role="alert"]').text()).toContain('could not be started')
     open.mockRestore()
     wrapper.unmount()
+  })
+  it.each(['claude', 'opencode'] as const)('%s raises once and navigates for every existing action state', async provider => {
+    for (const state of ['open', 'waiting', 'working', 'done'] as const) {
+      apiPost.mockReset().mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state, params: { server: 'notion', provider }, error: '', created_at: 1 } })
+      routerPush.mockClear()
+      runMock.mockClear()
+      const open = vi.spyOn(window, 'open').mockReturnValue(null)
+      const { wrapper } = panel(status => {
+        status.providers[0]!.servers[0]!.connections = [{ chat_id: 'claude-chat', state: 'needs_auth' }]
+      }, { defaultProvider: provider })
+      try {
+        await button(wrapper, 'Sign in').trigger('click')
+        await flushPromises()
+        expect(apiPost).toHaveBeenCalledTimes(1)
+        expect(routerPush).toHaveBeenCalledWith(`/chat/${provider === 'claude' ? 'claude-chat' : 'chat-two'}?details=mcp`)
+        expect(useProjectStore().chatActions[provider === 'claude' ? 'claude-chat' : 'chat-two']?.[0]?.state).toBe(state)
+        expect(open).not.toHaveBeenCalled()
+        expect(runMock).not.toHaveBeenCalled()
+      } finally { wrapper.unmount(); open.mockRestore() }
+    }
+  })
+  it.each(['claude', 'opencode'] as const)('%s refuses missing or rejected actions without side effects', async provider => {
+    for (const failure of ['missing', 'rejected'] as const) {
+      apiPost.mockReset()
+      if (failure === 'missing') apiPost.mockResolvedValueOnce({ action: null })
+      else apiPost.mockRejectedValueOnce(new Error('refused'))
+      routerPush.mockClear()
+      runMock.mockClear()
+      const open = vi.spyOn(window, 'open').mockReturnValue(null)
+      const { wrapper } = panel(status => {
+        status.providers[0]!.servers[0]!.connections = [{ chat_id: 'claude-chat', state: 'needs_auth' }]
+      }, { defaultProvider: provider })
+      try {
+        await button(wrapper, 'Sign in').trigger('click')
+        await flushPromises()
+        expect(apiPost).toHaveBeenCalledTimes(1)
+        expect(routerPush).not.toHaveBeenCalled()
+        expect(open).not.toHaveBeenCalled()
+        expect(runMock).not.toHaveBeenCalled()
+        expect(wrapper.get('[role=alert]').text()).toContain('could not be started')
+      } finally { wrapper.unmount(); open.mockRestore() }
+    }
+  })
+  it.each(['claude', 'opencode'] as const)('%s reports navigation rejection without starting authorization', async provider => {
+    apiPost.mockResolvedValueOnce({ action: { id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'working', params: { server: 'notion', provider }, error: '', created_at: 1 } })
+    routerPush.mockRejectedValueOnce(new Error('navigation refused'))
+    runMock.mockClear()
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { wrapper } = panel(status => {
+      status.providers[0]!.servers[0]!.connections = [{ chat_id: 'claude-chat', state: 'needs_auth' }]
+    }, { defaultProvider: provider })
+    try {
+      await button(wrapper, 'Sign in').trigger('click')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(open).not.toHaveBeenCalled()
+      expect(runMock).not.toHaveBeenCalled()
+      expect(wrapper.get('[role=alert]').text()).toContain('could not be started')
+    } finally { wrapper.unmount(); open.mockRestore() }
+  })
+  it('does not navigate when the raised action is missing', async () => {
+    apiPost.mockResolvedValueOnce({ action: null })
+    const { wrapper } = panel(undefined, { defaultProvider: 'opencode' })
+    try {
+      await button(wrapper, 'Sign in').trigger('click')
+      await flushPromises()
+      expect(routerPush).not.toHaveBeenCalled()
+      expect(wrapper.get('[role="alert"]').text()).toContain('could not be started')
+    } finally { wrapper.unmount() }
   })
   it('says so when the sign-in card cannot be raised', async () => {
     apiPost.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }))

@@ -74,6 +74,84 @@ test.beforeEach(async ({ page }, testInfo) => {
   await isolate(page, `terminal-pane-${testInfo.workerIndex}`)
 })
 
+for (const kind of ['local', 'global'] as const) {
+  for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+    test(`workspace capacity screenshots ${kind} ${viewport.width}`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport)
+      let posts = 0
+      await page.route('**/api/terminal/status', route => route.fulfill({ json: {
+        available: true, reason: '', platform: 'fixture', host: 'fixture.local',
+        unlock_expires_in: 900, detached_ttl_seconds: 900,
+      } }))
+      await page.route('**/api/terminal/unlock', route => route.fulfill({ json: { ok: true, expires_in: 900 } }))
+      await page.route('**/api/terminal/sessions**', route => {
+        if (route.request().method() === 'POST') {
+          posts += 1
+          return route.fulfill({ status: 409, json: { ok: false, reason: 'capacity', error: 'capacity' } })
+        }
+        const sessions = kind === 'local' ? Array.from({ length: 4 }, (_, i) => ({
+          session_id: `s${i}`, folder: `/workspace/shell-${i}`, cols: 80, rows: 24,
+          seq: 0, attached: false, exited: true, exit_code: 0,
+        })) : []
+        return route.fulfill({ json: { sessions, locations: [{ location: 'workspace', folder: '/workspace' }] } })
+      })
+      await page.goto('/__fixture__/harness/index.html?workspace-terminal=1')
+      await expect(page.getByRole('heading', { name: 'Providers', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Open workspace terminal' }).click()
+      const pane = page.locator('.terminal-pane')
+      await expect(pane).toBeVisible()
+      await expect(pane.getByRole('alert')).toHaveText(kind === 'local'
+        ? 'All four terminal slots are occupied. End a session in this workspace, then try again.'
+        : 'All four terminal slots are occupied. End a terminal session in its chat, project, or workspace, then try again.')
+      await expect(pane.getByRole('button', { name: 'Close' })).toBeFocused()
+      if (kind === 'local') await expect(pane.getByRole('tab')).toHaveCount(4)
+      expect(posts).toBe(kind === 'local' ? 0 : 1)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+      await page.screenshot({ path: testInfo.outputPath(`workspace-${kind}-${viewport.width}.png`), animations: 'disabled' })
+      await page.keyboard.press('Tab')
+      if (kind === 'local') {
+        await expect(pane.getByRole('tab').first()).toBeFocused()
+        await expect(pane.getByRole('button', { name: /End terminal session/ }).first()).toBeEnabled()
+      } else {
+        await expect(pane.getByRole('button', { name: 'New terminal session' })).toBeFocused()
+      }
+      await page.evaluate(() => { document.body.style.zoom = '1.5' })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+    })
+  }
+}
+
+test('workspace lazy pane does not steal focus moved during its download', async ({ page }) => {
+  let release!: () => void
+  let requested!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const chunkRequested = new Promise<void>(resolve => { requested = resolve })
+  await page.route('**/TerminalPane-*.js', async route => {
+    requested()
+    await gate
+    await route.continue()
+  })
+  await page.route('**/api/terminal/status', route => route.fulfill({ json: {
+    available: true, reason: '', platform: 'fixture', host: 'fixture.local',
+    unlock_expires_in: 900, detached_ttl_seconds: 900,
+  } }))
+  await page.route('**/api/terminal/sessions**', route => route.fulfill({ json: {
+    sessions: Array.from({ length: 4 }, (_, i) => ({
+      session_id: `s${i}`, folder: `/workspace/shell-${i}`, cols: 80, rows: 24,
+      seq: 0, attached: false, exited: true, exit_code: 0,
+    })),
+  } }))
+  await page.goto('/__fixture__/harness/index.html?workspace-terminal=1')
+  const verify = page.getByRole('button', { name: 'Verify', exact: true })
+  await expect(verify).toBeVisible()
+  await page.getByRole('button', { name: 'Open workspace terminal' }).click()
+  await chunkRequested
+  await verify.focus()
+  release()
+  await expect(page.locator('.terminal-pane')).toBeVisible()
+  await expect(verify).toBeFocused()
+})
+
 test('the terminal opens from a chat, takes a command, and keeps its session when closed', async ({ page }, testInfo) => {
   await boot(page, CHAT_PATH, COMPOSER)
 

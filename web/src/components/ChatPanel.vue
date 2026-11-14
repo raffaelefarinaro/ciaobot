@@ -365,18 +365,20 @@
                 <button
                   v-if="!hasPendingRetry && lastUserBefore(i) && !hasLaterItem(i)"
                   class="retry-btn"
+                  :disabled="!recoveryForError(i) || view.isStreaming"
                   @click="retryFromError(i)"
                 >Retry</button>
                 <!-- See errorBubbleAction for which fix a known error gets. -->
                 <button
                   v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
                   class="retry-btn fix-btn"
+                  :disabled="!recoveryForError(i) || view.isStreaming"
                   @click="retryHourlyFromError(i)"
                 >Retry every hour</button>
                 <button
                   v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
                   class="retry-btn fix-btn"
-                  :disabled="view.isStreaming"
+                  :disabled="view.isStreaming || !recoveryForError(i)"
                   @click="openRecoveryPicker(i)"
                 >Switch model</button>
                 <button
@@ -385,11 +387,13 @@
                   @click="openFixChat(i)"
                 >Fix this error</button>
               </div>
+              <p v-if="!recoveryForError(i) && !hasPendingRetry">Recovery is unavailable until this failure and its history are verified. Recovery sends “continue”, not the original request.</p>
+              <p v-else-if="recoveryForError(i) && !hasPendingRetry">Recovery sends “continue”, not the original request. The provider may no longer have the session.</p>
               <ProviderSignInHint
                 v-if="!hasPendingRetry && isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
                 :provider="chat.provider"
                 action-label="Retry"
-                :action-disabled="view.isStreaming"
+                :action-disabled="view.isStreaming || !recoveryForError(i)"
                 :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
@@ -504,6 +508,12 @@
       </template>
       </template>
 
+      <div v-if="store.unknownRecoveryOutcomes[chat.chat_id] || store.recoveryOutcomeStorageUnavailable" class="message-wrap" role="alert">
+        The recovery outcome is unknown. It may already be scheduled or have run. Check its status and reconcile the chat before trying again.
+        <button type="button" class="retry-btn" @click="checkUnknownRecovery">Check recovery status</button>
+        <button type="button" class="retry-btn" @click="stopObservedRecovery">Stop observed recovery</button>
+        <button v-if="!store.recoveryOutcomeStorageUnavailable" type="button" class="retry-btn" @click="acknowledgeUnknownRecovery">I checked the chat</button>
+      </div>
       <!-- The stored reason does not prove that a transcript error owns this schedule. -->
       <div v-if="retryPending && chat.retry" class="message-wrap injected-prompt-wrap">
         <InjectedPromptCard
@@ -517,6 +527,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :recovery-ready="!!readyRecovery && readyRecovery.chatId === chat.chat_id && readyRecovery.failureId === chat.failure_id && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[chat.chat_id]"
               :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
@@ -1181,19 +1192,11 @@
                 @select="selectModel"
                 @close="showModelPicker = false"
               >
-                <!-- Recovery only. Here a pick is not a model change but a
-                     retry of the turn that failed, so the picker says so
-                     before the user chooses. The thinking chips below it are
-                     the current model's set: a pick applies and retries in
-                     one go, so there is no moment where the chips could
-                     follow a model the user has not chosen yet. The note
-                     says so, and a staged level the chosen model does not
-                     offer is dropped when the pick is applied. -->
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
-                    <p :id="domId('model-picker-recovery-title')" class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p :id="domId('model-picker-recovery-title')" class="model-picker-recovery__title">Continue with the current model</p>
                     <p :id="domId('model-picker-recovery-note')" class="model-picker-recovery__note">
-                      Choosing a model retries the failed request and may incur usage charges. A Thinking level you pick here applies to that retry, within the levels the current model offers.
+                      Choose the current model to send “continue”; this may incur usage charges. Model and Thinking changes are unavailable during recovery.
                     </p>
                   </div>
                 </template>
@@ -1210,7 +1213,8 @@
                         type="button"
                         class="thinking-chip"
                         :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
-                        :aria-pressed="thinkingChipLevel === level"
+                         :aria-pressed="thinkingChipLevel === level"
+                         :disabled="isRecoveryPicker"
                         @click="selectThinking(level)"
                       >
                         {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
@@ -1346,6 +1350,15 @@
           </button>
         </div>
       </section>
+      <ChatMcpConnections
+        v-if="!chat.archived && chatMcpProvider"
+        :chat-id="chat.chat_id"
+        :provider="chatMcpProvider"
+        :controller="chatMcp"
+        :prioritize-heading="mcpHeadingPriority"
+        @settings="openMcpSettings"
+      />
+      <p v-if="mcpSettingsError" role="alert">{{ mcpSettingsError }}</p>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1466,6 +1479,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
@@ -1486,7 +1500,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1497,7 +1511,9 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
+import { useChatMcpConnections } from '../composables/useChatMcpConnections'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import ChatMcpConnections from './ChatMcpConnections.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1794,6 +1810,34 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
+const router = useRouter()
+const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
+  const provider = chat.value?.provider
+  return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
+})
+const chatMcp = useChatMcpConnections({
+  workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
+  provider: () => chat.value?.provider ?? '',
+  chatId: () => chat.value?.chat_id ?? '',
+  actions: () => store.chatActions[chat.value?.chat_id ?? ''] ?? [],
+  archived: () => !!chat.value?.archived,
+})
+const mcpSettingsError = ref('')
+async function openMcpSettings() {
+  const workspace = store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace
+  const provider = chatMcpProvider.value
+  if (!workspace || !provider || !router) {
+    mcpSettingsError.value = 'This chat’s workspace or CLI could not be resolved.'
+    return
+  }
+  mcpSettingsError.value = ''
+  try {
+    const failure = await router.push({ path: '/settings/mcp', query: { workspace, provider } })
+    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) throw failure
+  } catch {
+    mcpSettingsError.value = 'Could not open this chat’s MCP settings.'
+  }
+}
 
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
 const titleRailOn = computed(() => titleRail.items.value.length > 1)
@@ -2308,12 +2352,19 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context' | 'repo'
+type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
+const mcpHeadingPriority = ref(false)
+let mcpHeadingEpoch = 0
+function clearMcpHeadingPriority() {
+  mcpHeadingEpoch++
+  mcpHeadingPriority.value = false
+}
 const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
+  if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
   return railHideButton.value
 })
 // Bumped when a caller points at the agent context, so its Always loaded
@@ -2321,6 +2372,8 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
 const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
+  mcpHeadingEpoch++
+  mcpHeadingPriority.value = target === 'mcp'
   // The rail may not be mounted yet (narrow drawer, or a wide rail that
   // starts closed), and its watch is lazy: bump the key once it exists.
   const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
@@ -2337,11 +2390,17 @@ function showDetails(target: DetailsTarget = 'close') {
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
-    el?.focus()
-    if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
+    el?.focus({ preventScroll: target === 'mcp' })
+    if (el && target === 'mcp' && railEl.value) {
+      const rail = railEl.value
+      const header = rail.querySelector<HTMLElement>('.chat-rail-head')
+      rail.scrollTo({ top: Math.max(0, rail.scrollTop + el.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
+    } else if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
   })
 }
 function closeDetails() {
+  pendingMcpReveal.value = false
+  clearMcpHeadingPriority()
   if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   // Opened from ⋯: the drawerShown watch below returns focus there instead.
@@ -2360,12 +2419,46 @@ function openProjectKnowledge() {
 }
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
-  onEscape: () => { inspectorOpen.value = false },
+  onEscape: () => { pendingMcpReveal.value = false; clearMcpHeadingPriority(); inspectorOpen.value = false },
 })
+const pendingMcpReveal = ref(false)
+function matchesMcpRoute(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
+  return route.params.chatId === props.chatId && route.query.details === 'mcp'
+}
+function signature(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
+  return `${String(route.params.chatId ?? '')}|${String(route.query.details ?? '')}`
+}
+if (router) {
+  pendingMcpReveal.value = matchesMcpRoute(router.currentRoute.value)
+  const removeAfterEach = router.afterEach((to, from, failure) => {
+    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) return
+    if (!matchesMcpRoute(to)) { pendingMcpReveal.value = false; clearMcpHeadingPriority(); return }
+    if (signature(to) !== signature(from) || to.fullPath === from.fullPath) pendingMcpReveal.value = true
+  })
+  onBeforeUnmount(removeAfterEach)
+}
+watch([pendingMcpReveal, () => view.chat, chatMcpProvider], async ([pending, loaded, provider]) => {
+  if (!pending || !loaded || loaded.chat_id !== props.chatId || !provider || loaded.archived) return
+  showDetails('mcp')
+  const epoch = mcpHeadingEpoch
+  await nextTick()
+  if (!pendingMcpReveal.value) return
+  const heading = railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading')
+  if (!heading) return
+  heading.focus({ preventScroll: true })
+  if (document.activeElement !== heading) return
+  const rail = railEl.value!
+  const header = rail.querySelector<HTMLElement>('.chat-rail-head')
+  rail.scrollTo({ top: Math.max(0, rail.scrollTop + heading.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
+  pendingMcpReveal.value = false
+  await nextTick()
+  if (epoch === mcpHeadingEpoch) clearMcpHeadingPriority()
+}, { immediate: true })
 // Chat details opened from the ⋯ menu return focus to ⋯ however they close (the
 // close button or Escape). Registered after useModalFocus, so this runs after
 // its restore of the opener, which is the menu item that has already gone.
 watch(drawerShown, (open) => {
+  if (!open) clearMcpHeadingPriority()
   if (open || !detailsFromMenu) return
   detailsFromMenu = false
   void nextTick(() => moreMenu.value?.focusTrigger())
@@ -2437,8 +2530,7 @@ type PickerMode = 'normal' | 'recovery'
 
 interface RecoveryContext {
   chatId: string
-  // The error bubble to resend. Null for a deferred retry, which the engine
-  // resumes on its own schedule.
+  failureId: string
   errorIdx: number | null
 }
 
@@ -3907,8 +3999,19 @@ if (typeof document !== 'undefined') {
 //     every chat you tap into, and iOS zooms the page on focus besides.
 const COMPOSER_FOCUS_MIN_WIDTH = 768
 
+// Startup may await slow assets; a newer interaction owns focus from then on.
+const startupFocusEvents = ['pointerdown', 'keydown', 'focusin'] as const
+let startupFocusCancelled = false
+function cancelStartupFocus(): void {
+  startupFocusCancelled = true
+  for (const event of startupFocusEvents) {
+    document.removeEventListener(event, cancelStartupFocus, true)
+  }
+}
+
 function focusComposerOnOpen(): void {
   if (props.inactive) return
+  if (detailsTarget.value === 'mcp' && (railShown.value || drawerShown.value)) return
   if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
   if (questionCardVisible.value || pendingApprovals.value.length) return
   focusComposer()
@@ -3945,6 +4048,9 @@ async function loadModels(): Promise<void> {
 }
 
 onMounted(async () => {
+  for (const event of startupFocusEvents) {
+    document.addEventListener(event, cancelStartupFocus, true)
+  }
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
@@ -3971,11 +4077,15 @@ onMounted(async () => {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       pinToBottom()
     }
-    focusComposerOnOpen()
+    if (!startupFocusCancelled) {
+      cancelStartupFocus()
+      focusComposerOnOpen()
+    }
   })
 })
 
 onBeforeUnmount(() => {
+  cancelStartupFocus()
   composer.persistDraft()
   window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
@@ -4826,6 +4936,81 @@ function hasLaterItem(errorIdx: number): boolean {
 }
 const hasPendingRetry = computed(() => chat.value?.retry?.status === 'pending')
 const retryPending = computed(() => hasPendingRetry.value && !view.isStreaming)
+const readyRecovery = ref<{ chatId: string; failureId: string; rowIndex: number } | null>(null)
+let recoveryReadGeneration = 0
+watch(
+  () => [chat.value?.chat_id, chat.value?.failure_id, view.isStreaming,
+    renderItems.value.map(it => 'msg' in it ? `${it.kind}:${it.msg.i}:${it.msg.content}` : it.kind).join('|')],
+  async () => {
+    const generation = ++recoveryReadGeneration
+    readyRecovery.value = null
+    const chatId = chat.value?.chat_id
+    if (!chatId || view.isStreaming) return
+    const index = renderItems.value.findIndex((_it, i) => isErrorItem(i) && !hasLaterItem(i))
+    const item = renderItems.value[index]
+    if (!item || !('msg' in item) || typeof item.msg.i !== 'number') return
+    const displayed = item.msg
+    const rowIndex = item.msg.i
+    try {
+      const path = `/api/chats/${encodeURIComponent(chatId)}`
+      const before = await api.get<ChatInfo>(path)
+      type Page = { items: ChatMessage[]; total?: number; hasMore?: boolean; nextOffset?: number | null }
+      const history = await api.get<Page | ChatMessage[]>(`${path}/messages?limit=50`)
+      const rows = Array.isArray(history) ? history : [...history.items]
+      if (!Array.isArray(history)) {
+        let page = history
+        let offset = 0
+        while (!rows.some(row => row.role === 'user') && page.hasMore) {
+          if (typeof page.nextOffset !== 'number' || page.nextOffset <= offset) return
+          offset = page.nextOffset
+          page = await api.get<Page>(`${path}/messages?offset=${offset}&limit=50`)
+          if (page.total !== history.total) return
+          rows.unshift(...page.items)
+        }
+      }
+      const after = await api.get<ChatInfo>(path)
+      const last = [...rows].reverse().find(row => !row.tool_name && ['user', 'assistant', 'system'].includes(row.role))
+      const lastUser = [...rows].reverse().find(row => row.role === 'user')
+      if (generation !== recoveryReadGeneration || chat.value?.chat_id !== chatId || view.isStreaming
+          || !before.failure_id || before.failure_id !== after.failure_id || chat.value.failure_id !== after.failure_id || !after.recovery_eligible
+          || before.user_turn_count !== after.user_turn_count || typeof after.user_turn_count !== 'number'
+          || lastUser?.turn_index !== after.user_turn_count - 1
+          || !last || last.i !== displayed.i || last.content.trim() !== displayed.content.trim()
+          || !(last.is_error || (last.role === 'system' && isErrorMsg(last.content)))) return
+      readyRecovery.value = { chatId, failureId: after.failure_id, rowIndex }
+    } catch {
+      // A failed or lagging read cannot establish which failure is displayed.
+    }
+  }, { immediate: true },
+)
+function recoveryForError(errorIdx: number) {
+  const item = renderItems.value[errorIdx]
+  const ready = readyRecovery.value
+  return ready && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[ready.chatId] && item && 'msg' in item && item.msg.i === ready.rowIndex && !hasLaterItem(errorIdx)
+    ? ready : null
+}
+async function checkUnknownRecovery() {
+  const chatId = chat.value.chat_id
+  try {
+    const status = await store.checkRecoveryStatus(chatId)
+    store.pushToast({ chat_id: chatId, title: 'Recovery status', body: `Status: ${status.status}; mode: ${status.mode}; state: ${status.recovery_state || 'not reported'}. Refresh and reconcile the chat before taking further action.` })
+  } catch (e) {
+    store.pushErrorToast('Recovery status unavailable', `Do not retry yet. Refresh and reconcile the chat. ${errorMessage(e)}`)
+  }
+}
+async function acknowledgeUnknownRecovery() {
+  const chatId = chat.value.chat_id
+  if (!await askConfirm('Check the chat history and recovery status first. A continuation may already have run. Clear this warning only after reconciling its effects.', {
+    title: 'Clear recovery warning?', confirmLabel: 'I checked the chat',
+  })) return
+  if (chat.value?.chat_id !== chatId) return
+  try {
+    await store.acknowledgeRecoveryReconciled(chatId)
+    store.pushToast({ chat_id: chatId, title: 'Recovery warning cleared', body: 'Refresh the chat to verify the current failure before continuing.' })
+  } catch (e) {
+    store.pushErrorToast('Recovery is not reconciled', errorMessage(e))
+  }
+}
 // The next row that is not a trace, or -1.
 function nextNonTraceIdx(idx: number): number {
   const items = renderItems.value
@@ -4860,29 +5045,16 @@ function errorHasActions(errorIdx: number, content: string): boolean {
   const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
   return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
 }
-function retryFromError(errorIdx: number) {
-  if (chat.value.archived || hasPendingRetry.value) return
-  const prior = lastUserBefore(errorIdx)
-  if (!prior) return
-  // Build a PreparedMessage so sendMessage sends the prior turn's image
-  // refs alongside the text. We bypass prepareMessage (which would pull
-  // from the live composer) and pass `prepared` to skip the
-  // consumePreparedAttachments drain — a retry must not erase whatever
-  // the user has currently staged for a fresh send.
-  // The turn is tagged as a retry: it is a new turn the user asked to run
-  // again, and the engine records the tag per turn. The tag is the only
-  // thing the client chooses; the text never decides it.
-  return store.sendMessage(
-    chat.value.chat_id,
-    prior.text,
-    {
-      composed: prior.text,
-      imageRefs: prior.images.length ? prior.images : undefined,
-      fileComments: [],
-      chatComments: [],
-      origin: 'retry',
-    },
-  )
+async function retryFromError(errorIdx: number) {
+  const ready = recoveryForError(errorIdx)
+  if (!ready || chat.value.archived || hasPendingRetry.value) return
+  try {
+    await store.continueRecovery(ready.chatId, ready.failureId, true)
+  } catch (e) {
+    store.pushErrorToast('Could not continue', store.unknownRecoveryOutcomes[ready.chatId]
+      ? 'The outcome is unknown. Check recovery status and reconcile the chat; do not retry yet.'
+      : `The failure may have changed or another retry is pending. Inspect the saved schedule. ${errorMessage(e)}`)
+  }
 }
 
 // A known error gets its own fix instead of a diagnosis chat: a usage limit
@@ -4906,13 +5078,14 @@ function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 
 
 // Arm the chat's hourly deferred retry with the turn that hit the limit.
 async function retryHourlyFromError(errorIdx: number) {
-  if (chat.value.archived || hasPendingRetry.value) return
-  const prior = lastUserBefore(errorIdx)
-  if (!prior) return
+  const ready = recoveryForError(errorIdx)
+  if (!ready || chat.value.archived || hasPendingRetry.value) return
   try {
-    await store.setChatRetry(chat.value.chat_id, prior.text, prior.images)
+    await store.continueRecovery(ready.chatId, ready.failureId, false)
   } catch (e) {
-    store.pushErrorToast('Could not schedule the retry', `${(e as Error)?.message || e}`)
+    store.pushErrorToast('Could not schedule the retry', store.unknownRecoveryOutcomes[ready.chatId]
+      ? 'The outcome is unknown. Check recovery status and reconcile the chat; do not retry yet.'
+      : `The failure may have changed or another retry is pending. Inspect the saved schedule. ${errorMessage(e)}`)
   }
 }
 
@@ -4933,12 +5106,69 @@ async function openFixChat(errorIdx: number) {
 
 async function tryRetryNow() {
   if (!chat.value || view.isStreaming) return
-  await store.tryChatRetryNow(chat.value.chat_id)
+  const chatId = chat.value.chat_id
+  if (store.recoveryOutcomeStorageUnavailable || store.unknownRecoveryOutcomes[chatId]) {
+    store.pushErrorToast('Recovery outcome unknown', 'Check recovery status and reconcile the chat; do not retry yet.')
+    return
+  }
+  const ready = readyRecovery.value
+  if (chat.value.retry?.mode === 'continue_recovery') {
+    if (!ready || ready.chatId !== chatId) {
+      store.pushErrorToast('Cannot continue yet', 'Refresh the chat to verify the current failure.')
+      return
+    }
+    try { await store.continueRecovery(chatId, ready.failureId, true) }
+    catch (e) { store.pushErrorToast('Could not continue', errorMessage(e)) }
+    return
+  }
+  const scheduleId = chat.value.retry?.schedule_id
+  if (!scheduleId) {
+    store.pushErrorToast('Cannot run scheduled prompt', 'The saved schedule cannot be verified safely.')
+    return
+  }
+  if (!await askConfirm('This repeats the saved prompt and may repeat actions already performed.', {
+    title: 'Run scheduled prompt?', confirmLabel: 'Run scheduled prompt',
+  })) return
+  if (chat.value?.chat_id !== chatId) return
+  try { await store.tryChatRetryNow(chatId, scheduleId) }
+  catch (e) { store.pushErrorToast('Could not run scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
 }
 
 async function stopRetry() {
   if (!chat.value) return
-  await store.stopChatRetry(chat.value.chat_id)
+  if (chat.value.retry?.mode !== 'continue_recovery') {
+    const chatId = chat.value.chat_id
+    const scheduleId = chat.value.retry?.schedule_id
+    if (!scheduleId) {
+      store.pushErrorToast('Cannot stop scheduled prompt', 'The saved schedule cannot be verified safely.')
+      return
+    }
+    if (!await askConfirm('Stop this scheduled prompt? A replacement schedule will not be stopped.', {
+      title: 'Stop scheduled prompt?', confirmLabel: 'Stop trying',
+    })) return
+    if (chat.value?.chat_id !== chatId) return
+    try { await store.stopChatRetry(chatId, scheduleId) }
+    catch (e) { store.pushErrorToast('Could not stop scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
+    return
+  }
+  await stopObservedRecovery()
+}
+
+async function stopObservedRecovery() {
+  const chatId = chat.value.chat_id
+  try {
+    const status = await store.checkRecoveryStatus(chatId)
+    if (chat.value?.chat_id !== chatId || status.status !== 'pending' || status.mode !== 'continue_recovery' || !status.recovery_id) {
+      throw new Error('The saved recovery changed. Refresh the chat before stopping it.')
+    }
+    const recoveryId = status.recovery_id
+    if (!await askConfirm('Stop the currently observed continuation schedule? An in-flight or replaced recovery cannot be stopped here.', {
+      title: 'Stop continuation?', confirmLabel: 'Stop trying',
+    })) return
+    if (chat.value?.chat_id === chatId) await store.stopRecovery(chatId, recoveryId)
+  } catch (e) {
+    store.pushErrorToast('Could not stop continuation', errorMessage(e))
+  }
 }
 
 // Open the picker for a recovery: the retry card's "Continue with..." or the
@@ -4949,7 +5179,9 @@ function openRecoveryPicker(errorIdx: number | null) {
   if (!chat.value || chat.value.archived) return
   if (errorIdx !== null && hasPendingRetry.value) return
   if (view.isStreaming) return
-  recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
+  const ready = errorIdx === null ? readyRecovery.value : recoveryForError(errorIdx)
+  if (!ready || ready.chatId !== chat.value.chat_id) return
+  recoveryContext.value = { chatId: ready.chatId, failureId: ready.failureId, errorIdx }
   pickerMode.value = 'recovery'
   stagedThinkingLevel.value = null
   showModelPicker.value = true
@@ -5083,11 +5315,7 @@ async function runRecovery(recovery: RecoveryContext) {
   // The user may have moved to another chat while the picker was open: the
   // retry belongs to the chat it was captured in.
   if (chat.value?.chat_id !== recovery.chatId) return
-  if (recovery.errorIdx !== null) {
-    retryFromError(recovery.errorIdx)
-    return
-  }
-  await store.tryChatRetryNow(recovery.chatId)
+  await store.continueRecovery(recovery.chatId, recovery.failureId, true)
 }
 
 async function selectModel(value: string | string[], sectionKey = '') {
@@ -5128,6 +5356,11 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // CLI with its own session, so the new one has never seen this chat.
   const targetRoute = targetBucket
   const currentRoute = activeBucket.value
+  if (recovery && targetRoute !== currentRoute) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot continue with another provider', 'The original provider session is required to continue this failure.')
+    return
+  }
   const updates: {
     provider: ProviderKey
     model: string
@@ -5141,6 +5374,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // when the catalog says that model cannot do it, the retry falls back to
   // the provider default.
   const staged = recovery ? stagedThinkingLevel.value : null
+  if (recovery && (recovery.chatId !== chatId || chat.value.failure_id !== recovery.failureId)) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot continue this failure', 'The failure has changed. Refresh the chat before continuing.')
+    return
+  }
+  if (recovery && (!sameModelAndRoute || staged !== null)) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot change model during recovery', 'Model and thinking changes cannot yet be guarded against a newer turn. Choose the current model to continue.')
+    return
+  }
   if (staged !== null) {
     const providerLevels = modelsResponse.value?.thinking_levels?.[updates.provider]
     const allowed = targetLevels?.length ? targetLevels : providerLevels

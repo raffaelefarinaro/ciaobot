@@ -7,7 +7,7 @@
  * Sign in opens a placeholder tab in the click and sends it to the sign-in page once
  * the engine has the address; step 1 is ticked only once this card opened the page.
  */
-import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import {
   actionCopy,
   chatActionErrorReason,
@@ -21,6 +21,7 @@ import {
 import { isLoopbackPage } from '../../lib/loopback'
 import { useProjectStore } from '../../stores/projects'
 import type { ChatAction } from '../../lib/types'
+import { useMcpAuthStart } from '../../composables/useMcpAuthStart'
 import CallbackPasteField from './CallbackPasteField.vue'
 import HelperTerminalButton from './HelperTerminalButton.vue'
 
@@ -37,34 +38,16 @@ const scopeId = useId()
 const url = computed(() => safeExternalUrl(props.action.params.url))
 const isClaude = computed(() => props.action.params.provider === 'claude')
 const sessionId = computed(() => props.action.params.session_id ?? '')
-/** The tab opened in the Sign in click, waiting for the engine's address. */
-let pendingTab: Window | null = null
-/** The sign-in page was opened from this card, on this device. */
-const opened = ref(false)
-const steps = computed(() => (opened.value ? MCP_AUTH_STEPS : [MCP_AUTH_OPEN_STEP, ...MCP_AUTH_STEPS.slice(1)]))
-
-function closePendingTab(): void {
-  pendingTab?.close()
-  pendingTab = null
-}
-
-/** Send the waiting tab to the sign-in page, once the address is known. */
-function navigatePendingTab(target: string | null): void {
-  if (!pendingTab || !target) return
-  if (!pendingTab.closed) {
-    pendingTab.opener = null
-    pendingTab.location.href = target
-    opened.value = true
-  }
-  pendingTab = null
-}
-
-// Claude's address arrives a poll after the start answers.
-watch(url, target => navigatePendingTab(target))
-watch(() => props.action.state, state => {
-  if (state === 'failed' || state === 'done') closePendingTab()
+const authStart = useMcpAuthStart({
+  chatId: () => props.chatId,
+  provider: () => props.action.params.provider ?? '',
+  server: () => props.action.params.server ?? '',
+  action: () => props.action,
+  onNotice: message => emit('notice', message),
+  onError: message => emit('error', message),
 })
-onBeforeUnmount(closePendingTab)
+const opened = authStart.opened
+const steps = computed(() => opened.value ? MCP_AUTH_STEPS : [MCP_AUTH_OPEN_STEP, ...MCP_AUTH_STEPS.slice(1)])
 
 /** This body's root, so a focus inside it can be seen before it leaves. */
 const bodyEl = ref<HTMLElement | null>(null)
@@ -107,36 +90,13 @@ function onSent(): void {
 }
 
 async function start(): Promise<void> {
-  if (starting.value || turningOff.value) return
+  if (starting.value || authStart.busy.value || turningOff.value) return
   focusCard()
   starting.value = true
   emit('error', '')
   emit('notice', '')
-  // A pop-up opened after an await is blocked, so the placeholder tab opens in the click.
-  closePendingTab()
-  opened.value = false
-  pendingTab = window.open('', '_blank')
-  try {
-    const next = await store.startChatAction(props.chatId, props.action.id)
-    if (next === null) {
-      closePendingTab()
-      emit('notice', 'This card changed on another device. The newer state is shown.')
-    } else if (next.state === 'waiting') {
-      navigatePendingTab(safeExternalUrl(next.params.url))
-      closePendingTab() // no-op after a navigation; closes it for an unsafe or missing URL
-    } else if (next.state !== 'working') {
-      closePendingTab()
-    }
-  } catch (e) {
-    closePendingTab()
-    if (chatActionErrorReason(e) === 'invalid_state') {
-      emit('notice', 'This card changed on another device. The newer state is shown.')
-    } else {
-      emit('error', 'The sign-in could not be started. Try again.')
-    }
-  } finally {
-    starting.value = false
-  }
+  try { await authStart.start(props.action.id) }
+  finally { starting.value = false }
 }
 </script>
 
@@ -155,9 +115,9 @@ async function start(): Promise<void> {
       v-if="action.state === 'open' || action.state === 'failed'"
       type="button"
       class="needs-you-btn needs-you-btn--primary"
-      :disabled="starting"
+      :disabled="starting || authStart.busy.value"
       @click="start"
-    >{{ starting ? 'Starting…' : copy?.primaryLabel }}</button>
+    >{{ starting || authStart.busy.value ? 'Starting…' : copy?.primaryLabel }}</button>
 
     <a
       v-else-if="action.state === 'waiting' && url"
