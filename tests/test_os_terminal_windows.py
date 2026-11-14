@@ -3190,7 +3190,7 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
-    windows = workflow.split("\n  windows:\n", 1)[1]
+    windows = workflow.split("\n  windows-backend:\n", 1)[1].split("\n  windows-web:\n", 1)[0]
     steps = dict(
         re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows)
     )
