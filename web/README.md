@@ -28,6 +28,23 @@ with click, Enter, or Space to inspect the complete scrolling timeline; the
 expanded choice is preserved at turn completion. New activity slides within
 the preview, except when reduced motion is requested.
 
+Failure recovery sends a server-guarded “continue”, not the request or its
+attachments. Controls wait for matching fresh chat metadata and indexed history;
+an unavailable or stale snapshot disables continuation actions but still allows
+the observed schedule to be stopped. A conflicting saved retry is
+shown separately and is never automatically stopped or replaced. An uncertain
+outcome is retained across reloads, requires a disk-backed check of each exact
+server-issued receipt ID and explicit reconciliation, and is never automatically
+resubmitted. The receipt is saved locally before dispatch; a status check cancels
+an issued but unsubmitted request before its marker can be cleared.
+Creating a literal schedule from the sidebar requires the server to atomically
+verify an empty slot; a conflict refreshes the displayed schedule. Running or
+stopping a literal schedule requires confirmation and its observed server
+identity; a conflict refreshes the schedule without acting again. If no identity
+is available, these controls are disabled and it can still run on schedule.
+Recovery rejects model and thinking changes until the server can atomically
+guard them against a newer failure, and rejects provider handovers.
+
 A running background subagent stays visible while its chat is idle. The engine's
 `chat_subagents_ready` count and the `/api/subagents/running` list are separate
 sources and the store never writes one into the other. When the list names a
@@ -64,8 +81,35 @@ The component workshop runs without an engine: `npm run storybook` serves it at
 `http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
 `web/dist/storybook` output. It imports production components and CSS directly,
 starting with TabBar; it does not load the app bootstrap or public assets.
-`npm test` remains the separate application suite. Broader component inventory
-and automated Storybook browser interactions are follow-up work.
+`npm test` remains the separate application suite. Open **Inventory / UI
+inventory** (`inventory--all`) to search the production owner catalogue. Each
+SFC has its own row, including connected compositions, alongside inline and
+shared CSS families. Search intersects with family, coverage and migration
+filters. Direct consumers are production import/include sites; support sources
+may use classes or host a composition without directly importing the owner.
+
+An inventory row is not a story or a migration approval. **Covered** means a
+rendered-state story exists, not that interaction is automatically verified;
+**uncovered** means an implemented state has no story; **unknown** means the
+state or loading fidelity has not been audited; **not applicable** means it is
+known not to apply. Summary categories overlap. Loading notes distinguish the
+actual owner and initial load from failure or stale refresh where known.
+Migration starts unassessed unless an actual decision supports another status.
+Today only the four TabBar states have rendered stories; chat, task and other
+owners remain unassessed or uncovered. Adding an SFC requires a separate
+inventory row (and a rationale for a composition), not a complete story suite.
+
+After `npm run build-storybook`, run this from the repository root to check
+the built index, including the type of each linked story:
+
+```bash
+node --experimental-strip-types --input-type=module -e 'import {readFileSync} from "node:fs"; import assert from "node:assert/strict"; import {inventory} from "./web/src/stories/inventory.ts"; const {entries}=JSON.parse(readFileSync("web/dist/storybook/index.json","utf8")); assert.equal(entries["inventory--all"]?.type,"story"); assert.equal(entries["inventory--all"]?.title,"Inventory/UI inventory"); for(const row of inventory) for(const state of row.states) for(const id of state.storyIds) { assert.equal(entries[id]?.type,"story",`${row.id}/${state.name}: ${id}`); assert.notEqual(id,"inventory--all"); } for(const suffix of ["default","counts","long-labels","narrow-pane"]) assert.equal(entries[`foundation-tab-bar--${suffix}`]?.type,"story");'
+```
+
+The Node tests check data and filters, not Vue interactions or manager links.
+Check filtering, keyboard access, narrow/zoom layouts and story links in both
+the development and built workshop in a browser; record screenshots and network
+evidence with the change. Automated Storybook browser interactions are future work.
 
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 
