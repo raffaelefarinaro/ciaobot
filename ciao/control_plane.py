@@ -25,7 +25,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 from ciao import decision_rules, vault_index
 from ciao.agent_surface import RECALL_CHECK_MAX_REQUEST_BYTES
@@ -248,19 +248,52 @@ class _ManagedRecallRefusal(ControlPlaneError):
     """A fixed, operation-owned policy refusal safe to return to the caller."""
 
 
-async def _cancel_managed_recall_checker(task: asyncio.Task[Any]) -> None:
-    """Cancel and join checker work without letting cleanup errors escape policy handling."""
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise
-    except Exception:
-        # The checker is request-owned and its failure is represented by the
-        # fixed refusal already being handled, never by cleanup diagnostics.
-        pass
+class ManagedRecallAuthorization(Protocol):
+    def is_active(self) -> bool: ...
+    async def wait_invalid(self) -> None: ...
+
+
+async def _settle_managed_recall_tasks(
+    *tasks: asyncio.Task[Any] | None,
+    classified: set[asyncio.Task[Any]] | None = None,
+) -> None:
+    owned = [task for task in tasks if task is not None]
+    requested: set[asyncio.Task[Any]] = set()
+    for task in owned:
+        if not task.done():
+            requested.add(task)
+            task.cancel()
+    if not owned:
+        return
+    joined = asyncio.gather(*owned, return_exceptions=True)
+    pending_cancel = False
+    while True:
+        try:
+            outcomes = await asyncio.shield(joined)
+            break
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                pending_cancel = True
+                continue
+            # A child cancellation is reported by gather as a value.
+            outcomes = await asyncio.shield(joined)
+            break
+    failures = [
+        outcome for task, outcome in zip(owned, outcomes)
+        if isinstance(outcome, BaseException)
+        and task not in (classified or set())
+        and (
+            not isinstance(outcome, asyncio.CancelledError)
+            or task not in requested
+        )
+    ]
+    if pending_cancel:
+        raise asyncio.CancelledError
+    if failures:
+        raise _ManagedRecallRefusal(
+            "unavailable", "The recall check is unavailable."
+        ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2487,27 +2520,55 @@ class CiaoControlPlane:
         base = self._search_key_base()
         return base / ".runtime"
 
-    async def vault_recall_check(self, principal: AgentPrincipal, *, claims_json: str = "") -> dict[str, Any]:
+    async def vault_recall_check(
+        self,
+        principal: AgentPrincipal,
+        *,
+        claims_json: str = "",
+        authorization_factory: Callable[[], ManagedRecallAuthorization | None] | None = None,
+    ) -> dict[str, Any]:
         """Run one bounded recall check for the current foreground provider pass."""
         checker: asyncio.Task[Any] | None = None
+        watcher: asyncio.Task[Any] | None = None
+        issued_refusals: dict[int, tuple[_ManagedRecallRefusal, str, str]] = {}
+
+        def refuse(code: str, message: str) -> NoReturn:
+            error = _ManagedRecallRefusal(code, message)
+            issued_refusals[id(error)] = (error, code, message)
+            raise error from None
         try:
             async with asyncio.timeout(MANAGED_RECALL_OPERATION_TIMEOUT_S):
                 if not MANAGED_RECALL_CHECK_ENABLED:
-                    raise _ManagedRecallRefusal("feature_inactive", "Managed recall checking is inactive.")
+                    refuse("feature_inactive", "Managed recall checking is inactive.")
+                if authorization_factory is None:
+                    refuse(
+                        "unauthorized", "The managed agent session is no longer authorized."
+                    )
+                try:
+                    authorization = authorization_factory()
+                    authorized = authorization is not None and authorization.is_active()
+                except Exception:
+                    refuse(
+                        "unavailable", "The recall check is unavailable."
+                    )
+                if authorization is None or not authorized:
+                    refuse(
+                        "unauthorized", "The managed agent session is no longer authorized."
+                    )
                 try:
                     claims = _parse_managed_recall_claims(claims_json)
                 except (ValueError, TypeError, UnicodeError):
-                    raise _ManagedRecallRefusal(
+                    refuse(
                         "invalid_request", "The recall-check request is invalid."
-                    ) from None
+                    )
                 if not principal.chat_id:
-                    raise _ManagedRecallRefusal("recall_check_not_running", "Recall checking requires a running foreground pass.")
+                    refuse("recall_check_not_running", "Recall checking requires a running foreground pass.")
                 chat = self.pcm.get_chat(principal.chat_id)
                 project = self.pcm.get_project(principal.project_id)
                 stream = self.pcm.get_active_stream(principal.chat_id)
                 settings = getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None)
                 if settings is not True:
-                    raise _ManagedRecallRefusal("verification_disabled", "Vault verification is disabled.")
+                    refuse("verification_disabled", "Vault verification is disabled.")
                 if (
                     chat is None or project is None or chat.chat_id != principal.chat_id
                     or chat.project_id != principal.project_id or project.project_id != principal.project_id
@@ -2517,20 +2578,16 @@ class CiaoControlPlane:
                     or not stream or getattr(stream, "background", False) or stream.done
                     or stream.user_stopped or not stream.turn_task or stream.turn_task.done()
                 ):
-                    raise _ManagedRecallRefusal("recall_check_scope_mismatch", "Recall checking is not available for this pass.")
+                    refuse("recall_check_scope_mismatch", "Recall checking is not available for this pass.")
                 helper = chat.helper if isinstance(chat.helper, dict) else {}
                 if helper.get("kind") in self._ENGINE_HELPER_KINDS:
-                    raise _ManagedRecallRefusal("recall_check_helper_forbidden", "Recall checking is unavailable in helper chats.")
+                    refuse("recall_check_helper_forbidden", "Recall checking is unavailable in helper chats.")
                 running = getattr(stream, "running_turn_index", None)
                 driver = self.pcm._streaming.drive_task(principal.chat_id, stream)
                 if running is None or driver is None or driver.done():
-                    raise _ManagedRecallRefusal("recall_check_not_running", "Recall checking requires a running foreground pass.")
-                if not claims:
-                    return _ok({"status": "not_applicable", "claims": [], "coverage": {"truncated": False, "omitted_sources": []}})
-                if stream.turn_task in self._managed_recall_attempts:
-                    raise _ManagedRecallRefusal("recall_check_budget_exhausted", "This provider pass already used its recall-check attempt.")
-                # Reserve synchronously before any checker work can be scheduled.
-                self._managed_recall_attempts.add(stream.turn_task)
+                    refuse("recall_check_not_running", "Recall checking requires a running foreground pass.")
+                if claims and stream.turn_task in self._managed_recall_attempts:
+                    refuse("recall_check_budget_exhausted", "This provider pass already used its recall-check attempt.")
                 from ciao.insights import resolve_helper_model
                 from ciao.vault_verification import verify_recall_claims
                 provider = chat.provider
@@ -2541,7 +2598,7 @@ class CiaoControlPlane:
                 cwd = self.pcm._agent_root_for_chat(principal.chat_id)
                 snapshot = _ManagedRecallSnapshot(
                     str(principal.token_id), str(principal.chat_id), str(principal.project_id),
-                    str(principal.workspace), str(principal.provider), str(model), int(running),
+                    str(principal.workspace), str(principal.provider), str(model), int(cast(int, running)),
                     str(project.workspace), str(getattr(project, "kind", "")),
                     str(helper.get("kind") or ""), chat, project, stream,
                     stream.turn_task, driver, str(helper_model), Path(root), Path(cwd),
@@ -2565,115 +2622,212 @@ class CiaoControlPlane:
                     or snapshot.stream.running_turn_index != snapshot.turn_index
                     or getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None) is not True
                 ):
-                    raise _ManagedRecallRefusal("recall_check_stale", "The current pass changed before checking began.")
-                checker = asyncio.create_task(
-                    verify_recall_claims(
-                        claims, vault_root=snapshot.vault_root, model=snapshot.helper_model,
-                        provider=snapshot.provider, cwd=snapshot.cwd,
+                    refuse("recall_check_stale", "The current pass changed before checking began.")
+                if claims:
+                    # Reserve synchronously before any checker work can be scheduled.
+                    self._managed_recall_attempts.add(stream.turn_task)
+                if claims:
+                    assert authorization is not None
+                    if not authorization.is_active():
+                        refuse(
+                            "unauthorized", "The managed agent session is no longer authorized."
+                        )
+
+                    def before_helper() -> None:
+                        if not authorization.is_active():
+                            refuse(
+                                "unauthorized", "The managed agent session is no longer authorized."
+                            )
+
+                    checker = asyncio.create_task(
+                        verify_recall_claims(
+                            claims, vault_root=snapshot.vault_root, model=snapshot.helper_model,
+                            provider=snapshot.provider, cwd=snapshot.cwd,
+                            before_helper=before_helper,
+                        )
                     )
-                )
-                done, _ = await asyncio.wait(
-                    {checker, snapshot.turn_task, snapshot.driver_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if checker not in done or snapshot.turn_task in done or snapshot.driver_task in done:
-                    await _cancel_managed_recall_checker(checker)
-                    checker = None
-                    raise _ManagedRecallRefusal("recall_check_stale", "The current pass ended before checking completed.")
-                result = _json_native_copy(checker.result())
-                if type(result) is not dict or set(result) != {"status", "claims", "coverage"}:
-                    raise ValueError("invalid result")
-                if result["status"] not in {"checked", "not_applicable", "unavailable"}:
-                    raise ValueError("invalid result")
-                if type(result["claims"]) is not list or type(result["coverage"]) is not dict:
-                    raise ValueError("invalid result")
-                if set(result["coverage"]) != {"truncated", "omitted_sources"}:
-                    raise ValueError("invalid result")
-                if type(result["coverage"]["truncated"]) is not bool or type(result["coverage"]["omitted_sources"]) is not list:
-                    raise ValueError("invalid result")
-                if result["status"] == "checked":
-                    if any(
-                        type(row) is not dict or set(row) != {"id", "status", "sources", "reason"}
-                        or type(row["id"]) is not str or len(row["id"]) > 64
-                        or type(row["status"]) is not str
-                        or row["status"] not in {"supported", "contradicted", "insufficient_evidence"}
-                        or type(row["sources"]) is not list or len(row["sources"]) > 6
-                        or any(type(path) is not str or len(path) > 512 for path in row["sources"])
-                        or type(row["reason"]) is not str or len(row["reason"]) > 300
-                        for row in result["claims"]
-                    ):
-                        raise ValueError("invalid result")
-                    if len(result["claims"]) > 12 or len({row["id"] for row in result["claims"]}) != len(result["claims"]):
-                        raise ValueError("invalid result")
-                    from ciao.vault_verification import _validate_recall_source
-                    claims_by_id = {claim.id: set(claim.source_paths) for claim in claims}
-                    if {row["id"] for row in result["claims"]} != set(claims_by_id):
-                        raise ValueError("invalid result")
-                    for row in result["claims"]:
-                        if not row["reason"].strip() or any(
-                            _validate_recall_source(path) not in claims_by_id[row["id"]]
-                            for path in row["sources"]
-                        ):
-                            raise ValueError("invalid result")
-                elif result["claims"]:
-                    raise ValueError("invalid result")
-                if len(result["coverage"]["omitted_sources"]) > 12 * 6 or any(
-                    type(path) is not str or len(path) > 512
-                    for path in result["coverage"]["omitted_sources"]
+                    watcher = asyncio.create_task(authorization.wait_invalid())
+                    assert watcher is not None and checker is not None
+                    done, _ = await asyncio.wait(
+                        {checker, watcher, snapshot.turn_task, snapshot.driver_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not authorization.is_active():
+                        classified: set[asyncio.Task[Any]] = set()
+                        if watcher in done:
+                            try:
+                                watcher.result()
+                            except BaseException:
+                                pass
+                            else:
+                                classified.add(watcher)
+                        if checker in done:
+                            try:
+                                checker.result()
+                            except _ManagedRecallRefusal as child_refusal:
+                                issued = issued_refusals.get(id(child_refusal))
+                                if issued is not None and issued[0] is child_refusal:
+                                    classified.add(checker)
+                            except BaseException:
+                                pass
+                            else:
+                                classified.add(checker)
+                        await _settle_managed_recall_tasks(
+                            checker, watcher, classified=classified,
+                        )
+                        checker = watcher = None
+                        refuse(
+                            "unauthorized", "The managed agent session is no longer authorized."
+                        )
+                    if watcher in done:
+                        try:
+                            watcher.result()
+                        except asyncio.CancelledError:
+                            refuse("unavailable", "The recall check is unavailable.")
+                        refuse("unavailable", "The recall check is unavailable.")
+                    if checker not in done or snapshot.turn_task in done or snapshot.driver_task in done:
+                        await _settle_managed_recall_tasks(checker, watcher)
+                        checker = watcher = None
+                        refuse("recall_check_stale", "The current pass ended before checking completed.")
+                    try:
+                        checker_result = checker.result()
+                    except asyncio.CancelledError:
+                        refuse("unavailable", "The recall check is unavailable.")
+                    candidate = checker_result
+                else:
+                    candidate = {"status": "not_applicable", "claims": [], "coverage": {"truncated": False, "omitted_sources": []}}
+            if checker is not None or watcher is not None:
+                await _settle_managed_recall_tasks(checker, watcher)
+            checker = watcher = None
+            if (
+                not MANAGED_RECALL_CHECK_ENABLED
+                or str(principal.token_id) != snapshot.token_id
+                or str(principal.chat_id) != snapshot.chat_id
+                or str(principal.project_id) != snapshot.project_id
+                or str(principal.workspace) != snapshot.workspace
+                or str(principal.provider) != snapshot.provider
+                or self.pcm.get_chat(snapshot.chat_id) is not snapshot.chat
+                or self.pcm.get_project(snapshot.project_id) is not snapshot.project
+                or self.pcm.get_active_stream(snapshot.chat_id) is not snapshot.stream
+                or self.pcm._streaming.drive_task(snapshot.chat_id, snapshot.stream) is not snapshot.driver_task
+                or snapshot.chat.chat_id != snapshot.chat_id
+                or snapshot.chat.project_id != snapshot.project_id
+                or snapshot.chat.provider != snapshot.provider
+                or snapshot.chat.model != snapshot.source_model
+                or snapshot.project.project_id != snapshot.project_id
+                or str(snapshot.project.workspace) != snapshot.project_workspace
+                or str(getattr(snapshot.project, "kind", "")) != snapshot.project_kind
+                or not isinstance(snapshot.chat.helper, dict)
+                or str(snapshot.chat.helper.get("kind") or "") != snapshot.helper_kind
+                or snapshot.stream.turn_task is not snapshot.turn_task or snapshot.turn_task.done()
+                or snapshot.driver_task.done() or snapshot.stream.running_turn_index != snapshot.turn_index
+                or snapshot.stream.done or getattr(snapshot.stream, "background", False)
+                or snapshot.stream.user_stopped
+                or getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None) is not True
+                or resolve_helper_model(
+                    self.config, snapshot.project_workspace, snapshot.provider,
+                    source_model=snapshot.chat.model,
+                ) != snapshot.helper_model
+                or self._vault_root(principal) != snapshot.vault_root
+                or Path(self.pcm._agent_root_for_chat(snapshot.chat_id)) != snapshot.cwd
+            ):
+                refuse("recall_check_stale", "The current pass changed before results were returned.")
+            result = _json_native_copy(candidate)
+            if type(result) is not dict or set(result) != {"status", "claims", "coverage"}:
+                raise ValueError("invalid result")
+            if result["status"] not in {"checked", "not_applicable", "unavailable"}:
+                raise ValueError("invalid result")
+            if type(result["claims"]) is not list or type(result["coverage"]) is not dict:
+                raise ValueError("invalid result")
+            if set(result["coverage"]) != {"truncated", "omitted_sources"}:
+                raise ValueError("invalid result")
+            if type(result["coverage"]["truncated"]) is not bool or type(result["coverage"]["omitted_sources"]) is not list:
+                raise ValueError("invalid result")
+            if result["status"] == "checked":
+                if any(
+                    type(row) is not dict or set(row) != {"id", "status", "sources", "reason"}
+                    or type(row["id"]) is not str or len(row["id"]) > 64
+                    or type(row["status"]) is not str
+                    or row["status"] not in {"supported", "contradicted", "insufficient_evidence"}
+                    or type(row["sources"]) is not list or len(row["sources"]) > 6
+                    or any(type(path) is not str or len(path) > 512 for path in row["sources"])
+                    or type(row["reason"]) is not str or len(row["reason"]) > 300
+                    for row in result["claims"]
                 ):
+                    raise ValueError("invalid result")
+                if len(result["claims"]) > 12 or len({row["id"] for row in result["claims"]}) != len(result["claims"]):
                     raise ValueError("invalid result")
                 from ciao.vault_verification import _validate_recall_source
-                declared_sources = {path for claim in claims for path in claim.source_paths}
-                if any(
-                    _validate_recall_source(path) not in declared_sources
-                    for path in result["coverage"]["omitted_sources"]
-                ):
+                claims_by_id = {claim.id: set(claim.source_paths) for claim in claims}
+                if {row["id"] for row in result["claims"]} != set(claims_by_id):
                     raise ValueError("invalid result")
-                if (
-                    not MANAGED_RECALL_CHECK_ENABLED
-                    or self.pcm.get_chat(snapshot.chat_id) is not snapshot.chat
-                    or self.pcm.get_project(snapshot.project_id) is not snapshot.project
-                    or self.pcm.get_active_stream(snapshot.chat_id) is not snapshot.stream
-                    or self.pcm._streaming.drive_task(snapshot.chat_id, snapshot.stream) is not snapshot.driver_task
-                    or snapshot.chat.chat_id != snapshot.chat_id
-                    or snapshot.chat.project_id != snapshot.project_id
-                    or snapshot.chat.provider != snapshot.provider
-                    or snapshot.chat.model != snapshot.source_model
-                    or snapshot.project.project_id != snapshot.project_id
-                    or str(snapshot.project.workspace) != snapshot.project_workspace
-                    or str(getattr(snapshot.project, "kind", "")) != snapshot.project_kind
-                    or not isinstance(snapshot.chat.helper, dict)
-                    or str(snapshot.chat.helper.get("kind") or "") != snapshot.helper_kind
-                    or snapshot.stream.turn_task is not snapshot.turn_task or snapshot.turn_task.done()
-                    or snapshot.driver_task.done() or snapshot.stream.running_turn_index != snapshot.turn_index
-                    or snapshot.stream.user_stopped
-                    or getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None) is not True
-                    or resolve_helper_model(
-                        self.config, snapshot.project_workspace, snapshot.provider,
-                        source_model=snapshot.chat.model,
-                    ) != snapshot.helper_model
-                    or self._vault_root(principal) != snapshot.vault_root
-                    or Path(self.pcm._agent_root_for_chat(snapshot.chat_id)) != snapshot.cwd
-                ):
-                    raise _ManagedRecallRefusal("recall_check_stale", "The current pass changed before results were returned.")
-                encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8", errors="strict")
-                if len(encoded) > RECALL_CHECK_MAX_REQUEST_BYTES:
-                    raise ValueError("invalid result")
-                return _ok(result)
-        except _ManagedRecallRefusal:
-            raise
+                for row in result["claims"]:
+                    if not row["reason"].strip() or any(
+                        _validate_recall_source(path) not in claims_by_id[row["id"]]
+                        for path in row["sources"]
+                    ):
+                        raise ValueError("invalid result")
+            elif result["claims"]:
+                raise ValueError("invalid result")
+            if len(result["coverage"]["omitted_sources"]) > 12 * 6 or any(
+                type(path) is not str or len(path) > 512
+                for path in result["coverage"]["omitted_sources"]
+            ):
+                raise ValueError("invalid result")
+            from ciao.vault_verification import _validate_recall_source
+            declared_sources = {path for claim in claims for path in claim.source_paths}
+            if any(
+                _validate_recall_source(path) not in declared_sources
+                for path in result["coverage"]["omitted_sources"]
+            ):
+                raise ValueError("invalid result")
+            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8", errors="strict")
+            if len(encoded) > RECALL_CHECK_MAX_REQUEST_BYTES:
+                raise ValueError("invalid result")
+            if not authorization.is_active():
+                refuse(
+                    "unauthorized", "The managed agent session is no longer authorized."
+                )
+            return _ok(result)
+        except _ManagedRecallRefusal as exc:
+            if checker is not None or watcher is not None:
+                try:
+                    await _settle_managed_recall_tasks(checker, watcher)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    refuse("unavailable", "The recall check is unavailable.")
+            trusted = issued_refusals.get(id(exc))
+            if trusted is not None and trusted[0] is exc:
+                refuse(trusted[1], trusted[2])
+            refuse("unavailable", "The recall check is unavailable.")
         except asyncio.CancelledError:
-            if checker is not None:
-                await _cancel_managed_recall_checker(checker)
+            if checker is not None or watcher is not None:
+                try:
+                    await _settle_managed_recall_tasks(checker, watcher)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             raise
         except TimeoutError:
-            if checker is not None:
-                await _cancel_managed_recall_checker(checker)
-            raise _ManagedRecallRefusal("recall_check_timeout", "The recall check timed out.") from None
+            if checker is not None or watcher is not None:
+                try:
+                    await _settle_managed_recall_tasks(checker, watcher)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    refuse("unavailable", "The recall check is unavailable.")
+            refuse("recall_check_timeout", "The recall check timed out.")
         except Exception:
-            if checker is not None:
-                await _cancel_managed_recall_checker(checker)
-            raise _ManagedRecallRefusal("unavailable", "The recall check is unavailable.") from None
+            if checker is not None or watcher is not None:
+                try:
+                    await _settle_managed_recall_tasks(checker, watcher)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    refuse("unavailable", "The recall check is unavailable.")
+            refuse("unavailable", "The recall check is unavailable.")
 
     async def vault_search(self, principal: AgentPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -465,6 +466,7 @@ async def verify_recall_claims(
     model: str,
     provider: str,
     cwd: Path | None,
+    before_helper: Callable[[], None] | None = None,
 ) -> RecallCheckResult:
     from ciao import async_reads
 
@@ -494,6 +496,8 @@ async def verify_recall_claims(
         return {"status": "unavailable", "claims": [], "coverage": coverage}
     prompt = build_recall_check_prompt(snapshot, notes)
     from ciao.providers.oneshot import run_oneshot
+    if before_helper is not None:
+        before_helper()
     try:
         reply = await run_oneshot(
             prompt, system_prompt=_RECALL_SYSTEM_PROMPT, model=model,

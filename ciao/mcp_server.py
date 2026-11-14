@@ -9,6 +9,7 @@ dispatcher needs: the operation table, the bearer-token registry, the
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import inspect
@@ -17,7 +18,7 @@ import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -31,6 +32,7 @@ from ciao.control_plane import (
     AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
+    ManagedRecallAuthorization,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
 from ciao.schedules import DEFAULT_TIMEZONE
@@ -166,8 +168,34 @@ _SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_s
 @dataclass(slots=True)
 class _Session:
     principal: AgentPrincipal
-    token: str
+    token: str = field(repr=False)
     expires_at: int
+
+
+AGENT_SESSION_AUTH_POLL_S = 0.25
+
+
+class _ManagedRecallAuthorization:
+    __slots__ = ("__registry", "__session")
+
+    def __init__(self, registry: AgentSessionRegistry, session: _Session) -> None:
+        self.__registry = registry
+        self.__session = session
+
+    def __repr__(self) -> str:
+        return "<managed recall authorization>"
+
+    def is_active(self) -> bool:
+        with self.__registry._lock:
+            session = self.__session
+            return (
+                self.__registry._by_token.get(session.token) is session
+                and session.expires_at > int(time.time())
+            )
+
+    async def wait_invalid(self) -> None:
+        while self.is_active():
+            await asyncio.sleep(AGENT_SESSION_AUTH_POLL_S)
 
 
 class AgentSessionRegistry:
@@ -234,7 +262,9 @@ class AgentSessionRegistry:
             item = self._by_token.pop(token, None)
             if item is None:
                 return False
-            self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
+            key = (item.principal.chat_id, item.principal.provider)
+            if self._by_key.get(key) == token:
+                self._by_key.pop(key, None)
             return True
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -254,6 +284,21 @@ class AgentSessionRegistry:
                 subject=item.principal.chat_id,
                 claims=item.principal.to_claims(),
             )
+
+    def live_authorization(
+        self, access: AccessToken | None, principal: AgentPrincipal
+    ) -> ManagedRecallAuthorization | None:
+        if access is None or "ciaobot" not in (access.scopes or []):
+            return None
+        with self._lock:
+            session = self._by_token.get(access.token)
+            if (
+                session is None
+                or session.principal != principal
+                or session.expires_at <= int(time.time())
+            ):
+                return None
+            return _ManagedRecallAuthorization(self, session)
 
     def status(self) -> dict[str, Any]:
         now = int(time.time())
@@ -392,7 +437,13 @@ async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "")
     """Check selected factual claims against bounded vault evidence."""
     return await service._invoke(
         "vault_recall_check",
-        lambda cp, p: cp.vault_recall_check(p, claims_json=claims_json),
+        lambda cp, p: cp.vault_recall_check(
+            p,
+            claims_json=claims_json,
+            authorization_factory=lambda: service.registry.live_authorization(
+                get_access_token(), p
+            ),
+        ),
         mutating=False,
     )
 
