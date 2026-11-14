@@ -219,7 +219,7 @@ final class ConnectionRememberingTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        suiteName = "CiaobotMacTests.ConnectionRemembering.\(UUID().uuidString)"
+        suiteName = IsolatedDefaults.makeName("ConnectionRemembering")
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
         store = UserDefaultsLastServerStore(defaults: defaults)
@@ -229,7 +229,7 @@ final class ConnectionRememberingTests: XCTestCase {
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
+        IsolatedDefaults.remove(suiteName)
         defaults = nil
         store = nil
         hostStore = nil
