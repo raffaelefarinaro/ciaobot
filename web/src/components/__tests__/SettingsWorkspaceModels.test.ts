@@ -165,6 +165,28 @@ describe('SettingsWorkspaceModels', () => {
     expect(form().provider_overrides).toEqual({})
   })
 
+  it.each([0, 1])('rejects picker %i callback from before a provider round trip', async (index) => {
+    const view = await mountCard()
+    const picker = view.findAllComponents(ModelSelector)[index]
+    const oldCallback = picker.vm.$.vnode.props!['onUpdate:modelValue'] as (value: string) => void
+    form().default_provider = 'opencode'
+    await nextTick()
+    form().default_provider = 'claude'
+    await nextTick()
+    oldCallback('sonnet')
+    expect(form().provider_overrides).toEqual({})
+  })
+
+  it.each([0, 1])('rejects picker %i callback after a synchronous provider round trip', async (index) => {
+    const view = await mountCard()
+    const picker = view.findAllComponents(ModelSelector)[index]
+    const oldCallback = picker.vm.$.vnode.props!['onUpdate:modelValue'] as (value: string) => void
+    form().default_provider = 'opencode'
+    form().default_provider = 'claude'
+    oldCallback('sonnet')
+    expect(form().provider_overrides).toEqual({})
+  })
+
   it('announces loading, unavailable workspace, and switch loading distinctly', async () => {
     const { api } = await import('../../lib/api')
     const pending: ((value: unknown) => void)[] = []

@@ -34,7 +34,7 @@
         <span :id="`workspace-model-${form.name}`" class="ws-label set-subrow-label">Default model</span>
         <div class="set-subrow-control">
           <ModelSelector
-            :key="`${generation}:${provider}`"
+            :key="`${generation}:${providerGeneration}`"
             :model-value="override('model') || WS_DEFAULT"
             :sections="modelSections"
             :labelled-by="`workspace-model-${form.name}`"
@@ -93,7 +93,7 @@
         >Session insights</span>
         <div class="set-subrow-control">
           <ModelSelector
-            :key="`${generation}:${provider}`"
+            :key="`${generation}:${providerGeneration}`"
             :model-value="override('insights_model') || WS_DEFAULT"
             :sections="insightsSections"
             :labelled-by="`workspace-insights-model-${form.name}`"
@@ -174,6 +174,8 @@ const providerEls = ref<HTMLButtonElement[]>([])
 const choices = useProviderChoices({ routines, workspaceModels: models })
 
 const provider = computed<WorkspaceProvider>(() => form.value?.default_provider ?? 'claude')
+const providerGeneration = ref(0)
+watch(provider, () => { providerGeneration.value++ }, { flush: 'sync' })
 const saving = computed(() => !!form.value && workspacesSaving.value === form.value.name)
 const reportedModels = computed(() => provider.value === 'opencode'
   ? models.value?.opencode_models?.length ? models.value.opencode_models : models.value?.provider_models?.opencode || []
@@ -198,9 +200,10 @@ function setField(field: ProviderOverrideField, raw: string | string[], sentinel
 function selection(field: ProviderOverrideField) {
   const name = form.value?.name
   const current = generation.value
+  const currentProviderGeneration = providerGeneration.value
   const selectedProvider = provider.value
   return (value: string | string[]) => {
-    if (generation.value === current && form.value?.name === name && provider.value === selectedProvider && models.value && providerAvailable.value) {
+    if (generation.value === current && providerGeneration.value === currentProviderGeneration && form.value?.name === name && provider.value === selectedProvider && models.value && providerAvailable.value) {
       setField(field, value, true)
     }
   }
