@@ -29,6 +29,319 @@ from ciao.web.routes_api import (
 from ciao.os_support.private import is_private
 
 
+@pytest.fixture(autouse=True)
+def _stub_auth_list(monkeypatch):
+    monkeypatch.setattr("ciao.providers.opencode.bounded_output", lambda *a, **k: (0, b"[]"))
+
+
+def test_settings_and_verify_expose_safe_opencode_inventory(tmp_path, monkeypatch):
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from types import SimpleNamespace
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {
+        "connections": {"opencode": {"ready": True}, "claude": {"ready": False}}
+    })
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: "fake")
+    rows = [{"id": "ollama", "name": "Ollama", "connections": [
+        {"type": "credential", "method": "key", "token": "hidden-sentinel"}]}]
+    calls = []
+    monkeypatch.setattr("ciao.providers.opencode.bounded_output",
+                        lambda *a, **k: (calls.append(1) or (0, json.dumps(rows).encode())))
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/settings/providers", routes_api.provider_config_settings),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = SimpleNamespace(workspace_root=tmp_path, state_path=tmp_path / "state.json")
+    client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
+    path = "/api/settings/providers"
+    assert client.get(path).status_code == 401
+    assert client.post(path + "/opencode/verify", headers={"Origin": "http://localhost:8443"}).status_code == 401
+    assert calls == []
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    get = client.get(path, headers=headers)
+    verify = client.post(path + "/opencode/verify", headers=headers)
+    assert get.status_code == verify.status_code == 200
+    assert get.headers["cache-control"] == verify.headers["cache-control"] == "no-store"
+    assert get.json()["connections"]["claude"] == {"ready": False}
+    inventory = get.json()["connections"]["opencode"]["credential_inventory"]
+    assert inventory == verify.json()["credential_inventory"]
+    assert inventory["providers"][0]["auth_types"] == ["api_key"]
+    assert "hidden-sentinel" not in get.text + verify.text
+    assert len(calls) == 2
+
+
+def test_verify_inventory_is_fresh_during_older_inflight_get(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def collector(*args, **kwargs):
+        number = len(calls)
+        calls.append(number)
+        if number == 0:
+            entered.set()
+            assert release.wait(5)
+        name = "old" if number == 0 else "new"
+        return 0, json.dumps([{"id": name, "name": name, "connections": [{"type": "env"}]}]).encode()
+
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr("ciao.providers.opencode.bounded_output", collector)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/settings/providers", routes_api.provider_config_settings),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = SimpleNamespace(workspace_root=tmp_path, state_path=tmp_path / "state.json")
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    path = "/api/settings/providers"
+    responses = []
+    errors = []
+
+    def old_get():
+        try:
+            with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+                responses.append(client.get(path, headers=headers))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=old_get)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+            verify = client.post(path + "/opencode/verify", headers=headers)
+            release.set()
+            thread.join(5)
+            fresh = client.get(path, headers=headers)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert responses[0].json()["connections"]["opencode"]["credential_inventory"]["providers"][0]["id"] == "old"
+    assert verify.json()["credential_inventory"]["providers"][0]["id"] == "new"
+    assert fresh.json()["connections"]["opencode"]["credential_inventory"]["providers"][0]["id"] == "new"
+
+
+def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+    import ciao.providers.opencode as mod
+
+    roots = [tmp_path / "default", tmp_path / "named"]
+    versions = {root: "old" for root in roots}
+    counts = {root: 0 for root in roots}
+
+    class Server:
+        def __init__(self, root):
+            self.root = root
+            assert root in roots
+
+        async def __aenter__(self):
+            counts[self.root] += 1
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, path):
+            assert path == "/api/model"
+            model = f"{self.root.name}-{versions[self.root]}"
+            return SimpleNamespace(
+                status_code=200, raise_for_status=lambda: None,
+                json=lambda: {"data": [{"providerID": "opencode", "modelID": model,
+                                         "name": model, "enabled": True, "variants": []}]},
+            )
+
+    config = SimpleNamespace(
+        workspace_root=roots[0], state_path=tmp_path / "state.json",
+        workspace=lambda name: object() if name == "named" else None,
+        agent_root=lambda name: roots[1],
+        default_model_for_provider=lambda provider: "",
+        claude_default_model="",
+    )
+    monkeypatch.setattr(mod, "_EphemeralServer", Server)
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
+    monkeypatch.setattr(mod, "opencode_credential_inventory", lambda: {"status": "complete", "providers": []})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/models", routes_api.list_models),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = config
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    urls = ["/api/models", "/api/models?workspace=named"]
+    mod.invalidate_opencode_model_cache()
+    try:
+        with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+            for url, root in zip(urls, roots):
+                body = client.get(url, headers=headers).json()
+                assert body["provider_models"]["opencode"] == [f"opencode/{root.name}-old"]
+            for root in roots:
+                versions[root] = "new"
+            assert client.post("/api/settings/providers/opencode/verify", headers=headers).status_code == 200
+            for url, root in zip(urls, roots):
+                body = client.get(url, headers=headers).json()
+                expected = [f"opencode/{root.name}-new"]
+                assert body["provider_models"]["opencode"] == expected
+                assert body["opencode_models"] == expected
+        assert counts == {roots[0]: 2, roots[1]: 2}
+    finally:
+        mod.invalidate_opencode_model_cache()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("error_type,classification", [(ValueError, "unexpected"), (TimeoutError, "timeout")])
+@pytest.mark.parametrize("mode", ["catalog", "chat"])
+def test_startup_exception_chain_never_leaks_in_response_or_logs(
+    tmp_path, monkeypatch, caplog, cleanup_fails, error_type, classification, mode
+):
+    import logging
+    import socket
+    import threading
+    import time
+    from types import SimpleNamespace
+    import httpx
+    import uvicorn
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+    import ciao.providers.opencode as mod
+
+    raw_startup = error_type("startup-secret-sentinel")
+    raw_cleanup = OSError("cleanup-secret-sentinel")
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if cleanup_fails:
+                raise raw_cleanup
+
+        def kill_checked(self):
+            if cleanup_fails:
+                raise raw_cleanup
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            raise raw_startup
+
+        async def aclose(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    async def health(self):
+        raise raw_startup
+
+    class ChatRequest:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def chat_start(request):
+        from starlette.responses import JSONResponse
+        await mod.OpencodeProvider(tmp_path)._ensure_server_locked(ChatRequest())
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(mod.OpencodeProvider, "_await_health", health)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[Route("/api/models", routes_api.list_models),
+                            Route("/api/test-chat-start", chat_start)],
+                    middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = SimpleNamespace(workspace_root=tmp_path)
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}"}
+    mod.invalidate_opencode_model_cache()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_config=None, lifespan="off"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]})
+    caplog.set_level(logging.ERROR, logger="uvicorn.error")
+    try:
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline
+            time.sleep(0.01)
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
+            expected_errors = ("cleanup failed", "quarantined") if cleanup_fails else ("startup failed", "startup failed")
+            for index, expected in enumerate(expected_errors):
+                response = client.get("/api/models" if mode == "catalog" else "/api/test-chat-start", headers=headers)
+                assert response.status_code == 500
+                assert b"startup-secret-sentinel" not in response.content
+                assert b"cleanup-secret-sentinel" not in response.content
+                deadline = time.monotonic() + 5
+                while True:
+                    records = [r for r in caplog.records if r.name == "uvicorn.error" and r.exc_info]
+                    if len(records) > index and expected in str(records[-1].exc_info[1]):
+                        break
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+                pending = [records[-1].exc_info[1]]
+                seen = set()
+                while pending:
+                    exc = pending.pop()
+                    if id(exc) in seen:
+                        continue
+                    seen.add(id(exc))
+                    assert exc is not raw_startup and exc is not raw_cleanup
+                    assert "startup-secret-sentinel" not in str(exc)
+                    assert "cleanup-secret-sentinel" not in str(exc)
+                    pending.extend(item for item in (exc.__cause__, exc.__context__) if item is not None)
+                    if isinstance(exc, BaseExceptionGroup):
+                        pending.extend(exc.exceptions)
+                if expected == "cleanup failed":
+                    assert classification in str(records[-1].exc_info[1])
+        assert "startup-secret-sentinel" not in caplog.text
+        assert "cleanup-secret-sentinel" not in caplog.text
+    finally:
+        server.should_exit = True
+        thread.join(5)
+        sock.close()
+        assert not thread.is_alive()
+        mod.invalidate_opencode_model_cache()
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
 def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
     """The workspace-policy part of a denylist, without the credential denies.
 

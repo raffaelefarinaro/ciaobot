@@ -69,6 +69,1901 @@ def _stub_auth_list(monkeypatch):
     monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, b"[]"))
 
 
+def test_safe_credential_inventory_projection(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    rows = [
+        {"id": "ollama", "name": "Ollama", "connections": [
+            {"type": "credential", "method": "key", "token": "SECRET"},
+            {"type": "env", "name": "SECRET"},
+        ]},
+        {"id": "custom", "name": " Custom ", "connections": [
+            {"type": "credential", "method": "oauth"},
+            {"type": "credential", "method": "oauth"},
+        ]},
+    ]
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, json.dumps(rows).encode()))
+    assert mod.opencode_credential_inventory() == {
+        "status": "complete",
+        "providers": [
+            {"id": "custom", "name": "Custom", "auth_types": ["oauth"], "configured": True, "verified": None},
+            {"id": "ollama", "name": "Ollama", "auth_types": ["api_key", "environment"], "configured": True, "verified": None},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_error_has_no_exception_chain(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    class Process:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    class Tree:
+        def close_checked(self):
+            raise OSError("cleanup-secret")
+
+        def detach_job_handle(self):
+            return None
+
+    server = mod._EphemeralServer(tmp_path)
+
+    async def fail():
+        server._process, server._tree = Process(), Tree()
+        raise ValueError("startup-secret")
+
+    monkeypatch.setattr(server, "_enter_unlocked", fail)
+    with pytest.raises(mod.SanitizedStartupError) as error:
+        await server.__aenter__()
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert str(error.value) == "OpenCode startup cleanup failed (unexpected)"
+    with mod._SERVER_START_GUARD:
+        mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["chat", "ephemeral"])
+@pytest.mark.parametrize("error_type,classification", [(ValueError, "unexpected"), (TimeoutError, "timeout")])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_successful_cleanup_sanitizes_startup_exception(
+    monkeypatch, tmp_path, mode, error_type, classification, cleanup_fails
+):
+    import ciao.providers.opencode as mod
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if cleanup_fails:
+                raise OSError("cleanup-private-sentinel")
+
+        def kill_checked(self):
+            if cleanup_fails:
+                raise OSError("cleanup-private-sentinel")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            raise error_type("startup-private-sentinel")
+
+        async def aclose(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    async def health(self):
+        raise error_type("startup-private-sentinel")
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", health)
+    try:
+        with pytest.raises(mod.SanitizedStartupError, match="OpenCode startup") as error:
+            if mode == "chat":
+                await OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+            else:
+                await mod._EphemeralServer(tmp_path).__aenter__()
+        assert error.value.__context__ is None and error.value.__cause__ is None
+        assert error.value.classification == classification
+        if cleanup_fails:
+            assert f"({classification})" in str(error.value)
+        assert "startup-private-sentinel" not in str(error.value)
+        assert "cleanup-private-sentinel" not in str(error.value)
+        assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is cleanup_fails
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["spawn", "resolve"])
+async def test_chat_spawn_exception_is_sanitized(monkeypatch, tmp_path, boundary):
+    import ciao.providers.opencode as mod
+
+    async def spawn(*args, **kwargs):
+        raise OSError("spawn-private-sentinel")
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    def resolve(*args):
+        if boundary == "resolve":
+            raise OSError("spawn-private-sentinel")
+        return "fake"
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", resolve)
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    with pytest.raises(mod.SanitizedStartupError) as error:
+        await OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+    assert error.value.__context__ is None and error.value.__cause__ is None
+    assert "spawn-private-sentinel" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,classification", [
+    ("timeout", "timeout"), ("exited", "exited"),
+    ("json", "invalid_response"), ("version", "incompatible_version"),
+])
+async def test_ephemeral_none_cleanup_failure_keeps_safe_classification(
+    monkeypatch, tmp_path, outcome, classification
+):
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    class Process:
+        returncode = 1 if outcome == "exited" else None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            raise OSError("cleanup-private-sentinel")
+
+        def kill_checked(self):
+            raise OSError("cleanup-private-sentinel")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            def payload():
+                if outcome == "json":
+                    raise ValueError("json-private-sentinel")
+                return {"version": "private-version-sentinel"}
+            return SimpleNamespace(status_code=200, json=payload)
+
+        async def aclose(self):
+            if outcome == "exited":
+                raise OSError("cleanup-private-sentinel")
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    if outcome == "timeout":
+        monkeypatch.setattr(mod, "_SERVER_START_TIMEOUT", 0)
+    try:
+        with pytest.raises(mod.SanitizedStartupError) as error:
+            await mod._EphemeralServer(tmp_path).__aenter__()
+        assert error.value.classification == classification
+        assert classification in str(error.value)
+        assert error.value.__cause__ is None and error.value.__context__ is None
+        assert "sentinel" not in str(error.value)
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,message", [
+    ("version", "OpenCode 2.0.16 or later is required"),
+    ("operations", "OpenCode API is missing required operations"),
+    ("unauthorized", "OpenCode server authentication failed"),
+])
+async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
+    monkeypatch, tmp_path, outcome, message, caplog
+):
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            pass
+
+        def kill_checked(self):
+            pass
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, path, **kwargs):
+            payload = {"version": "private-version-sentinel"} if outcome == "version" else (
+                {"version": "2.0.16"} if path == "/api/info" else {"paths": {"private-path-sentinel": {}}}
+            )
+            return SimpleNamespace(status_code=401 if outcome == "unauthorized" else 200,
+                                   text="authentication-response-sentinel",
+                                   json=lambda: payload, raise_for_status=lambda: None)
+
+        async def aclose(self):
+            pass
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    with pytest.raises(mod.SanitizedStartupError, match=message) as error:
+        await OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+    assert error.value.__cause__ is None and error.value.__context__ is None
+    assert "sentinel" not in str(error.value)
+    assert "sentinel" not in caplog.text
+    if outcome == "unauthorized":
+        assert error.value.classification == "unauthorized"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["chat", "ephemeral"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_cancellation_during_failed_startup_cleanup_has_no_raw_context(
+    monkeypatch, tmp_path, mode, cleanup_fails, caplog
+):
+    import ciao.providers.opencode as mod
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            entered.set()
+            await release.wait()
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if cleanup_fails:
+                raise OSError("cancel-cleanup-sentinel")
+
+        def kill_checked(self):
+            if cleanup_fails:
+                raise OSError("cancel-cleanup-sentinel")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            raise ValueError("cancel-startup-sentinel")
+
+        async def aclose(self):
+            pass
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    async def health(self):
+        raise ValueError("cancel-startup-sentinel")
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", health)
+    task = asyncio.create_task(
+        OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+        if mode == "chat" else mod._EphemeralServer(tmp_path).__aenter__()
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as error:
+            await task
+        assert error.value.__cause__ is None and error.value.__context__ is None
+        assert "sentinel" not in caplog.text
+        assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is cleanup_fails
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["chat", "ephemeral"])
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_cancellation_during_failing_spawn_has_no_raw_context(monkeypatch, tmp_path, mode, uncertain):
+    import ciao.providers.opencode as mod
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def spawn(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        if uncertain:
+            try:
+                raise OSError("spawn-cancel-secret")
+            except OSError as exc:
+                raise mod._UncertainSpawn() from exc
+        raise OSError("spawn-cancel-secret")
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    task = asyncio.create_task(
+        OpencodeProvider(tmp_path)._ensure_server_locked(Request())
+        if mode == "chat" else mod._EphemeralServer(tmp_path).__aenter__()
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as error:
+            await task
+        assert error.value.__cause__ is None and error.value.__context__ is None
+        assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is uncertain
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+async def test_exited_posix_leader_is_not_signalled(tmp_path):
+    import ciao.providers.opencode as mod
+
+    if mod.sys.platform == "win32":
+        pytest.skip("POSIX-specific behavior")
+
+    class Process:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    class Tree:
+        def terminate(self):
+            pytest.fail("exited leader must not be signalled")
+
+        def kill_checked(self):
+            pytest.fail("exited leader must not be signalled")
+
+        def close_checked(self):
+            pass
+
+    assert not await mod._startup_cleanup(tmp_path, Process(), Tree())
+
+
+@pytest.mark.asyncio
+async def test_posix_missing_leader_requires_confirmed_exit(tmp_path):
+    import ciao.providers.opencode as mod
+    if mod.sys.platform == "win32":
+        pytest.skip("POSIX-specific behavior")
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            raise ProcessLookupError()
+
+        def close_checked(self):
+            pass
+
+    assert not await mod._startup_cleanup(tmp_path, Process(), Tree())
+    assert str(tmp_path.resolve()) not in mod._SERVER_START_LOCKS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["kill", "wait"])
+async def test_posix_kill_and_reap_failure_quarantine(monkeypatch, tmp_path, failure):
+    import ciao.providers.opencode as mod
+    if mod.sys.platform == "win32":
+        pytest.skip("POSIX-specific behavior")
+    monkeypatch.setattr(mod, "_SHUTDOWN_TIMEOUT", 0.01)
+    calls = []
+
+    class Process:
+        returncode = None
+        count = 0
+
+        async def wait(self):
+            self.count += 1
+            if self.count == 1:
+                await asyncio.Event().wait()
+            if failure == "wait":
+                raise OSError("wait-secret")
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+
+        def kill_checked(self):
+            calls.append("kill")
+            if failure == "kill":
+                raise OSError("kill-secret")
+
+        def close_checked(self):
+            calls.append("close")
+
+    try:
+        assert await mod._startup_cleanup(tmp_path, Process(), Tree())
+        assert calls == ["terminate", "kill", "close"]
+        assert mod._SERVER_START_LOCKS[str(tmp_path.resolve())].quarantined
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["terminate", "wait", "client", "reader"])
+async def test_startup_cleanup_failure_quarantines_only_uncertain_tree(tmp_path, failure):
+    import ciao.providers.opencode as mod
+
+    if mod.sys.platform == "win32":
+        pytest.skip("POSIX termination behavior")
+    calls = []
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            calls.append("wait")
+            if failure == "wait":
+                raise OSError("wait-secret")
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+            if failure == "terminate":
+                raise OSError("terminate-secret")
+
+        def close_checked(self):
+            calls.append("close")
+
+    class Client:
+        async def aclose(self):
+            calls.append("client")
+            if failure == "client":
+                raise OSError("client-secret")
+
+    async def reader():
+        raise ValueError("reader-secret")
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0)
+    if failure != "reader":
+        # A completed reader without an error does not fail cleanup.
+        async def good():
+            return None
+        await asyncio.gather(task, return_exceptions=True)
+        task = asyncio.create_task(good())
+        await task
+    try:
+        assert await mod._startup_cleanup(tmp_path, Process(), Tree(), Client(), task)
+        assert {"client", "terminate", "wait", "close"} <= set(calls)
+        with mod._SERVER_START_GUARD:
+            state = mod._SERVER_START_LOCKS.get(str(tmp_path.resolve()))
+        assert (state is not None and state.quarantined) == (failure in {"terminate", "wait"})
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+async def test_windows_checked_failure_retains_job_handle(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    calls = []
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform="win32"))
+
+    class Process:
+        returncode = 0
+
+        async def wait(self):
+            calls.append("wait")
+            return 0
+
+    class Tree:
+        def kill_checked(self):
+            calls.append("kill")
+            raise OSError("kill-secret")
+
+        def close_checked(self):
+            calls.append("close")
+            raise OSError("close-secret")
+
+        def detach_job_handle(self):
+            calls.append("detach")
+            return 123456
+
+    try:
+        assert await mod._startup_cleanup(tmp_path, Process(), Tree())
+        assert calls == ["kill", "wait", "close", "detach"]
+        with mod._SERVER_START_GUARD:
+            state = mod._SERVER_START_LOCKS[str(tmp_path.resolve())]
+            assert state.quarantined and state.retained_job_handles == [123456]
+        with pytest.raises(mod.SanitizedStartupError, match="quarantined"):
+            async with mod._server_start_lock(tmp_path):
+                pytest.fail("quarantined root entered")
+        async with mod._server_start_lock(tmp_path / "different"):
+            pass
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["reader", "client"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_path, failure, cleanup_fails):
+    import ciao.providers.opencode as mod
+
+    calls = []
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            calls.append("wait")
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+            if cleanup_fails:
+                raise OSError("cleanup-sentinel")
+
+        def kill_checked(self):
+            calls.append("kill")
+            if cleanup_fails:
+                raise OSError("cleanup-sentinel")
+
+        def close_checked(self):
+            calls.append("close")
+
+    class Client:
+        def __init__(self, **kwargs):
+            if failure == "client":
+                raise ValueError("constructor failed")
+
+        async def aclose(self):
+            calls.append("client-close")
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    def reader(self):
+        if failure == "reader":
+            raise ValueError("reader failed")
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_start_stderr_reader", reader)
+    provider = OpencodeProvider(tmp_path)
+    try:
+        with pytest.raises(mod.SanitizedStartupError, match="failed") as error:
+            await provider._ensure_server_locked(Request())
+        assert "wait" in calls and "close" in calls
+        assert ("kill" if mod.sys.platform == "win32" else "terminate") in calls
+        assert provider._process is None and provider._tree is None
+        assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is cleanup_fails
+        if cleanup_fails:
+            assert error.value.__cause__ is None and error.value.__context__ is None
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+async def test_global_model_invalidation_refreshes_every_workspace(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    mod.invalidate_opencode_model_cache()
+    counts = {}
+
+    async def fetch(cls, root):
+        counts[root] = counts.get(root, 0) + 1
+        return [] if root.name == "empty" else [{"id": str(counts[root])}]
+
+    monkeypatch.setattr(mod.OpencodeProvider, "_fetch_model_catalog", classmethod(fetch))
+    roots = [tmp_path / "empty", tmp_path / "other"]
+    try:
+        for root in roots:
+            await mod.OpencodeProvider.model_catalog(root)
+            await mod.OpencodeProvider.model_catalog(root)
+        assert list(counts.values()) == [1, 1]
+        mod.invalidate_opencode_model_cache()
+        for root in roots:
+            await mod.OpencodeProvider.model_catalog(root)
+        assert list(counts.values()) == [2, 2]
+    finally:
+        mod.invalidate_opencode_model_cache()
+
+
+@pytest.mark.parametrize("same_root", [False, True])
+def test_cross_loop_catalog_invalidation(monkeypatch, tmp_path, same_root):
+    import threading
+    import ciao.providers.opencode as mod
+
+    mod.invalidate_opencode_model_cache()
+    barrier = threading.Barrier(3, timeout=5)
+    release = threading.Event()
+    counts = {}
+    guard = threading.Lock()
+    results = []
+    errors = []
+    locks = []
+
+    async def fetch(cls, root):
+        with guard:
+            counts[root] = counts.get(root, 0) + 1
+            number = counts[root]
+        if number <= (2 if same_root else 1):
+            await asyncio.to_thread(barrier.wait)
+            assert await asyncio.to_thread(release.wait, 5)
+        return [{"id": str(number)}]
+
+    async def run(root):
+        locks.append(mod._catalog_lock(root))
+        results.append(await mod.OpencodeProvider.model_catalog(root))
+
+    def worker(root):
+        try:
+            asyncio.run(run(root))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(mod.OpencodeProvider, "_fetch_model_catalog", classmethod(fetch))
+    threads = [threading.Thread(target=worker, args=(tmp_path / ("same" if same_root else str(i)),))
+               for i in range(2)]
+    for thread in threads:
+        thread.start()
+    try:
+        barrier.wait()
+        mod.invalidate_opencode_model_cache()
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        mod.invalidate_opencode_model_cache()
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert locks[0] is not locks[1]
+    if same_root:
+        assert all(int(result[0]["id"]) >= 3 for result in results)
+        assert list(counts.values())[0] in (3, 4)
+    else:
+        assert results == [[{"id": "2"}], [{"id": "2"}]]
+        assert sorted(counts.values()) == [2, 2]
+
+
+def test_contended_closed_catalog_loop_is_collectible(tmp_path):
+    import gc
+    import threading
+    import weakref
+    import ciao.providers.opencode as mod
+
+    refs = []
+    errors = []
+
+    def worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def contend():
+            lock = mod._catalog_lock(tmp_path)
+            refs.extend([weakref.ref(loop), weakref.ref(lock)])
+            entered = asyncio.Event()
+
+            async def waiter():
+                entered.set()
+                async with mod._catalog_lock(tmp_path):
+                    pass
+
+            async with lock:
+                task = asyncio.create_task(waiter())
+                await entered.wait()
+                await asyncio.sleep(0)
+                assert not task.done()
+            await task
+
+        try:
+            loop.run_until_complete(contend())
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive() and not errors
+    for _ in range(3):
+        gc.collect()
+    assert refs[0]() is None and refs[1]() is None
+    with mod._MODEL_CACHE_GUARD:
+        assert all(not loop.is_closed() for loop in mod._CATALOG_LOCKS)
+
+
+def test_cross_loop_catalog_cancellation_does_not_block_other_loop(monkeypatch, tmp_path):
+    import threading
+    import ciao.providers.opencode as mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    controls, results = {}, {}
+    guard = threading.Lock()
+    calls = []
+
+    async def fetch(cls, root):
+        with guard:
+            calls.append(1)
+            number = len(calls)
+        if number == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        assert await asyncio.to_thread(release.wait, 5)
+        return [{"id": "fresh"}]
+
+    def worker(name):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        task = loop.create_task(mod.OpencodeProvider.model_catalog(tmp_path))
+        controls[name] = (loop, task)
+        try:
+            results[name] = loop.run_until_complete(task)
+        except BaseException as exc:
+            results[name] = exc
+        finally:
+            loop.run_until_complete(loop.shutdown_default_executor())
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    monkeypatch.setattr(mod.OpencodeProvider, "_fetch_model_catalog", classmethod(fetch))
+    mod.invalidate_opencode_model_cache()
+    owner, waiter = threading.Thread(target=worker, args=("owner",)), threading.Thread(target=worker, args=("waiter",))
+    owner.start()
+    try:
+        assert entered.wait(5)
+        waiter.start()
+        mod.invalidate_opencode_model_cache()
+        loop, task = controls["owner"]
+        loop.call_soon_threadsafe(task.cancel)
+        release.set()
+        owner.join(5)
+        waiter.join(5)
+        assert not owner.is_alive() and not waiter.is_alive()
+        assert isinstance(results["owner"], asyncio.CancelledError)
+        assert results["waiter"] == [{"id": "fresh"}]
+        assert len(calls) >= 2
+    finally:
+        release.set()
+        owner.join(5)
+        if waiter.ident is not None:
+            waiter.join(5)
+        mod.invalidate_opencode_model_cache()
+
+
+@pytest.mark.parametrize("first,second", [("chat", "ephemeral"), ("ephemeral", "chat"),
+                                          ("chat", "chat"), ("ephemeral", "ephemeral")])
+@pytest.mark.parametrize("distinct", [False, True])
+def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path, first, second, distinct):
+    import threading
+    import time
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    second_spawned = threading.Event()
+    guard = threading.Lock()
+    spawned = []
+    active = 0
+    max_active = 0
+    errors = []
+    roots = [tmp_path / "first", tmp_path / "second" if distinct else tmp_path / "first" / ".." / "first"]
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            pass
+
+        def close_checked(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        nonlocal active, max_active
+        with guard:
+            spawned.append(kwargs["cwd"])
+            number = len(spawned)
+            active += 1
+            max_active = max(max_active, active)
+        if number == 1:
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 5)
+        else:
+            second_spawned.set()
+        return Process(), Tree()
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            nonlocal active
+            with guard:
+                active -= 1
+            return SimpleNamespace(status_code=200, json=lambda: {"version": "2.0.16"})
+
+        async def aclose(self):
+            pass
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def chat_health(*args):
+        nonlocal active
+        with guard:
+            active -= 1
+
+    async def no_op(*args):
+        pass
+
+    async def run(kind, root):
+        if kind == "chat":
+            provider = OpencodeProvider(root)
+            await provider._ensure_server_locked(Request())
+        else:
+            await mod._EphemeralServer(root).__aenter__()
+
+    def worker(kind, root):
+        try:
+            asyncio.run(run(kind, root))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", chat_health)
+    monkeypatch.setattr(OpencodeProvider, "_verify_contract", no_op)
+    threads = [threading.Thread(target=worker, args=(kind, root)) for kind, root in zip((first, second), roots)]
+    threads[0].start()
+    try:
+        assert entered.wait(5)
+        threads[1].start()
+        if distinct:
+            assert second_spawned.wait(5)
+        else:
+            deadline = time.monotonic() + 5
+            while True:
+                with mod._SERVER_START_GUARD:
+                    state = mod._SERVER_START_LOCKS.get(str(roots[0].resolve()))
+                    queued = state is not None and len(state.waiters) == 1
+                if queued:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert not second_spawned.is_set()
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(5)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(spawned) == 2
+    assert max_active == (2 if distinct else 1)
+    assert active == 0
+    assert str(roots[0].resolve()) not in mod._SERVER_START_LOCKS
+    assert str(roots[1].resolve()) not in mod._SERVER_START_LOCKS
+
+
+@pytest.mark.asyncio
+async def test_transient_chat_retry_releases_gate_to_queued_contender(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    order = []
+    first, second = OpencodeProvider(tmp_path), OpencodeProvider(tmp_path)
+    first_calls = 0
+
+    class Process:
+        returncode = None
+        stderr = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            pass
+
+        def kill_checked(self):
+            pass
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+    class Request:
+        extra_env = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots = ()
+        agent_denied = ()
+        agent_denied_except = ()
+
+    async def spawn(*args, **kwargs):
+        return Process(), Tree()
+
+    async def health(self):
+        nonlocal first_calls
+        if self is first:
+            first_calls += 1
+            if first_calls == 1:
+                order.append("first")
+                entered.set()
+                await release.wait()
+                raise RuntimeError("database is locked")
+            order.append("retry")
+        else:
+            order.append("contender")
+
+    async def verify(self):
+        pass
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", health)
+    monkeypatch.setattr(OpencodeProvider, "_verify_contract", verify)
+    owner = asyncio.create_task(first._ensure_server_locked(Request()))
+    contender = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        contender = asyncio.create_task(second._ensure_server_locked(Request()))
+        key = str(tmp_path.resolve())
+        async def queued():
+            while True:
+                with mod._SERVER_START_GUARD:
+                    if mod._SERVER_START_LOCKS[key].waiters:
+                        return
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(queued(), 2)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(owner, contender), 3)
+        assert order == ["first", "contender", "retry"]
+    finally:
+        release.set()
+        for task in (owner, contender):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (owner, contender) if task), return_exceptions=True)
+
+
+@pytest.mark.parametrize("cancelled", [1, 2])
+def test_startup_queue_cancellation_and_loop_lifecycle(tmp_path, cancelled):
+    import gc
+    import threading
+    import time
+    import weakref
+    import ciao.providers.opencode as mod
+
+    acquired = threading.Event()
+    release = threading.Event()
+    refs, controls, order, errors = [], {}, [], []
+    guard = threading.Lock()
+
+    def worker(number):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        refs.append(weakref.ref(loop))
+
+        async def contender():
+            async with mod._server_start_lock(tmp_path):
+                with guard:
+                    order.append(number)
+                if number == 0:
+                    acquired.set()
+                    assert await asyncio.to_thread(release.wait, 5)
+
+        task = loop.create_task(contender())
+        controls[number] = (loop, task)
+        try:
+            loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            pass
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            loop.run_until_complete(loop.shutdown_default_executor())
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    threads[0].start()
+    try:
+        assert acquired.wait(5)
+        key = str(tmp_path.resolve())
+        for i in range(1, 4):
+            threads[i].start()
+            deadline = time.monotonic() + 5
+            while True:
+                with mod._SERVER_START_GUARD:
+                    waiting = len(mod._SERVER_START_LOCKS[key].waiters)
+                if waiting == i:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        loop, task = controls[cancelled]
+        loop.call_soon_threadsafe(task.cancel)
+        threads[cancelled].join(5)
+        assert not threads[cancelled].is_alive()
+        release.set()
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(5)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors and order == [0, *(i for i in (1, 2, 3) if i != cancelled)]
+    assert key not in mod._SERVER_START_LOCKS
+    controls.clear()
+    del loop, task
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_safe_credential_inventory_rejects_bad_data(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    rows = [
+        {"id": "a", "name": "bad\nname", "connections": [{"type": "env"}]},
+        {"id": "a", "name": "good", "connections": []},
+        {"id": "a", "name": "good", "connections": [{"type": "env"}]},
+        {"id": "a", "name": "duplicate", "connections": [{"type": "env"}]},
+        {"id": "b", "name": "B", "connections": [None, {"type": "other"}]},
+    ]
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, json.dumps(rows).encode()))
+    assert mod.opencode_credential_inventory() == {
+        "status": "partial",
+        "providers": [
+            {"id": "a", "name": "good", "auth_types": ["environment"], "configured": True, "verified": None},
+            {"id": "b", "name": "B", "auth_types": ["unknown"], "configured": True, "verified": None},
+        ],
+    }
+
+
+@pytest.mark.parametrize("result", [None, (1, b"[]"), (0, b"\xff"), (0, b"{}"), (0, b"[")])
+def test_safe_credential_inventory_probe_failures_are_unknown(monkeypatch, result):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: result)
+    assert mod.opencode_credential_inventory() == {"status": "unknown", "providers": []}
+
+
+def test_safe_credential_inventory_limits_and_reservation(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    rows = [
+        {"id": "x", "name": "X", "connections": [None]},
+        {"id": "x", "name": "X", "connections": [{"type": "env"}] * 33},
+        {"id": "é" * 128, "name": "有效", "connections": [{"type": "env"}]},
+        {"id": "y" * 129, "name": "long", "connections": [{"type": "env"}]},
+        {"id": "bad\u200b", "name": "bad", "connections": [{"type": "env"}]},
+    ] + [{"id": f"empty{i}", "name": "Empty", "connections": []} for i in range(96)]
+    calls = []
+    def collect(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return 0, json.dumps(rows).encode()
+    monkeypatch.setattr(mod, "bounded_output", collect)
+    result = mod.opencode_credential_inventory()
+    assert result == {
+        "status": "partial",
+        "providers": [
+            {"id": "x", "name": "X", "auth_types": ["environment"], "configured": True, "verified": None},
+            {"id": "é" * 128, "name": "有效", "auth_types": ["environment"], "configured": True, "verified": None},
+        ],
+    }
+    assert calls == [(["fake", "auth", "list", "--format", "json", "--standalone"],
+                      {"timeout": 5.0, "max_stdout": 1024 * 1024})]
+
+
+def test_safe_credential_inventory_deep_json_and_missing_binary(monkeypatch, caplog):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: (0, b"[" * 100000 + b"]" * 100000))
+    assert mod.opencode_credential_inventory() == {"status": "unknown", "providers": []}
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: None)
+    monkeypatch.setattr(mod, "bounded_output", lambda *a, **k: pytest.fail("unexpected probe"))
+    assert mod.opencode_credential_inventory() == {"status": "unknown", "providers": []}
+    assert not caplog.records
+
+
+def test_safe_credential_inventory_never_projects_credential_fields(monkeypatch, caplog):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    rows = [{"id": "custom", "name": "visible-name", "label": "label-sentinel",
+             "connections": [{"type": "credential", "method": "key", "key": "key-sentinel",
+                              "token": "token-sentinel", "account": "account-sentinel",
+                              "path": "path-sentinel", "nested": {"value": "nested-sentinel"}},
+                             {"type": "env", "name": "env-name-sentinel", "value": "env-value-sentinel"}]}]
+    monkeypatch.setattr(mod, "bounded_output", lambda *args, **kwargs: (0, json.dumps(rows).encode()))
+    output = json.dumps(mod.opencode_credential_inventory()) + caplog.text
+    for word in ("label", "key", "token", "account", "path", "nested", "env-name", "env-value"):
+        assert f"{word}-sentinel" not in output
+    assert "visible-name" in output
+    monkeypatch.setattr(mod, "bounded_output",
+                        lambda *args, **kwargs: (0, b'[{"id":"empty","name":"Empty","connections":[]}]'))
+    assert mod.opencode_credential_inventory() == {"status": "complete", "providers": []}
+
+
+@pytest.mark.asyncio
+async def test_inflight_model_catalog_retries_after_invalidation(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    mod.invalidate_opencode_model_cache()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def fetch(cls, root):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+        return [{"id": str(calls)}]
+
+    monkeypatch.setattr(mod.OpencodeProvider, "_fetch_model_catalog", classmethod(fetch))
+    task = asyncio.create_task(mod.OpencodeProvider.model_catalog(tmp_path))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        mod.invalidate_opencode_model_cache()
+        release.set()
+        assert await asyncio.wait_for(task, 2) == [{"id": "2"}]
+        assert await mod.OpencodeProvider.model_catalog(tmp_path) == [{"id": "2"}]
+        assert calls == 2
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        mod.invalidate_opencode_model_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("invalidations", [1, 2])
+async def test_catalog_waiters_and_multiple_invalidations(monkeypatch, tmp_path, force, invalidations):
+    import ciao.providers.opencode as mod
+
+    mod.invalidate_opencode_model_cache()
+    entered = [asyncio.Event() for _ in range(invalidations)]
+    release = [asyncio.Event() for _ in range(invalidations)]
+    calls = 0
+
+    async def fetch(cls, root):
+        nonlocal calls
+        calls += 1
+        number = calls
+        if number <= invalidations:
+            entered[number - 1].set()
+            await release[number - 1].wait()
+        return [{"id": str(number)}]
+
+    monkeypatch.setattr(mod.OpencodeProvider, "_fetch_model_catalog", classmethod(fetch))
+    owner = asyncio.create_task(mod.OpencodeProvider.model_catalog(tmp_path))
+    waiter = None
+    try:
+        await asyncio.wait_for(entered[0].wait(), 2)
+        waiter = asyncio.create_task(mod.OpencodeProvider.model_catalog(tmp_path, force=force))
+        await asyncio.sleep(0)
+        for i in range(invalidations):
+            await asyncio.wait_for(entered[i].wait(), 2)
+            mod.invalidate_opencode_model_cache()
+            release[i].set()
+        owner_result, waiter_result = await asyncio.wait_for(asyncio.gather(owner, waiter), 3)
+        assert owner_result == [{"id": str(invalidations + 1)}]
+        assert waiter_result == [{"id": str(invalidations + 1 + int(force))}]
+        assert calls == invalidations + 1 + int(force)
+    finally:
+        for event in release:
+            event.set()
+        for task in (owner, waiter):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (owner, waiter) if task is not None), return_exceptions=True)
+        mod.invalidate_opencode_model_cache()
+
+
+@pytest.mark.asyncio
+async def test_startup_queue_fifo_and_cancelled_waiter(tmp_path):
+    import ciao.providers.opencode as mod
+
+    entered = []
+    owner_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def contender(number):
+        async with mod._server_start_lock(tmp_path):
+            entered.append(number)
+            if number == 0:
+                owner_entered.set()
+                await release.wait()
+
+    owner = asyncio.create_task(contender(0))
+    await asyncio.wait_for(owner_entered.wait(), 2)
+    first = asyncio.create_task(contender(1))
+    await asyncio.sleep(0.01)
+    middle = asyncio.create_task(contender(2))
+    await asyncio.sleep(0.01)
+    last = asyncio.create_task(contender(3))
+    await asyncio.sleep(0.01)
+    middle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await middle
+    release.set()
+    await asyncio.wait_for(asyncio.gather(owner, first, last), 2)
+    assert entered == [0, 1, 3]
+    assert str(tmp_path.resolve()) not in mod._SERVER_START_LOCKS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination_fails", [False, True])
+async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, tmp_path, termination_fails):
+    import ciao.providers.opencode as mod
+
+    started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    spawned = []
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if termination_fails:
+                raise OSError("secret injected")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        spawned.append(1)
+        return Process(), Tree()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        owner.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), 2)
+        waiter = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+        await asyncio.sleep(0.1)
+        assert len(spawned) == 1
+        owner.cancel()
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, 2)
+        if termination_fails:
+            with pytest.raises(RuntimeError, match="quarantined"):
+                await asyncio.wait_for(waiter, 2)
+            assert len(spawned) == 1
+        else:
+            await asyncio.sleep(0.1)
+            assert len(spawned) == 2
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(waiter, 2)
+    finally:
+        allow_cleanup.set()
+        if not owner.done():
+            owner.cancel()
+        # Test-only cleanup of permanent quarantine, after all tasks are drained.
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_path):
+    import ciao.providers.opencode as mod
+
+    spawned, allow_spawn, cleanup, allow_cleanup = (asyncio.Event() for _ in range(4))
+    calls = []
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            cleanup.set()
+            await allow_cleanup.wait()
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+
+        def close_checked(self):
+            calls.append("close")
+
+    async def spawn(*args, **kwargs):
+        calls.append("spawn")
+        spawned.set()
+        await allow_spawn.wait()
+        return Process(), Tree()
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+    waiter = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 2)
+        owner.cancel()
+        waiter = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+        await asyncio.sleep(0.1)
+        assert calls == ["spawn"]
+        allow_spawn.set()
+        await asyncio.wait_for(cleanup.wait(), 2)
+        owner.cancel()
+        await asyncio.sleep(0.1)
+        assert calls == ["spawn", "terminate"]
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, 2)
+        await asyncio.sleep(0.1)
+        assert calls.count("spawn") == 2
+    finally:
+        allow_spawn.set()
+        allow_cleanup.set()
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(owner, *( [waiter] if waiter else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform,kill_fails,quarantined", [
+    ("linux", False, False), ("linux", True, True), ("win32", False, True),
+])
+async def test_tree_construction_failure_quarantines_uncertain_spawn(
+    monkeypatch, tmp_path, platform, kill_fails, quarantined
+):
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def kill(self):
+            if kill_fails:
+                raise OSError("kill-secret")
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def create(*args, **kwargs):
+        return Process()
+
+    def tree(*args, **kwargs):
+        raise OSError("tree-secret")
+
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(mod, "tree_spawn_options", lambda **kwargs: {})
+    monkeypatch.setattr(mod, "ProcessTree", tree)
+    try:
+        async with mod._server_start_lock(tmp_path):
+            expected = mod.SanitizedStartupError if quarantined else OSError
+            with pytest.raises(expected) as error:
+                await mod._spawn_server_owned(tmp_path, "fake")
+            if quarantined:
+                assert error.value.__cause__ is None and error.value.__context__ is None
+        assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is quarantined
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["timeout", "exited", "json", "version", "401", "404", "exception"])
+async def test_unsuccessful_ephemeral_enter_cleans_before_next_start(monkeypatch, tmp_path, outcome):
+    import threading
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    cleanup, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class Process:
+        returncode = 1 if outcome == "exited" else None
+
+        async def wait(self):
+            cleanup.set()
+            await release.wait()
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+
+        def kill_checked(self):
+            calls.append("kill")
+
+        def close_checked(self):
+            calls.append("tree-closed")
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            if outcome == "exception":
+                raise ValueError("injected startup failure")
+            def payload():
+                if outcome == "json":
+                    raise ValueError("bad json")
+                return {"version": "1.0.0"}
+            return SimpleNamespace(status_code=int(outcome) if outcome in {"401", "404"} else 200,
+                                   json=payload)
+
+        async def aclose(self):
+            calls.append("client-closed")
+
+    async def spawn(*args, **kwargs):
+        calls.append("spawn")
+        return Process(), Tree()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    if outcome == "timeout":
+        monkeypatch.setattr(mod, "_SERVER_START_TIMEOUT", 0)
+    owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
+    waiter = None
+    waiter_started = threading.Event()
+    errors = []
+    try:
+        await asyncio.wait_for(cleanup.wait(), 2)
+        async def queued():
+            waiter_started.set()
+            try:
+                await mod._EphemeralServer(tmp_path).__aenter__()
+            except mod.SanitizedStartupError:
+                if outcome != "exception":
+                    raise
+            calls.append("next")
+        def run_waiter():
+            try:
+                asyncio.run(queued())
+            except BaseException as exc:
+                errors.append(exc)
+        waiter = threading.Thread(target=run_waiter)
+        waiter.start()
+        assert await asyncio.to_thread(waiter_started.wait, 2)
+        await asyncio.sleep(0.1)
+        assert "next" not in calls
+        release.set()
+        if outcome == "exception":
+            with pytest.raises(mod.SanitizedStartupError, match="OpenCode startup failed"):
+                await asyncio.wait_for(owner, 2)
+        else:
+            assert await asyncio.wait_for(owner, 2) is None
+        await asyncio.to_thread(waiter.join, 2)
+        assert not waiter.is_alive() and not errors
+        assert calls.index("tree-closed") < calls.index("next")
+        assert calls.index("tree-closed") < calls.index("spawn", 1)
+        if outcome != "exited":
+            assert ("kill" if mod.sys.platform == "win32" else "terminate") in calls
+        elif mod.sys.platform == "win32":
+            assert "kill" in calls
+        assert "client-closed" in calls
+    finally:
+        release.set()
+        if not owner.done():
+            owner.cancel()
+        await asyncio.gather(owner, return_exceptions=True)
+        if waiter is not None:
+            await asyncio.to_thread(waiter.join, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [False, True])
+async def test_ephemeral_missing_or_broken_binary_never_spawns(monkeypatch, tmp_path, broken, caplog):
+    import ciao.providers.opencode as mod
+
+    def resolve():
+        if broken:
+            raise OSError("private-path-sentinel")
+        return None
+
+    async def spawn(*args, **kwargs):
+        pytest.fail("unexpected spawn")
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", resolve)
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    assert await mod._EphemeralServer(tmp_path).__aenter__() is None
+    assert "private-path-sentinel" not in caplog.text
+    assert str(tmp_path.resolve()) not in mod._SERVER_START_LOCKS
+
+
+@pytest.mark.parametrize("termination_fails", [False, True])
+def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_path, termination_fails):
+    import threading
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    cleanup, release, entered = threading.Event(), threading.Event(), threading.Event()
+    calls, results = [], []
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            cleanup.set()
+            assert await asyncio.to_thread(release.wait, 5)
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if termination_fails:
+                raise OSError("termination-secret")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            return SimpleNamespace(status_code=404)
+
+        async def aclose(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        calls.append("spawn")
+        return Process(), Tree()
+
+    async def run():
+        entered.set()
+        try:
+            results.append(await mod._EphemeralServer(tmp_path).__aenter__())
+        except BaseException as exc:
+            results.append(exc)
+
+    def worker():
+        asyncio.run(run())
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    owner, waiter = threading.Thread(target=worker), threading.Thread(target=worker)
+    owner.start()
+    try:
+        assert cleanup.wait(5)
+        entered.clear()
+        waiter.start()
+        assert entered.wait(5)
+        assert not release.wait(0.15)
+        assert calls == ["spawn"]
+        release.set()
+        owner.join(5)
+        waiter.join(5)
+        assert not owner.is_alive() and not waiter.is_alive()
+        if termination_fails:
+            assert len(calls) == 1
+            assert all(isinstance(value, mod.SanitizedStartupError) for value in results)
+        else:
+            assert len(calls) == 2 and results == [None, None]
+    finally:
+        release.set()
+        owner.join(5)
+        if waiter.ident is not None:
+            waiter.join(5)
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("failure", ["none", "stop", "wait"])
+@pytest.mark.parametrize("stage", ["spawn", "health"])
+def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
+    monkeypatch, tmp_path, caplog, platform, failure, stage
+):
+    import threading
+    from types import SimpleNamespace
+    import ciao.providers.opencode as mod
+
+    health, cleanup, release, waiter_entered = (threading.Event() for _ in range(4))
+    allow_spawn = threading.Event()
+    calls, controls, results = [], {}, {}
+    guard = threading.Lock()
+
+    class Process:
+        returncode = None
+
+        async def wait(self):
+            cleanup.set()
+            assert await asyncio.to_thread(release.wait, 5)
+            if failure == "wait":
+                raise OSError("wait-secret")
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            if failure == "stop":
+                raise OSError("stop-secret")
+
+        def kill_checked(self):
+            if failure == "stop":
+                raise OSError("stop-secret")
+
+        def close_checked(self):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get(self, *args, **kwargs):
+            with guard:
+                number = len(calls)
+            if number == 1 and stage == "health":
+                health.set()
+                await asyncio.Event().wait()
+            return SimpleNamespace(status_code=404)
+
+        async def aclose(self):
+            pass
+
+    async def spawn(*args, **kwargs):
+        with guard:
+            calls.append("spawn")
+            number = len(calls)
+        if number == 1 and stage == "spawn":
+            health.set()
+            assert await asyncio.to_thread(allow_spawn.wait, 5)
+        return Process(), Tree()
+
+    def worker(name):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def enter():
+            if name == "waiter":
+                waiter_entered.set()
+            return await mod._EphemeralServer(tmp_path).__aenter__()
+
+        task = loop.create_task(enter())
+        controls[name] = (loop, task)
+        try:
+            results[name] = loop.run_until_complete(task)
+        except BaseException as exc:
+            results[name] = exc
+        finally:
+            loop.run_until_complete(loop.shutdown_default_executor())
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr(mod, "_spawn_server", spawn)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
+    owner, waiter = threading.Thread(target=worker, args=("owner",)), threading.Thread(target=worker, args=("waiter",))
+    owner.start()
+    try:
+        assert health.wait(5)
+        loop, task = controls["owner"]
+        loop.call_soon_threadsafe(task.cancel)
+        allow_spawn.set()
+        assert cleanup.wait(5)
+        waiter.start()
+        assert waiter_entered.wait(5)
+        loop.call_soon_threadsafe(task.cancel)
+        assert not release.wait(0.15)
+        assert calls == ["spawn"]
+        release.set()
+        owner.join(5)
+        waiter.join(5)
+        assert not owner.is_alive() and not waiter.is_alive()
+        assert isinstance(results["owner"], asyncio.CancelledError)
+        if failure != "none":
+            assert isinstance(results["waiter"], mod.SanitizedStartupError)
+            assert "quarantined" in str(results["waiter"])
+            assert calls == ["spawn"]
+            async def later():
+                with pytest.raises(mod.SanitizedStartupError, match="quarantined"):
+                    async with mod._server_start_lock(tmp_path):
+                        pytest.fail("quarantined root entered")
+                async with mod._server_start_lock(tmp_path / "other"):
+                    pass
+            asyncio.run(later())
+        else:
+            assert results["waiter"] is None
+            assert calls == ["spawn", "spawn"]
+        assert "stop-secret" not in caplog.text
+        assert "wait-secret" not in caplog.text
+    finally:
+        allow_spawn.set()
+        release.set()
+        owner.join(5)
+        if waiter.ident is not None:
+            waiter.join(5)
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
 def test_shell_and_subagent_calls_are_backgroundable(tmp_path: Path) -> None:
     provider = OpencodeProvider(tmp_path)
     for tool in ("shell", "subagent"):
@@ -2929,6 +4824,15 @@ class _NoOpTree:
     def close(self) -> None:
         pass
 
+    def kill_checked(self) -> None:
+        pass
+
+    def close_checked(self) -> None:
+        pass
+
+    def detach_job_handle(self) -> None:
+        return None
+
 
 def _no_op_trees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr("ciao.providers.opencode.ProcessTree", _NoOpTree)
@@ -2979,7 +4883,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
         agent_denied: tuple = ()
         agent_denied_except: tuple = ()
 
-    with pytest.raises(RuntimeError, match="incompatible build"):
+    with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
 
     assert terminated == ["terminate"]
@@ -3352,7 +5256,7 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
         agent_denied: tuple = ()
         agent_denied_except: tuple = ()
 
-    with pytest.raises(RuntimeError, match="port already in use"):
+    with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
 
     assert spawn_kwargs["stdout"] is asyncio.subprocess.DEVNULL, "nothing reads stdout"
