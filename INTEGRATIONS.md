@@ -91,6 +91,12 @@ The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and 
 
 The engine's internal migration staging helper creates a private candidate;
 it does not change the shared command or activate that candidate.
+If a future approved update activates a private candidate, Ciaobot first honors
+`CIAO_OPENCODE_BIN`, then verifies its private active receipt and binary, and
+uses the shared command only if no receipt exists. A corrupt receipt fails
+closed instead of selecting the shared command. Activation does not modify
+the shared CLI, and an engine rollback does not undo the provider receipt;
+an older engine without this resolver may continue to use the shared CLI.
 On Windows, inherited owner-only installer output is validated as a whole and
 given protected DACLs within that invocation; unknown work is not repaired.
 The whole installer work tree is validated before candidate publication;

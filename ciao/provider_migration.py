@@ -1211,3 +1211,237 @@ def _verify_candidate_at(op: "Operation", expected_sha256: str, state_dir: Path 
         return binary
     except Exception:
         raise ValueError("candidate verification failed") from None
+
+
+def managed_opencode_binary(*, state_dir: Path | None = None) -> str | None:
+    """Resolve only a verified private active receipt; absence alone permits fallback."""
+    from ciao.engine_update import default_state_dir
+    from ciao.os_support.private import is_private_strict
+
+    try:
+        root = state_dir if state_dir is not None else default_state_dir()
+        if not root.is_absolute() or ".." in root.parts:
+            raise ValueError
+        base = root.parent
+        provider = base / "providers" / "opencode"
+        checked: list[tuple[Path, os.stat_result]] = []
+
+        def confirm_absence(path: Path) -> None:
+            # A missing child is absence only while every observed ancestor
+            # still names the directory we checked.
+            for parent, original in checked:
+                current = parent.lstat()
+                if (not stat.S_ISDIR(current.st_mode) or parent.is_symlink()
+                        or parent.is_junction()
+                        or (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+                        or (parent.is_relative_to(base) and not is_private_strict(parent))):
+                    raise ValueError
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError
+            if checked and sys.platform != "win32":
+                fd = _candidate_directory_fd(checked[-1][0])
+                try:
+                    current = os.fstat(fd)
+                    original = checked[-1][1]
+                    if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
+                        raise ValueError
+                finally:
+                    os.close(fd)
+
+        # Every traversed ancestor must be a real directory. Only the state
+        # parent and managed descendants are required to be owner-private.
+        for directory in (*reversed(base.parents), base, base / "providers", provider):
+            try:
+                info = directory.lstat()
+            except FileNotFoundError:
+                confirm_absence(directory)
+                return None
+            if (not stat.S_ISDIR(info.st_mode) or directory.is_symlink()
+                    or directory.is_junction()
+                    or (directory.is_relative_to(base) and not is_private_strict(directory))):
+                raise ValueError
+            checked.append((directory, info))
+        receipt = provider / "active.json"
+        try:
+            receipt.lstat()
+        except FileNotFoundError:
+            confirm_absence(receipt)
+            return None
+        fd = _candidate_open(receipt, 0o600)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            raw = handle.read(65537)
+            after = os.fstat(handle.fileno())
+        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if (len(raw) > 65536 or any(getattr(before, k) != getattr(after, k) for k in keys)
+                or any(getattr(before, k) != getattr(receipt.lstat(), k) for k in keys)):
+            raise ValueError
+        receipt_info = before
+
+        def unique(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in items:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        data = json.loads(raw, object_pairs_hook=unique)
+        name = "opencode.exe" if sys.platform == "win32" else "opencode"
+        if (not isinstance(data, dict)
+                or set(data) != {"schema", "operation_id", "version", "relative_binary", "sha256"}
+                or type(data["schema"]) is not int or data["schema"] != 1
+                or not valid_operation_id(data["operation_id"])
+                or not isinstance(data["version"], str) or not data["version"].isascii()
+                or not _VERSION_RE.fullmatch(data["version"])
+                or not isinstance(data["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", data["sha256"])
+                or data["relative_binary"] != f"versions/{data['operation_id']}/{name}"):
+            raise ValueError
+        versions = provider / "versions"
+        version_dir = versions / data["operation_id"]
+        for directory in (versions, version_dir):
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or directory.is_symlink()
+                    or directory.is_junction() or not is_private_strict(directory)):
+                raise ValueError
+        binary = version_dir / name
+        fd = _candidate_open(binary, 0o700)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            after = os.fstat(handle.fileno())
+        if (digest != data["sha256"]
+                or any(getattr(before, k) != getattr(after, k) for k in keys)
+                or any(getattr(before, k) != getattr(binary.lstat(), k) for k in keys)
+                or any(getattr(receipt_info, k) != getattr(receipt.lstat(), k) for k in keys)):
+            raise ValueError
+        return str(binary)
+    except Exception:
+        raise OSError("OpenCode is unavailable; check provider setup.") from None
+
+
+def activate_candidate(op: "Operation", candidate_sha256: str, *, state_dir: Path | None = None) -> str:
+    """Publish a verified candidate after the caller has drained and locked updates."""
+    from ciao.engine_update import default_state_dir
+    from ciao.os_support.private import is_private_strict
+
+    root = state_dir if state_dir is not None else default_state_dir()
+    stage = Path(op.stage_dir)
+    if (not root.is_absolute() or ".." in root.parts or not stage.is_absolute()
+            or ".." in stage.parts or not valid_operation_id(op.id, op.to_version)
+            or stage != root / op.to_version):
+        raise ValueError("invalid candidate operation")
+    source = verify_candidate(op, candidate_sha256, state_dir=root)
+    fd = _candidate_open(source.parent / "candidate.json", 0o600)
+    with os.fdopen(fd, "rb") as handle:
+        metadata = handle.read(65537)
+        data = json.loads(metadata)
+    version = data["version"]
+    if not is_private_strict(root.parent):
+        raise ValueError("invalid provider directory")
+    # An existing receipt is never treated as absent when it is invalid.
+    managed_opencode_binary(state_dir=root)
+    provider = root.parent / "providers" / "opencode"
+    versions = provider / "versions"
+    for directory in (provider.parent, provider, versions):
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            _make_candidate_directory(directory)
+            info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or directory.is_symlink()
+                or directory.is_junction() or not is_private_strict(directory)):
+            raise ValueError("invalid provider directory")
+        if sys.platform != "win32":
+            fd = _candidate_directory_fd(directory.parent)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    final = versions / op.id
+    name = "opencode.exe" if sys.platform == "win32" else "opencode"
+    destination = final / name
+
+    def verify_final(path: Path) -> None:
+        if (path.is_symlink() or path.is_junction() or not path.is_dir()
+                or not is_private_strict(path) or set(os.listdir(path)) != {name}):
+            raise ValueError("invalid provider binary")
+        fd = _candidate_open(path / name, 0o700)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            after = os.fstat(handle.fileno())
+        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if (digest != candidate_sha256
+                or any(getattr(before, k) != getattr(after, k) for k in keys)
+                or any(getattr(before, k) != getattr((path / name).lstat(), k) for k in keys)):
+            raise ValueError("invalid provider binary")
+
+    try:
+        final.lstat()
+    except FileNotFoundError:
+        temporary = versions / ("candidate-tmp-" + secrets.token_hex(16))
+        _make_candidate_directory(temporary)
+        source_fd = _candidate_open(source, 0o700)
+        with os.fdopen(source_fd, "rb") as source_file:
+            before = os.fstat(source_file.fileno())
+            out = _open_candidate_file(temporary / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+            with os.fdopen(out, "wb") as target:
+                shutil.copyfileobj(source_file, target)
+                target.flush()
+                os.fsync(target.fileno())
+            after = os.fstat(source_file.fileno())
+            if any(getattr(before, k) != getattr(after, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns")):
+                raise ValueError("candidate changed")
+        verify_final(temporary)
+        if sys.platform != "win32":
+            fd = _candidate_directory_fd(temporary)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _publish_candidate(temporary, final)
+    verify_final(final)
+    if sys.platform != "win32":
+        fd = _candidate_directory_fd(versions)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    # Recheck the candidate and target after copying, before the receipt commits it.
+    verify_candidate(op, candidate_sha256, state_dir=root)
+    fd = _candidate_open(source.parent / "candidate.json", 0o600)
+    with os.fdopen(fd, "rb") as handle:
+        if handle.read(65537) != metadata:
+            raise ValueError("candidate changed")
+    managed_opencode_binary(state_dir=root)
+    receipt = {"schema": 1, "operation_id": op.id, "version": version,
+               "relative_binary": f"versions/{op.id}/{name}", "sha256": candidate_sha256}
+    temp_receipt = provider / ("active-tmp-" + secrets.token_hex(16))
+    encoded = json.dumps(receipt, separators=(",", ":")).encode()
+    fd = _open_candidate_file(temp_receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as receipt_file:
+        receipt_file.write(encoded)
+        receipt_file.flush()
+        os.fsync(receipt_file.fileno())
+    if sys.platform == "win32":
+        os.replace(temp_receipt, provider / "active.json")
+    else:
+        fd = _candidate_directory_fd(provider)
+        try:
+            os.replace(temp_receipt.name, "active.json", src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    if managed_opencode_binary(state_dir=root) != str(destination):
+        raise ValueError("provider activation verification failed")
+    fd = _candidate_open(provider / "active.json", 0o600)
+    with os.fdopen(fd, "rb") as handle:
+        if handle.read(65537) != encoded:
+            raise ValueError("provider activation verification failed")
+    return str(destination)

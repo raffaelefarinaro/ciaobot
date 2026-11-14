@@ -2389,3 +2389,477 @@ def test_operation_id_is_safe_timestamp_and_matching_version() -> None:
     ):
         assert not valid_operation_id(operation_id)
     assert not valid_operation_id("20261112T101500Z-1.2.3", "1.2.4")
+
+
+@pytest.fixture
+def managed_receipt(tmp_path):
+    from ciao.os_support import private
+
+    private.make_private_dir(tmp_path)
+    root = tmp_path / "updates"
+    provider = tmp_path / "providers" / "opencode"
+    operation = "20261112T101500Z-1.2.3"
+    name = "opencode.exe" if sys.platform == "win32" else "opencode"
+    version_dir = provider / "versions" / operation
+    for directory in (provider.parent, provider, provider / "versions", version_dir):
+        directory.mkdir()
+        private.make_private_dir(directory)
+    binary = version_dir / name
+    binary.write_bytes(b"private executable")
+    if sys.platform == "win32":
+        private.make_private(binary)
+    else:
+        binary.chmod(0o700)
+    receipt = provider / "active.json"
+    data = {"schema": 1, "operation_id": operation, "version": "2.0.16",
+            "relative_binary": f"versions/{operation}/{name}",
+            "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+    receipt.write_text(json.dumps(data))
+    private.make_private(receipt)
+    return root, provider, binary, receipt, data
+
+
+def test_managed_resolver_valid_and_explicit_state(managed_receipt, monkeypatch):
+    from ciao import engine_update, provider_migration
+    root, _, binary, _, _ = managed_receipt
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: pytest.fail("default state used"))
+    assert provider_migration.managed_opencode_binary(state_dir=root) == str(binary)
+
+
+def test_managed_resolver_absent_receipt(tmp_path):
+    from ciao.os_support.private import make_private_dir
+    from ciao.provider_migration import managed_opencode_binary
+    make_private_dir(tmp_path)
+    assert managed_opencode_binary(state_dir=tmp_path / "updates") is None
+
+
+@pytest.mark.parametrize("corruption", ["missing_binary", "receipt_link", "dangling_receipt", "directory_link", "escape", "hash", "private", "operation", "json", "schema", "extra", "relative", "version"])
+def test_managed_resolver_refuses_corruption(managed_receipt, corruption, tmp_path, monkeypatch):
+    import traceback
+    from ciao.provider_migration import managed_opencode_binary
+    root, provider, binary, receipt, data = managed_receipt
+    if corruption == "missing_binary":
+        binary.unlink()
+    elif corruption in ("receipt_link", "dangling_receipt"):
+        receipt.unlink()
+        target = tmp_path / "target"
+        if corruption == "receipt_link":
+            target.write_text("secret-sentinel")
+        try:
+            receipt.symlink_to(target)
+        except OSError:
+            from ciao.os_support import files
+            receipt.write_text("unavailable link")
+            original_open = files.open_fd
+            def reject_link(path, *args, **kwargs):
+                if path == receipt:
+                    raise OSError("reparse point")
+                return original_open(path, *args, **kwargs)
+            monkeypatch.setattr(files, "open_fd", reject_link)
+    elif corruption == "directory_link":
+        original = provider / "versions"
+        original.rename(provider / "moved")
+        try:
+            original.symlink_to(provider / "moved", target_is_directory=True)
+        except OSError:
+            from pathlib import Path
+            original.mkdir()
+            is_junction = Path.is_junction
+            monkeypatch.setattr(Path, "is_junction", lambda path: path == original or is_junction(path))
+    elif corruption == "private":
+        if sys.platform == "win32":
+            from ciao.os_support import private
+            monkeypatch.setattr(private, "is_private_descriptor_strict", lambda fd: False)
+        else:
+            binary.chmod(0o755)
+    elif corruption == "json":
+        receipt.write_text("secret-sentinel{")
+    else:
+        if corruption == "escape": data["relative_binary"] = "../../secret-sentinel"
+        if corruption == "hash": data["sha256"] = "a" * 64
+        if corruption == "operation": data["operation_id"] = "../secret-sentinel"
+        if corruption == "schema": data["schema"] = True
+        if corruption == "extra": data["secret-sentinel"] = 1
+        if corruption == "relative": data["relative_binary"] = "versions/other/opencode"
+        if corruption == "version": data["version"] = "secret-sentinel"
+        receipt.write_text(json.dumps(data))
+    with pytest.raises(OSError) as caught:
+        managed_opencode_binary(state_dir=root)
+    assert type(caught.value) is OSError
+    assert str(caught.value) == "OpenCode is unavailable; check provider setup."
+    assert caught.value.__suppress_context__
+    assert "secret-sentinel" not in "".join(traceback.format_exception(caught.value))
+    assert str(tmp_path) not in "".join(traceback.format_exception(caught.value))
+
+
+def test_managed_resolver_absent_receipt_in_private_tree(managed_receipt):
+    from ciao.provider_migration import managed_opencode_binary
+    root, _, _, receipt, _ = managed_receipt
+    receipt.unlink()
+    assert managed_opencode_binary(state_dir=root) is None
+
+
+def test_managed_resolver_refuses_unowned_file(managed_receipt, monkeypatch):
+    from ciao import provider_migration
+    from ciao.os_support import private
+    root, _, _, _, _ = managed_receipt
+    monkeypatch.setattr(private, "is_owned_descriptor", lambda fd: False)
+    with pytest.raises(OSError, match="^OpenCode is unavailable; check provider setup\\.$") as caught:
+        provider_migration.managed_opencode_binary(state_dir=root)
+    assert type(caught.value) is OSError
+
+
+def test_managed_resolver_refuses_nonprivate_directory(managed_receipt, monkeypatch):
+    from ciao import provider_migration
+    from ciao.os_support import private
+    root, provider, _, _, _ = managed_receipt
+    original = private.is_private_strict
+    monkeypatch.setattr(private, "is_private_strict", lambda path: False if path == provider else original(path))
+    with pytest.raises(OSError, match="^OpenCode is unavailable; check provider setup\\.$"):
+        provider_migration.managed_opencode_binary(state_dir=root)
+
+
+@pytest.fixture
+def activation_candidate(published_candidate, tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.os_support.private import make_private_dir
+    from ciao import engine_update
+    op, migration, old_binary, _, sha, _ = published_candidate
+    old_stage = Path(op.stage_dir)
+    root = tmp_path / "updates"
+    root.mkdir(mode=0o700)
+    make_private_dir(tmp_path)
+    make_private_dir(root)
+    stage = root / op.to_version
+    shutil.copytree(old_stage, stage, symlinks=True)
+    make_private_dir(stage)
+    make_private_dir(stage / "provider-candidate")
+    old_python = op.env_python
+    op.env_python = str(stage / Path(old_python).relative_to(old_stage))
+    op.wheel = str(stage / Path(op.wheel).relative_to(old_stage))
+    op.stage_dir = str(stage)
+    binary = stage / "provider-candidate" / old_binary.name
+    runner = migration._run_bounded
+    def run(argv, *args, **kwargs):
+        argv = list(argv)
+        if argv[0] == op.env_python:
+            argv[0] = old_python
+        elif argv[0] == str(binary):
+            argv[0] = str(old_binary)
+        return runner(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", run)
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: pytest.fail("default state used"))
+    return op, migration, root, binary, sha
+
+
+def test_activation_publishes_verified_candidate_and_reuses_it(activation_candidate, tmp_path):
+    op, migration, root, binary, sha = activation_candidate
+    shared = tmp_path / "shared-cli"
+    shared.write_bytes(b"untouched")
+    result = migration.activate_candidate(op, sha, state_dir=root)
+    assert result == str(tmp_path / "providers" / "opencode" / "versions" / op.id / binary.name)
+    assert migration.managed_opencode_binary(state_dir=root) == result
+    receipt = json.loads((tmp_path / "providers" / "opencode" / "active.json").read_text())
+    assert receipt == {"schema": 1, "operation_id": op.id, "version": "2.2.5", "relative_binary": f"versions/{op.id}/{binary.name}", "sha256": sha}
+    assert migration.activate_candidate(op, sha, state_dir=root) == result
+    assert shared.read_bytes() == b"untouched"
+
+
+@pytest.mark.parametrize("field,value", [("id", "../20261112T101500Z-1.2.3"), ("id", "20261112T101500Z-1.2.4"), ("stage_dir", "relative/1.2.3")])
+def test_activation_rejects_operation_before_verification(activation_candidate, monkeypatch, field, value):
+    op, migration, root, _, sha = activation_candidate
+    setattr(op, field, value)
+    monkeypatch.setattr(migration, "verify_candidate", lambda *a, **kw: pytest.fail("invalid operation was probed"))
+    with pytest.raises(ValueError):
+        migration.activate_candidate(op, sha, state_dir=root)
+
+
+def test_activation_refuses_corrupt_existing_receipt(activation_candidate, tmp_path):
+    op, migration, root, _, sha = activation_candidate
+    migration.activate_candidate(op, sha, state_dir=root)
+    receipt = tmp_path / "providers" / "opencode" / "active.json"
+    receipt.write_text("bad")
+    with pytest.raises((ValueError, OSError)):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert receipt.read_text() == "bad"
+
+
+def test_activation_refuses_final_collision(activation_candidate, tmp_path):
+    from ciao.os_support.private import make_private, make_private_dir
+    op, migration, root, binary, sha = activation_candidate
+    versions = tmp_path / "providers" / "opencode" / "versions"
+    for directory in (versions.parent.parent, versions.parent, versions, versions / op.id):
+        directory.mkdir()
+        make_private_dir(directory)
+    foreign = versions / op.id / binary.name
+    foreign.write_bytes(b"foreign")
+    if sys.platform == "win32":
+        make_private(foreign)
+    else:
+        foreign.chmod(0o700)
+    fd = migration._candidate_open(foreign, 0o700)
+    import os
+    os.close(fd)
+    with pytest.raises((ValueError, OSError)):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert foreign.read_bytes() == b"foreign"
+    assert not (versions.parent / "active.json").exists()
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_activation_receipt_crash_is_retryable(activation_candidate, tmp_path, monkeypatch, when):
+    import os
+    op, migration, root, binary, sha = activation_candidate
+    old = migration.activate_candidate(op, sha, state_dir=root)
+    receipt = tmp_path / "providers" / "opencode" / "active.json"
+    old_bytes = receipt.read_bytes()
+    op.id = "20261112T101501Z-1.2.3"
+    metadata = binary.parent / "candidate.json"
+    data = json.loads(metadata.read_text())
+    data["operation_id"] = op.id
+    metadata.write_text(json.dumps(data))
+    original = os.replace
+    def interrupted(src, dst, *args, **kwargs):
+        if str(dst).endswith("active.json"):
+            if when == "after":
+                original(src, dst, *args, **kwargs)
+            raise OSError("simulated crash")
+        return original(src, dst, *args, **kwargs)
+    monkeypatch.setattr(os, "replace", interrupted)
+    with pytest.raises(OSError, match="simulated crash"):
+        migration.activate_candidate(op, sha, state_dir=root)
+    current = migration.managed_opencode_binary(state_dir=root)
+    if when == "before":
+        assert receipt.read_bytes() == old_bytes
+        assert current == old
+    else:
+        assert current == str(tmp_path / "providers" / "opencode" / "versions" / op.id / binary.name)
+    monkeypatch.setattr(os, "replace", original)
+    expected = str(tmp_path / "providers" / "opencode" / "versions" / op.id / binary.name)
+    assert migration.activate_candidate(op, sha, state_dir=root) == expected
+    assert migration.managed_opencode_binary(state_dir=root) == expected
+
+
+def test_activation_refuses_target_resolver_change(activation_candidate, preflight):
+    op, migration, root, _, sha = activation_candidate
+    _, state, _, _, _ = preflight
+    state["resolver"] = 0
+    with pytest.raises(ValueError):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert not (root.parent / "providers").exists()
+
+
+def test_activation_publishes_final_before_receipt(activation_candidate, monkeypatch):
+    import os
+    op, migration, root, binary, sha = activation_candidate
+    events = []
+    publish = migration._publish_candidate
+    replace = os.replace
+    def observe_publish(source, destination):
+        events.append("final")
+        return publish(source, destination)
+    def observe_replace(src, dst, *args, **kwargs):
+        if str(dst).endswith("active.json"):
+            final = root.parent / "providers" / "opencode" / "versions" / op.id / binary.name
+            assert final.read_bytes() == binary.read_bytes()
+            events.append("receipt")
+        return replace(src, dst, *args, **kwargs)
+    monkeypatch.setattr(migration, "_publish_candidate", observe_publish)
+    monkeypatch.setattr(os, "replace", observe_replace)
+    migration.activate_candidate(op, sha, state_dir=root)
+    assert events == ["final", "receipt"]
+
+
+def test_activation_refuses_wrong_candidate_hash(activation_candidate):
+    op, migration, root, _, _ = activation_candidate
+    with pytest.raises(ValueError):
+        migration.activate_candidate(op, "a" * 64, state_dir=root)
+    assert not (root.parent / "providers").exists()
+
+
+def test_activation_refuses_running_checker_rejection(activation_candidate, monkeypatch):
+    from ciao.providers import opencode
+    op, migration, root, _, sha = activation_candidate
+    monkeypatch.setattr(opencode, "_server_version_error", lambda _: "rejected")
+    with pytest.raises(ValueError):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert not (root.parent / "providers").exists()
+
+
+@pytest.mark.parametrize("disappears", ["provider", "ancestor"])
+def test_managed_resolver_raced_ancestor_never_falls_back(managed_receipt, monkeypatch, disappears):
+    from pathlib import Path
+    from ciao import engine_update
+    from ciao.providers import opencode
+    root, provider, _, receipt, _ = managed_receipt
+    original = Path.lstat
+    victim = provider if disappears == "provider" else provider.parent
+    trigger = receipt if disappears == "provider" else provider
+    moved = root.parent / ("moved-" + disappears)
+    triggered = False
+    def raced(path, *args, **kwargs):
+        nonlocal triggered
+        if path == trigger and not triggered:
+            triggered = True
+            victim.rename(moved)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", raced)
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: root)
+    monkeypatch.delenv("CIAO_OPENCODE_BIN", raising=False)
+    monkeypatch.setattr(opencode, "resolve_tool", lambda _: pytest.fail("shared fallback"))
+    with pytest.raises(OSError) as caught:
+        opencode.resolve_opencode_binary()
+    assert triggered
+    assert type(caught.value) is OSError
+    assert str(caught.value) == "OpenCode is unavailable; check provider setup."
+    assert caught.value.__suppress_context__
+
+
+def test_activation_syncs_each_new_parent_before_next_publication(activation_candidate, monkeypatch):
+    import os
+    import stat
+    op, migration, root, _, sha = activation_candidate
+    events = []
+    descriptors = {}
+    create = migration._make_candidate_directory
+    open_dir = migration._candidate_directory_fd
+    sync = os.fsync
+    publish = migration._publish_candidate
+    def track_create(path):
+        result = create(path)
+        events.append(("create", path))
+        return result
+    def track_open(path):
+        fd = open_dir(path)
+        descriptors[fd] = path
+        return fd
+    def track_sync(fd):
+        if fd in descriptors and stat.S_ISDIR(os.fstat(fd).st_mode):
+            events.append(("sync", descriptors[fd]))
+        return sync(fd)
+    def track_publish(src, dst):
+        events.append(("publish", dst))
+        return publish(src, dst)
+    monkeypatch.setattr(migration, "_make_candidate_directory", track_create)
+    monkeypatch.setattr(migration, "_candidate_directory_fd", track_open)
+    monkeypatch.setattr(os, "fsync", track_sync)
+    monkeypatch.setattr(migration, "_publish_candidate", track_publish)
+    migration.activate_candidate(op, sha, state_dir=root)
+    if sys.platform != "win32":
+        providers = root.parent / "providers"
+        provider = providers / "opencode"
+        versions = provider / "versions"
+        assert events.index(("create", providers)) < events.index(("sync", root.parent)) < events.index(("create", provider))
+        assert events.index(("create", provider)) < events.index(("sync", providers)) < events.index(("create", versions))
+        assert events.index(("create", versions)) < events.index(("sync", provider)) < events.index(("publish", versions / op.id))
+
+
+@pytest.mark.parametrize("failure", ["raise", "mismatch"])
+def test_activation_does_not_succeed_if_own_readback_fails(activation_candidate, monkeypatch, failure):
+    import os
+    op, migration, root, _, sha = activation_candidate
+    original_replace = os.replace
+    original_resolve = migration.managed_opencode_binary
+    replaced = False
+    def replace(src, dst, *args, **kwargs):
+        nonlocal replaced
+        result = original_replace(src, dst, *args, **kwargs)
+        if str(dst).endswith("active.json"):
+            replaced = True
+        return result
+    def resolve(*, state_dir=None):
+        if replaced:
+            if failure == "raise":
+                raise OSError("readback failed")
+            return None
+        return original_resolve(state_dir=state_dir)
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(migration, "managed_opencode_binary", resolve)
+    with pytest.raises((ValueError, OSError)):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert replaced
+    assert original_resolve(state_dir=root) is not None
+
+
+def test_staging_preserves_existing_active_provider(activation_candidate, preflight, monkeypatch):
+    from pathlib import Path
+    op, migration, root, binary, sha = activation_candidate
+    old = migration.activate_candidate(op, sha, state_dir=root)
+    receipt = root.parent / "providers" / "opencode" / "active.json"
+    before = receipt.read_bytes()
+    binary.parent.rename(binary.parent.with_name("saved-candidate"))
+    runner = migration._run_bounded
+    def run(argv, *args, **kwargs):
+        if "install" in argv:
+            prefix = Path(argv[argv.index("--prefix") + 1])
+            package = prefix / "node_modules" / "@opencode" / "cli-darwin-arm64"
+            (package / "bin").mkdir(parents=True)
+            (package / "package.json").write_text(json.dumps({
+                "name": "@opencode/cli-darwin-arm64", "version": "2.2.5",
+                "os": ["darwin"], "cpu": ["arm64"],
+            }))
+            executable = package / "bin" / binary.name
+            executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"native fixture" * 30)
+            if sys.platform != "win32":
+                executable.chmod(0o700)
+            return b""
+        if Path(argv[0]).name in ("opencode", "opencode.exe") and "provider-candidate" in argv[0]:
+            return b"2.2.5\n"
+        return runner(argv, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_bounded", run)
+    snapshot = migration.provider_snapshot(op, frozenset({"opencode"}), state_dir=root)
+    assert snapshot["can_apply"]
+    result = migration.stage_opencode_candidate(op, migration.snapshot_id(snapshot), frozenset({"opencode"}), state_dir=root)
+    assert result["sha256"] != sha
+    assert receipt.read_bytes() == before
+    assert migration.managed_opencode_binary(state_dir=root) == old
+
+
+@pytest.mark.parametrize("entry", ["providers", "opencode", "versions", "final"])
+def test_activation_retry_syncs_existing_parent_before_receipt(activation_candidate, monkeypatch, entry):
+    import os
+    import stat
+    op, migration, root, _, sha = activation_candidate
+    providers = root.parent / "providers"
+    provider = providers / "opencode"
+    versions = provider / "versions"
+    entries = {"providers": providers, "opencode": provider,
+               "versions": versions, "final": versions / op.id}
+    created = entries[entry]
+    parent = created.parent
+    real_sync = os.fsync
+    real_replace = os.replace
+    events = []
+    failed = False
+
+    def sync(fd):
+        nonlocal failed
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode) and created.exists():
+            parent_info = parent.stat()
+            if (info.st_dev, info.st_ino) == (parent_info.st_dev, parent_info.st_ino):
+                events.append("parent-sync")
+                if not failed:
+                    failed = True
+                    raise OSError("injected parent sync failure")
+        return real_sync(fd)
+
+    def replace(src, dst, *args, **kwargs):
+        if str(dst).endswith("active.json"):
+            events.append("receipt-replace")
+        return real_replace(src, dst, *args, **kwargs)
+
+    if sys.platform == "win32":
+        # Windows does not expose this POSIX directory-fsync path.
+        assert migration.activate_candidate(op, sha, state_dir=root)
+        return
+    monkeypatch.setattr(os, "fsync", sync)
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError, match="injected parent sync failure"):
+        migration.activate_candidate(op, sha, state_dir=root)
+    assert failed and created.is_dir()
+    assert "receipt-replace" not in events
+    events.clear()
+    result = migration.activate_candidate(op, sha, state_dir=root)
+    assert result == migration.managed_opencode_binary(state_dir=root)
+    assert events.index("parent-sync") < events.index("receipt-replace")

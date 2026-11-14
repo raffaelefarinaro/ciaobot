@@ -437,6 +437,9 @@ def opencode_default_model(config: object) -> str:
     return str(getattr(settings, "default_model", "") or "")
 
 
+MANAGED_OPENCODE_RESOLVER_VERSION = 1
+
+
 def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
     """Absolute path to the opencode CLI, or None when it is not installed."""
     source: Mapping[str, str] = {**os.environ, **env} if env else os.environ
@@ -444,7 +447,9 @@ def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
     if explicit:
         path = Path(explicit).expanduser()
         return str(path.resolve()) if path.is_file() else None
-    return resolve_tool("opencode")
+    from ciao.provider_migration import managed_opencode_binary
+
+    return managed_opencode_binary() or resolve_tool("opencode")
 
 
 #: Where someone with no OpenCode at all is sent. The download page lists every
@@ -2640,7 +2645,10 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             await self.disconnect()
 
-        binary = resolve_opencode_binary(request.extra_env)
+        try:
+            binary = resolve_opencode_binary(request.extra_env)
+        except OSError:
+            raise OSError("OpenCode is unavailable; check provider setup.") from None
         if not binary:
             raise FileNotFoundError(
                 "opencode CLI not found. Install OpenCode 2 (npm install -g @opencode/cli), "
@@ -5455,7 +5463,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     binary: str | None
     try:
         binary = resolve_opencode_binary()
-    except OSError as exc:
+    except OSError:
         # Found on PATH, but as a wrapper that does not lead to one executable —
         # a `npm install -g` that was interrupted, or a package whose entry point
         # is a script. Saying "not installed" would send the operator to install
@@ -5465,7 +5473,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             ok=False,
             auth="broken",
             command="opencode",
-            detail=f"installed but broken: {exc}",
+            detail="OpenCode is unavailable; check provider setup.",
             version="unknown",
         )
     if not binary:

@@ -1537,6 +1537,13 @@ staged engine, and publishes only `provider-candidate/opencode[.exe]` and
 is 0600; Windows uses owner-only ACLs. It uses a private cwd, cache and empty npm
 configuration. On Windows, this run's inherited owner-only output is validated
 as a whole before its entries receive protected DACLs; unsafe entries are not repaired.
+The separate activation helper is for a future approved, drained caller holding
+the same update lock. It verifies the candidate again, publishes an owner-private
+version without replacing an unknown directory, then replaces the active receipt
+last and verifies it on readback. Tests use explicit temporary state and fake
+external probes; native Windows protected-DACL and macOS acceptance still require
+isolated platform validation. Engine rollback does not roll back that receipt;
+an older engine without the resolver may continue using its shared CLI.
 It uses an allowlisted child environment, a 600 second deadline and a
 16 KiB combined output limit. The shared CLI and active provider remain unchanged.
 Normal completion removes only this invocation's work before returning success.
