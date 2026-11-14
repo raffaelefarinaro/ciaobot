@@ -89,6 +89,21 @@ ciao auth opencode                  # opens `opencode auth login`
 
 The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and do not work with Ciaobot, and `opencode upgrade` does not move a 1.x install to 2.x. If you installed OpenCode 1 that way, run `npm uninstall -g opencode-ai` first, because it also provides an `opencode` command.
 
+The engine's internal migration staging helper creates a private candidate;
+it does not change the shared command or activate that candidate.
+On Windows, inherited owner-only installer output is validated as a whole and
+given protected DACLs within that invocation; unknown work is not repaired.
+The whole installer work tree is validated before candidate publication;
+unsafe entries require manual recovery rather than cleanup.
+It uses the exact tested platform package and disables npm scripts; npm registry
+TLS and integrity checks, rather than the engine wheel signature, cover that
+download. Normal completion and handled failures clean this invocation's safe,
+identity-checked work and temporary candidate. Unsafe, interrupted or unremovable
+work requires manual recovery and is never silently reused. Private
+directories and the update lock are not an OS sandbox against hostile
+same-account processes, compromised npm/Node or malicious downloaded executable
+code. Disposable native-package acceptance remains required before shipping.
+
 OpenCode is bring-your-own-provider: it authenticates against whichever model
 backends you connect, and Ciaobot lists enabled models from active providers
 via the V2 `/api/provider` and `/api/model` endpoints. Ciaobot runs one
