@@ -22,6 +22,32 @@ import pytest
 
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
+
+def test_checked_startup_tree_cleanup(monkeypatch):
+    tree = ProcessTree.__new__(ProcessTree)
+    if sys.platform == "win32":
+        import ciao.os_support.processes as processes
+
+        tree._job = 123
+        monkeypatch.setattr(processes, "_TerminateJobObject", lambda *args: 0)
+        monkeypatch.setattr(processes, "_CloseHandle", lambda *args: 0)
+        with pytest.raises(OSError):
+            tree.kill_checked()
+        with pytest.raises(OSError):
+            tree.close_checked()
+        assert tree.detach_job_handle() == 123
+        assert tree.detach_job_handle() is None
+    else:
+        tree.pid = 123
+        tree._group = False
+        calls = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append((pid, sig)))
+        tree.kill_checked()
+        tree.close_checked()
+        assert calls == [(123, signal.SIGKILL)]
+        assert tree.detach_job_handle() is None
+
+
 _GRANDCHILD = textwrap.dedent(
     """
     import sys, time
@@ -66,6 +92,133 @@ def _beats_stopped(beat: Path) -> bool:
         elif time.monotonic() - still_since >= 1.0:
             return True
     return False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows Job Object test")
+def test_checked_job_termination_after_leader_exit(tmp_path):
+    beat = tmp_path / "beat"
+    leader = subprocess.Popen(
+        _leader(beat, then="time.sleep(1); sys.exit(0)"),
+        **tree_spawn_options(dies_with_engine=True),
+    )
+    tree = ProcessTree(leader.pid, dies_with_engine=True)
+    try:
+        _wait_for_beat(beat)
+        assert leader.wait(timeout=15) == 0
+        tree.kill_checked()
+        assert _beats_stopped(beat)
+    finally:
+        tree.close()
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait(timeout=15)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows Job Object test")
+@pytest.mark.parametrize("failure", ["kill", "close"])
+def test_checked_windows_failures_independently_quarantine(tmp_path, monkeypatch, failure):
+    import asyncio
+    import ciao.os_support.processes as processes
+    import ciao.providers.opencode as mod
+
+    handle = processes._CreateJobObjectW(None, None)
+    assert handle
+    real_kill, real_close = processes._TerminateJobObject, processes._CloseHandle
+    calls = []
+
+    def kill(job, code):
+        calls.append("kill")
+        return 0 if failure == "kill" else real_kill(job, code)
+
+    def close(job):
+        calls.append("close")
+        return 0 if failure == "close" else real_close(job)
+
+    monkeypatch.setattr(processes, "_TerminateJobObject", kill)
+    monkeypatch.setattr(processes, "_CloseHandle", close)
+
+    class Process:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    tree = ProcessTree.__new__(ProcessTree)
+    tree._job = handle
+    try:
+        assert asyncio.run(mod._startup_cleanup(tmp_path, Process(), tree))
+        assert calls == ["kill", "close"]
+        with mod._SERVER_START_GUARD:
+            state = mod._SERVER_START_LOCKS[str(tmp_path.resolve())]
+            assert state.quarantined
+            assert state.retained_job_handles == ([handle] if failure == "close" else [])
+        assert tree._job is None
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+        if failure == "close":
+            assert real_close(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows Job Object test")
+def test_failed_checked_close_retains_handle_without_retaining_loop(tmp_path, monkeypatch):
+    import asyncio
+    import gc
+    import threading
+    import weakref
+    import ciao.os_support.processes as processes
+    import ciao.providers.opencode as mod
+
+    handle = processes._CreateJobObjectW(None, None)
+    assert handle
+    real_close = processes._CloseHandle
+    monkeypatch.setattr(processes, "_CloseHandle", lambda value: 0 if value == handle else real_close(value))
+    refs, errors = [], []
+
+    def worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        refs.append(weakref.ref(loop))
+
+        async def run():
+            class Process:
+                returncode = 0
+
+                async def wait(self):
+                    return 0
+
+            tree = ProcessTree.__new__(ProcessTree)
+            tree._job = handle
+            async with mod._server_start_lock(tmp_path):
+                waiting = asyncio.create_task(mod._server_start_lock(tmp_path).__aenter__())
+                await asyncio.sleep(0.1)
+                assert await mod._startup_cleanup(tmp_path, Process(), tree)
+            with pytest.raises(mod.SanitizedStartupError):
+                await waiting
+
+        try:
+            loop.run_until_complete(run())
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    thread = threading.Thread(target=worker)
+    try:
+        thread.start()
+        thread.join(10)
+        assert not thread.is_alive() and not errors
+        gc.collect()
+        assert refs[0]() is None
+        with mod._SERVER_START_GUARD:
+            state = mod._SERVER_START_LOCKS[str(tmp_path.resolve())]
+            assert state.quarantined and state.retained_job_handles == [handle]
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+        assert real_close(handle)
 
 
 def test_kill_ends_the_leader_and_its_grandchild(tmp_path: Path) -> None:
