@@ -687,15 +687,14 @@ def test_parse_recall_check_preserves_input_order_without_filtering() -> None:
     assert [finding["id"] for finding in result] == ["a", "b", "c"]
 
 
-def test_parse_recall_check_accepts_one_fenced_json_result_with_surrounding_prose() -> None:
+def test_parse_recall_check_accepts_one_fenced_json_result_with_whitespace_outside() -> None:
     claim = vv.RecallClaim("claim_1", "The fictional code is ORCHID-17.", ("Synthetic/Project-Quartz.md",))
     reply = (
-        "```json\n"
+        " \n```json\n"
         '{"claims":[{"id":"claim_1","status":"supported",'
         '"sources":["Synthetic/Project-Quartz.md"],'
         '"reason":"The source explicitly states the fictional launch code is ORCHID-17."}]}\n'
-        "```\n\n"
-        "This result is supported by the evidence in Synthetic/Project-Quartz.md."
+        "```\n \n"
     )
     assert vv.parse_recall_check(reply, [claim], {"Synthetic/Project-Quartz.md"}) == [{
         "id": "claim_1",
@@ -705,13 +704,38 @@ def test_parse_recall_check_accepts_one_fenced_json_result_with_surrounding_pros
     }]
 
 
+def test_parse_recall_check_rejects_one_raw_json_object_followed_by_plain_sentence() -> None:
+    claim = vv.RecallClaim("claim_1", "The fictional launch code is ORCHID-17.", ("Project Quartz.md",))
+    reply = (
+        '{"claims":[{"id":"claim_1","status":"supported",'
+        '"sources":["Project Quartz.md"],'
+        '"reason":"The source directly states the fictional launch code is ORCHID-17."}]}\n\n'
+        "The source supports this finding."
+    )
+    assert vv.parse_recall_check(reply, [claim], {"Project Quartz.md"}) is None
+
+
+def test_parse_recall_check_rejects_actual_two_sentence_plan_mode_trailer() -> None:
+    claim = vv.RecallClaim("claim_1", "The fictional launch code is ORCHID-17.", ("Project Quartz.md",))
+    reply = (
+        '{"claims":[{"id":"claim_1","status":"supported",'
+        '"sources":["Project Quartz.md"],'
+        '"reason":"The source directly states the fictional launch code is ORCHID-17."}]}\n\n'
+        "Understood. I’ll remain in Plan mode and won’t modify files."
+    )
+    assert vv.parse_recall_check(reply, [claim], {"Project Quartz.md"}) is None
+
+
 @pytest.mark.parametrize("reply", [
     '```json\n{"claims":[]}\n```\n```json\n{"claims":[]}\n```',
     '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n{"claims":[]}',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\nThe claim is contradicted.',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\nstatus: contradicted',
     '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n{"claims": BROKEN}',
     '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n prose [in brackets]',
     '```text\n{"claims":[]}\n```',
     '```json\n{"claims":[]}\n```\n```text\nordinary prose\n```',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]} not json\n```',
     '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["fake.md"],"reason":"prose claim"}]}\n```',
     '```json\n{"claims":[]}\n',
 ])
@@ -737,6 +761,45 @@ def test_parse_recall_check_rejects_deeply_nested_json_without_raising() -> None
     assert vv.parse_recall_check("[" * 15_000, [claim], {"a.md"}) is None
     reply = '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n' + "[" * 15_000
     assert vv.parse_recall_check(reply, [claim], {"a.md"}) is None
+    assert vv.parse_recall_check("```json" + "\n" * 15_000, [claim], {"a.md"}) is None
+
+
+@pytest.mark.parametrize("trailer", [
+    '{"claims":[]}',
+    '{"claims": BROKEN}',
+    '```json\n{"claims":[]}\n```',
+    '```text\nordinary prose\n```',
+    'status: contradicted',
+    '"contradicted"',
+    'false',
+    '42',
+    'Done.\n- status: contradicted',
+    'Done.\n"contradicted"',
+    'Done.\nfalse',
+    'The claim is contradicted.',
+    'status: contradicted',
+])
+def test_parse_recall_check_rejects_structured_or_malformed_raw_trailer(trailer) -> None:
+    claim = vv.RecallClaim("claim_1", "A fact", ("a.md",))
+    reply = (
+        '{"claims":[{"id":"claim_1","status":"supported",'
+        '"sources":["a.md"],"reason":"x"}]}\n\n' + trailer
+    )
+    assert vv.parse_recall_check(reply, [claim], {"a.md"}) is None
+
+
+def test_parse_recall_check_handles_long_whitespace_trailer_linearly() -> None:
+    claim = vv.RecallClaim("claim_1", "A fact", ("a.md",))
+    reply = (
+        '{"claims":[{"id":"claim_1","status":"supported",'
+        '"sources":["a.md"],"reason":"x"}]}' + "\n" * 15_000
+    )
+    assert vv.parse_recall_check(reply, [claim], {"a.md"}) == [{
+        "id": "claim_1",
+        "status": "supported",
+        "sources": ["a.md"],
+        "reason": "x",
+    }]
 
 
 def test_parse_recall_check_rejects_invalid_output() -> None:

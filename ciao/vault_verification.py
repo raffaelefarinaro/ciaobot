@@ -291,18 +291,26 @@ def parse_recall_check(
         raise ValueError("unknown known source")
     if not isinstance(text, str) or len(text) > RECALL_MAX_REPLY_CHARS:
         return None
-    # OpenCode may wrap its single structured result in Markdown and then add
-    # conversational text. Only the fenced JSON block is authoritative.
-    fenced = re.findall(r"```json\s*\n(.*?)\n```", text, re.DOTALL)
-    if "```" in text:
-        if len(fenced) != 1 or text.count("```") != 2:
+    # OpenCode may add conversational text around its single structured result.
+    is_fenced = "```" in text
+    if is_fenced:
+        if text.count("```") != 2:
             return None
         fence_start = text.find("```")
-        fence_end = text.find("```", fence_start + 3) + 3
-        outside = text[:fence_start] + text[fence_end:]
-        if any(char in "{[" for char in outside):
+        header_end = text.find("\n", fence_start + 3)
+        if header_end < 0:
             return None
-        text = fenced[0]
+        header = text[fence_start + 3:header_end]
+        if not header.startswith("json") or header[4:].strip(" \t\r"):
+            return None
+        closing_start = text.find("\n```", header_end + 1)
+        if closing_start < 0:
+            return None
+        fence_end = closing_start + 4
+        outside = text[:fence_start] + text[fence_end:]
+        if outside.strip():
+            return None
+        text = text[header_end + 1:closing_start]
 
     def reject_duplicate_keys(pairs):
         result = {}
