@@ -57,6 +57,7 @@ function mountCard(props: { action?: ChatAction } = {}) {
   // A Pinia of its own per test, so one test's actions never reach another.
   const pinia = createPinia()
   setActivePinia(pinia)
+  useProjectStore().chatActions[CHAT_ID] = [props.action ?? action()]
   wrapper = mount(NeedsYouCard, {
     props: { chatId: CHAT_ID, action: action(), ...props },
     attachTo: document.body,
