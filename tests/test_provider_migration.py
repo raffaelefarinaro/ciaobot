@@ -1397,6 +1397,7 @@ def test_windows_stage_checks_installed_file_dacl(stage_installer, monkeypatch, 
 
 def test_windows_stage_secures_inherited_output_and_cleans_work(stage_installer, monkeypatch):
     from types import SimpleNamespace
+    from ciao import update_host
     from ciao.os_support import private
     op, _, migration, setup, stage = stage_installer
     protected = set()
@@ -1419,6 +1420,10 @@ def test_windows_stage_secures_inherited_output_and_cleans_work(stage_installer,
         if binary.exists():
             binary.rename(binary.with_name("opencode.exe"))
         monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+        monkeypatch.setattr(update_host, "sys", SimpleNamespace(platform="linux"))
+        def staged_python(tool):
+            return tool / "ciaobot" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        monkeypatch.setattr(update_host, "current_update_host", lambda: SimpleNamespace(find_staged_python=staged_python))
     setup["after_install"] = after_install
     result = stage()
     work = migration.Path(op.stage_dir) / "provider-candidate-work"
