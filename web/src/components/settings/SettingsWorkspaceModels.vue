@@ -34,33 +34,41 @@
         <span :id="`workspace-model-${form.name}`" class="ws-label set-subrow-label">Default model</span>
         <div class="set-subrow-control">
           <ModelSelector
+            :key="`${generation}:${provider}`"
             :model-value="override('model') || WS_DEFAULT"
             :sections="modelSections"
             :labelled-by="`workspace-model-${form.name}`"
             :disabled="saving || !providerAvailable"
-            @update:model-value="setField('model', $event, true)"
+            @update:model-value="modelSelection"
           />
         </div>
       </div>
-      <p v-if="routines && !providerAvailable" class="hint hint--compact set-subrow-hint">
-        Connect {{ providerLabel }} on Settings &gt; Providers to choose a model.
+      <p v-if="models && !providerAvailable" class="hint hint--compact set-subrow-hint">
+        No models reported; availability unknown.
+      </p>
+      <p ref="modelStatus" class="hint hint--compact set-subrow-hint" role="status" tabindex="-1">
+        {{ !form.name ? 'Workspace unavailable; model options cannot be loaded.' : modelsLoading ? 'Loading model options…' : modelsError ? 'Model options unavailable.' : models ? 'Model options loaded.' : 'Model options unavailable.' }}
       </p>
 
       <label class="set-subrow">
         <span class="ws-label set-subrow-label">Thinking</span>
         <select
+          :key="generation"
           :id="`ws-override-thinking-${provider}`"
+          :data-generation="generation"
+          :data-workspace="form.name"
+          :data-provider="provider"
           class="routine-select set-subrow-control"
           :value="override('thinking')"
           :disabled="saving || !models"
-          @change="setField('thinking', ($event.target as HTMLSelectElement).value)"
+          @change="thinkingChange"
         >
           <option value="">Engine default ({{ engineThinkingLabel }})</option>
           <option v-for="level in thinkingLevels" :key="level.value" :value="level.value">{{ capitalise(level.label) }}</option>
         </select>
       </label>
       <p v-if="!models" class="hint hint--compact set-subrow-hint">
-        {{ modelsError ? 'Effort options unavailable.' : 'Loading effort options…' }}
+        {{ modelsError || !form.name ? 'Effort options unavailable.' : 'Loading effort options…' }}
       </p>
 
       <label class="set-subrow">
@@ -85,17 +93,19 @@
         >Session insights</span>
         <div class="set-subrow-control">
           <ModelSelector
+            :key="`${generation}:${provider}`"
             :model-value="override('insights_model') || WS_DEFAULT"
             :sections="insightsSections"
             :labelled-by="`workspace-insights-model-${form.name}`"
             :disabled="saving || !providerAvailable"
-            @update:model-value="setField('insights_model', $event, true)"
+            @update:model-value="insightsSelection"
           />
         </div>
       </div>
 
       <p v-if="routinesError" class="hint hint--warn" role="alert">{{ routinesError }}</p>
       <p v-if="modelsError" class="hint hint--warn" role="alert">{{ modelsError }}</p>
+      <button v-if="showRetry" ref="retryButton" type="button" class="btn-small" :aria-disabled="modelsLoading" @click="retryModels">Retry</button>
       <p class="hint hint--compact models-hint">
         Switching the provider shows that provider's overrides; each provider keeps its own.
       </p>
@@ -116,10 +126,11 @@
       </div>
     </div>
   </div>
+  <p v-else role="status" class="hint">Workspace unavailable; model options cannot be loaded.</p>
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ModelSelector from '../ModelSelector.vue'
 import { api } from '../../lib/api'
 import { apiErrorMessage } from '../../lib/errorMessage'
@@ -153,16 +164,21 @@ const routines = ref<RoutineSettings | null>(null)
 const models = ref<ModelsResponse | null>(null)
 const routinesError = ref('')
 const modelsError = ref('')
+const modelsLoading = ref(false)
+const showRetry = ref(false)
+const retryButton = ref<HTMLButtonElement | null>(null)
+const modelStatus = ref<HTMLElement | null>(null)
+const generation = ref(0)
 const providerEls = ref<HTMLButtonElement[]>([])
 
 const choices = useProviderChoices({ routines, workspaceModels: models })
 
 const provider = computed<WorkspaceProvider>(() => form.value?.default_provider ?? 'claude')
 const saving = computed(() => !!form.value && workspacesSaving.value === form.value.name)
-const providerLabel = computed(
-  () => workspaceProviderOptions.value.find((o) => o.value === provider.value)?.label || provider.value,
-)
-const providerAvailable = computed(() => !!choices.getProviderSection(provider.value)?.available)
+const reportedModels = computed(() => provider.value === 'opencode'
+  ? models.value?.opencode_models?.length ? models.value.opencode_models : models.value?.provider_models?.opencode || []
+  : models.value?.provider_models?.claude || models.value?.models || [])
+const providerAvailable = computed(() => reportedModels.value.length > 0)
 
 function override(field: ProviderOverrideField): string {
   return form.value?.provider_overrides[provider.value]?.[field] ?? ''
@@ -179,33 +195,67 @@ function setField(field: ProviderOverrideField, raw: string | string[], sentinel
   form.value.provider_overrides = setOverride(form.value.provider_overrides, provider.value, field, value)
 }
 
-const modelSections = computed(() =>
-  choices.providerSectionsWithDefault(
+function selection(field: ProviderOverrideField) {
+  const name = form.value?.name
+  const current = generation.value
+  const selectedProvider = provider.value
+  return (value: string | string[]) => {
+    if (generation.value === current && form.value?.name === name && provider.value === selectedProvider && models.value && providerAvailable.value) {
+      setField(field, value, true)
+    }
+  }
+}
+const modelSelection = computed(() => selection('model'))
+const insightsSelection = computed(() => selection('insights_model'))
+function thinkingChange(event: Event): void {
+  const select = event.currentTarget as HTMLSelectElement
+  if (select.dataset.generation === String(generation.value) && select.dataset.workspace === form.value?.name &&
+      select.dataset.provider === provider.value && models.value && !saving.value) {
+    setField('thinking', select.value)
+  }
+}
+
+function sections(insights: boolean) {
+  if (!routines.value) {
+    const options = reportedModels.value
+    return [
+      { key: 'default', label: 'Default', models: [WS_DEFAULT], modelLabels: { [WS_DEFAULT]: 'Engine default (unknown)' } },
+      { key: provider.value, label: provider.value, models: options, modelLabels: choices.modelLabelsFor(options), modelBadges: choices.modelBadgesFor(options) },
+    ]
+  }
+  const result = choices.providerSectionsWithDefault(
     provider.value,
     WS_DEFAULT,
-    (effective) => `Engine default (${effective ? modelDisplayName(effective) : 'automatic'})`,
-    true,
-  ),
-)
+    (effective) => insights
+      ? `Engine default (${engineInsights.value ? modelDisplayName(engineInsights.value) : 'same as chat model'})`
+      : `Engine default (${effective ? modelDisplayName(effective) : 'automatic'})`,
+    !insights,
+  )
+  result[1] = {
+    ...result[1],
+    models: reportedModels.value,
+    modelLabels: choices.modelLabelsFor(reportedModels.value),
+    modelBadges: choices.modelBadgesFor(reportedModels.value),
+    disabled: !providerAvailable.value,
+  }
+  return result
+}
+const modelSections = computed(() => sections(false))
 
 const engineInsights = computed(() => routines.value?.provider_insights_models?.[provider.value] || '')
-const insightsSections = computed(() =>
-  choices.providerSectionsWithDefault(
-    provider.value,
-    WS_DEFAULT,
-    () => `Engine default (${engineInsights.value ? modelDisplayName(engineInsights.value) : 'same as chat model'})`,
-  ),
-)
+const insightsSections = computed(() => sections(true))
 
 // The first entry is the composable's own "Automatic"; this card names the engine default instead.
 const thinkingLevels = computed(() => choices.providerThinkingOptions(provider.value).slice(1))
 const engineThinkingLabel = computed(() => {
+  if (!routines.value) return 'unknown'
   const level = routines.value?.provider_default_thinking?.[provider.value]
   return level ? capitalise(level) : 'Auto'
 })
 
 const modeOptions = PROVIDER_MODE_OPTIONS.filter((o) => o.value !== DEFAULT_MODE_SELECTION)
 const engineModeLabel = computed(() => {
+  if (!routines.value) return 'unknown'
   const mode = routines.value?.provider_default_modes?.[provider.value] || 'auto'
   return capitalise(mode)
 })
@@ -244,18 +294,47 @@ function onProviderKeydown(e: KeyboardEvent): void {
 }
 
 let unmounted = false
+async function fetchModels(): Promise<void> {
+  const name = form.value?.name
+  const current = ++generation.value
+  models.value = null
+  modelsError.value = ''
+  modelsLoading.value = !!name
+  if (!name) return
+  const valid = () => !unmounted && generation.value === current && form.value?.name === name
+  try {
+    const result = await api.get<ModelsResponse>(`/api/models?${new URLSearchParams({ workspace: name })}`)
+    if (valid()) {
+      const restoreFocus = document.activeElement === retryButton.value && retryButton.value !== null
+      models.value = result
+      modelsLoading.value = false
+      showRetry.value = false
+      if (restoreFocus) {
+        await nextTick()
+        if (valid() && document.activeElement === document.body) modelStatus.value?.focus()
+      }
+    }
+  } catch (error) {
+    if (valid()) {
+      modelsLoading.value = false
+      modelsError.value = `Could not load the model list: ${apiErrorMessage(error, 'The request failed.')}`
+      showRetry.value = true
+    }
+  }
+}
+function retryModels(): void {
+  if (!modelsLoading.value) void fetchModels()
+}
+watch(() => form.value?.name, () => { showRetry.value = false; void fetchModels() }, { immediate: true, flush: 'sync' })
 onMounted(async () => {
-  const [r, m] = await Promise.allSettled([
-    api.get<RoutineSettings>('/api/settings/routines'),
-    api.get<ModelsResponse>('/api/models'),
-  ])
-  if (unmounted) return
-  if (r.status === 'fulfilled') routines.value = r.value
-  else routinesError.value = `Could not load the provider defaults: ${apiErrorMessage(r.reason, 'The request failed.')}`
-  if (m.status === 'fulfilled') models.value = m.value
-  else modelsError.value = `Could not load the model list: ${apiErrorMessage(m.reason, 'The request failed.')}`
+  try {
+    const result = await api.get<RoutineSettings>('/api/settings/routines')
+    if (!unmounted) routines.value = result
+  } catch (error) {
+    if (!unmounted) routinesError.value = `Could not load the provider defaults: ${apiErrorMessage(error, 'The request failed.')}`
+  }
 })
-onBeforeUnmount(() => { unmounted = true })
+onBeforeUnmount(() => { unmounted = true; generation.value++ })
 </script>
 
 <style scoped src="./settingsPanels.css"></style>
