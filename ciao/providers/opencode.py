@@ -49,6 +49,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -147,6 +148,8 @@ _MODEL_CACHE_TTL = 300.0
 # on every single request.
 _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_MODEL_CACHE_GUARD = threading.RLock()
+_MODEL_CACHE_GENERATION = 0
 # How long the catalog keeps polling a fresh server whose model list is still
 # empty, counted from its first /api/model reply. Loading took about 0.5s
 # against three connected providers; an account with genuinely no models pays
@@ -342,16 +345,205 @@ async def _spawn_server(
     process = await asyncio.create_subprocess_exec(*argv, **options)
     try:
         tree = ProcessTree(process.pid, dies_with_engine=True)
-    except OSError:
+    except BaseException as exc:
         # A server that cannot be stopped as a tree would leak; do not run it.
-        process.kill()
-        await process.wait()
+        try:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
+        except BaseException:
+            raise _UncertainSpawn() from exc
+        if sys.platform == "win32":
+            # Without a Job, stopping the leader cannot establish tree cleanup.
+            raise _UncertainSpawn() from exc
         raise
     return process, tree
 
 
-_SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
-_CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
+class _UncertainSpawn(RuntimeError):
+    pass
+
+
+_STARTUP_CLASSIFICATIONS = frozenset({
+    "unknown", "unexpected", "timeout", "exited", "invalid_response",
+    "incompatible_version", "missing_operations", "unauthorized",
+})
+_STARTUP_MESSAGES = {
+    "incompatible_version": "OpenCode 2.0.16 or later is required (2.x only)",
+    "missing_operations": "OpenCode API is missing required operations",
+    "unauthorized": "OpenCode server authentication failed",
+}
+
+
+class _StartupContractError(RuntimeError):
+    def __init__(self, classification: str) -> None:
+        self.classification = classification
+        super().__init__(_STARTUP_MESSAGES[classification])
+
+
+class SanitizedStartupError(RuntimeError):
+    def __init__(self, message: str, *, classification: str = "unknown", retryable: bool = False) -> None:
+        super().__init__(message)
+        self.classification = classification if classification in _STARTUP_CLASSIFICATIONS else "unknown"
+        self.retryable = retryable
+
+
+def _startup_failure_classification(exc: BaseException) -> str:
+    if isinstance(exc, (SanitizedStartupError, _StartupContractError)):
+        return exc.classification if exc.classification in _STARTUP_CLASSIFICATIONS else "unknown"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    return "unexpected"
+
+
+async def _startup_cleanup(
+    root: Path,
+    process: asyncio.subprocess.Process | None,
+    tree: ProcessTree | None,
+    client: httpx.AsyncClient | None = None,
+    reader: asyncio.Task[Any] | None = None,
+) -> bool:
+    """Attempt every cleanup; quarantine if tree termination is uncertain."""
+    failed = False
+    uncertain = False
+    if client is not None:
+        try:
+            await client.aclose()
+        except BaseException:
+            failed = True
+    if process is not None:
+        if tree is None:
+            uncertain = True
+        else:
+            try:
+                if sys.platform == "win32":
+                    try:
+                        tree.kill_checked()
+                    except BaseException:
+                        uncertain = True
+                    try:
+                        await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
+                    except BaseException:
+                        uncertain = True
+                elif process.returncode is None:
+                    missing = False
+                    try:
+                        tree.terminate()
+                    except ProcessLookupError:
+                        missing = True
+                    except BaseException:
+                        uncertain = True
+                    try:
+                        await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
+                    except TimeoutError:
+                        if process.returncode is None:
+                            try:
+                                tree.kill_checked()
+                            except ProcessLookupError:
+                                missing = True
+                            except BaseException:
+                                uncertain = True
+                        try:
+                            await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
+                        except BaseException:
+                            uncertain = True
+                    except BaseException:
+                        uncertain = True
+                    if missing and process.returncode is None:
+                        uncertain = True
+                else:
+                    try:
+                        await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
+                    except BaseException:
+                        uncertain = True
+            finally:
+                try:
+                    tree.close_checked()
+                except BaseException:
+                    uncertain = True
+                    handle = tree.detach_job_handle()
+                    if handle is not None:
+                        _quarantine_startup(root, handle)
+    if reader is not None:
+        try:
+            reader.cancel()
+            results = await asyncio.gather(reader, return_exceptions=True)
+            if any(isinstance(item, BaseException) and not isinstance(item, asyncio.CancelledError) for item in results):
+                failed = True
+        except BaseException:
+            failed = True
+    if uncertain:
+        _quarantine_startup(root)
+    return failed or uncertain
+
+
+async def _finish_startup_cleanup(
+    root: Path, process: asyncio.subprocess.Process | None, tree: ProcessTree | None,
+    client: httpx.AsyncClient | None = None, reader: asyncio.Task[Any] | None = None,
+) -> tuple[bool, bool]:
+    task = asyncio.create_task(_startup_cleanup(root, process, tree, client, reader))
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            cancelled = True
+
+
+async def _spawn_server_owned(
+    root: Path, *argv: str, **kwargs: Any
+) -> tuple[asyncio.subprocess.Process, ProcessTree]:
+    task = asyncio.create_task(_spawn_server(*argv, **kwargs))
+    cancelled = False
+    uncertain = False
+    spawn_failed = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+        except _UncertainSpawn:
+            _quarantine_startup(root)
+            uncertain = True
+            break
+        except BaseException:
+            if not cancelled:
+                raise
+            spawn_failed = True
+            break
+    if uncertain:
+        if cancelled:
+            logger.error("OpenCode startup cleanup failed")
+            raise asyncio.CancelledError from None
+        raise SanitizedStartupError("OpenCode startup cleanup failed") from None
+    if spawn_failed:
+        raise asyncio.CancelledError from None
+    if cancelled:
+        failed, _ = await _finish_startup_cleanup(root, *result)
+        if failed:
+            logger.error("OpenCode startup cleanup failed")
+        raise asyncio.CancelledError
+    return result
+
+
+@dataclass
+class _StartupState:
+    owner: object | None = None
+    # A weak reference detects a closed owner loop without retaining it.
+    owner_loop: weakref.ReferenceType[asyncio.AbstractEventLoop] | None = None
+    waiters: deque[object] = field(default_factory=deque)
+    quarantined: bool = False
+    retained_job_handles: list[int] = field(default_factory=list)
+
+
+_SERVER_START_GUARD = threading.Lock()
+_SERVER_START_LOCKS: dict[str, _StartupState] = {}
+_CATALOG_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, weakref.WeakValueDictionary[str, asyncio.Lock]
+] = weakref.WeakKeyDictionary()
 # Lines of the server's stderr kept for error messages. The pipe must be read
 # continuously (a full 64K pipe buffer blocks the child's next write and wedges
 # the server mid-turn), so the reader keeps a bounded tail rather than the lot.
@@ -503,7 +695,8 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
+@contextlib.asynccontextmanager
+async def _server_start_lock(workspace_root: Path) -> AsyncGenerator[None, None]:
     """Serialize per-workspace server startup inside this Ciaobot process.
 
     opencode keeps its state in a shared SQLite database even though Ciaobot
@@ -511,20 +704,72 @@ def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
     Ciaobot chats racing through opencode's migrations at the same time.
     """
     key = str(workspace_root.resolve())
-    lock = _SERVER_START_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _SERVER_START_LOCKS[key] = lock
-    return lock
+    token = object()
+    loop = asyncio.get_running_loop()
+    abandoned = False
+    try:
+        with _SERVER_START_GUARD:
+            state = _SERVER_START_LOCKS.setdefault(key, _StartupState())
+            state.waiters.append(token)
+        while True:
+            with _SERVER_START_GUARD:
+                if state.owner is not None and state.owner_loop is not None:
+                    owner_loop = state.owner_loop()
+                    if owner_loop is None or owner_loop.is_closed():
+                        state.quarantined = True
+                if state.quarantined:
+                    raise SanitizedStartupError("OpenCode startup is quarantined for this workspace")
+                if state.owner is None and state.waiters[0] is token:
+                    state.waiters.popleft()
+                    state.owner = token
+                    state.owner_loop = weakref.ref(loop)
+                    break
+            await asyncio.sleep(0.05)
+        yield
+    except GeneratorExit:
+        abandoned = True
+        raise
+    finally:
+        with _SERVER_START_GUARD:
+            current = _SERVER_START_LOCKS.get(key)
+            if current is not None:
+                if current.owner is token:
+                    if abandoned or loop.is_closed():
+                        current.quarantined = True
+                    current.owner = None
+                    current.owner_loop = None
+                else:
+                    with contextlib.suppress(ValueError):
+                        current.waiters.remove(token)
+                if current.owner is None and not current.waiters and not current.quarantined:
+                    del _SERVER_START_LOCKS[key]
+
+
+def _quarantine_startup(workspace_root: Path, handle: int | None = None) -> None:
+    with _SERVER_START_GUARD:
+        state = _SERVER_START_LOCKS.setdefault(str(workspace_root.resolve()), _StartupState())
+        state.quarantined = True
+        if handle is not None:
+            state.retained_job_handles.append(handle)
 
 
 def _catalog_lock(workspace_root: Path) -> asyncio.Lock:
     key = str(workspace_root.resolve())
-    lock = _CATALOG_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _CATALOG_LOCKS[key] = lock
-    return lock
+    loop = asyncio.get_running_loop()
+    with _MODEL_CACHE_GUARD:
+        locks = _CATALOG_LOCKS.setdefault(loop, weakref.WeakValueDictionary())
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        return lock
+
+
+def invalidate_opencode_model_cache() -> None:
+    global _MODEL_CACHE_GENERATION
+    with _MODEL_CACHE_GUARD:
+        _MODEL_CACHE_GENERATION += 1
+        _MODEL_CACHE.clear()
 
 
 def _version_number(value: object) -> tuple[int, ...] | None:
@@ -567,6 +812,8 @@ def _is_transient_startup_error(exc: BaseException) -> bool:
     retriable. Everything else — a missing binary, a contract mismatch — is
     terminal.
     """
+    if isinstance(exc, SanitizedStartupError):
+        return exc.retryable
     text = str(exc).lower()
     if "database is locked" in text or "database is busy" in text:
         return True
@@ -2640,17 +2887,23 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             await self.disconnect()
 
-        binary = resolve_opencode_binary(request.extra_env)
+        resolution_failed = False
+        try:
+            binary = resolve_opencode_binary(request.extra_env)
+        except Exception:
+            resolution_failed = True
+            binary = None
+        if resolution_failed:
+            raise SanitizedStartupError("OpenCode startup failed", classification="unexpected") from None
         if not binary:
             raise FileNotFoundError(
                 "opencode CLI not found. Install OpenCode 2 (npm install -g @opencode/cli), "
                 "make sure it is on your login shell PATH, or set CIAO_OPENCODE_BIN."
             )
 
-        lock = _server_start_lock(self.workspace_root)
         for attempt in range(_SERVER_START_ATTEMPTS):
             try:
-                async with lock:
+                async with _server_start_lock(self.workspace_root):
                     return await self._start_server_once(request, binary)
             except BaseException as exc:
                 if (
@@ -2739,34 +2992,76 @@ class OpencodeProvider(BaseSDKProvider):
         for problem in workspace_config_placeholder_problems(self.workspace_root, env):
             logger.warning("opencode: %s", problem)
 
-        self._process, self._tree = await _spawn_server(
-            *argv,
-            cwd=str(self.workspace_root),
-            env=env,
-            # stdout is discarded rather than piped: nothing consumes it, and an
-            # unread pipe blocks the child once the OS buffer fills. stderr is
-            # kept for diagnostics but drained continuously for the same reason.
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._start_stderr_reader()
-        self._base_url = f"http://127.0.0.1:{port}"
-        self._client = httpx.AsyncClient(
-            base_url=self._base_url,
-            auth=("opencode", self._password),
-            # No read timeout: the SSE stream is idle between turns and must
-            # not be torn down for being quiet.
-            timeout=httpx.Timeout(_REQUEST_TIMEOUT, read=None),
-        )
+        spawn_failed = False
+        spawn_classification = "unknown"
+        spawn_retryable = False
         try:
+            self._process, self._tree = await _spawn_server_owned(
+                self.workspace_root,
+                *argv,
+                cwd=str(self.workspace_root),
+                env=env,
+                # stderr is drained continuously so the pipe cannot block the child.
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (asyncio.CancelledError, SanitizedStartupError):
+            raise
+        except Exception as exc:
+            spawn_failed = True
+            spawn_classification = _startup_failure_classification(exc)
+            try:
+                spawn_retryable = _is_transient_startup_error(exc)
+            except BaseException:
+                pass
+        if spawn_failed:
+            raise SanitizedStartupError(
+                "OpenCode startup failed", classification=spawn_classification, retryable=spawn_retryable
+            ) from None
+        failed = False
+        startup_failed = False
+        classification = "unknown"
+        retryable = False
+        pending_cancel = False
+        try:
+            self._start_stderr_reader()
+            self._base_url = f"http://127.0.0.1:{port}"
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                auth=("opencode", self._password),
+                timeout=httpx.Timeout(_REQUEST_TIMEOUT, read=None),
+            )
             await self._await_health()
             await self._verify_contract()
-        except BaseException:
-            # A server we could not validate is a server nobody will ever
-            # shut down; reap it here rather than leaking it for the life of
-            # the app.
-            await self.disconnect()
+        except GeneratorExit:
             raise
+        except BaseException as exc:
+            classification = _startup_failure_classification(exc)
+            try:
+                retryable = _is_transient_startup_error(exc)
+            except BaseException:
+                retryable = False
+            startup_failed = True
+            failed, cancelled = await _finish_startup_cleanup(
+                self.workspace_root, self._process, self._tree, self._client, self._stderr_task
+            )
+            self._process, self._tree, self._client, self._stderr_task = None, None, None, None
+            self._base_url = ""
+            pending_cancel = isinstance(exc, asyncio.CancelledError) or cancelled
+        if pending_cancel:
+            if failed:
+                logger.error("OpenCode startup cleanup failed")
+            raise asyncio.CancelledError from None
+        if failed:
+            raise SanitizedStartupError(
+                f"OpenCode startup cleanup failed ({classification})", classification=classification
+            ) from None
+        if startup_failed:
+            raise SanitizedStartupError(
+                _STARTUP_MESSAGES.get(classification, "OpenCode startup failed"),
+                classification=classification, retryable=retryable
+            ) from None
+        assert self._client is not None
         return self._client
 
     def _start_stderr_reader(self) -> None:
@@ -2808,7 +3103,7 @@ class OpencodeProvider(BaseSDKProvider):
         if reader is not None and not reader.done():
             try:
                 await asyncio.wait_for(asyncio.shield(reader), timeout=1.0)
-            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.TimeoutError):
                 pass
         return self._stderr_tail[-1] if self._stderr_tail else ""
 
@@ -2829,18 +3124,18 @@ class OpencodeProvider(BaseSDKProvider):
                 response = await self._client.get("/api/info", timeout=2.0)
                 last_status = response.status_code
                 if response.status_code == 401:
-                    raise RuntimeError("OpenCode server authentication failed")
+                    raise _StartupContractError("unauthorized")
                 if response.status_code == 200:
                     try:
                         payload = response.json()
-                    except ValueError as exc:
-                        raise RuntimeError(OPENCODE_V2_REQUIRED) from exc
+                    except ValueError:
+                        raise _StartupContractError("incompatible_version") from None
                     version_error = _server_version_error(payload)
                     if version_error:
-                        raise RuntimeError(version_error)
+                        raise _StartupContractError("incompatible_version")
                     return
                 if response.status_code == 404:
-                    raise RuntimeError(OPENCODE_V2_REQUIRED)
+                    raise _StartupContractError("incompatible_version")
             except httpx.HTTPError as exc:  # not up yet
                 last_error = exc
                 last_status = None
@@ -2869,10 +3164,7 @@ class OpencodeProvider(BaseSDKProvider):
             ) from last_error
         missing = missing_required_paths(spec)
         if missing:
-            raise RuntimeError(
-                "This OpenCode 2.x build is missing operations Ciaobot needs: "
-                + ", ".join(missing)
-            )
+            raise _StartupContractError("missing_operations")
 
     async def disconnect(self) -> None:
         """Tear down the server, denying anything still awaiting a reply."""
@@ -4823,20 +5115,37 @@ class OpencodeProvider(BaseSDKProvider):
         queried from Settings, where no chat is necessarily open.
         """
         key = str(workspace_root)
-        cached = _MODEL_CACHE.get(key)
-        if cached and not force:
-            ttl = _MODEL_CACHE_TTL if cached[1] else _EMPTY_MODEL_CACHE_TTL
-            if time.monotonic() - cached[0] < ttl:
-                return [dict(item) for item in cached[1]]
-
-        async with _catalog_lock(workspace_root):
-            # Recheck after acquiring the single-flight lock: another settings
-            # request may have filled the cache while this one was waiting.
+        def cached_copy() -> list[dict[str, Any]] | None:
             cached = _MODEL_CACHE.get(key)
             if cached and not force:
                 ttl = _MODEL_CACHE_TTL if cached[1] else _EMPTY_MODEL_CACHE_TTL
                 if time.monotonic() - cached[0] < ttl:
                     return [dict(item) for item in cached[1]]
+            return None
+
+        with _MODEL_CACHE_GUARD:
+            hit = cached_copy()
+            if hit is not None:
+                return hit
+        lock = _catalog_lock(workspace_root)
+        async with lock:
+            while True:
+                with _MODEL_CACHE_GUARD:
+                    hit = cached_copy()
+                    if hit is not None:
+                        return hit
+                    generation = _MODEL_CACHE_GENERATION
+                catalog = await cls._fetch_model_catalog(workspace_root)
+                with _MODEL_CACHE_GUARD:
+                    if generation != _MODEL_CACHE_GENERATION:
+                        continue
+                    cached = _MODEL_CACHE.get(key)
+                    _log_catalog_change(key, cached[1] if cached else None, catalog)
+                    _MODEL_CACHE[key] = (time.monotonic(), catalog)
+                    return [dict(item) for item in catalog]
+
+    @classmethod
+    async def _fetch_model_catalog(cls, workspace_root: Path) -> list[dict[str, Any]]:
             models_payload: object = {"data": []}
             async with _EphemeralServer(workspace_root) as client:
                 if client is not None:
@@ -4878,8 +5187,6 @@ class OpencodeProvider(BaseSDKProvider):
             # V2's /api/model snapshot is already filtered to enabled models;
             # do not combine it with a separately timed provider snapshot.
             catalog = _catalog_from_api({"data": None}, models_payload)
-            _log_catalog_change(key, cached[1] if cached else None, catalog)
-            _MODEL_CACHE[key] = (time.monotonic(), catalog)
             return catalog
 
     @classmethod
@@ -5178,25 +5485,66 @@ class _EphemeralServer:
         self._process: asyncio.subprocess.Process | None = None
         self._tree: ProcessTree | None = None
         self._client: httpx.AsyncClient | None = None
+        self._startup_classification = "unknown"
 
     async def __aenter__(self) -> httpx.AsyncClient | None:
         async with _server_start_lock(self._workspace_root):
-            return await self._enter_unlocked()
+            self._startup_classification = "unknown"
+            failed = False
+            startup_failed = False
+            classification = "unknown"
+            existing_cleanup_failure = False
+            pending_cancel = False
+            try:
+                client = await self._enter_unlocked()
+            except GeneratorExit:
+                raise
+            except BaseException as exc:
+                startup_failed = True
+                classification = _startup_failure_classification(exc)
+                existing_cleanup_failure = isinstance(exc, SanitizedStartupError) and str(exc).startswith("OpenCode startup cleanup failed")
+                failed, cancelled = await self._cleanup_failed_enter()
+                pending_cancel = isinstance(exc, asyncio.CancelledError) or cancelled
+                client = None
+            else:
+                if client is None:
+                    failed, cancelled = await self._cleanup_failed_enter()
+                    pending_cancel = cancelled
+                    classification = self._startup_classification
+            if pending_cancel:
+                if failed:
+                    logger.error("OpenCode startup cleanup failed")
+                raise asyncio.CancelledError from None
+            if failed or existing_cleanup_failure:
+                raise SanitizedStartupError(
+                    f"OpenCode startup cleanup failed ({classification})", classification=classification
+                ) from None
+            if startup_failed:
+                raise SanitizedStartupError("OpenCode startup failed", classification=classification) from None
+            return client
+
+    async def _cleanup_failed_enter(self) -> tuple[bool, bool]:
+        failed, cancelled = await _finish_startup_cleanup(
+            self._workspace_root, self._process, self._tree, self._client
+        )
+        self._process, self._tree, self._client = None, None, None
+        return failed, cancelled
 
     async def _enter_unlocked(self) -> httpx.AsyncClient | None:
         try:
             binary = resolve_opencode_binary()
-        except OSError as exc:
+        except OSError:
             # A wrapper that leads nowhere is not a missing CLI, but for a caller
             # asking only "can this start a server" the two answers are the same.
-            logger.warning("opencode: %s", exc)
+            logger.warning("opencode: binary resolution failed")
             return None
         if not binary:
             return None
         port = _free_port()
         password = secrets.token_urlsafe(24)
         try:
-            self._process, self._tree = await _spawn_server(
+            self._process, self._tree = await _spawn_server_owned(
+                self._workspace_root,
                 binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
                 cwd=str(self._workspace_root),
                 env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
@@ -5213,6 +5561,7 @@ class _EphemeralServer:
         deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
         while asyncio.get_running_loop().time() < deadline:
             if self._process.returncode is not None:
+                self._startup_classification = "exited"
                 return None
             try:
                 response = await self._client.get("/api/info", timeout=2.0)
@@ -5220,13 +5569,19 @@ class _EphemeralServer:
                     try:
                         payload = response.json()
                     except ValueError:
+                        self._startup_classification = "invalid_response"
                         return None
-                    return self._client if _server_version_error(payload) is None else None
+                    if _server_version_error(payload) is not None:
+                        self._startup_classification = "incompatible_version"
+                        return None
+                    return self._client
                 if response.status_code in {401, 404}:
+                    self._startup_classification = "unauthorized" if response.status_code == 401 else "incompatible_version"
                     return None
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0.2)
+        self._startup_classification = "timeout"
         return None
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -5242,6 +5597,78 @@ class _EphemeralServer:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _CREDENTIAL_WORD_RE = re.compile(r"credentials?\b", re.IGNORECASE)
 _AUTH_LIST_MAX_STDOUT = 1024 * 1024
+
+
+def opencode_credential_inventory() -> dict[str, Any]:
+    """Project only bounded, user-visible metadata from the CLI's auth listing."""
+    import unicodedata
+
+    unknown: dict[str, Any] = {"status": "unknown", "providers": []}
+    try:
+        binary = resolve_opencode_binary()
+        if not binary:
+            return unknown
+        result = bounded_output(
+            [binary, "auth", "list", "--format", "json", "--standalone"],
+            timeout=5.0, max_stdout=_AUTH_LIST_MAX_STDOUT,
+        )
+        if result is None or result[0] != 0:
+            return unknown
+        rows = json.loads(result[1].decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return unknown
+    if not isinstance(rows, list):
+        return unknown
+
+    def clean(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or len(value) > 128 or any(
+            unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for ch in value
+        ):
+            return None
+        return value
+
+    partial = len(rows) > 100
+    providers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    order = ("oauth", "api_key", "environment", "unknown")
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            partial = True
+            continue
+        provider_id, name = clean(row.get("id")), clean(row.get("name"))
+        connections = row.get("connections")
+        if provider_id is None or name is None or not isinstance(connections, list):
+            partial = True
+            continue
+        if provider_id in seen:
+            partial = True
+            continue
+        if len(connections) > 32:
+            partial = True
+        methods: set[str] = set()
+        for connection in connections[:32]:
+            if not isinstance(connection, dict):
+                partial = True
+                continue
+            if connection.get("type") == "env":
+                methods.add("environment")
+            elif connection.get("type") == "credential" and connection.get("method") in ("oauth", "key"):
+                methods.add("oauth" if connection["method"] == "oauth" else "api_key")
+            else:
+                methods.add("unknown")
+                partial = True
+        if methods:
+            seen.add(provider_id)
+            providers.append({
+                "id": provider_id, "name": name,
+                "auth_types": [method for method in order if method in methods],
+                "configured": True, "verified": None,
+            })
+    providers.sort(key=lambda item: (item["id"], item["name"]))
+    return {"status": "partial" if partial else "complete", "providers": providers}
 
 
 def _credential_count(binary: str, *, timeout: float) -> int | None:
