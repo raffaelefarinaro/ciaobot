@@ -95,16 +95,30 @@ state or loading fidelity has not been audited; **not applicable** means it is
 known not to apply. Summary categories overlap. Loading notes distinguish the
 actual owner and initial load from failure or stale refresh where known.
 Migration starts unassessed unless an actual decision supports another status.
-Today only the four TabBar states have rendered stories; chat, task and other
-owners remain unassessed or uncovered. Adding an SFC requires a separate
+The four TabBar states, six plain SidebarRow states, two SidebarListSkeleton
+states and four SettingsSwitch states (six stories) have rendered stories;
+other states and owners remain unassessed or uncovered. Adding an SFC requires a separate
 inventory row (and a rationale for a composition), not a complete story suite.
 
-After `npm run build-storybook`, run this from the repository root to check
-the built index, including the type of each linked story:
+`npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
+after building. Every registry-linked ID must exist as a story, not Docs or
+the inventory page; missing/malformed output fails the command. Run the check
+alone with `node --experimental-strip-types web/scripts/check-storybook-index.ts`
+from the repository root (its paths do not depend on the current directory).
+The Node inventory tests separately enforce exact owner/state/ID sets.
 
-```bash
-node --experimental-strip-types --input-type=module -e 'import {readFileSync} from "node:fs"; import assert from "node:assert/strict"; import {inventory} from "./web/src/stories/inventory.ts"; const {entries}=JSON.parse(readFileSync("web/dist/storybook/index.json","utf8")); assert.equal(entries["inventory--all"]?.type,"story"); assert.equal(entries["inventory--all"]?.title,"Inventory/UI inventory"); for(const row of inventory) for(const state of row.states) for(const id of state.storyIds) { assert.equal(entries[id]?.type,"story",`${row.id}/${state.name}: ${id}`); assert.notEqual(id,"inventory--all"); } for(const suffix of ["default","counts","long-labels","narrow-pane"]) assert.equal(entries[`foundation-tab-bar--${suffix}`]?.type,"story");'
-```
+SidebarRow covers default, active, unread, muted, pending and long-content;
+these use its plain-div branch, not links, host controls or keyboard interaction.
+SidebarListSkeleton covers loading (one group, three rows) and nested (two
+groups, two rows), each with one loading announcement. This does not separately
+cover SidebarRow's placeholder state or other owners' loading fidelity.
+
+SettingsSwitch covers default (On and Off), disabled (On and Off), busy and
+narrow (a maximum 390px container). Busy renders an ellipsis and `aria-busy`
+without disabling the native button. Its controlled interactive stories import
+the production component; parents still own persistence. Only Check vault
+answers and Resume after restart have migrated to it. Their connected screens,
+keyboard-focus and reduced-motion states do not gain story coverage.
 
 The Node tests check data and filters, not Vue interactions or manager links.
 Check filtering, keyboard access, narrow/zoom layouts and story links in both

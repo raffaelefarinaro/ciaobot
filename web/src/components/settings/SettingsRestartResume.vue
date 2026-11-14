@@ -11,24 +11,19 @@
     </div>
     <div class="settings-switch-row">
       <span class="hint">Continue interrupted chats</span>
-      <button
-        class="settings-switch"
-        type="button"
-        role="switch"
-        :aria-checked="enabled"
+      <SettingsSwitch
+        :checked="enabled"
         aria-label="Continue interrupted chats after a restart"
         :disabled="!routines || routinesSaving"
-        @click="saveRoutines({ resume_after_restart: !enabled })"
-      >
-        <span class="switch-word">{{ enabled ? 'On' : 'Off' }}</span>
-        <span class="switch-track" aria-hidden="true"></span>
-      </button>
+        @toggle="saveRoutines({ resume_after_restart: !enabled })"
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import SettingsSwitch from './SettingsSwitch.vue'
 import type { RoutineSettings } from '../../lib/types'
 
 // The settings store is owned by SettingsView.

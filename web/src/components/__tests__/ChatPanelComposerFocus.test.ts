@@ -15,7 +15,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { writeChatDraft } from '../../lib/chatDrafts'
 
-const apiGet = vi.hoisted(() => vi.fn(() => Promise.reject(new Error('no server'))))
+const apiGet = vi.hoisted(() => vi.fn((_path: string): Promise<unknown> => Promise.reject(new Error('no server'))))
 const apiPost = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
 const apiPatch = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
 const apiDel = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
@@ -169,6 +169,7 @@ beforeEach(() => {
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   localStorage.clear()
   vi.clearAllMocks()
+  apiGet.mockImplementation(() => Promise.reject(new Error('no server')))
 })
 
 afterEach(() => {
@@ -183,6 +184,32 @@ describe('composer focus on opening a chat', () => {
     const composer = wrapper.find('textarea.chat-input')
     expect(composer.exists()).toBe(true)
     expect(document.activeElement).toBe(composer.element)
+    wrapper.unmount()
+  })
+
+  test.each(['pointerdown', 'keydown', 'focusin'])('startup focus yields to %s while assets load', async (event) => {
+    let release!: () => void
+    const assets = new Promise<void>(resolve => { release = resolve })
+    apiGet.mockImplementation(path => path === '/api/agent-assets'
+      ? assets.then(() => ({ subagents: [] }))
+      : Promise.reject(new Error('no server')))
+    const { wrapper } = await mountLayout()
+    expect(apiGet).toHaveBeenCalledWith('/api/agent-assets')
+    const other = document.createElement('button')
+    document.body.append(other)
+    if (event === 'focusin') other.focus()
+    else if (event === 'keydown') pressKey('Shift', other)
+    else other.dispatchEvent(new Event(event, { bubbles: true }))
+    const active = document.activeElement
+
+    release()
+    await flushPromises()
+    await nextTick()
+    expect(document.activeElement).toBe(active)
+    // Explicit pane-focus shortcuts still work after automatic focus yields.
+    const panel = wrapper.findComponent({ name: 'ChatPanel' })
+    ;(panel.vm as unknown as { focusComposer: () => void }).focusComposer()
+    expect(document.activeElement).toBe(wrapper.get('textarea.chat-input').element)
     wrapper.unmount()
   })
 

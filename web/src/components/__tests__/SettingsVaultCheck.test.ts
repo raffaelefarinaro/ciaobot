@@ -12,6 +12,24 @@ function mountCard(routines: Partial<RoutineSettings> | null, saveRoutines = vi.
 }
 
 describe('SettingsVaultCheck', () => {
+  it('keeps checked controlled by routines across a deferred save', async () => {
+    let resolveSave!: () => void
+    const save = vi.fn(() => new Promise<void>((resolve) => { resolveSave = resolve }))
+    const { wrapper } = mountCard({ verify_vault_answers: true }, save)
+    const button = wrapper.get('button.settings-switch')
+    await button.trigger('click')
+    expect(save).toHaveBeenCalledExactlyOnceWith({ verify_vault_answers: false })
+    await wrapper.setProps({ routinesSaving: true })
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.attributes('aria-checked')).toBe('true')
+    resolveSave()
+    await Promise.resolve()
+    expect(button.attributes('aria-checked')).toBe('true')
+    await wrapper.setProps({ routinesSaving: false, routines: { verify_vault_answers: false } as RoutineSettings })
+    expect(button.attributes('aria-checked')).toBe('false')
+    expect(button.text()).toBe('Off')
+  })
+
   it('is on by default', () => {
     const { wrapper } = mountCard({ model_options: { anthropic: [] } } as Partial<RoutineSettings>)
     expect(wrapper.get('[role="switch"]').attributes('aria-checked')).toBe('true')
