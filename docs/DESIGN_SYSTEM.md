@@ -52,11 +52,11 @@ layer to hardcode what the layer below provides.
 ```
 L3  Patterns    compositions with rules      lanes, action dock, settings card list
 L2  Components  own a meaning, not a look    ChatSignals, TierLabel, CountTile
-L1  Primitives  global, unscoped, in App.vue .btn-small, .card, .badge, inputs
-L0  Tokens      App.vue :root                colour, type, space, radius, motion
+L1  Primitives  global, unscoped, in app.css  .btn-small, .card, .badge, inputs
+L0  Tokens      app.css :root                 colour, type, space, radius, motion
 ```
 
-### L0 — Tokens (`web/src/App.vue`, the `:root` block)
+### L0 — Tokens (`web/src/styles/app.css`, the `:root` block)
 
 The single source of raw values. Already complete; do not add near-duplicates.
 
@@ -82,11 +82,11 @@ if you genuinely need an off-scale size.
 value. `var(--warning, #b7791f)` in `SettingsView.vue` is wrong twice over: the
 token is `#facc15`, and the fallback can never fire.
 
-### L1 — Primitives (`web/src/App.vue`, the global `<style>` block)
+### L1 — Primitives (`web/src/styles/app.css`, the global stylesheet)
 
-`App.vue`'s style block is **not scoped**, so it is the app's global sheet. This
-is where shared primitives live. `.btn-small`, `.card` and friends are already
-here.
+`App.vue` loads this stylesheet through an **unscoped** external `<style>` block.
+This is where shared primitives live. `.btn-small`, `.card` and friends are
+already here.
 
 **Rule L1.1 — one name, one look.** A primitive may not be re-specified by a
 container. These currently violate it and should collapse into primitive
@@ -281,7 +281,7 @@ and label should agree — rename the route or the label.
 
 ## 5. Theming
 
-`:root.theme-light` in `App.vue` redefines tokens. Components should therefore
+`:root.theme-light` in `web/src/styles/app.css` redefines tokens. Components should therefore
 need **no** theme-specific CSS: style through tokens and both themes work.
 
 Only 4 of 36 components mention `.theme-light`, and that is the *correct* number

@@ -16,6 +16,8 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { Task } from '../../lib/types'
 import { pendingPrompt } from '../../lib/prompt'
+import { api } from '../../lib/api'
+import { pendingConfirm } from '../../lib/confirm'
 
 const chatId = 'chat-1234-abcd'
 
@@ -81,6 +83,29 @@ describe('ProjectSidebar chat actions', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+  })
+
+  it('does not replace a retry created while confirmation and history loading are pending', async () => {
+    const store = useProjectStore()
+    const wrapper = await mountSidebar()
+    let finishHistory!: () => void
+    vi.spyOn(store, 'loadMessages').mockImplementation(() => new Promise<void>(resolve => { finishHistory = resolve }))
+    store.messages[chatId] = [{ role: 'user', content: 'Original task', images: ['original.png'] }] as never
+    const post = vi.spyOn(api, 'post').mockRejectedValue(Object.assign(new Error('slot occupied'), { status: 409 }))
+    const replacement = { status: 'pending', mode: 'literal', schedule_id: 'other', next_at: '', last_error: '', attempts: 0, interval_seconds: 3600 } as const
+    vi.spyOn(api, 'get').mockResolvedValue({ ...store.chats[0], retry: replacement } as never)
+    const action = (wrapper.vm as unknown as { setRetry: (id: string) => Promise<void> }).setRetry(chatId)
+    expect(pendingConfirm.value?.title).toBe('Schedule literal rerun?')
+    pendingConfirm.value!.resolve(true)
+    await flushPromises()
+    store.chats[0].retry = replacement
+    finishHistory()
+    await action
+    expect(post).toHaveBeenCalledExactlyOnceWith(`/api/chats/${chatId}/retry`, {
+      action: 'set', prompt: 'Original task', images: ['original.png'], require_empty: true,
+    })
+    expect(store.chats[0].retry?.schedule_id).toBe('other')
+    wrapper.unmount()
   })
 
   it('shows a notification dot beside an unread chat', async () => {
@@ -705,7 +730,7 @@ describe('ProjectSidebar global new chat', () => {
     const wrapper = await mountSidebar('chat')
     const row = wrapper.get('.sidebar-brand-row').element
     expect(wrapper.find('.sidebar-brand-mark').exists()).toBe(false)
-    expect(wrapper.get('.sidebar-brand .brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
+    expect(wrapper.get('img.sidebar-brand').attributes()).toMatchObject({ src: '/icons/icon-32.png', alt: 'Ciaobot' })
     const order = Array.from(row.children).map((el) =>
       el.classList.contains('sidebar-history') ? 'history'
         : el.classList.contains('history-divider') ? 'divider'
