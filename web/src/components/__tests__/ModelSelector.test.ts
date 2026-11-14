@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, nextTick, ref } from 'vue'
 import ModelSelector, { type ModelSection } from '../ModelSelector.vue'
 
 beforeEach(() => {
@@ -68,6 +68,25 @@ describe('ModelSelector', () => {
 
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it.each([false, true])('preserves newly moved focus when an open selector is removed (triggerless=%s)', async (triggerless) => {
+    const key = ref(0)
+    const Host = defineComponent({
+      components: { ModelSelector },
+      setup: () => ({ key, triggerless, sections: SECTIONS }),
+      template: '<div><textarea /><ModelSelector v-if="!triggerless || !key" :key="key" :sections="sections" :triggerless="triggerless" /></div>',
+    })
+    const wrapper = mount(Host, { attachTo: document.body })
+    if (!triggerless) await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+    key.value++
+    const prompt = wrapper.get<HTMLTextAreaElement>('textarea').element
+    prompt.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(prompt)
+    wrapper.unmount()
   })
 
   it('exposes the full trigger label as a title, since the label ellipsizes', () => {
@@ -199,6 +218,40 @@ describe('ModelSelector', () => {
     expect(document.activeElement).toBe(trigger.element)
   })
 
+  it('keeps focus on a focusable outside click target', async () => {
+    const wrapper = mountSelector()
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    outside.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    outside.focus() // The browser's pointerdown default action.
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
+  })
+
+  it.each([false, true])('does not restore focus over a navigation destination after selection (deferred=%s)', async (deferred) => {
+    const destination = document.createElement('button')
+    document.body.appendChild(destination)
+    const wrapper = mountSelector({ onSelect: () => {
+      if (deferred) nextTick(() => destination.focus())
+      else destination.focus()
+    } })
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    await wrapper.get('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(destination)
+    wrapper.unmount()
+    destination.remove()
+  })
+
   it('supports keyboard navigation and Enter selection without a pointer', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')
@@ -216,6 +269,46 @@ describe('ModelSelector', () => {
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
+  it.each([
+    { key: 'ArrowDown', isComposing: true },
+    { key: 'ArrowUp', isComposing: true },
+    { key: 'ArrowDown', keyCode: 229 },
+    { key: 'ArrowUp', keyCode: 229 },
+  ])('leaves IME arrow navigation to the input: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search').element
+    search.focus()
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    search.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(search)
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    const ordinary = new KeyboardEvent('keydown', { key: init.key, bubbles: true, cancelable: true })
+    search.dispatchEvent(ordinary)
+    expect(ordinary.defaultPrevented).toBe(true)
+    expect(document.activeElement?.classList.contains('model-selector__item')).toBe(true)
+  })
+
+  it.each([
+    { key: 'Enter', isComposing: true },
+    { key: ' ', isComposing: true },
+    { key: 'Enter', keyCode: 229 },
+    { key: ' ', keyCode: 229 },
+  ])('does not select an option during composition: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const item = wrapper.get<HTMLButtonElement>('.model-selector__item').element
+    item.focus()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true })
+    item.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+  })
+
   it('closes on Escape and restores the trigger', async () => {
     const wrapper = mountSelector()
     const trigger = wrapper.get<HTMLButtonElement>('.model-selector__trigger')
@@ -227,6 +320,24 @@ describe('ModelSelector', () => {
 
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
     expect(document.activeElement).toBe(trigger.element)
+  })
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('keeps the picker open during IME Escape: %o', async init => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    wrapper.get('.model-selector__search').element.dispatchEvent(event)
+    await flushPromises()
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    const layerEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+    window.dispatchEvent(layerEvent)
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+    await wrapper.get('.model-selector__search').trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
   it('renders disabled sections with hint', async () => {

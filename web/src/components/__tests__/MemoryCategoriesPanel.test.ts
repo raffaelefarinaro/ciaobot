@@ -391,6 +391,14 @@ describe('MemoryCategoriesPanel', () => {
     await nextTick()
     await nextTick()
 
+    const description = wrapper.get<HTMLTextAreaElement>('#cat-description').element
+    description.focus()
+    for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+      description.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(wrapper.find('.cat-drawer').exists()).toBe(true)
+    }
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await flushPromises()
     await nextTick()

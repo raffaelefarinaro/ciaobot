@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -75,6 +75,11 @@ const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
+let preserveFocusOnUnmount = false
+onBeforeUnmount(() => {
+  const active = document.activeElement
+  preserveFocusOnUnmount = !!active && active !== document.body && !rootRef.value?.contains(active)
+})
 
 const effectiveValue = computed<string | string[]>(() => {
   if (props.multiple) return Array.isArray(props.modelValue) ? props.modelValue : []
@@ -160,9 +165,16 @@ function onPopoverOpenChange(nextOpen: boolean): void {
 
 function close() {
   const returnFocus = !props.triggerless ? triggerRef.value : null
+  const active = document.activeElement
+  const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
   open.value = false
   query.value = ''
-  if (returnFocus) nextTick(() => returnFocus.focus())
+  if (returnFocus && shouldReturnFocus) nextTick(() => {
+    const current = document.activeElement
+    if (returnFocus.isConnected && (!current || current === document.body || rootRef.value?.contains(current))) {
+      returnFocus.focus()
+    }
+  })
   if (props.triggerless) emit('close')
 }
 
@@ -229,6 +241,10 @@ function scrollActiveIntoView() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) {
+    if (event.key === 'Escape') event.stopPropagation()
+    return
+  }
   if (event.key === 'Escape') {
     // Claim the key. Dismissing this popover is the whole meaning of the press,
     // and the global handler in ChatLayout treats an unclaimed Escape as "go
@@ -290,7 +306,20 @@ function onOpenAutoFocus(event: Event): void {
   focusSearch()
 }
 
+function onCloseAutoFocus(event: Event): void {
+  // Never override focus that has already moved outside the picker.
+  const active = document.activeElement
+  if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
+    event.preventDefault()
+  }
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) {
+    // Reka dismisses its layer unless this window-level event is prevented.
+    event.preventDefault()
+    return
+  }
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
   event.preventDefault()
@@ -365,6 +394,7 @@ onMounted(() => {
         :position-strategy="'fixed'"
         :update-position-strategy="'always'"
         @open-auto-focus="onOpenAutoFocus"
+        @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
       >
         <div
