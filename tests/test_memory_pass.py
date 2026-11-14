@@ -31,6 +31,9 @@ from ciao.web.project_chats import (
 )
 
 from tests.conftest import attach_stub_mcp
+from tests.test_start_stream_enospc_repro import (
+    assert_restored, consume, driver_probe, state_checkpoint, storage_fault,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -80,9 +83,508 @@ def passes_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 def streams(monkeypatch: pytest.MonkeyPatch) -> _FakeStreams:
     fake = _FakeStreams()
     monkeypatch.setattr(
-        ProjectChatManager, "start_stream", lambda self, *a, **k: fake(*a, **k)
+        ProjectChatManager, "start_stream",
+        lambda self, *a, **k: _bind_recording_stream(self, fake)(*a, **k),
     )
     return fake
+
+
+def _bind_recording_stream(manager, recorder):
+    def start(chat_id, prompt, images=None, **kwargs):
+        chat = manager.get_chat(chat_id)
+        source = manager._memory_pass.prepare_turn_start(
+            chat, allow_queued=kwargs.pop("_memory_pass_dispatch", False)
+        )
+        manager._save()
+        if source is not None:
+            manager._publish_postprocess(source)
+        return recorder(chat_id, prompt, images, **kwargs)
+    return start
+
+
+def _admission_pass(tmp_path, *, state="attention", count=1):
+    manager = _make_manager(tmp_path)
+    manager._restart_draining = True
+    pairs = []
+    for index in range(count):
+        source = _source(manager, f"Source {index}")
+        pass_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+        chat = manager.get_chat(pass_id)
+        chat.helper = {**chat.helper, "state": state}
+        source.postprocess = {
+            "updated_at": "old timestamp",
+            "steps": {"other": {"nested": [1, 2]}, "memory_pass": {"status": state}},
+        }
+        pairs.append((chat, source))
+    manager._save()
+    manager._restart_draining = False
+    manager._memory_pass._cancel_pump_retry("work")  # discard setup-only drain deferral
+    return manager, pairs, tmp_path / ".runtime" / "web_projects.json"
+
+
+@pytest.fixture
+def pump_retry_clock(monkeypatch):
+    """Capture only coordinator retry timers; keep wait_for/driver timers real."""
+    handles = []
+
+    class Handle:
+        def __init__(self, delay, callback, args):
+            self.delay, self.callback, self.args = delay, callback, args
+            self.was_cancelled = False
+            self.fired = False
+
+        def cancel(self):
+            self.was_cancelled = True
+
+        def cancelled(self):
+            return self.was_cancelled
+
+        def fire(self, *, force=False):
+            assert not self.fired
+            self.fired = True
+            if force or not self.was_cancelled:
+                self.callback(*self.args)
+
+    def install(manager):
+        loop = asyncio.get_running_loop()
+        real = loop.call_later
+
+        def call_later(delay, callback, *args, **kwargs):
+            if getattr(callback, "__self__", None) is manager._memory_pass:
+                handle = Handle(delay, callback, args)
+                handles.append(handle)
+                return handle
+            return real(delay, callback, *args, **kwargs)
+
+        monkeypatch.setattr(loop, "call_later", call_later)
+        return handles
+
+    yield install
+    for handle in handles:
+        handle.cancel()
+
+
+@pytest.mark.parametrize("failure", ["write", "prompt"])
+async def test_failed_pump_recovers_without_external_trigger(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock, monkeypatch, failure,
+):
+    manager, [(first, source), (second, _)], registry = _admission_pass(tmp_path, state="queued", count=2)
+    handles = pump_retry_clock(manager)
+    probe = driver_probe(manager, first)
+    fault = storage_fault(manager, registry)
+    fault.armed = failure == "write"
+    real_prompt = manager._memory_pass._prompt_for
+    if failure == "prompt":
+        def broken_prompt(chat):
+            raise ValueError("synthetic prompt failure")
+        monkeypatch.setattr(manager._memory_pass, "_prompt_for", broken_prompt)
+    before = registry.read_bytes()
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1 and handles[0].delay == 30
+    assert registry.read_bytes() == before
+    assert first.helper["state"] == second.helper["state"] == "queued"
+    assert not probe.calls and manager._streaming.drive_task(first.chat_id) is None
+    fault.armed = False
+    monkeypatch.setattr(manager._memory_pass, "_prompt_for", real_prompt)
+    handles[0].fire()
+    stream = manager._broker.get(first.chat_id)
+    assert manager._streaming.drive_task(first.chat_id, stream) is not None
+    assert first.helper["state"] == "running" and second.helper["state"] == "queued"
+    assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+    await asyncio.wait_for(probe.entered.wait(), 5)
+    assert len(probe.calls) == 1 and len(handles) == 1
+    manager.begin_restart_drain()
+    probe.release.set()
+    await consume(stream)
+
+
+async def test_persistent_storage_failure_has_one_deferred_retry(
+    tmp_path, passes_enabled, storage_fault, pump_retry_clock,
+):
+    manager, pairs, registry = _admission_pass(tmp_path, state="queued", count=2)
+    handles = pump_retry_clock(manager)
+    checkpoints = [(chat, state_checkpoint(chat)) for pair in pairs for chat in pair]
+    before = registry.read_bytes()
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    first = handles[0]
+    for _ in range(3):
+        manager._memory_pass.pump("work")
+    assert len(handles) == 1 and handles[0] is first and not first.cancelled()
+    assert len(fault.writes) == 4 and not fault.replaces
+    for attempt in range(3):
+        handles[-1].fire()
+        assert len(handles) == attempt + 2
+        assert handles[-1].delay == 30
+        assert len([h for h in handles if not h.fired and not h.cancelled()]) == 1
+        assert len(fault.writes) == 5 + attempt and not fault.replaces
+        assert registry.read_bytes() == before
+        for chat, checkpoint in checkpoints:
+            assert_restored(chat, checkpoint)
+            assert manager._broker.get(chat.chat_id) is None
+            assert manager._streaming.drive_task(chat.chat_id) is None
+
+
+async def test_successful_external_pump_cancels_recovery_wakeup(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock,
+):
+    manager, [(chat, _)], registry = _admission_pass(tmp_path, state="queued")
+    handles = pump_retry_clock(manager)
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    fault.armed = False
+    probe = driver_probe(manager, chat)
+    manager._memory_pass.pump("work")
+    stream = manager._broker.get(chat.chat_id)
+    assert handles[0].cancelled()
+    handles[0].fire()
+    assert len(handles) == 1 and len(fault.replaces) == 1
+    probe.release.set()
+    await consume(stream)
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("change", ["archive", "delete", "running", "empty", "running_callback", "empty_callback"])
+async def test_recovery_rechecks_queue_and_workspace_serialization(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock, change,
+):
+    manager, [(first, _), (second, _)], registry = _admission_pass(tmp_path, state="queued", count=2)
+    handles = pump_retry_clock(manager)
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    fault.armed = False
+    probe = driver_probe(manager, second)
+    base_change = change.removesuffix("_callback")
+    if change == "delete":
+        manager._chats.pop(first.chat_id)
+    elif base_change == "running":
+        first.helper = {**first.helper, "state": "running"}
+    else:
+        first.archived = True
+        if base_change == "empty":
+            second.archived = True
+    manager._save()
+    if change in {"running", "empty"}:
+        manager._memory_pass.pump("work")
+        assert handles[0].cancelled()
+    handles[0].fire()
+    assert len(handles) == 1
+    if base_change in {"running", "empty"}:
+        assert manager._broker.get(second.chat_id) is None and not probe.calls
+        assert not manager._memory_pass._pump_retry_handles
+    else:
+        assert second.helper["state"] == "running" and second.user_turn_count == 1
+        stream = manager._broker.get(second.chat_id)
+        assert manager._streaming.drive_task(second.chat_id, stream) is not None
+        probe.release.set()
+        await consume(stream)
+        assert len(probe.calls) == 1
+
+
+async def test_recovery_defers_during_restart_drain_and_resumes_after_cancel(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock,
+):
+    manager, [(chat, _)], registry = _admission_pass(tmp_path, state="queued")
+    handles = pump_retry_clock(manager)
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    fault.armed = False
+    probe = driver_probe(manager, chat)
+    before = registry.read_bytes()
+    writes = len(fault.writes)
+    manager.begin_restart_drain()
+    handles[0].fire()
+    assert len(handles) == 2 and handles[1].delay == 30
+    assert len(fault.writes) == writes and registry.read_bytes() == before
+    assert chat.helper["state"] == "queued" and not probe.calls
+    assert manager.cancel_restart_drain()
+    handles[1].fire()
+    stream = manager._broker.get(chat.chat_id)
+    assert manager._streaming.drive_task(chat.chat_id, stream) is not None
+    assert len(handles) == 2 and chat.user_turn_count == 1
+    probe.release.set()
+    await consume(stream)
+
+
+@pytest.mark.parametrize("finish", ["normal", "drain", "shutdown"])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_running_pass_completion_during_drain_retains_queued_recovery(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock,
+    monkeypatch, finish, is_error,
+):
+    manager, [(queued, source), (running, _)], registry = _admission_pass(
+        tmp_path, state="queued", count=2,
+    )
+    manager._memory_pass._set_state(running, "attention")
+    _stub_archive(manager, monkeypatch)
+    handles = pump_retry_clock(manager)
+    probe = driver_probe(manager, running)
+    real_stream_chat = manager.stream_chat
+
+    async def stream_chat(chat_id, *args, **kwargs):
+        async for event in real_stream_chat(chat_id, *args, **kwargs):
+            if chat_id == running.chat_id and is_error:
+                yield ResultEvent(type="result", result="synthetic pass failure", is_error=True,
+                                  session_id="", effective_model=running.model, usage={}, quota={})
+            else:
+                yield event
+
+    monkeypatch.setattr(manager, "stream_chat", stream_chat)
+    admitted = []
+
+    def observe(chat_id, stream):
+        if chat_id == queued.chat_id:
+            task = manager._streaming.drive_task(chat_id, stream)
+            assert task is not None and not task.done()
+            admitted.append(stream)
+
+    manager.on_turn_started(observe)
+    fault = storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    assert len(handles) == 1
+    fault.armed = False
+    running_stream = manager.start_stream(running.chat_id, "continue the other pass")
+    await asyncio.wait_for(probe.entered.wait(), 5)
+    assert not handles[0].cancelled()
+    if finish != "normal":
+        manager.begin_restart_drain()
+    handles[0].fire()
+    assert not manager._memory_pass._pump_retry_handles
+    assert queued.helper["state"] == "queued" and not admitted
+
+    probe.release.set()
+    await consume(running_stream)
+    await asyncio.wait_for(_await_detached(manager), 5)
+    assert running.helper["state"] == ("attention" if is_error else "done")
+    if finish == "normal":
+        assert len(admitted) == 1 and len(handles) == 1
+        await consume(admitted[0])
+    else:
+        assert not admitted and queued.helper["state"] == "queued"
+        assert source.postprocess["steps"]["memory_pass"]["status"] == "queued"
+        assert len(handles) == 2 and handles[1].delay == 30
+        assert manager._memory_pass._pump_retry_handles["work"] is handles[1]
+        if finish == "shutdown":
+            before, checkpoint = registry.read_bytes(), state_checkpoint(queued)
+            manager.begin_shutdown()
+            assert handles[1].cancelled()
+            assert manager.cancel_restart_drain()
+            handles[1].fire(force=True)
+            manager._memory_pass.pump("work")
+            assert registry.read_bytes() == before
+            assert_restored(queued, checkpoint)
+            assert not admitted and len(handles) == 2
+        else:
+            assert manager.cancel_restart_drain()
+            handles[1].fire()
+            assert len(admitted) == 1 and queued.helper["state"] == "running"
+            await consume(admitted[0])
+    await asyncio.wait_for(_await_detached(manager), 5)
+    assert not manager._memory_pass._pump_retry_handles
+    assert len([chat_id for chat_id, _ in probe.calls if chat_id == queued.chat_id]) == (0 if finish == "shutdown" else 1)
+
+
+async def test_shutdown_cancels_pump_recovery_without_mutating_queue(
+    tmp_path, passes_enabled, storage_fault, pump_retry_clock,
+):
+    manager, pairs, registry = _admission_pass(tmp_path, state="queued", count=2)
+    manager._restart_draining = True
+    personal_source = _source(manager, "Personal source", workspace="personal")
+    personal_id = manager.enqueue_memory_pass(personal_source, None, _archive_file(tmp_path), "")
+    pairs.append((manager.get_chat(personal_id), personal_source))
+    manager._restart_draining = False
+    manager._memory_pass._cancel_pump_retry("personal")  # capture only fault-induced timers below
+    handles = pump_retry_clock(manager)
+    storage_fault(manager, registry)
+    manager._memory_pass.pump("work")
+    manager._memory_pass.pump("personal")
+    assert len(handles) == 2 and {handle.args[0] for handle in handles} == {"work", "personal"}
+    checkpoints = [(chat, state_checkpoint(chat)) for pair in pairs for chat in pair]
+    before = registry.read_bytes()
+    manager.begin_shutdown()
+    assert all(handle.cancelled() for handle in handles)
+    for handle in handles:
+        handle.fire(force=True)  # already-captured callbacks must be inert too
+    manager._memory_pass.pump("work")
+    manager._memory_pass.pump("personal")
+    assert len(handles) == 2 and not manager._memory_pass._pump_retry_handles
+    assert registry.read_bytes() == before
+    for chat, checkpoint in checkpoints:
+        assert_restored(chat, checkpoint)
+        assert manager._broker.get(chat.chat_id) is None
+
+
+async def test_committed_admission_diagnostic_does_not_schedule_recovery(
+    tmp_path, passes_enabled, storage_fault, driver_probe, pump_retry_clock,
+):
+    manager, [(chat, _)], registry = _admission_pass(tmp_path, state="queued")
+    handles = pump_retry_clock(manager)
+    probe = driver_probe(manager, chat)
+    fault = storage_fault(manager, registry, "audit")
+    manager._memory_pass.pump("work")
+    assert handles == [] and len(fault.replaces) == 1
+    assert chat.helper["state"] == "running" and chat.user_turn_count == 1
+    stream = manager._broker.get(chat.chat_id)
+    assert manager._streaming.drive_task(chat.chat_id, stream) is not None
+    fault.armed = False
+    probe.release.set()
+    await consume(stream)
+    assert len(probe.calls) == 1 and handles == []
+
+
+async def test_attention_pass_admission_failure_restores_helper_and_source(
+    tmp_path, passes_enabled, storage_fault, driver_probe, monkeypatch,
+):
+    manager, [(chat, source)], registry = _admission_pass(tmp_path)
+    target_state, source_state = state_checkpoint(chat), state_checkpoint(source)
+    before = registry.read_bytes()
+    probe = driver_probe(manager, chat)
+    publications = []
+    real_publish = manager._publish_postprocess
+    monkeypatch.setattr(manager, "_publish_postprocess", lambda source: (publications.append(source), real_publish(source)))
+    fault = storage_fault(manager, registry)
+    with pytest.raises(OSError):
+        manager.start_stream(chat.chat_id, "continue", send_id="continued")
+    assert_restored(chat, target_state)
+    assert_restored(source, source_state)
+    assert registry.read_bytes() == before
+    assert not publications and not probe.calls
+    assert manager._broker.get(chat.chat_id) is None
+    fault.armed = False
+    stream = manager.start_stream(chat.chat_id, "continue", send_id="continued")
+    payload = json.loads(registry.read_bytes())["chats"]
+    assert payload[chat.chat_id]["helper"]["state"] == "running"
+    assert payload[source.chat_id]["postprocess"]["steps"]["memory_pass"]["status"] == "running"
+    assert payload[chat.chat_id]["user_turn_count"] == 1
+    assert publications == [source]
+    probe.release.set()
+    await consume(stream)
+
+
+async def test_attention_pass_self_source_failure_restores_helper_and_postprocess(
+    tmp_path, passes_enabled, storage_fault,
+):
+    manager, [(chat, _)], registry = _admission_pass(tmp_path)
+    chat.helper = {**chat.helper, "source_chat_id": chat.chat_id}
+    chat.postprocess = {"updated_at": "old", "steps": {"other": {"values": [1]}}}
+    manager._save()
+    checkpoint, before = state_checkpoint(chat), registry.read_bytes()
+    storage_fault(manager, registry)
+    with pytest.raises(OSError):
+        manager.start_stream(chat.chat_id, "continue")
+    assert_restored(chat, checkpoint)
+    assert registry.read_bytes() == before
+    assert manager.get_chat(chat.chat_id) is chat
+
+
+async def test_pump_admission_failure_keeps_pass_queued_without_recursive_pump(
+    tmp_path, passes_enabled, storage_fault, driver_probe, monkeypatch,
+):
+    manager, pairs, registry = _admission_pass(tmp_path, state="queued", count=2)
+    (first, source), (second, _) = pairs
+    checkpoints = [(chat, state_checkpoint(chat)) for pair in pairs for chat in pair]
+    before = registry.read_bytes()
+    fault = storage_fault(manager, registry)
+    calls = []
+    real_start = manager.start_stream
+    def record(*args, **kwargs):
+        calls.append(args[0])
+        return real_start(*args, **kwargs)
+    monkeypatch.setattr(manager, "start_stream", record)
+    manager._memory_pass.pump("work")
+    assert calls == [first.chat_id]
+    assert len(fault.writes) == 1 and not fault.replaces
+    assert registry.read_bytes() == before
+    for chat, checkpoint in checkpoints:
+        assert_restored(chat, checkpoint)
+    fault.armed = False
+    probe = driver_probe(manager, first)
+    manager._memory_pass.pump("work")
+    assert calls == [first.chat_id, first.chat_id]
+    assert first.helper["state"] == "running" and second.helper["state"] == "queued"
+    assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+    await asyncio.wait_for(probe.entered.wait(), 5)
+    assert len(probe.calls) == 1
+    # Do not let finishing the first pass dispatch a second during teardown.
+    manager._restart_draining = True
+    probe.release.set()
+    await consume(manager._broker.get(first.chat_id))
+
+
+@pytest.mark.parametrize("queued", [False, True])
+async def test_pass_admission_commits_helper_source_and_turn_in_one_replace(
+    tmp_path, passes_enabled, storage_fault, driver_probe, monkeypatch, queued,
+):
+    manager, [(chat, source)], registry = _admission_pass(tmp_path, state="queued" if queued else "attention")
+    probe = driver_probe(manager, chat)
+    fault = storage_fault(manager, registry)
+    fault.armed = False  # record actual writes without injecting a failure
+    observed = []
+    real_publish = manager._publish_postprocess
+    def publish(changed):
+        assert manager._streaming.drive_task(chat.chat_id) is not None
+        observed.append(registry.read_bytes())
+        real_publish(changed)
+    monkeypatch.setattr(manager, "_publish_postprocess", publish)
+    if queued:
+        manager._memory_pass.pump("work")
+        stream = manager._broker.get(chat.chat_id)
+    else:
+        stream = manager.start_stream(chat.chat_id, "continue", send_id="owner")
+    assert len(fault.replaces) == 1 and observed == fault.replaces
+    chats = json.loads(fault.replaces[0])["chats"]
+    assert chats[chat.chat_id]["helper"]["state"] == "running"
+    assert chats[chat.chat_id]["user_turn_count"] == 1
+    if not queued:
+        assert chats[chat.chat_id]["user_turn_send_ids"] == {"0": "owner"}
+    assert chats[source.chat_id]["postprocess"]["steps"]["memory_pass"]["status"] == "running"
+    assert chats[source.chat_id]["postprocess"]["steps"]["other"] == {"nested": [1, 2]}
+    probe.release.set()
+    await consume(stream)
+
+
+async def test_pass_postcommit_audit_failure_starts_once_without_rollback(
+    tmp_path, passes_enabled, storage_fault, driver_probe,
+):
+    manager, [(chat, source)], registry = _admission_pass(tmp_path, state="queued")
+    probe = driver_probe(manager, chat)
+    fault = storage_fault(manager, registry, "audit")
+    manager._memory_pass.pump("work")
+    assert len(fault.replaces) == 1
+    assert chat.helper["state"] == "running" and chat.user_turn_count == 1
+    assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+    stream = manager._broker.get(chat.chat_id)
+    assert manager._streaming.drive_task(chat.chat_id, stream) is not None
+    fault.armed = False
+    await asyncio.wait_for(probe.entered.wait(), 5)
+    assert len(probe.calls) == 1
+    probe.release.set()
+    await consume(stream)
+
+
+@pytest.mark.parametrize("state", ["ordinary", "archived", "attention", "running"])
+async def test_memory_admission_rejects_invalid_internal_dispatch(tmp_path, passes_enabled, state):
+    manager, [(chat, source)], registry = _admission_pass(tmp_path)
+    if state == "ordinary":
+        chat.helper = {}
+    elif state == "archived":
+        chat.helper = {**chat.helper, "state": "queued"}
+        chat.archived = True
+    else:
+        chat.helper = {**chat.helper, "state": state}
+    manager._save()
+    checkpoint, source_checkpoint = state_checkpoint(chat), state_checkpoint(source)
+    before = registry.read_bytes()
+    with pytest.raises(ValueError, match="queued memory pass"):
+        manager.start_stream(chat.chat_id, "invalid", _memory_pass_dispatch=True)
+    assert_restored(chat, checkpoint)
+    assert_restored(source, source_checkpoint)
+    assert registry.read_bytes() == before
+    assert manager._broker.get(chat.chat_id) is None
 
 
 def _stub_archive(
@@ -1513,7 +2015,7 @@ async def test_resume_after_restart(
     # The first was running when the process died; the second was still queued.
     reloaded = _make_manager(tmp_path)
     reloaded_streams = _FakeStreams()
-    reloaded.start_stream = reloaded_streams  # type: ignore[method-assign]
+    reloaded.start_stream = _bind_recording_stream(reloaded, reloaded_streams)  # type: ignore[method-assign]
     assert reloaded.get_chat(ids[0]).helper["state"] == "running"
     assert reloaded.get_chat(ids[1]).helper["state"] == "queued"
 
@@ -1543,7 +2045,7 @@ async def test_resume_archives_a_pass_left_done_by_a_restart(
 
     reloaded = _make_manager(tmp_path)
     reloaded_streams = _FakeStreams()
-    reloaded.start_stream = reloaded_streams  # type: ignore[method-assign]
+    reloaded.start_stream = _bind_recording_stream(reloaded, reloaded_streams)  # type: ignore[method-assign]
     archived = _stub_archive(reloaded, monkeypatch)
     assert reloaded.get_chat(pass_id).archived is False
 
@@ -1680,7 +2182,7 @@ async def test_continuing_a_pass_respects_another_running_pass(
 ) -> None:
     manager = _make_manager(tmp_path)
     with monkeypatch.context() as setup:
-        setup.setattr(manager, "start_stream", _FakeStreams())
+        setup.setattr(manager, "start_stream", _bind_recording_stream(manager, _FakeStreams()))
         first_id = manager.enqueue_memory_pass(
             _source(manager, "First"), None, _archive_file(tmp_path), ""
         )
@@ -1708,7 +2210,7 @@ async def test_a_user_turn_on_a_queued_pass_is_refused(
     manager = _make_manager(tmp_path)
     archive = _archive_file(tmp_path)
     with monkeypatch.context() as setup:
-        setup.setattr(manager, "start_stream", _FakeStreams())
+        setup.setattr(manager, "start_stream", _bind_recording_stream(manager, _FakeStreams()))
         manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
         queued_source = _source(manager, "Second")
         queued_id = manager.enqueue_memory_pass(queued_source, None, archive, "")

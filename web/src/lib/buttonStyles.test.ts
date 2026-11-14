@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const css = readFileSync(resolve(__dirname, '../App.vue'), 'utf8')
+const css = readFileSync(resolve(__dirname, '../styles/app.css'), 'utf8')
 
 function rule(selector: string): string {
   const start = css.indexOf(`\n${selector} {`)

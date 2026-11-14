@@ -56,7 +56,7 @@ function stripComments(text: string): string {
 
 function definedTokens(): Set<string> {
   const names = new Set<string>()
-  for (const file of ['App.vue', 'main.ts', 'style.css']) {
+  for (const file of ['App.vue', 'main.ts', 'style.css', 'styles/app.css']) {
     let text = ''
     try {
       text = readFileSync(join(SRC, file), 'utf8')
@@ -91,7 +91,14 @@ describe('CSS custom properties', () => {
   const defined = definedTokens()
   const files = readdirSync(COMPONENTS).filter(f => f.endsWith('.vue'))
 
-  it('reads the palette out of App.vue', () => {
+  it('App loads the canonical global stylesheet', () => {
+    const app = readFileSync(join(SRC, 'App.vue'), 'utf8')
+    expect(app).toContain('<style src="./styles/app.css"></style>')
+    const styles = [...app.matchAll(/<style\b([^>]*)>/g)]
+    expect(styles.filter(m => !/\bscoped\b/.test(m[1]))).toHaveLength(1)
+  })
+
+  it('reads the palette out of the global stylesheet', () => {
     for (const token of ['--bg2', '--bg3', '--bg-elev', '--fg2', '--fg3', '--warning', '--error']) {
       expect(defined.has(token), token).toBe(true)
     }
