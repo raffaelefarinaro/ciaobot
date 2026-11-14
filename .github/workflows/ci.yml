@@ -519,17 +519,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - name: Require every applicable Windows gate
+      shell: python
       env:
         BACKEND: ${{ needs.windows-backend.result }}
         FRONTEND: ${{ needs.windows-web.result }}
         FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
       run: |
-        test "$BACKEND" = success
-        if [ "$FULL" = true ]; then
-          test "$FRONTEND" = success
-        else
-          test "$FRONTEND" = skipped
-        fi
+        import os
+        import sys
+        if os.environ["FULL"] not in {"true", "false"}:
+            sys.exit("Invalid full-Windows scope")
+        if os.environ["BACKEND"] != "success":
+            sys.exit("Windows backend checks did not succeed")
+        expected = "success" if os.environ["FULL"] == "true" else "skipped"
+        if os.environ["FRONTEND"] != expected:
+            sys.exit("Windows frontend checks did not reach the required outcome")
 
   test:
     # Engine-only coverage that only the real platform can give. This job runs
