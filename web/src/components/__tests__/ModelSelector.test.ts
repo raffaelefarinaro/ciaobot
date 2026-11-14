@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, nextTick, ref } from 'vue'
 import ModelSelector, { type ModelSection } from '../ModelSelector.vue'
 
 beforeEach(() => {
@@ -68,6 +68,25 @@ describe('ModelSelector', () => {
 
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it.each([false, true])('preserves newly moved focus when an open selector is removed (triggerless=%s)', async (triggerless) => {
+    const key = ref(0)
+    const Host = defineComponent({
+      components: { ModelSelector },
+      setup: () => ({ key, triggerless, sections: SECTIONS }),
+      template: '<div><textarea /><ModelSelector v-if="!triggerless || !key" :key="key" :sections="sections" :triggerless="triggerless" /></div>',
+    })
+    const wrapper = mount(Host, { attachTo: document.body })
+    if (!triggerless) await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+    key.value++
+    const prompt = wrapper.get<HTMLTextAreaElement>('textarea').element
+    prompt.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(prompt)
+    wrapper.unmount()
   })
 
   it('exposes the full trigger label as a title, since the label ellipsizes', () => {

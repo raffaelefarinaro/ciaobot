@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -75,6 +75,11 @@ const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
+let preserveFocusOnUnmount = false
+onBeforeUnmount(() => {
+  const active = document.activeElement
+  preserveFocusOnUnmount = !!active && active !== document.body && !rootRef.value?.contains(active)
+})
 
 const effectiveValue = computed<string | string[]>(() => {
   if (props.multiple) return Array.isArray(props.modelValue) ? props.modelValue : []
@@ -290,6 +295,11 @@ function onOpenAutoFocus(event: Event): void {
   focusSearch()
 }
 
+function onCloseAutoFocus(event: Event): void {
+  // A removed picker must not override focus chosen by its parent.
+  if (preserveFocusOnUnmount) event.preventDefault()
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
@@ -365,6 +375,7 @@ onMounted(() => {
         :position-strategy="'fixed'"
         :update-position-strategy="'always'"
         @open-auto-focus="onOpenAutoFocus"
+        @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
       >
         <div
