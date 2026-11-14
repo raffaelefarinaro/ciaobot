@@ -43,18 +43,19 @@ test.describe('zoom and text scaling', () => {
     ).toBeLessThanOrEqual(0)
   })
 
-  test('the phone header wordmark follows its compact font size', async ({ page }) => {
+  test('the phone drawer shows the small static icon', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await boot(page)
-    const brand = page.locator('.header-center .brand')
+    await page.getByRole('button', { name: 'Open sidebar', exact: true }).click()
+    const brand = page.locator('img.sidebar-brand')
     await expect(brand).toBeVisible()
-    const sizes = await brand.evaluate((el) => ({
-      font: parseFloat(getComputedStyle(el).fontSize),
-      image: Array.from(el.querySelectorAll('img')).find(img => getComputedStyle(img).display !== 'none')!.getBoundingClientRect().width,
-      compact: 12 * parseFloat(getComputedStyle(el).getPropertyValue('--font-scale')),
-    }))
-    expect(sizes.font).toBeCloseTo(sizes.compact, 1)
-    expect(sizes.image / sizes.font).toBeCloseTo(5.5, 1)
+    await expect(brand).toHaveAttribute('src', '/icons/icon-32.png')
+    await expect(brand).toHaveAttribute('alt', 'Ciaobot')
+    await expect(brand).toHaveCSS('width', '30px')
+    await expect(brand).toHaveCSS('height', '30px')
+    await expect(page.getByRole('button', { name: 'Reload Ciaobot' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+    await expect(brand).toBeHidden()
   })
 
   test('the largest in-app font scale keeps the composer usable', async ({ page }) => {

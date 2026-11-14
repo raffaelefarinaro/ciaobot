@@ -47,15 +47,18 @@ test.describe('Settings › Appearance', () => {
     await expect.poll(() => fg(page)).toBe('#e8e8f0')
   })
 
-  test('shows the supplied wordmark in both themes', async ({ page }) => {
+  test('shows the supplied static icon in both themes', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
-    const brand = page.getByRole('button', { name: 'Reload Ciaobot' })
-    await page.getByRole('radio', { name: 'Light', exact: true }).click()
-    await expect(brand.locator('.brand-logo--light')).toBeVisible()
-    await expect(brand.locator('.brand-logo--dark')).toBeHidden()
-    await page.getByRole('radio', { name: 'Dark', exact: true }).click()
-    await expect(brand.locator('.brand-logo--dark')).toBeVisible()
-    await expect(brand.locator('.brand-logo--light')).toBeHidden()
+    const brand = page.locator('img.sidebar-brand')
+    for (const theme of ['Light', 'Dark']) {
+      await page.getByRole('radio', { name: theme, exact: true }).click()
+      await expect(brand).toBeVisible()
+      await expect(brand).toHaveAttribute('src', '/icons/icon-32.png')
+      await expect(brand).toHaveAttribute('alt', 'Ciaobot')
+      await expect(brand).toHaveCSS('width', '30px')
+      await expect(brand).toHaveCSS('height', '30px')
+      await expect(page.getByRole('button', { name: 'Reload Ciaobot' })).toHaveCount(0)
+    }
   })
 
   test('body font follows the choice and code stays monospace', async ({ page }) => {

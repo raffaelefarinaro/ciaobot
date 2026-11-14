@@ -388,6 +388,15 @@ async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10)
     return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
 
+async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "") -> dict[str, Any]:
+    """Check selected factual claims against bounded vault evidence."""
+    return await service._invoke(
+        "vault_recall_check",
+        lambda cp, p: cp.vault_recall_check(p, claims_json=claims_json),
+        mutating=False,
+    )
+
+
 async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
                             disposition: str = "", confirm: str = "") -> dict[str, Any]:
     """List and decide scoped vault-note review candidates.
@@ -1499,6 +1508,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
+    Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
