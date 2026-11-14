@@ -125,6 +125,34 @@ describe('notification inbox store', () => {
     expect(inbox.count).toBe(1)
   })
 
+  it('projects MCP-only as quiet or unread while real blockers still need attention', () => {
+    const { projects, signals, inbox } = setup()
+    setChats(projects, [makeChat('c1')])
+    markHealthy(projects, signals)
+    const mcp = {
+      id: 'mcp', kind: 'mcp_auth', origin: 'engine', state: 'open',
+      params: { server: 'linear', provider: 'claude' }, error: '', created_at: 1,
+    } as const
+    projects.chatActions = { c1: [mcp] }
+    expect(inbox.rows).toHaveLength(0)
+    expect(inbox.count).toBe(0)
+    setChats(projects, [makeChat('c1', { last_read_at: '' })])
+    expect(inbox.rows).toHaveLength(1)
+    expect(inbox.rows[0].section).not.toBe('needsYou')
+    expect(inbox.rows[0].unread).toBe(true)
+    for (const blocker of [
+      { last_error: 'MCP failed during a real turn' },
+      { pending_permission: '{"tool":"Bash"}' },
+      { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) },
+    ]) {
+      setChats(projects, [makeChat('c1', blocker)])
+      expect(inbox.rows[0]?.section).toBe('needsYou')
+    }
+    setChats(projects, [makeChat('c1')])
+    projects.chatActions = { c1: [mcp, { ...mcp, id: 'command', kind: 'command', params: { command: 'echo review-only' } }] }
+    expect(inbox.rows[0]?.section).toBe('needsYou')
+  })
+
   it('active_read_chat_keeps_permission', () => {
     const { projects, signals, inbox } = setup()
     setChats(projects, [makeChat('c1', { pending_permission: '{"tool":"Bash"}' })])

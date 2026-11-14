@@ -1,8 +1,9 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, fixtureWrites, horizontalOverflow, isolate, openChatDetails, seedInbox, settled } from '../support/app'
+import { bellCount, boot, fixtureWrites, horizontalOverflow, isolate, openChatDetails, openInbox, seedInbox, settled } from '../support/app'
 
 const screenshots = `${process.env.HOME}/repos/ciaobot/.loop-engineering/2026-11-13-mcp-sidebar-plan/state/screenshots-2972`
 const shortcutScreenshots = `${process.env.HOME}/repos/ciaobot/.loop-engineering/2026-11-13-mcp-sidebar-plan/state/screenshots-2972`
+const cutoverScreenshots = `${process.env.HOME}/repos/ciaobot/.loop-engineering/2026-11-13-mcp-sidebar-plan/state/screenshots-2974`
 test.use({ launchOptions: { args: ['--host-resolver-rules=MAP ciao.test 127.0.0.1'] } })
 
 async function shortcutFixture(page: Page) {
@@ -21,6 +22,86 @@ async function shortcutFixture(page: Page) {
   } }))
   return { frames, setState: (next: string) => { state = next } }
 }
+
+test('atomic attention cutover keeps MCP recovery in details without chat attention', async ({ page }) => {
+  await isolate(page, 'mcp-atomic-cutover')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const fixture = await shortcutFixture(page)
+  fixture.setState('connected')
+  await boot(page, '/chat/alpha-chat-1')
+  const rail = page.locator('.chat-rail')
+  if (await rail.isVisible()) await page.getByRole('button', { name: 'Hide chat details' }).click()
+  const beforeCount = await bellCount(page)
+  const dialog = await openInbox(page)
+  const beforeSummary = await dialog.getByTestId('inbox-summary').innerText()
+  const beforeRows = await dialog.locator('[data-testid^="row-"]').allTextContents()
+  await page.keyboard.press('Escape')
+  await page.screenshot({ path: `${cutoverScreenshots}/desktop-before.png`, animations: 'disabled' })
+  const history = await page.evaluate(() => localStorage.getItem('ciao-chat-sent-prompts'))
+  const writes = await fixtureWrites(page)
+  fixture.setState('failed')
+  const response = await page.request.post('/__fixture__/chat-action', { data: {
+    chat_id: 'alpha-chat-1', kind: 'mcp_auth', state: 'open', params: { provider: 'claude', server: 'linear' },
+  } })
+  expect(response.ok()).toBe(true)
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(page.getByRole('button', { name: /Show chat details, 1 MCP/ }).locator('.chat-mcp-indicator')).toBeVisible()
+  await expect(page.locator('.chat-column [data-kind="mcp_auth"]')).toHaveCount(0)
+  await expect(page.locator('.chat-column .needs-you-fold')).toHaveCount(0)
+  expect(await bellCount(page)).toBe(beforeCount)
+  const after = await openInbox(page)
+  expect(await after.getByTestId('inbox-summary').innerText()).toBe(beforeSummary)
+  expect(await after.locator('[data-testid^="row-"]').allTextContents()).toEqual(beforeRows)
+  await expect(after.getByTestId('row-chat:alpha-chat-1')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.screenshot({ path: `${cutoverScreenshots}/desktop-after.png`, animations: 'disabled' })
+  await openChatDetails(page)
+  await expect(rail.locator('.chat-mcp-state')).toHaveText('Connection failed')
+  await expect(rail.locator('.needs-you-card')).toHaveAttribute('data-action-id', (await response.json()).action.id)
+  await page.screenshot({ path: `${cutoverScreenshots}/desktop-sidebar.png`, animations: 'disabled' })
+  expect(await page.evaluate(() => localStorage.getItem('ciao-chat-sent-prompts'))).toBe(history)
+  expect((await fixtureWrites(page)).filter(w => /\/actions\/|\/queue/.test(w.path)))
+    .toEqual(writes.filter(w => /\/actions\/|\/queue/.test(w.path)))
+  await page.goto('/')
+  await expect(page.locator('.home-chat-item--needsYou', { hasText: 'alpha first conversation' })).toHaveCount(0)
+  await page.screenshot({ path: `${cutoverScreenshots}/desktop-home-after.png`, animations: 'disabled' })
+})
+
+for (const [name, blocker] of [
+  ['failed turn', { last_error: 'MCP failed during a real turn' }],
+  ['question', { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) }],
+  ['permission', { pending_permission: JSON.stringify({ request_id: 'p1', tool_name: 'Bash', tool_input: 'echo test' }) }],
+] as const) {
+  test(`MCP with a real ${name} remains in Needs you`, async ({ page }) => {
+    await isolate(page, `mcp-real-${name.replace(' ', '-')}`)
+    await seedInbox(page, { chats: { 'alpha-chat-1': blocker } })
+    const response = await page.request.post('/__fixture__/chat-action', { data: {
+      chat_id: 'alpha-chat-1', kind: 'mcp_auth', params: { provider: 'claude', server: 'linear' },
+    } })
+    expect(response.ok()).toBe(true)
+    await boot(page, '/')
+    const inbox = await openInbox(page)
+    await expect(inbox.getByTestId('row-chat:alpha-chat-1')).toBeVisible()
+    await expect(inbox.locator('section', { has: page.getByRole('heading', { name: /Needs you/i }) })
+      .getByTestId('row-chat:alpha-chat-1')).toBeVisible()
+  })
+}
+
+test('MCP with a command remains in Needs you', async ({ page }) => {
+  await isolate(page, 'mcp-real-command')
+  for (const [kind, params] of [
+    ['mcp_auth', { provider: 'claude', server: 'linear' }],
+    ['command', { command: 'echo review-only' }],
+  ] as const) {
+    const response = await page.request.post('/__fixture__/chat-action', { data: { chat_id: 'alpha-chat-1', kind, params } })
+    expect(response.ok()).toBe(true)
+  }
+  await boot(page, '/')
+  const inbox = await openInbox(page)
+  await expect(inbox.getByTestId('row-chat:alpha-chat-1')).toBeVisible()
+  await expect(inbox.locator('section', { has: page.getByRole('heading', { name: /Needs you/i }) })
+    .getByTestId('row-chat:alpha-chat-1')).toBeVisible()
+})
 
 test.describe('local MCP shortcut on a touch device', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })

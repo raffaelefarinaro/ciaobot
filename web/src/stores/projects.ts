@@ -1938,8 +1938,8 @@ export const useProjectStore = defineStore('projects', () => {
     if (chatIsMemoryPass(chatId)) return false
     if (chatNeedsInput(chatId)) return true
     if (chatFailed(chatId)) return true
-    // A needs-you card (an MCP sign-in, ...) is waiting on the user.
-    if (chatActions.value[chatId]?.length) return true
+    // MCP recovery belongs to Chat details, not chat attention.
+    if (chatActions.value[chatId]?.some(a => a.kind !== 'mcp_auth')) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return false
     // Only the loaded workspace's tasks are held, and slugs collide across

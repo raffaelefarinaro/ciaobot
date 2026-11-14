@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 /**
- * The needs-you card (an MCP sign-in, ...), where it sits in a chat.
+ * The needs-you card, where it sits in a chat.
  *
  * Like the suggested command, the card is contextual: it belongs to one chat,
  * sits above the composer's queue, and is not shown for a chat that is not on
@@ -55,7 +55,7 @@ const CommentPopoverStub = vi.hoisted(() => ({
     show: () => {},
   },
 }))
-vi.mock('../PaneHeader.vue', () => ({ default: NoopStub }))
+vi.mock('../PaneHeader.vue', () => ({ default: { template: '<header><slot name="title" /><slot name="actions" /></header>' } }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatCommentPopover.vue', () => ({ default: CommentPopoverStub }))
 vi.mock('../CommentComposePopover.vue', () => ({ default: NoopStub }))
@@ -88,6 +88,7 @@ async function mountPanel(chatId = CHAT_ID, existing?: ReturnType<typeof createP
   setActivePinia(pinia)
   const store = useProjectStore()
   store.chats = [makeChat({ chat_id: chatId })]
+  store.projects = [{ project_id: 'proj-1', name: 'Test', workspace: 'personal' }] as never
   store.activeChatId = chatId
   store.messages = { [chatId]: [] }
   store.bootstrapped = true
@@ -120,22 +121,50 @@ afterEach(() => {
 
 const ACTION = {
   id: 'a1',
-  kind: 'mcp_auth',
+  kind: 'command',
   origin: 'engine',
   state: 'open',
-  params: { server: 'linear', provider: 'opencode' },
+  params: { command: 'echo review-only' },
   error: '',
   created_at: 1,
 } as const
 
 describe('ChatPanel needs-you card', () => {
+  it.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
+    'keeps MCP %s in the store without an inline card',
+    async (state) => {
+      const { wrapper: panel, store } = await mountPanel()
+      const mcp = { ...ACTION, kind: 'mcp_auth', state, params: { server: 'linear', provider: 'claude' } } as const
+      store.chatActions = { [CHAT_ID]: [mcp] }
+      await flushPromises()
+      expect(panel.find('.chat-column [data-kind="mcp_auth"]').exists()).toBe(false)
+      expect(panel.find('.chat-column .needs-you-fold').exists()).toBe(false)
+      expect(store.chatActions[CHAT_ID]).toEqual([mcp])
+      const opener = panel.find('[title="Show chat details"]')
+      await opener.trigger('click')
+      await flushPromises()
+      expect(panel.find('.chat-mcp-connections .needs-you-card').attributes('data-action-id')).toBe(mcp.id)
+    },
+  )
+
+  it('shows only the command inline when two MCP actions are also present', async () => {
+    const { wrapper: panel, store } = await mountPanel()
+    const mcp = { ...ACTION, kind: 'mcp_auth', params: { server: 'linear', provider: 'opencode' } } as const
+    store.chatActions = { [CHAT_ID]: [mcp, { ...mcp, id: 'a2', params: { ...mcp.params, server: 'other' } }, ACTION] }
+    await flushPromises()
+    expect(panel.findAll('.chat-column .needs-you-card')).toHaveLength(1)
+    expect(panel.find('.chat-column [data-kind="mcp_auth"]').exists()).toBe(false)
+    expect(panel.get('.chat-column .needs-you-card-title').text()).toBe('Suggested command — review before running')
+    expect(store.chatActions[CHAT_ID]).toHaveLength(3)
+  })
+
   it('shows the chat\'s needs-you card above the queue and the composer', async () => {
     const { wrapper: panel, store } = await mountPanel()
     store.chatActions = { [CHAT_ID]: [ACTION as never] }
     await flushPromises()
 
     const card = panel.get('.needs-you-card').element
-    expect(panel.get('.needs-you-card-title').text()).toBe('Sign in to linear')
+    expect(panel.get('.needs-you-card-title').text()).toBe('Suggested command — review before running')
 
     const composer = panel.get('.chat-input').element
     expect(comesBefore(card, composer)).toBe(true)
