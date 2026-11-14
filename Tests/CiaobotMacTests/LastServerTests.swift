@@ -72,14 +72,14 @@ final class LastServerStoreTests: XCTestCase {
 
     override func tearDown() {
         for name in suiteNames {
-            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+            IsolatedDefaults.remove(name)
         }
         suiteNames = []
         super.tearDown()
     }
 
     private func isolatedDefaults() throws -> UserDefaults {
-        let name = "CiaobotMacTests.LastServer.\(UUID().uuidString)"
+        let name = IsolatedDefaults.makeName("LastServer")
         suiteNames.append(name)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         defaults.removePersistentDomain(forName: name)

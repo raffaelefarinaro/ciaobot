@@ -35,7 +35,7 @@ final class NativeInstallFlowTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        suiteName = "CiaobotMacTests.NativeInstallFlow.\(UUID().uuidString)"
+        suiteName = IsolatedDefaults.makeName("NativeInstallFlow")
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
         store = UserDefaultsLastServerStore(defaults: defaults)
@@ -44,7 +44,7 @@ final class NativeInstallFlowTests: XCTestCase {
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
+        IsolatedDefaults.remove(suiteName)
         defaults = nil
         store = nil
         if let registryURL { try? FileManager.default.removeItem(at: registryURL) }

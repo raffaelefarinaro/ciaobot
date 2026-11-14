@@ -260,10 +260,10 @@ final class LocalServerDiscoveryTests: XCTestCase {
     func testShippedConnectionViewDefaultFollowsTheSamePolicy() throws {
         // The host store is isolated even though this view never connects, so
         // a future connect here cannot write the operator's real host list.
-        let name = "CiaobotMacTests.ShippedView.\(UUID().uuidString)"
+        let name = IsolatedDefaults.makeName("ShippedView")
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         defaults.removePersistentDomain(forName: name)
-        defer { defaults.removePersistentDomain(forName: name) }
+        defer { IsolatedDefaults.remove(name) }
         let view = ConnectionView(hostStore: UserDefaultsHostListStore(
             defaults: defaults,
             lastServer: UserDefaultsLastServerStore(defaults: defaults)
