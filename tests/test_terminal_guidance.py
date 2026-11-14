@@ -311,3 +311,120 @@ def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
     server = (REPO / "ciao" / "web" / "mcp_inventory.py").read_text(encoding="utf-8")
     assert 'f"cd -- {shlex.quote(root)} && "' in server
     assert "f\"Set-Location -LiteralPath '{_double_ps_quotes(root)}'; \"" in server
+
+
+def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:
+    settings_mcp = "\n".join(
+        line for line in settings.splitlines()
+        if line.startswith((
+            "- **Asked in a chat", "- **Say the next step", "- **MCP servers in Settings",
+            "- **Adding a server", "- **Claude Code**", "- **OpenCode**",
+            "- **A workspace's `.mcp.json`", "- **Reloading after a change",
+            "- **Chat MCP navigation", "- **The manual bridge", "- **Never report a step",
+        ))
+    )
+    reload = cli.split("### Reloading tools", 1)[1].split("### Long-running commands", 1)[0]
+    row = next(line for line in cli.splitlines() if line.startswith("| `chat needs-action KIND"))
+    intro = row.split(" `command --command-file", 1)[0]
+    mcp_action = row.split(" `mcp_auth --server NAME`", 1)[1].split(" `permission_mode", 1)[0]
+    for text in (index, settings_mcp, reload, intro):
+        assert "Chat details → MCP" in text
+    mcp_intro = intro.split("while `mcp_auth`", 1)[1]
+    for text in (index, settings_mcp, reload, mcp_intro, mcp_action):
+        assert not re.search(
+            r"(?:mcp|sign[ -]in|auth(?:entication)?).{0,60}"
+            r"(?:card|tile|above the composer|fold(?:ed|s|ing)?)\b",
+            text, re.IGNORECASE,
+        )
+    assert "generic actions show as a card above the composer" in intro
+    assert "device_code" in row
+
+
+def _assert_managed_callback_contract(text: str) -> None:
+    assert re.search(
+        r"Managed remote OAuth for both Claude and OpenCode supports callback paste-back",
+        text, re.IGNORECASE,
+    )
+    assert re.search(r"separate from native CLI OAuth", text, re.IGNORECASE)
+    assert re.search(r"Callback delivery is not verification: check provider state", text)
+    assert re.search(r"Terminal authentication does not reconnect an already-running OpenCode provider", text)
+    assert "manually pastes and runs" in text
+
+
+def _assert_mcp_shortcut_contract(text: str) -> None:
+    assert re.search(r"Standalone case-insensitive `/mcp` opens the current chat's MCP sidebar only for an actual Claude or OpenCode chat with a resolved owning workspace", text)
+    assert re.search(r"unsupported provider or unresolved workspace the app shows a local reason, preserves raw text and staged state, and sends no turn", text)
+    assert re.search(r"`/mcp ARG` and other arguments are ordinary prompts, not native TUI commands", text)
+
+
+def _mcp_sources() -> tuple[str, str, str]:
+    return (
+        _section(_skill(), "Connecting providers"),
+        _reference("install-and-settings.md"),
+        (STOCK / "skills/ciao-cli/SKILL.md").read_text(encoding="utf-8"),
+    )
+
+
+def test_guidance_places_mcp_signin_in_chat_details_not_inline_cards() -> None:
+    _assert_mcp_recovery_location(*_mcp_sources())
+
+
+@pytest.mark.parametrize(("source", "old", "new"), [
+    (0, "authentication use **Chat details → MCP → Sign in**", "authentication use **Chat details → MCP → Sign in**; MCP authentication card above the composer"),
+    (1, "A server that still needs a sign-in uses the chat's managed MCP recovery.", "A server that still needs a sign-in uses the chat's managed MCP recovery. Sign-in requests fold under one row."),
+    (2, "ask the user to sign in to an MCP server.", "ask the user to sign in to an MCP server. MCP authentication card above the composer."),
+    (2, "while `mcp_auth` lives in Chat details → MCP.", "while `mcp_auth` lives in Chat details → MCP. MCP authentication card above the composer."),
+])
+def test_mcp_location_contract_rejects_inline_mutations(source: int, old: str, new: str) -> None:
+    texts = list(_mcp_sources())
+    assert old in texts[source]
+    texts[source] = texts[source].replace(old, new)
+    with pytest.raises(AssertionError):
+        _assert_mcp_recovery_location(*texts)
+
+
+def test_sidebar_terminal_guidance_keeps_user_control_boundaries() -> None:
+    terminal = _reference("terminal.md")
+    for fact in ("Chat details → Open → Terminal", "Open in Terminal", "engine runs as", "agent cannot drive", "cannot read", "bypass permissions", "Repository", "Workspace", "repository is not required"):
+        assert fact in terminal
+
+
+def test_mcp_shortcut_guidance_is_app_navigation_for_supported_providers() -> None:
+    guidance = _reference("install-and-settings.md")
+    _assert_mcp_shortcut_contract(next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation.")))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("preserves raw text and staged state", "discards raw text and staged state"),
+    ("preserves raw text and staged state", "preserves raw text but discards staged state"),
+    ("sends no turn", "sends a turn"),
+    ("unsupported provider or unresolved workspace", "unsupported provider and resolved workspace"),
+    ("ordinary prompts, not native TUI commands", "native TUI commands, not ordinary prompts"),
+])
+def test_mcp_shortcut_contract_rejects_opposite_outcomes(old: str, new: str) -> None:
+    guidance = _reference("install-and-settings.md")
+    navigation = next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation."))
+    assert old in navigation
+    with pytest.raises(AssertionError):
+        _assert_mcp_shortcut_contract(navigation.replace(old, new))
+
+
+def test_managed_mcp_callback_guidance_preserves_both_providers() -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    _assert_managed_callback_contract(bridge)
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("supports callback paste-back", "does NOT support callback paste-back"),
+    ("both Claude and OpenCode", "Claude but not OpenCode"),
+    ("separate from native CLI OAuth", "the same as native CLI OAuth"),
+    ("Callback delivery is not verification: check provider state", "Callback delivery proves verification"),
+    ("does not reconnect an already-running OpenCode provider", "reconnects an already-running OpenCode provider"),
+])
+def test_managed_callback_contract_rejects_contradictions(old: str, new: str) -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    assert old in bridge
+    with pytest.raises(AssertionError):
+        _assert_managed_callback_contract(bridge.replace(old, new))

@@ -281,3 +281,11 @@ def test_disclosed_memory_procedures_remain_available() -> None:
         "`ciao file surface",
     ):
         assert instruction in procedures, instruction
+
+
+def test_system_prompt_points_operator_steps_to_sidebar_terminal() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    text = payload["append"]
+    for fact in ("Chat details → Open → Terminal", "engine's computer", "cannot drive", "bypass permissions", "dedicated sign-in", "`/mcp`", "navigation", "provider TUI"):
+        assert fact in text
