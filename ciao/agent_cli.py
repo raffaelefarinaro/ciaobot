@@ -20,6 +20,7 @@ import stat
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,18 @@ _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
 }
 
 _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" / "SKILL.md"
+
+
+def _help_parts() -> Iterator[str]:
+    """Read and yield each help resource lazily in output order."""
+    yield _SKILL_PATH.read_text(encoding="utf-8")
+    yield "\n" + _SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8")
+
+
+def _help_text() -> str:
+    """Return the complete packaged CLI reference."""
+    return "".join(_help_parts())
+
 
 _SCHEDULE_FLAG_HELP: dict[str, str] = {
     "--command": "Shell command run before the prompt. Only a bypass-mode chat may set one; "
@@ -991,8 +1004,8 @@ def main(argv: list[str]) -> int:
         return 2
     if args.noun == "help":
         try:
-            sys.stdout.write(_SKILL_PATH.read_text(encoding="utf-8"))
-            sys.stdout.write("\n" + _SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8"))
+            for part in _help_parts():
+                sys.stdout.write(part)
         except OSError:
             parser.print_help()
         return 0
