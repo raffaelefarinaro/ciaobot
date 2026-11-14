@@ -863,6 +863,57 @@ async def test_recall_empty_claims_are_not_applicable_without_io(tmp_path, monke
     assert result["claims"] == []
 
 
+async def test_recall_before_helper_gate_runs_at_provider_seam(tmp_path, monkeypatch) -> None:
+    (tmp_path / "a.md").write_text("Evidence", encoding="utf-8")
+    calls = []
+
+    async def fake_run(*args, **kwargs):
+        calls.append(True)
+        return '{"claims":[{"id":"a","status":"insufficient_evidence","sources":[],"reason":"Not enough."}]}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run)
+    result = await vv.verify_recall_claims(
+        [vv.RecallClaim("a", "claim", ("a.md",))],
+        vault_root=tmp_path, model="m", provider="claude", cwd=None,
+        before_helper=lambda: calls.append("gate"),
+    )
+    assert calls == ["gate", True]
+    assert result["status"] == "checked"
+
+
+async def test_recall_before_helper_refusal_propagates_without_provider_call(tmp_path, monkeypatch) -> None:
+    (tmp_path / "a.md").write_text("Evidence", encoding="utf-8")
+    monkeypatch.setattr(
+        "ciao.providers.oneshot.run_oneshot",
+        lambda *args, **kwargs: pytest.fail("provider must not run"),
+    )
+
+    class Refused(Exception):
+        pass
+
+    def refuse():
+        raise Refused("private")
+
+    with pytest.raises(Refused, match="private"):
+        await vv.verify_recall_claims(
+            [vv.RecallClaim("a", "claim", ("a.md",))],
+            vault_root=tmp_path, model="m", provider="claude", cwd=None,
+            before_helper=refuse,
+        )
+
+
+async def test_recall_before_helper_is_optional_and_skipped_without_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.providers.oneshot.run_oneshot",
+        lambda *args, **kwargs: pytest.fail("provider must not run"),
+    )
+    result = await vv.verify_recall_claims(
+        [vv.RecallClaim("a", "claim", ("missing.md",))],
+        vault_root=tmp_path, model="m", provider="claude", cwd=None,
+    )
+    assert result["status"] == "unavailable"
+
+
 def test_recall_system_prompt_defines_evidence_only_judgment_and_uncertainty() -> None:
     prompt = vv._RECALL_SYSTEM_PROMPT.lower()
     for phrase in ("caller", "conversation context", "supersession", "truncated", "insufficient_evidence"):

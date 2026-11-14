@@ -154,9 +154,13 @@ If enabled by a later rollout change, the caller supplies a UTF-8 JSON claims
 file and the operation is available only during a live foreground provider
 pass. It is model-invoked, not an automatic or guaranteed pre-final check.
 Findings return to the authenticated requester (normally as the ordinary tool
-result); the existing chat bearer does not prove which turn or process made
-the request: a still-valid same-scope token from an earlier pass is
-indistinguishable from a token used by the current pass and can use the current
+result). The operation binds to the exact registry session presented at
+execution and refuses results if that session is revoked, chat-revoked, rotated
+or expired while the request is pending. A 250 ms polling watcher is cooperative,
+not a hard cancellation deadline; synchronous checks also guard helper admission
+and result delivery. This proves live chat-capability validity, not which turn
+or process made the request: a still-valid same-scope token from an earlier pass
+is indistinguishable from a token used by the current pass and can use the current
 pass's unspent attempt. It allows one attempt per provider pass and honors the existing
 vault-verification opt-out. The operation has a cooperative 45-second server
 deadline while the CLI HTTP timeout remains 60 seconds; a client timeout or
