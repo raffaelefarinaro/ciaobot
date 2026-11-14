@@ -168,8 +168,8 @@ deadline while the CLI HTTP timeout remains 60 seconds; a client timeout or
 disconnect does not guarantee cancellation. The reader's resolve/stat/open/
 fstat sequence has a TOCTOU window and assumes a non-hostile local filesystem.
 No verification-specific message, notification or stream event is produced
-for this model-invoked check. The existing post-answer verifier and its
-historical verdicts remain available; the badge and Settings card are removed
+for this model-invoked check. The former post-answer verifier is retired and its
+historical verdict data are preserved; the badge and Settings card are removed
 atomically with activation. Ordinary tool transcripts can contain the request
 and result; this is not an invisible or zero-retention path.
 
