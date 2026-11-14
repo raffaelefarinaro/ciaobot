@@ -149,12 +149,13 @@ const TURN_FACTS_TRANSCRIPT = [
 ]
 
 /**
- * One vault-grounded turn whose answer the engine checked against the notes it
- * read: one claim supported, one not in the notes, one general knowledge. A
- * browser spec checks the badge is visible without hover and opens its list.
+ * Historical verdict metadata stays in the transcript fixture after the
+ * dedicated answer-check UI is removed. Keep ordinary tool activity alongside
+ * it so the removal regression also guards the normal activity trace.
  */
 const VAULT_CHECK_TRANSCRIPT = [
   { role: 'user', content: 'Where does Ann live now?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'system', content: '$ Bash git status', tool_name: '_activity' },
   {
     role: 'assistant',
     content: 'Ann moved to Rome in March and works at the Bergamo office twice a week. Rome is the capital of Italy.',

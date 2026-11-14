@@ -240,7 +240,7 @@ def _ann_note(pcm) -> Path:
     return note
 
 
-async def test_turn_that_read_a_vault_note_is_checked_and_published(
+async def test_post_answer_verification_is_not_triggered_by_vault_reads(
     tmp_path: Path, monkeypatch
 ) -> None:
     pcm = _make_manager(tmp_path)
@@ -260,14 +260,10 @@ async def test_turn_that_read_a_vault_note_is_checked_and_published(
         pcm, chat.chat_id, [_read(note), _result("Ann lives in Rome.")]
     )
 
-    await _wait_for(lambda: bool(calls), timeout=2.0)
-    assert calls == [("Ann lives in Rome.", [note.resolve()])]
-    await _wait_for(lambda: "0" in pcm._chats[chat.chat_id].turn_verification)
-    assert pcm._chats[chat.chat_id].turn_verification["0"] == _VERDICT
-    verdicts = [e for e in published if e.get("type") == "turn_verification"]
-    assert len(verdicts) == 1
-    assert verdicts[0]["turn_index"] == 0
-    assert verdicts[0]["verification"] == _VERDICT
+    await asyncio.sleep(0.05)
+    assert calls == []
+    assert pcm._chats[chat.chat_id].turn_verification == {}
+    assert not [e for e in published if e.get("type") == "turn_verification"]
 
 
 async def test_no_check_without_vault_reads_or_when_disabled(
@@ -290,15 +286,7 @@ async def test_no_check_without_vault_reads_or_when_disabled(
     other.write_text("not the vault", encoding="utf-8")
     await _drive_turn(pcm, chat.chat_id, [_read(other), _result("ok")])
 
-    # (b) a vault read with the setting off
-    pcm = _make_manager(tmp_path / "disabled")
-    project = pcm.create_project("no-check", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="verify-test")
-    note = _ann_note(pcm)
-    pcm.verify_vault_answers_enabled = lambda: False  # type: ignore[assignment]
-    await _drive_turn(pcm, chat.chat_id, [_read(note), _result("ok")])
-
-    # (c) a vault read in a turn that errored
+    # A vault read in a turn that errored does not trigger the retired verifier.
     pcm = _make_manager(tmp_path / "errored")
     project = pcm.create_project("no-check", workspace="work")
     chat = pcm.create_chat(project.project_id, title="verify-test")
@@ -322,7 +310,7 @@ def test_transcript_overlay_attaches_verification_to_last_assistant_row() -> Non
     assert entries[2]["verification"] == _VERDICT
 
 
-async def test_steered_turn_keys_the_verdict_on_the_steer_index(
+async def test_steered_vault_read_does_not_publish_post_answer_verdict(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A steer that lands before the terminal frame owns the final answer row.
@@ -367,14 +355,10 @@ async def test_steered_turn_keys_the_verdict_on_the_steer_index(
     stream = pcm.start_stream(chat.chat_id, "where does ann live?")
     await asyncio.wait_for(asyncio.create_task(consume(stream)), timeout=5.0)
 
-    await _wait_for(lambda: "1" in pcm._chats[chat.chat_id].turn_verification)
-    turn_verification = pcm._chats[chat.chat_id].turn_verification
-    assert "0" not in turn_verification
-    assert turn_verification["1"] == _VERDICT
-    verdicts = [e for e in published if e.get("type") == "turn_verification"]
-    assert len(verdicts) == 1
-    assert verdicts[0]["turn_index"] == 1
-    assert calls == [("Ann lives in Rome.", [note.resolve()])]
+    await asyncio.sleep(0.05)
+    assert pcm._chats[chat.chat_id].turn_verification == {}
+    assert not [e for e in published if e.get("type") == "turn_verification"]
+    assert calls == []
 
 
 def test_validate_recall_request_accepts_exact_limits() -> None:
@@ -701,6 +685,58 @@ def test_parse_recall_check_preserves_input_order_without_filtering() -> None:
     result = vv.parse_recall_check(reply, claims, {"a.md", "b.md", "c.md"})
     assert result is not None
     assert [finding["id"] for finding in result] == ["a", "b", "c"]
+
+
+def test_parse_recall_check_accepts_one_fenced_json_result_with_surrounding_prose() -> None:
+    claim = vv.RecallClaim("claim_1", "The fictional code is ORCHID-17.", ("Synthetic/Project-Quartz.md",))
+    reply = (
+        "```json\n"
+        '{"claims":[{"id":"claim_1","status":"supported",'
+        '"sources":["Synthetic/Project-Quartz.md"],'
+        '"reason":"The source explicitly states the fictional launch code is ORCHID-17."}]}\n'
+        "```\n\n"
+        "This result is supported by the evidence in Synthetic/Project-Quartz.md."
+    )
+    assert vv.parse_recall_check(reply, [claim], {"Synthetic/Project-Quartz.md"}) == [{
+        "id": "claim_1",
+        "status": "supported",
+        "sources": ["Synthetic/Project-Quartz.md"],
+        "reason": "The source explicitly states the fictional launch code is ORCHID-17.",
+    }]
+
+
+@pytest.mark.parametrize("reply", [
+    '```json\n{"claims":[]}\n```\n```json\n{"claims":[]}\n```',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n{"claims":[]}',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n{"claims": BROKEN}',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n prose [in brackets]',
+    '```text\n{"claims":[]}\n```',
+    '```json\n{"claims":[]}\n```\n```text\nordinary prose\n```',
+    '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["fake.md"],"reason":"prose claim"}]}\n```',
+    '```json\n{"claims":[]}\n',
+])
+def test_parse_recall_check_rejects_ambiguous_or_invalid_fenced_reply(reply) -> None:
+    claim = vv.RecallClaim("claim_1", "A fact", ("a.md",))
+    assert vv.parse_recall_check(reply, [claim], {"a.md"}) is None
+
+
+@pytest.mark.parametrize("reply", [
+    '{"claims":[{"id":"claim_1","id":"other","status":"supported","sources":["a.md"],"reason":"x"}]}',
+    '{"claims":[{"id":"claim_1","status":"supported","status":"insufficient_evidence","sources":["a.md"],"reason":"x"}]}',
+    '{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"sources":[],"reason":"x"}]}',
+    '{"claims":[],"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}',
+    '{"claims":[{"id":"claim_1","status":"supported","sources":[{"a.md":"a.md"}],"reason":"x"}]}',
+])
+def test_parse_recall_check_rejects_duplicate_json_keys(reply) -> None:
+    claim = vv.RecallClaim("claim_1", "A fact", ("a.md",))
+    assert vv.parse_recall_check(reply, [claim], {"a.md"}) is None
+
+
+def test_parse_recall_check_rejects_deeply_nested_json_without_raising() -> None:
+    claim = vv.RecallClaim("claim_1", "A fact", ("a.md",))
+    assert vv.parse_recall_check("[" * 15_000, [claim], {"a.md"}) is None
+    reply = '```json\n{"claims":[{"id":"claim_1","status":"supported","sources":["a.md"],"reason":"x"}]}\n```\n' + "[" * 15_000
+    assert vv.parse_recall_check(reply, [claim], {"a.md"}) is None
 
 
 def test_parse_recall_check_rejects_invalid_output() -> None:

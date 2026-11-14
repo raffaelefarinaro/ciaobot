@@ -218,7 +218,7 @@ describe('production ownership', () => {
     expect(() => assertCoverage([{ ...tab, states: [{ ...tab.states[0], coverage: 'uncovered' }] }])).toThrow('Noncovered state')
     const entry = inventory.find((row) => row.id === 'components-settings-settings-switch')!
     expect(Object.fromEntries(entry.states.filter((state) => state.coverage === 'covered').map((state) => [state.name, state.storyIds]))).toEqual(switchCovered)
-    expect(entry.consumers).toEqual(['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'])
+    expect(entry.consumers).toEqual(['web/src/components/settings/SettingsRestartResume.vue'])
     assertCoverage(inventory.filter((row) => row.owner.path in expectedCoverage))
     for (const candidate of [tab, entry]) {
       const state = candidate.states.find((state) => state.coverage === 'covered')!

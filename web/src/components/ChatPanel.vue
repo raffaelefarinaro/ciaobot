@@ -483,7 +483,6 @@
                 <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group" v-html="formatTokenUsage(item.meta.usage)"></span>
               </div>
             </div>
-            <TurnVerificationBadge v-if="item.meta?.verification" :verification="item.meta.verification" />
           </div>
         </div>
         <!-- System message (errors, etc) -->
@@ -1535,7 +1534,6 @@ import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
 import ChatRetryState from './ChatRetryState.vue'
-import TurnVerificationBadge from './TurnVerificationBadge.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'

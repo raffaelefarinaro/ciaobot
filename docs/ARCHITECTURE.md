@@ -677,9 +677,9 @@ defer until their caller chat drains. The native file tools are denied `.env`,
 `.env.example`-style templates are deliberately not denied, matching
 `local_session.py`. See `docs/AGENT_CLI.md`.
 
-`vault_recall_check` is a read-only operation in the shared table, hard-disabled
-by default and independently gated by the existing `verify_vault_answers`
-setting. Dormant requests do not acquire authorization or perform evidence/helper
+`vault_recall_check` is a read-only operation in the shared table, enabled and
+independently gated by the existing `verify_vault_answers` setting. Disabled
+requests do not acquire authorization or perform evidence/helper
 work. When enabled, the operation binds to the exact registry session represented
 by the authenticated access token; revocation, chat revocation, scope rotation
 and expiry invalidate it. A request-owned 250 ms polling watcher detects
@@ -693,8 +693,10 @@ and driver tasks are never canceled. The operation accepts only model-selected
 claims and binds delivery to the foreground pass observed at request time;
 bearer authentication is a chat capability, not proof of originating pass, so a
 retained same-scope token can make the same request in a later pass. It does not
-intercept answers, publish findings to the stream, persist a verdict, or
-guarantee a final answer was checked. Its cooperative server deadline is 45 s
+intercept answers, publish findings to the stream, or persist a verdict. The
+system prompt and stock CLI skill instruct the model to invoke it before
+finalizing actual vault recall, not work summaries, and keep the result internal.
+This is model guidance, not a server-enforced guarantee. Its cooperative server deadline is 45 s
 (the CLI's HTTP client timeout stays 60 s); a disconnected socket alone does
 not promise cancellation. Aggregate admission safety remains a separate
 prerequisite to activation. If enabled, the process-local gate admits at most

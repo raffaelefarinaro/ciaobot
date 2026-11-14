@@ -1,8 +1,4 @@
-"""Vault checking primitives.
-
-The existing active post-answer verifier is preserved. The separate bounded
-recall-claim checker is a foundation only and is not wired into chat execution.
-"""
+"""Vault checking primitives, including the model-invoked recall-claim check."""
 
 from __future__ import annotations
 
@@ -13,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
+
+from ciao.jsonio import json_nesting_exceeds
 
 logger = logging.getLogger(__name__)
 
@@ -293,8 +291,31 @@ def parse_recall_check(
         raise ValueError("unknown known source")
     if not isinstance(text, str) or len(text) > RECALL_MAX_REPLY_CHARS:
         return None
+    # OpenCode may wrap its single structured result in Markdown and then add
+    # conversational text. Only the fenced JSON block is authoritative.
+    fenced = re.findall(r"```json\s*\n(.*?)\n```", text, re.DOTALL)
+    if "```" in text:
+        if len(fenced) != 1 or text.count("```") != 2:
+            return None
+        fence_start = text.find("```")
+        fence_end = text.find("```", fence_start + 3) + 3
+        outside = text[:fence_start] + text[fence_end:]
+        if any(char in "{[" for char in outside):
+            return None
+        text = fenced[0]
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    if json_nesting_exceeds(text):
+        return None
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=reject_duplicate_keys)
     except (ValueError, TypeError):
         return None
     if type(data) is not dict or type(data.get("claims")) is not list:
