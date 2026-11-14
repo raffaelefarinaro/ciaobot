@@ -2238,6 +2238,11 @@ def _auth_command(args: argparse.Namespace) -> int:
             return 0
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except OSError:
+        if args.provider != "opencode":
+            raise
+        print("Error: OpenCode is unavailable; check provider setup.", file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

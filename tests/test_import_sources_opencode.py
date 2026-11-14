@@ -550,7 +550,32 @@ def test_a_binary_that_cannot_be_executed_is_refused(monkeypatch: pytest.MonkeyP
         read_opencode_session("ses_synthetic00000000000000000000000")
 
     assert refused.value.reason == REASON_UNAVAILABLE
-    assert "Permission denied" in str(refused.value)
+    assert str(refused.value) == "The OpenCode CLI is unavailable; check provider setup."
+    assert "Permission denied" not in str(refused.value)
+
+
+def test_import_broken_opencode_reports_bounded_unavailable(monkeypatch):
+    import traceback
+    import ciao.tool_path as tool_path
+    import ciao.providers.opencode as provider
+
+    shared_lookups = []
+    def resolve_shared(cmd):
+        shared_lookups.append(cmd)
+        return "/fake/shared-opencode"
+
+    monkeypatch.setattr(tool_path, "resolve_tool", resolve_shared)
+    monkeypatch.setattr(provider, "resolve_tool", resolve_shared)
+    def broken():
+        raise OSError("private-sentinel")
+    monkeypatch.setattr("ciao.import_sources.opencode.resolve_opencode_binary", broken)
+    with pytest.raises(SourceError) as refused:
+        read_opencode_session("ses_synthetic00000000000000000000000")
+    assert refused.value.reason == REASON_UNAVAILABLE
+    assert str(refused.value) == "The OpenCode CLI is unavailable; check provider setup."
+    assert "private-sentinel" not in str(refused.value)
+    assert "private-sentinel" not in "".join(traceback.format_exception(refused.value))
+    assert "opencode" not in shared_lookups
 
 
 @pytest.mark.parametrize(

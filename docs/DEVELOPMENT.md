@@ -1512,6 +1512,61 @@ The completed-reply mention route (`/api/chats/{chat_id}/file-paths/resolve`, #2
 
 ## Quality gates
 
+Provider migration preflight uses the staged interpreter to check both the installed
+and target-recorded OpenCode versions. Capability markers and the actual operation
+fields must both be present before a managed migration can be offered; existing
+chats using a non-default provider can still need attention. The wheel signature
+does not authenticate npm artifacts or the separately resolved Claude SDK binary.
+Producer and validator both keep OpenCode major 3 or later manual-only, even if a
+future target accepts it. Ready installer claims must use a supported native
+package and the matching npm argv shape (POSIX npm or Windows node.exe plus
+npm-cli.js); this shape check is not executable or package authentication.
+Exercise the read-only preflight with `tests/test_provider_migration.py`; its
+fixtures isolate the stage, binaries and process boundary and perform no install,
+login or model call.
+On Windows, the probe starts a private isolated-Python bootstrap that waits for
+the parent to assign its Job Object before it can launch the requested command.
+The bootstrap ordering is exercised with owned test processes; native Windows
+process and Job behavior still requires the Windows-full CI gate.
+
+Candidate staging is an internal helper called with the update lock held, not an
+activation path. It rechecks the approved preflight, installs the selected exact
+native package with scripts disabled into `provider-candidate-work` under the
+staged engine, and publishes only `provider-candidate/opencode[.exe]` and
+`candidate.json`. POSIX directories and executable are 0700 and the descriptor
+is 0600; Windows uses owner-only ACLs. It uses a private cwd, cache and empty npm
+configuration. On Windows, this run's inherited owner-only output is validated
+as a whole before its entries receive protected DACLs; unsafe entries are not repaired.
+The separate activation helper is for a future approved, drained caller holding
+the same update lock. It verifies the candidate again, publishes an owner-private
+version without replacing an unknown directory, then replaces the active receipt
+last and verifies it on readback. Tests use explicit temporary state and fake
+external probes; native Windows protected-DACL and macOS acceptance still require
+isolated platform validation. Engine rollback does not roll back that receipt;
+an older engine without the resolver may continue using its shared CLI.
+It uses an allowlisted child environment, a 600 second deadline and a
+16 KiB combined output limit. The shared CLI and active provider remain unchanged.
+Normal completion removes only this invocation's work before returning success.
+Handled failures also clean its identity-checked work and temporary candidate
+when both trees pass validation, retaining the original failure for retry.
+The entire work tree is checked for allowed types, ownership and ACLs before
+candidate creation and before the first deletion; links, multiply linked files,
+special files, foreign entries and POSIX group/other-writable entries require recovery
+and remain untouched. Installed package directories are checked too.
+POSIX file traversal, exclusive creation, publication and cleanup use directory
+descriptors and refuse links; Windows uses private DACLs, reparse checks and
+no-replace rename. A replaced work root is never cleaned. Unsafe, interrupted or
+failed cleanup can leave work requiring inspection and manual recovery; retries refuse
+those remnants without invoking npm. An already published candidate can be
+reverified and reused after recovery. Never delete unrecognized files automatically.
+Owner-private directories and the caller's lock exclude other accounts and
+cooperating updates, not hostile same-account processes or compromised npm/Node.
+The external installer resolves ordinary absolute paths; descriptor-cwd startup
+is not a sandbox for npm or the downloaded executable. The npm trust boundary is registry TLS and
+integrity, not the signed engine wheel. Unit tests use fake installer/probes;
+real native package and Windows Job acceptance require separate disposable-device
+testing before shipping.
+
 For task progress/history changes, run `tests/test_task_updates.py`,
 `tests/test_task_log.py`, `tests/test_task_resolution.py`,
 `tests/test_task_markdown.py` and `tests/test_task_board_store.py`. Progress-note

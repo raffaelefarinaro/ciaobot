@@ -874,7 +874,10 @@ def _probe_opencode() -> ProviderProbe:
         from ciao.dependency_updates import get_latest_npm_version
         from ciao.providers.opencode import resolve_opencode_binary
 
-        binary = resolve_opencode_binary()
+        try:
+            binary = resolve_opencode_binary()
+        except OSError:
+            return ProviderProbe("opencode", None, None, None, "OpenCode is unavailable; check provider setup.")
         if binary is None:
             note = "opencode binary not found"
         else:

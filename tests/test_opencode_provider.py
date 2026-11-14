@@ -4978,8 +4978,8 @@ def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
 
     assert row["ok"] is False
     assert row["auth"] == "broken"
-    assert row["detail"].startswith("installed but broken: ")
-    assert "node_modules" in row["detail"]
+    assert row["detail"] == "OpenCode is unavailable; check provider setup."
+    assert "node_modules" not in row["detail"]
 
 
 async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
@@ -5888,3 +5888,83 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     )
 
     assert len(starts) == 1
+
+
+def test_managed_resolver_precedence(tmp_path, monkeypatch):
+    from ciao.providers import opencode as mod
+    from ciao import provider_migration
+    explicit = tmp_path / "explicit"
+    explicit.write_bytes(b"explicit")
+    monkeypatch.delenv("CIAO_OPENCODE_BIN", raising=False)
+    calls = []
+    monkeypatch.setattr(provider_migration, "managed_opencode_binary", lambda: calls.append("managed") or "/managed")
+    monkeypatch.setattr(mod, "resolve_tool", lambda _: calls.append("shared") or "/shared")
+    assert mod.resolve_opencode_binary({"CIAO_OPENCODE_BIN": str(explicit)}) == str(explicit.resolve())
+    assert mod.resolve_opencode_binary({"CIAO_OPENCODE_BIN": str(tmp_path / "missing")}) is None
+    assert calls == []
+    assert mod.resolve_opencode_binary() == "/managed"
+    assert calls == ["managed"]
+    monkeypatch.setattr(provider_migration, "managed_opencode_binary", lambda: None)
+    assert mod.resolve_opencode_binary() == "/shared"
+
+
+@pytest.mark.asyncio
+async def test_resolver_failure_chat_and_status_are_bounded(tmp_path, monkeypatch):
+    import traceback
+    from ciao.providers import opencode as mod
+    def broken(*args):
+        raise OSError("secret-sentinel")
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+    provider = _provider(tmp_path)
+    request = AgentRequest(prompt="p", model="m", mode="bypass", provider="opencode")
+    with pytest.raises(OSError) as error:
+        await provider._ensure_server(request)
+    assert str(error.value) == "OpenCode is unavailable; check provider setup."
+    assert "secret-sentinel" not in "".join(traceback.format_exception(error.value))
+    status = mod.opencode_login_status()
+    assert status["auth"] == "broken"
+    assert status["detail"] == "OpenCode is unavailable; check provider setup."
+
+
+def test_release_probe_handles_broken_resolver_without_fallback(monkeypatch):
+    from ciao import release, dependency_updates
+    from ciao.providers import opencode as mod
+    def broken(*args):
+        raise OSError("secret-sentinel")
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+    monkeypatch.setattr(dependency_updates, "get_latest_npm_version", lambda *args: pytest.fail("unexpected network probe"))
+    probe = release._probe_opencode()
+    assert probe.note == "OpenCode is unavailable; check provider setup."
+    assert "secret-sentinel" not in str(probe)
+
+
+def test_auth_print_only_missing_managed_binary_is_not_shared_fallback(tmp_path, monkeypatch, capsys):
+    import argparse
+    import hashlib
+    import json
+    import sys
+    from ciao import cli, engine_update
+    from ciao.os_support.private import make_private, make_private_dir
+    from ciao.providers import opencode as mod
+    monkeypatch.delenv("CIAO_OPENCODE_BIN", raising=False)
+    make_private_dir(tmp_path)
+    provider = tmp_path / "providers" / "opencode"
+    for directory in (provider.parent, provider):
+        directory.mkdir()
+        make_private_dir(directory)
+    operation = "20261112T101500Z-1.2.3"
+    name = "opencode.exe" if sys.platform == "win32" else "opencode"
+    versions = provider / "versions"
+    version_dir = versions / operation
+    for directory in (versions, version_dir):
+        directory.mkdir()
+        make_private_dir(directory)
+    receipt = provider / "active.json"
+    receipt.write_text(json.dumps({"schema": 1, "operation_id": operation, "version": "2.0.16", "relative_binary": f"versions/{operation}/{name}", "sha256": hashlib.sha256(b"missing").hexdigest()}))
+    make_private(receipt)
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: tmp_path / "updates")
+    monkeypatch.setattr(mod, "resolve_tool", lambda _: pytest.fail("shared lookup"))
+    assert cli._auth_command(argparse.Namespace(provider="opencode", print_only=True)) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.strip() == "Error: OpenCode is unavailable; check provider setup."

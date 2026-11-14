@@ -137,6 +137,27 @@ claude auth login
 **OpenCode.** Ciaobot needs OpenCode 2.0.16 or newer in the 2.x line. It installs
 with npm, so you need Node.js first:
 
+The internal migration staging helper does not use this global installation or
+activate a candidate. Its invocation uses `node.exe` and `npm-cli.js`, with
+no shell, a private working directory, cache and npm configuration, and scripts
+disabled. An isolated Python bootstrap waits for assignment to a Windows Job
+before starting npm; its process tree is bounded. Candidate files use owner-only
+ACLs. Normal completion cleans only the work created by this invocation after
+the entire inherited owner-only output is validated and secured with protected
+DACLs. Unsafe or unknown work is never repaired. Cleanup follows
+checking its identity and prevalidating every entry's type, ownership and ACLs;
+links, junctions, special files and foreign entries are refused before deletion.
+Multiply linked files are also refused before protecting installer output.
+Handled failures also clean validated, identity-checked work and temporary
+candidates, preserving the original failure. Both trees are validated before
+cleanup changes work DACLs or deletes either tree. Unsafe, interrupted or failed
+cleanup can retain work and require manual recovery;
+retries refuse those remnants until inspected. Private directories and the
+caller-held update lock do not sandbox hostile same-account processes,
+compromised npm/Node or malicious downloaded executable code.
+Native Windows Job
+and package behavior still need a disposable Windows acceptance test.
+
 ```powershell
 npm install -g @opencode/cli
 ciao auth opencode
