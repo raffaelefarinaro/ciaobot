@@ -46,6 +46,48 @@ function expectOnlyRecoveryWrites(writes: ReturnType<typeof observeApiWrites>, i
   ])
 }
 
+async function hideDesktopRail(page: Page, afterInitialCheck?: (visible: boolean) => Promise<void>) {
+  const rail = page.locator('.chat-rail')
+  const visible = await rail.isVisible()
+  await afterInitialCheck?.(visible)
+  if (!visible) await expect(rail).toBeVisible()
+  await page.getByRole('button', { name: 'Hide chat details' }).click()
+}
+
+test('desktop rail can mount after the composer is ready', async ({ page }) => {
+  await isolate(page, 'rail-observer-order')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => {
+    localStorage.removeItem('ciao:chat-details-closed')
+    const NativeObserver = window.ResizeObserver
+    const pending: Array<() => void> = []
+    let held = true
+    window.ResizeObserver = class extends NativeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        super((entries, observer) => {
+          if (held && entries.some(entry => entry.target.classList.contains('chat-panel'))) {
+            pending.push(() => callback(entries, observer))
+            Object.assign(window, { railObserverWidth: entries[0]?.contentRect.width })
+          } else {
+            callback(entries, observer)
+          }
+        })
+      }
+    }
+    Object.assign(window, { releaseRailObserver: () => { held = false; for (const deliver of pending) deliver() } })
+  })
+  await boot(page, '/chat/alpha-chat-1', 'textarea.chat-input')
+  const rail = page.locator('.chat-rail')
+  await expect.poll(() => page.evaluate(() => (window as unknown as { railObserverWidth?: number }).railObserverWidth)).toBeGreaterThan(940)
+  await expect(rail).toHaveCount(0)
+  await hideDesktopRail(page, async visible => {
+    expect(visible).toBe(false)
+    await page.evaluate(() => (window as unknown as { releaseRailObserver: () => void }).releaseRailObserver())
+    await expect(rail).toBeVisible()
+  })
+  await expect(rail).toHaveCount(0)
+})
+
 test('atomic attention cutover keeps MCP recovery in details without chat attention', async ({ page }) => {
   await isolate(page, 'mcp-atomic-cutover')
   await page.context().addCookies([{ name: 'e2e_session', value: 'mcp-atomic-cutover', domain: 'ciao.test', path: '/' }])
@@ -63,7 +105,7 @@ test('atomic attention cutover keeps MCP recovery in details without chat attent
   })
   await boot(page, `${origin}/chat/alpha-chat-1`, 'textarea.chat-input')
   const rail = page.locator('.chat-rail')
-  if (await rail.isVisible()) await page.getByRole('button', { name: 'Hide chat details' }).click()
+  await hideDesktopRail(page)
   await expect(rail).toHaveCount(0)
   const beforeCount = await bellCount(page)
   const dialog = await openInbox(page)
