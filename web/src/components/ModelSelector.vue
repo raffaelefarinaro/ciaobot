@@ -165,9 +165,16 @@ function onPopoverOpenChange(nextOpen: boolean): void {
 
 function close() {
   const returnFocus = !props.triggerless ? triggerRef.value : null
+  const active = document.activeElement
+  const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
   open.value = false
   query.value = ''
-  if (returnFocus) nextTick(() => returnFocus.focus())
+  if (returnFocus && shouldReturnFocus) nextTick(() => {
+    const current = document.activeElement
+    if (returnFocus.isConnected && (!current || current === document.body || rootRef.value?.contains(current))) {
+      returnFocus.focus()
+    }
+  })
   if (props.triggerless) emit('close')
 }
 
@@ -296,8 +303,11 @@ function onOpenAutoFocus(event: Event): void {
 }
 
 function onCloseAutoFocus(event: Event): void {
-  // A removed picker must not override focus chosen by its parent.
-  if (preserveFocusOnUnmount) event.preventDefault()
+  // Never override focus that has already moved outside the picker.
+  const active = document.activeElement
+  if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
+    event.preventDefault()
+  }
 }
 
 function onEscapeKeyDown(event: KeyboardEvent): void {
