@@ -918,6 +918,85 @@ def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:
 # ── Budget and cursor ─────────────────────────────────────────────────────
 
 
+def test_mixed_workload_planning_baseline(tmp_path: Path) -> None:
+    """A frozen mixed workload through the canonical worklist and budget split.
+
+    The reproducible reference for planning a night's care: one synthetic vault,
+    one frozen date, the whole plan. It is a deterministic baseline, not a
+    measurement of token use or semantic coverage — three queued proposals at a
+    two-item budget boundary, with the weekly checks deferred behind them.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "- [people Ada] Ships on Fridays.\n"
+        "- [project docs/Release.md] Ships on Fridays.\n"
+        "- [project docs/Release.md] Ships on Fridays.\n",
+        encoding="utf-8", newline=""
+    )
+
+    def build() -> cr.Worklist:
+        return cr.build_worklist(
+            vault_root=vault,
+            workspace=vault.name,
+            guide_path=guide,
+            category_registry=_categories(vault),
+            workspace_dir=tmp_path,
+            today=date(2026, 9, 19),
+        )
+
+    # Literal identities, not the plan's own output read back as an expectation:
+    # a `proposals:` key hashes the kind, the destination, the source and the
+    # duplicate ordinal along with the text, so the two byte-identical rows
+    # differ only in that ordinal. A change to any of them is a deliberate
+    # re-baseline, not a test that agrees with whatever the planner now does.
+    ada = "proposals:2618165c48d8"
+    release = "proposals:af3d962c93b1"
+    release_duplicate = "proposals:5e7e5eccfcd7"
+    guide_review = "guide:a22c020177e7"
+    expected_items = [
+        (cr.PASS_PROPOSALS, (ada, release, release_duplicate)),
+        (cr.PASS_HYGIENE, (cr.HYGIENE_INDEX_KEY, cr.HYGIENE_AUDIT_KEY)),
+        (cr.PASS_GUIDE, (guide_review,)),
+    ]
+    expected_planned = [(cr.PASS_PROPOSALS, (ada, release))]
+    expected_deferred = [
+        (cr.PASS_PROPOSALS, (release_duplicate,)),
+        (cr.PASS_HYGIENE, (cr.HYGIENE_INDEX_KEY, cr.HYGIENE_AUDIT_KEY)),
+        (cr.PASS_GUIDE, (guide_review,)),
+    ]
+
+    def planned_and_deferred(
+        worklist: cr.Worklist,
+    ) -> tuple[list[tuple[str, tuple[str, ...]]], list[tuple[str, tuple[str, ...]]]]:
+        plan = cr.plan_run(worklist, cr.RunBudget(max_items=2))
+        return (
+            [(item.pass_id, item.keys) for item in plan.planned],
+            [(item.pass_id, item.keys) for item in plan.deferred],
+        )
+
+    worklist = build()
+
+    assert worklist.weekly_due is True
+    # The whole pass sequence, in `PASS_ORDER`, with every key: three proposals
+    # first, then both weekly checks, then the weekly guide review.
+    assert [(item.pass_id, item.keys) for item in worklist.items] == expected_items
+
+    planned, deferred = planned_and_deferred(worklist)
+    assert planned == expected_planned
+    # The third proposal waits whole, then both required checks, then the guide:
+    # the budget boundary never reorders the tail behind it.
+    assert deferred == expected_deferred
+
+    # An unmodified rebuild plans the same night: same passes, same keys, same
+    # partition. `generated_at` is deliberately not compared — it is a clock.
+    again = build()
+    assert again.weekly_due is True
+    assert [(item.pass_id, item.keys) for item in again.items] == expected_items
+    assert planned_and_deferred(again) == (expected_planned, expected_deferred)
+
+
 def _worklist_of(*counts: int) -> cr.Worklist:
     items = tuple(
         cr.WorklistItem(
