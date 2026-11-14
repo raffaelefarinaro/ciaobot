@@ -6358,6 +6358,9 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         for note in payload.get("coverage_notes", []):
             print(f"Coverage note: {note}")
         return
+    lease = payload.get("lease")
+    if lease and lease.get("holder"):
+        print(f"Lease holder (use exactly for follow-ups): {lease['holder']}")
     print("Coverage is incomplete; counts are observed, not exhaustive.")
     print(f"Observed work items: {payload.get('remaining_observed_count', 0)}")
     for note in payload.get("coverage_notes", []):
@@ -6425,12 +6428,13 @@ def _curation_holder(args: argparse.Namespace) -> str:
     than defaulted, because only `curation-begin` knows the value — guessing
     `host:pid` here would match nothing and reject every honest run.
     """
-    holder = (getattr(args, "holder", "") or "").strip()
-    if not holder:
+    holder = getattr(args, "holder", "") or ""
+    if not holder.strip():
         print(
             "pass --holder with the value `curation-begin` reported as lease.holder",
             file=sys.stderr,
         )
+        return ""
     return holder
 
 
@@ -9588,7 +9592,7 @@ def build_parser() -> argparse.ArgumentParser:
     curation_begin_parser.add_argument(
         "--holder",
         default="",
-        help="Label recorded as the lease owner. Defaults to host:pid.",
+        help="Descriptive label; follow-ups must use the exact lease.holder returned. Defaults to host:pid.",
     )
     curation_begin_parser.set_defaults(func=_curation_begin_command)
 
