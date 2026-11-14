@@ -53,6 +53,16 @@ function assertSourcePath(base: string, path: string, ops: PathOps = fsOps) {
 }
 
 const covered: Record<string, string> = { default: 'foundation-tab-bar--default', counts: 'foundation-tab-bar--counts', 'long-content': 'foundation-tab-bar--long-labels', narrow: 'foundation-tab-bar--narrow-pane' }
+const switchCovered: Record<string, string[]> = {
+  default: ['settings-switch--on', 'settings-switch--off'],
+  disabled: ['settings-switch--disabled-on', 'settings-switch--disabled-off'],
+  busy: ['settings-switch--busy'],
+  narrow: ['settings-switch--narrow'],
+}
+const coverageOwners = [
+  { id: 'components-tab-bar', path: 'web/src/components/TabBar.vue', states: Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])) },
+  { id: 'components-settings-settings-switch', path: 'web/src/components/settings/SettingsSwitch.vue', states: switchCovered },
+]
 function assertCoverage(entries: InventoryEntry[]) {
   const ids = new Set<string>()
   for (const entry of entries) {
@@ -70,7 +80,8 @@ function assertCoverage(entries: InventoryEntry[]) {
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage === 'covered') {
-        if (entry.id !== 'components-tab-bar' || entry.kind !== 'component' || entry.owner.path !== 'web/src/components/TabBar.vue' || !covered[state.name] || JSON.stringify(state.storyIds) !== JSON.stringify([covered[state.name]])) throw new Error(`Invalid covered state: ${entry.id}/${state.name}`)
+        const owner = coverageOwners.find((owner) => owner.id === entry.id && owner.path === entry.owner.path)
+        if (entry.kind !== 'component' || !owner?.states[state.name] || JSON.stringify(state.storyIds) !== JSON.stringify(owner.states[state.name])) throw new Error(`Invalid covered state: ${entry.id}/${state.name}`)
       } else if (state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
     }
   }
@@ -156,7 +167,7 @@ describe('production ownership', () => {
     expect(() => assertSourcePath(source, 'web/src/deleted.vue')).toThrow('deleted.vue')
   }))
 
-  it('allows only the four exact TabBar story states', () => {
+  it('preserves TabBar coverage while admitting only the exact switch owner/state IDs', () => {
     assertCoverage(inventory)
     const tab = inventory.find((entry) => entry.id === 'components-tab-bar')!
     expect(Object.fromEntries(tab.states.filter((state) => state.coverage === 'covered').map((state) => [state.name, state.storyIds[0]]))).toEqual(covered)
@@ -167,6 +178,18 @@ describe('production ownership', () => {
     }
     expect(() => assertCoverage([tab, tab])).toThrow(`Duplicate ID: ${tab.id}`)
     expect(() => assertCoverage([{ ...tab, states: [{ ...tab.states[0], coverage: 'uncovered' }] }])).toThrow('Noncovered state')
+    const entry = inventory.find((row) => row.id === 'components-settings-settings-switch')!
+    expect(Object.fromEntries(entry.states.filter((state) => state.coverage === 'covered').map((state) => [state.name, state.storyIds]))).toEqual(switchCovered)
+    expect(entry.consumers).toEqual(['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'])
+    assertCoverage([tab, entry])
+    for (const candidate of [tab, entry]) {
+      const state = candidate.states.find((state) => state.coverage === 'covered')!
+      for (const storyIds of [[...state.storyIds, 'settings-switch--busy'], ['settings-switch--docs'], ['settings-switch--nonexistent'], ['foundation-tab-bar--counts']]) {
+        expect(() => assertCoverage([{ ...candidate, states: [{ ...state, storyIds }] }])).toThrow('Invalid covered state')
+      }
+      expect(() => assertCoverage([{ ...candidate, owner: { ...candidate.owner, path: 'web/src/components/Other.vue' } }])).toThrow('Invalid covered state')
+      expect(() => assertCoverage([{ ...candidate, id: 'unrelated-owner' }])).toThrow('Invalid covered state')
+    }
   })
 
   it('documents the completion sheet rather than completion history', () => {
