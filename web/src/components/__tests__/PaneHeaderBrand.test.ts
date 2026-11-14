@@ -1,14 +1,5 @@
 // @vitest-environment jsdom
 
-/**
- * The pane header carries the brand mark and the page tag.
- *
- * The brand was moved out of the sidebar into the middle of this header, so what
- * these tests protect is (a) the reload behaviour survived the move intact, and
- * (b) the structure that makes the mark genuinely centred: the mark lives in its
- * own grid column, a sibling of the title, so no title length can move it.
- */
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -23,6 +14,7 @@ const LONG_TITLE = 'A chat title long enough to need every pixel of the header a
 
 describe('BrandMark', () => {
   const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')
+  const originalServiceWorker = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')
   let replace: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
@@ -35,43 +27,48 @@ describe('BrandMark', () => {
 
   afterEach(() => {
     if (originalLocation) Object.defineProperty(window, 'location', originalLocation)
+    if (originalServiceWorker) Object.defineProperty(navigator, 'serviceWorker', originalServiceWorker)
+    else Reflect.deleteProperty(navigator, 'serviceWorker')
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
-  it('renders the wordmark', () => {
+  it('renders the supplied static icon', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.attributes('aria-label')).toBe('Reload Ciaobot')
-    expect(wrapper.get('.brand-logo--dark').attributes('src')).toBe('/brand/ciaobot-wordmark-light.png')
-    expect(wrapper.get('.brand-logo--light').attributes('src')).toBe('/brand/ciaobot-wordmark.png')
-    expect(wrapper.attributes('title')).toBe('Click to reload the latest app build')
-    expect(wrapper.attributes('aria-busy')).toBe('false')
+    expect(wrapper.element.tagName).toBe('IMG')
+    expect(wrapper.attributes('src')).toBe('/icons/icon-32.png')
+    expect(wrapper.attributes('alt')).toBe('Ciaobot')
     wrapper.unmount()
   })
 
-  it('reloads the latest build with a cache-busting query when clicked', async () => {
+  it('is not a focusable reload control', () => {
     const wrapper = mount(BrandMark)
-    await wrapper.trigger('click')
-    await flushPromises()
-
-    expect(replace).toHaveBeenCalledTimes(1)
-    const target = new URL(replace.mock.calls[0][0] as string)
-    expect(target.pathname).toBe('/chat/abc')
-    expect(target.searchParams.get('_r')).toMatch(/^\d+$/)
+    expect(wrapper.element.tagName).toBe('IMG')
+    expect(wrapper.attributes('tabindex')).toBeUndefined()
+    expect(wrapper.attributes('role')).toBeUndefined()
+    expect(wrapper.attributes('aria-label')).toBeUndefined()
+    expect(wrapper.attributes('aria-busy')).toBeUndefined()
+    expect(wrapper.attributes('title')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it('reports the reload as busy and refuses a second click', async () => {
+  it('does not navigate, clear caches or update service workers when clicked', async () => {
+    const update = vi.fn()
+    const deleteCache = vi.fn()
+    const keys = vi.fn().mockResolvedValue(['app'])
+    const getRegistrations = vi.fn().mockResolvedValue([{ update }])
+    vi.stubGlobal('caches', { keys, delete: deleteCache })
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true, value: Object.assign(new EventTarget(), { getRegistrations }),
+    })
     const wrapper = mount(BrandMark)
     await wrapper.trigger('click')
     await flushPromises()
-
-    expect(wrapper.attributes('aria-busy')).toBe('true')
-    expect(wrapper.classes()).toContain('brand--refreshing')
-    expect(wrapper.attributes('title')).toBe('Reloading...')
-
-    await wrapper.trigger('click')
-    await flushPromises()
-    expect(replace).toHaveBeenCalledTimes(1)
+    expect(replace).not.toHaveBeenCalled()
+    expect(keys).not.toHaveBeenCalled()
+    expect(deleteCache).not.toHaveBeenCalled()
+    expect(getRegistrations).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })
