@@ -947,8 +947,6 @@ async def test_real_route_running_pass_stop_timeout_and_followup(
     provider_turns = 0
     helper_calls = 0
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
-    if ending == "timeout":
-        monkeypatch.setattr(control_plane, "MANAGED_RECALL_OPERATION_TIMEOUT_S", 0.03)
     if ending == "stop":
         monkeypatch.setattr(ProjectChatManager, "_STOP_GRACE_S", 0.02)
     monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_kw: "haiku")
@@ -968,6 +966,43 @@ async def test_real_route_running_pass_stop_timeout_and_followup(
         }]})
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", run_oneshot)
+
+    if ending == "timeout":
+        real_timeout = asyncio.timeout
+        injected = False
+
+        class TimeoutWhenHelperPauses:
+            def __init__(self):
+                self.manager = real_timeout(None)
+                self.trigger: asyncio.Task | None = None
+
+            async def __aenter__(self):
+                result = await self.manager.__aenter__()
+
+                async def expire_at_helper_pause():
+                    await entered.wait()
+                    self.manager.reschedule(asyncio.get_running_loop().time())
+
+                self.trigger = asyncio.create_task(expire_at_helper_pause())
+                return result
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                if self.trigger is not None:
+                    self.trigger.cancel()
+                    try:
+                        await self.trigger
+                    except asyncio.CancelledError:
+                        pass
+                return await self.manager.__aexit__(exc_type, exc, traceback)
+
+        def timeout_after_first_helper_pause(seconds):
+            nonlocal injected
+            if seconds == control_plane.MANAGED_RECALL_OPERATION_TIMEOUT_S and not injected:
+                injected = True
+                return TimeoutWhenHelperPauses()
+            return real_timeout(seconds)
+
+        monkeypatch.setattr(control_plane.asyncio, "timeout", timeout_after_first_helper_pause)
 
     async def request_recall_check() -> httpx.Response:
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50001))
