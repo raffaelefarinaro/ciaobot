@@ -1878,7 +1878,7 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
 const needsYouActions = computed(() => {
   const current = chat.value
   if (!current || current.archived) return []
-  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
+  return (store.chatActions[current.chat_id] ?? []).filter(a => a.kind !== 'mcp_auth' && actionCopy(a) !== null)
 })
 
 // A needs-you card that holds the focus and goes away hands it to the

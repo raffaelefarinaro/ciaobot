@@ -768,12 +768,12 @@ def test_develop_web_prs_run_linux_e2e() -> None:
     assert "github.event_name == 'pull_request' && github.base_ref == 'develop'" in workflow
     jobs = re.split(r"(?m)^  (?=[a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
     by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
-    web = by_name["linux-web"]
-    assert "fetch-depth: 0" in web
-    assert "outputs:\n      web_changed: ${{ steps.web-changes.outputs.web_changed }}" in web
+    scope = by_name["web-scope"]
+    assert "fetch-depth: 0" in scope
+    assert "outputs:\n      web_changed: ${{ steps.web-changes.outputs.web_changed }}" in scope
     e2e = by_name["linux-e2e"]
-    assert "needs: linux-web" in e2e
-    assert "needs.linux-web.outputs.web_changed == 'true'" in e2e
+    assert "needs: web-scope" in e2e
+    assert "needs.web-scope.outputs.web_changed == 'true'" in e2e
     assert "runs-on: ubuntu-24.04" in e2e
     commands = ["npm ci", "npx playwright install --with-deps chromium", "npm run test:e2e"]
     assert [e2e.index(command) for command in commands] == sorted(e2e.index(command) for command in commands)
@@ -824,7 +824,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     web = by_name["linux-web"]
     assert web.index("npm run build") < web.index("ciao package-smoke --skip-frontend")
 
-    windows = by_name["windows"]
+    windows = by_name["windows-backend"]
     assert (
         "WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}"
         in windows
@@ -835,13 +835,14 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
         assert "WINDOWS_FULL" not in steps[name], f"{name!r} must run on every PR"
     for name in (
         "Windows backend tests",
-        "Windows frontend tests",
         "Build install.ps1 offline fixture",
         "Build install.ps1 end-to-end fixture",
         "install.ps1 offline verification and analyzer (advisory)",
         "install.ps1 end-to-end install and uninstall (advisory)",
     ):
         assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"
+    assert "Windows frontend tests" in by_name["windows-web"]
+    assert "windows-full" in by_name["windows-web"]
 
 
 def test_windows_full_label_opts_a_develop_pr_in() -> None:
@@ -860,7 +861,7 @@ def test_windows_full_label_opts_a_develop_pr_in() -> None:
     by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
     windows_full = [
         line
-        for line in by_name["windows"].splitlines()
+        for line in by_name["windows-backend"].splitlines()
         if line.strip().startswith("WINDOWS_FULL:")
     ]
     assert len(windows_full) == 1
