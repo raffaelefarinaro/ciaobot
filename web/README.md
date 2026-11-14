@@ -95,9 +95,9 @@ state or loading fidelity has not been audited; **not applicable** means it is
 known not to apply. Summary categories overlap. Loading notes distinguish the
 actual owner and initial load from failure or stale refresh where known.
 Migration starts unassessed unless an actual decision supports another status.
-The four TabBar states, six plain SidebarRow states and two SidebarListSkeleton
-states have rendered stories; other states and owners remain unassessed or
-uncovered. Adding an SFC requires a separate
+The four TabBar states, six plain SidebarRow states, two SidebarListSkeleton
+states and four SettingsSwitch states (six stories) have rendered stories;
+other states and owners remain unassessed or uncovered. Adding an SFC requires a separate
 inventory row (and a rationale for a composition), not a complete story suite.
 
 `npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
@@ -112,6 +112,13 @@ these use its plain-div branch, not links, host controls or keyboard interaction
 SidebarListSkeleton covers loading (one group, three rows) and nested (two
 groups, two rows), each with one loading announcement. This does not separately
 cover SidebarRow's placeholder state or other owners' loading fidelity.
+
+SettingsSwitch covers default (On and Off), disabled (On and Off), busy and
+narrow (a maximum 390px container). Busy renders an ellipsis and `aria-busy`
+without disabling the native button. Its controlled interactive stories import
+the production component; parents still own persistence. Only Check vault
+answers and Resume after restart have migrated to it. Their connected screens,
+keyboard-focus and reduced-motion states do not gain story coverage.
 
 The Node tests check data and filters, not Vue interactions or manager links.
 Check filtering, keyboard access, narrow/zoom layouts and story links in both

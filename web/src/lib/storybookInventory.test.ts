@@ -54,7 +54,14 @@ function assertSourcePath(base: string, path: string, ops: PathOps = fsOps) {
 }
 
 const covered: Record<string, string> = { default: 'foundation-tab-bar--default', counts: 'foundation-tab-bar--counts', 'long-content': 'foundation-tab-bar--long-labels', narrow: 'foundation-tab-bar--narrow-pane' }
+const switchCovered: Record<string, string[]> = {
+  default: ['settings-switch--on', 'settings-switch--off'],
+  disabled: ['settings-switch--disabled-on', 'settings-switch--disabled-off'],
+  busy: ['settings-switch--busy'],
+  narrow: ['settings-switch--narrow'],
+}
 const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
+  'web/src/components/settings/SettingsSwitch.vue': switchCovered,
   'web/src/components/TabBar.vue': Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])),
   'web/src/components/SidebarRow.vue': {
     default: ['foundation-sidebar-row--default'],
@@ -70,6 +77,7 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
   },
 }
 const coveredOwners: Record<string, string> = {
+  'web/src/components/settings/SettingsSwitch.vue': 'components-settings-settings-switch',
   'web/src/components/TabBar.vue': 'components-tab-bar',
   'web/src/components/SidebarRow.vue': 'components-sidebar-row',
   'web/src/components/SidebarListSkeleton.vue': 'components-sidebar-list-skeleton',
@@ -208,6 +216,18 @@ describe('production ownership', () => {
     }
     expect(() => assertCoverage([tab, tab])).toThrow(`Duplicate ID: ${tab.id}`)
     expect(() => assertCoverage([{ ...tab, states: [{ ...tab.states[0], coverage: 'uncovered' }] }])).toThrow('Noncovered state')
+    const entry = inventory.find((row) => row.id === 'components-settings-settings-switch')!
+    expect(Object.fromEntries(entry.states.filter((state) => state.coverage === 'covered').map((state) => [state.name, state.storyIds]))).toEqual(switchCovered)
+    expect(entry.consumers).toEqual(['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'])
+    assertCoverage(inventory.filter((row) => row.owner.path in expectedCoverage))
+    for (const candidate of [tab, entry]) {
+      const state = candidate.states.find((state) => state.coverage === 'covered')!
+      for (const storyIds of [[...state.storyIds, 'settings-switch--busy'], ['settings-switch--docs'], ['settings-switch--nonexistent'], ['foundation-tab-bar--counts']]) {
+        expect(() => assertCoverage([{ ...candidate, states: [{ ...state, storyIds }] }])).toThrow('Invalid covered state')
+      }
+      expect(() => assertCoverage([{ ...candidate, owner: { ...candidate.owner, path: 'web/src/components/Other.vue' } }])).toThrow('Invalid covered state')
+      expect(() => assertCoverage([{ ...candidate, id: 'unrelated-owner' }])).toThrow('Invalid covered state')
+    }
   })
 
   it('rejects valid but unrelated IDs, wrong owners, duplicate and omitted states', () => {
@@ -231,6 +251,24 @@ describe('production ownership', () => {
     corrupt((entries) => { entries.splice(entries.indexOf(row(entries)), 1) }, 'Missing or duplicate covered owner')
     for (const kind of ['css', 'inline', 'composition'] as const) {
       corrupt((entries) => { row(entries).kind = kind; row(entries).rationale = 'Not a component owner' }, 'Invalid covered state')
+    }
+  })
+
+  it('keeps switch admission complete without dropping existing row and skeleton coverage', () => {
+    const admitted = inventory.filter((entry) => entry.owner.path in expectedCoverage)
+    expect(admitted).toHaveLength(4)
+    assertCoverage(admitted)
+    const mutateSwitch = (change: (entry: InventoryEntry) => void, error: string) => {
+      const entries = structuredClone(admitted)
+      change(entries.find((entry) => entry.id === 'components-settings-settings-switch')!)
+      expect(() => assertCoverage(entries)).toThrow(error)
+    }
+    mutateSwitch((entry) => { entry.states = entry.states.filter((state) => state.name !== 'busy') }, 'Missing covered state')
+    mutateSwitch((entry) => { entry.states[0].storyIds.pop() }, 'Invalid covered state')
+    mutateSwitch((entry) => { entry.states[0].storyIds.push(entry.states[0].storyIds[0]) }, 'Invalid covered state')
+    mutateSwitch((entry) => { entry.states.push(entry.states[0]) }, 'Duplicate state')
+    for (const path of Object.keys(expectedCoverage)) {
+      expect(() => assertCoverage(admitted.filter((entry) => entry.owner.path !== path))).toThrow('Missing or duplicate covered owner')
     }
   })
 
