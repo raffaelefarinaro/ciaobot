@@ -1410,6 +1410,7 @@ def build_worklist(
     path_prefix: Path | None = None,
     today: date | None = None,
     done_keys: frozenset[str] | set[str] | None = None,
+    category_items: tuple[WorklistItem, ...] = (),
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
@@ -1480,11 +1481,7 @@ def build_worklist(
         notes.append("no usable last_full_pass marker; the weekly pass counts as due")
 
     collected: list[WorklistItem] = []
-    # Collected FIRST because it is the one pass that writes: the bullets it
-    # files have to be on disk before `_proposal_items` reads the queue, or the
-    # run that proposes a category would not count the row it just proposed. The
-    # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
-    collected.extend(_category_cluster_items(vault_root, registry=category_registry))
+    collected.extend(category_items)
     collected.extend(_proposal_items(vault_root, handover))
     collected.extend(
         _region_items(
