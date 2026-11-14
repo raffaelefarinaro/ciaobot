@@ -81,8 +81,35 @@ The component workshop runs without an engine: `npm run storybook` serves it at
 `http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
 `web/dist/storybook` output. It imports production components and CSS directly,
 starting with TabBar; it does not load the app bootstrap or public assets.
-`npm test` remains the separate application suite. Broader component inventory
-and automated Storybook browser interactions are follow-up work.
+`npm test` remains the separate application suite. Open **Inventory / UI
+inventory** (`inventory--all`) to search the production owner catalogue. Each
+SFC has its own row, including connected compositions, alongside inline and
+shared CSS families. Search intersects with family, coverage and migration
+filters. Direct consumers are production import/include sites; support sources
+may use classes or host a composition without directly importing the owner.
+
+An inventory row is not a story or a migration approval. **Covered** means a
+rendered-state story exists, not that interaction is automatically verified;
+**uncovered** means an implemented state has no story; **unknown** means the
+state or loading fidelity has not been audited; **not applicable** means it is
+known not to apply. Summary categories overlap. Loading notes distinguish the
+actual owner and initial load from failure or stale refresh where known.
+Migration starts unassessed unless an actual decision supports another status.
+Today only the four TabBar states have rendered stories; chat, task and other
+owners remain unassessed or uncovered. Adding an SFC requires a separate
+inventory row (and a rationale for a composition), not a complete story suite.
+
+After `npm run build-storybook`, run this from the repository root to check
+the built index, including the type of each linked story:
+
+```bash
+node --experimental-strip-types --input-type=module -e 'import {readFileSync} from "node:fs"; import assert from "node:assert/strict"; import {inventory} from "./web/src/stories/inventory.ts"; const {entries}=JSON.parse(readFileSync("web/dist/storybook/index.json","utf8")); assert.equal(entries["inventory--all"]?.type,"story"); assert.equal(entries["inventory--all"]?.title,"Inventory/UI inventory"); for(const row of inventory) for(const state of row.states) for(const id of state.storyIds) { assert.equal(entries[id]?.type,"story",`${row.id}/${state.name}: ${id}`); assert.notEqual(id,"inventory--all"); } for(const suffix of ["default","counts","long-labels","narrow-pane"]) assert.equal(entries[`foundation-tab-bar--${suffix}`]?.type,"story");'
+```
+
+The Node tests check data and filters, not Vue interactions or manager links.
+Check filtering, keyboard access, narrow/zoom layouts and story links in both
+the development and built workshop in a browser; record screenshots and network
+evidence with the change. Automated Storybook browser interactions are future work.
 
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 
