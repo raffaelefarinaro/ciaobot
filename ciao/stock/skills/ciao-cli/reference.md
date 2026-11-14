@@ -1,6 +1,6 @@
 # ciao CLI reference
 
-Worked examples and the error catalogue for the `ciao-cli` skill. `SKILL.md` has the command syntax; `ciao help` prints both.
+Worked examples and the error catalogue for the `ciao-cli` skill. `SKILL.md` is the shared entry and topic index; command syntax and guards live in its linked references. `ciao help <topic>` prints the shared entry plus one bounded topic reference, `ciao help examples` prints this file's worked examples, errors and background commands, and bare `ciao help` assembles the entire reference.
 
 ## Worked examples
 
@@ -89,3 +89,9 @@ ciao context get
 - **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not look for it in another workspace; report the id back and let the operator reconcile it.
 - **`webhook_invalid`** — the store refused one field: a blank name or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
 - **`unauthorized` on the sender's POST** — the trigger's secret does not authorize right now. Missing, disabled, revoked and wrong are one answer; if the secret was rotated, the old one is dead by design and the sender needs the new one, which `webhook create`/`webhook rotate` showed once.
+
+## Long-running commands
+
+For a long command use the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours.
+
+A dev or preview server is one background run for the whole session. Start it with the framework's auto-reload (`uvicorn --reload`, `vite`, `next dev`, `flask run --debug`) so code changes need no restart, and give it a `timeout` that covers the session. Restart it only when the server itself has to change (port, environment, dependencies). Stopping a background run wakes the chat with a cancelled notice, so stopping and restarting after every edit floods the chat with notices that carry no information.

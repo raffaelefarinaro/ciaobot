@@ -53,16 +53,41 @@ _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
 
 _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" / "SKILL.md"
 
+#: Topic aliases `ciao help <topic>` accepts, each mapped to the relative
+#: reference it prints. Explicit on purpose: help never takes a path.
+_HELP_TOPICS: dict[str, str] = {
+    "memory": "references/memory-and-review.md",
+    "vault": "references/memory-and-review.md",
+    "queues": "references/memory-and-review.md",
+    "note": "references/workspace-operations.md",
+    "file": "references/workspace-operations.md",
+    "chat": "references/workspace-operations.md",
+    "project": "references/workspace-operations.md",
+    "task": "references/tasks.md",
+    "schedule": "references/automation-and-status.md",
+    "webhook": "references/automation-and-status.md",
+    "context": "references/automation-and-status.md",
+    "stats": "references/automation-and-status.md",
+    "gws": "references/automation-and-status.md",
+    "workspace": "references/automation-and-status.md",
+    "repo": "references/automation-and-status.md",
+    "examples": "reference.md",
+}
+#: Every unique reference once, in mapping order, for bare help.
+_HELP_REFERENCES: tuple[str, ...] = tuple(dict.fromkeys(_HELP_TOPICS.values()))
 
-def _help_parts() -> Iterator[str]:
-    """Read and yield each help resource lazily in output order."""
+
+def _help_parts(topic: str | None = None) -> Iterator[str]:
+    """Lazily yield the shared entry and the selected reference chunks."""
     yield _SKILL_PATH.read_text(encoding="utf-8")
-    yield "\n" + _SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8")
+    references = (_HELP_TOPICS[topic],) if topic else _HELP_REFERENCES
+    for relative in references:
+        yield "\n" + (_SKILL_PATH.parent / relative).read_text(encoding="utf-8")
 
 
-def _help_text() -> str:
-    """Return the complete packaged CLI reference."""
-    return "".join(_help_parts())
+def _help_text(topic: str | None = None) -> str:
+    """Return complete help, or the shared entry plus one topic reference."""
+    return "".join(_help_parts(topic))
 
 
 _SCHEDULE_FLAG_HELP: dict[str, str] = {
@@ -216,7 +241,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Accepted for compatibility; output is always JSON.")
     nouns = parser.add_subparsers(dest="noun", metavar="<noun>")
 
-    nouns.add_parser("help", help="Print the ciao-cli command reference.")
+    help_parser = nouns.add_parser("help", help="Print the ciao-cli command reference.")
+    help_parser.add_argument(
+        "topic", nargs="?", choices=tuple(_HELP_TOPICS),
+        help="Print the shared entry plus one topic reference (default: the whole reference).",
+    )
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
@@ -1004,7 +1033,7 @@ def main(argv: list[str]) -> int:
         return 2
     if args.noun == "help":
         try:
-            for part in _help_parts():
+            for part in _help_parts(args.topic):
                 sys.stdout.write(part)
         except OSError:
             parser.print_help()
