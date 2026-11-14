@@ -271,7 +271,7 @@ def _isolate_install_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.fixture(autouse=True)
-def _isolate_update_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_update_state(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test touch the machine's real update staging area.
 
     ``engine_update`` stages whole environments (a ``uv venv`` plus a full
@@ -279,8 +279,11 @@ def _isolate_update_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     un-isolated test would download and install a release into the developer's
     own machine. Autouse and unconditional for the same reason as its siblings.
     """
+    from ciao.os_support.private import make_private_dir
+    base = tmp_path_factory.mktemp("provider-state")
+    make_private_dir(base)
     monkeypatch.setattr(
-        "ciao.engine_update.default_state_dir", lambda: tmp_path / "update-state"
+        "ciao.engine_update.default_state_dir", lambda: base / "update-state"
     )
 
 

@@ -1397,6 +1397,7 @@ def test_windows_stage_checks_installed_file_dacl(stage_installer, monkeypatch, 
 
 def test_windows_stage_secures_inherited_output_and_cleans_work(stage_installer, monkeypatch):
     from types import SimpleNamespace
+    from ciao import update_host
     from ciao.os_support import private
     op, _, migration, setup, stage = stage_installer
     protected = set()
@@ -1419,6 +1420,10 @@ def test_windows_stage_secures_inherited_output_and_cleans_work(stage_installer,
         if binary.exists():
             binary.rename(binary.with_name("opencode.exe"))
         monkeypatch.setattr(migration, "sys", SimpleNamespace(platform="win32"))
+        monkeypatch.setattr(update_host, "sys", SimpleNamespace(platform="linux"))
+        def staged_python(tool):
+            return tool / "ciaobot" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        monkeypatch.setattr(update_host, "current_update_host", lambda: SimpleNamespace(find_staged_python=staged_python))
     setup["after_install"] = after_install
     result = stage()
     work = migration.Path(op.stage_dir) / "provider-candidate-work"
@@ -2539,6 +2544,13 @@ def activation_candidate(published_candidate, tmp_path, monkeypatch):
     op.wheel = str(stage / Path(op.wheel).relative_to(old_stage))
     op.stage_dir = str(stage)
     binary = stage / "provider-candidate" / old_binary.name
+    from ciao.os_support.private import is_private_strict, make_private
+    if sys.platform == "win32":
+        make_private(stage / "provider-candidate" / "candidate.json")
+        make_private(binary)
+    assert is_private_strict(stage / "provider-candidate" / "candidate.json")
+    if sys.platform == "win32":
+        assert is_private_strict(binary)
     runner = migration._run_bounded
     def run(argv, *args, **kwargs):
         argv = list(argv)
@@ -2744,7 +2756,7 @@ def test_activation_syncs_each_new_parent_before_next_publication(activation_can
     monkeypatch.setattr(migration, "_candidate_directory_fd", track_open)
     monkeypatch.setattr(os, "fsync", track_sync)
     monkeypatch.setattr(migration, "_publish_candidate", track_publish)
-    migration.activate_candidate(op, sha, state_dir=root)
+    result = migration.activate_candidate(op, sha, state_dir=root)
     if sys.platform != "win32":
         providers = root.parent / "providers"
         provider = providers / "opencode"
@@ -2752,6 +2764,12 @@ def test_activation_syncs_each_new_parent_before_next_publication(activation_can
         assert events.index(("create", providers)) < events.index(("sync", root.parent)) < events.index(("create", provider))
         assert events.index(("create", provider)) < events.index(("sync", providers)) < events.index(("create", versions))
         assert events.index(("create", versions)) < events.index(("sync", provider)) < events.index(("publish", versions / op.id))
+    else:
+        from ciao.os_support.private import is_private_strict
+        from pathlib import Path
+        assert is_private_strict(Path(result))
+        assert is_private_strict(root.parent / "providers" / "opencode" / "active.json")
+        assert migration.managed_opencode_binary(state_dir=root) == result
 
 
 @pytest.mark.parametrize("failure", ["raise", "mismatch"])
@@ -2851,7 +2869,13 @@ def test_activation_retry_syncs_existing_parent_before_receipt(activation_candid
 
     if sys.platform == "win32":
         # Windows does not expose this POSIX directory-fsync path.
-        assert migration.activate_candidate(op, sha, state_dir=root)
+        from ciao.os_support.private import is_private_strict
+        from pathlib import Path
+        result = migration.activate_candidate(op, sha, state_dir=root)
+        assert is_private_strict(Path(result))
+        assert is_private_strict(provider / "active.json")
+        assert migration.activate_candidate(op, sha, state_dir=root) == result
+        assert migration.managed_opencode_binary(state_dir=root) == result
         return
     monkeypatch.setattr(os, "fsync", sync)
     monkeypatch.setattr(os, "replace", replace)

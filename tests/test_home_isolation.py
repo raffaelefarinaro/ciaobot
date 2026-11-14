@@ -25,3 +25,14 @@ def test_the_installed_opencode_is_never_found(monkeypatch) -> None:
 
     monkeypatch.delenv("CIAO_OPENCODE_BIN", raising=False)
     assert resolve_opencode_binary() is None
+
+
+def test_managed_provider_state_is_a_separate_private_fixture(tmp_path: Path) -> None:
+    from ciao.engine_update import default_state_dir
+    from ciao.os_support.private import is_private_strict
+
+    base = default_state_dir().parent
+    assert base != tmp_path and not base.is_relative_to(tmp_path)
+    assert is_private_strict(base)
+    assert not (base / "providers").exists()
+    assert list(tmp_path.iterdir()) == []
