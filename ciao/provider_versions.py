@@ -311,6 +311,7 @@ def current_checks() -> dict[str, dict[str, str]]:
         opencode_binary = resolve_opencode_binary()
     except OSError:
         opencode_binary = None
+        checks["opencode"] = {"state": "unknown"}
     if opencode_binary:
         checks["opencode"] = release_check(
             "opencode", _probe_version(opencode_binary), binary=opencode_binary

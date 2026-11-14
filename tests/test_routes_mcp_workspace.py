@@ -13,12 +13,61 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import agent_paths
-from ciao.web.auth import AuthMiddleware
+from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_mcp import mcp_server_enabled_endpoint, mcp_status_endpoint
 
 _key = agent_paths.claude_config_project_key
 _ORIGIN = "https://ciao.example"
 _URL = "/api/mcp/servers/enabled"
+
+
+def test_mcp_corrupt_resolver_keeps_claude_inventory_and_no_500(native_home, monkeypatch):
+    import ciao.tool_path as tool_path
+    import ciao.providers.opencode as opencode
+    import ciao.web.routes_mcp as routes
+
+    home, root = native_home
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"example": {"command": "example"}}}))
+    seen = []
+    shared_lookups = []
+    def resolve_shared(cmd):
+        shared_lookups.append(cmd)
+        return "/fake/shared-opencode"
+
+    monkeypatch.setattr(tool_path, "resolve_tool", resolve_shared)
+    monkeypatch.setattr(opencode, "resolve_tool", resolve_shared)
+    inventory = routes.provider_inventory
+
+    async def spy(**kwargs):
+        seen.append(kwargs.copy())
+        return await inventory(**kwargs)
+
+    def broken():
+        raise OSError("private-sentinel")
+
+    monkeypatch.setattr(routes, "provider_inventory", spy)
+    monkeypatch.setattr(routes, "resolve_opencode_binary", broken)
+    monkeypatch.setattr(routes, "get_bundled_claude_path", lambda: "/claude")
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[Route("/api/mcp/status", mcp_status_endpoint)],
+                    middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(primary_workspace=lambda: "work", workspace=lambda name: object(),
+        agent_root=lambda name: root, disallowed_tools_for_workspace=lambda name: ["mcp__example"])
+    client = TestClient(app, base_url=_ORIGIN)
+    assert client.get("/api/mcp/status?workspace=work").status_code == 401
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+    response = client.get("/api/mcp/status?workspace=work")
+    assert response.status_code == 200
+    assert seen[0]["opencode_available"] is False
+    assert seen[0]["claude_available"] is True
+    assert seen[0]["workspace"] == "work"
+    assert seen[0]["explicitly_denied"] == {"example"}
+    assert response.json()["workspace"] == "work"
+    claude = next(p for p in response.json()["providers"] if p["provider"] == "claude")
+    assert any(server["name"] == "example" for server in claude["servers"])
+    assert "private-sentinel" not in response.text
+    assert "opencode" not in shared_lookups
 
 
 @pytest.mark.asyncio
