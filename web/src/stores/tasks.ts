@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { api } from '../lib/api'
+import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { useProjectStore } from './projects'
 import type {
   RuntimeProvider,
   Schedule,
@@ -39,10 +41,42 @@ export interface ScheduleUpdate {
   command?: string
 }
 
+export type ModelFetchResult =
+  | { status: 'success'; workspace: string; generation: number }
+  | { status: 'error'; workspace: string; generation: number; error: string }
+  | { status: 'superseded'; workspace: string; generation: number | null }
+
 export const useTaskStore = defineStore('tasks', () => {
   const schedules = ref<Schedule[]>([])
   const status = ref<StatusResponse | null>(null)
   const models = ref<ModelsResponse | null>(null)
+  const modelLoading = ref(false)
+  const modelError = ref('')
+  const modelResult = ref<'success' | 'error' | null>(null)
+  const modelStale = ref(false)
+  const modelEmpty = computed(() => !!models.value && !sectionsFromModelsResponse(models.value).some(section => section.models.length))
+  const modelGeneration = ref(0)
+  onScopeDispose(() => { modelGeneration.value++ })
+  const modelTransition = ref(0)
+  const projects = useProjectStore()
+  const modelWorkspaceEligible = computed(() =>
+    projects.workspaceRegistryStatus === 'ready'
+    && !!projects.activeWorkspace
+    && projects.workspaces.some(workspace => workspace.name === projects.activeWorkspace),
+  )
+  watch(
+    () => [projects.activeWorkspace, projects.workspaceRegistryStatus, projects.workspaces.map(w => w.name).join('\0')],
+    () => {
+      modelGeneration.value++
+      models.value = null
+      modelLoading.value = false
+      modelError.value = ''
+      modelResult.value = null
+      modelStale.value = false
+      modelTransition.value++
+    },
+    { flush: 'sync' },
+  )
   const loading = ref(false)
   const scheduleLoading = ref(false)
   const scheduleLoadError = ref('')
@@ -90,8 +124,32 @@ export const useTaskStore = defineStore('tasks', () => {
     status.value = await api.get<StatusResponse>('/api/status')
   }
 
-  async function fetchModels() {
-    models.value = await api.get<ModelsResponse>('/api/models')
+  async function fetchModels(workspace = projects.activeWorkspace): Promise<ModelFetchResult> {
+    if (!modelWorkspaceEligible.value || workspace !== projects.activeWorkspace) {
+      return { status: 'superseded', workspace, generation: null }
+    }
+    const generation = ++modelGeneration.value
+    const current = () => generation === modelGeneration.value
+      && modelWorkspaceEligible.value && workspace === projects.activeWorkspace
+    modelLoading.value = true
+    modelError.value = ''
+    modelResult.value = null
+    modelStale.value = models.value !== null
+    try {
+      const response = await api.get<ModelsResponse>(`/api/models?${new URLSearchParams({ workspace })}`)
+      if (!current()) return { status: 'superseded', workspace, generation }
+      models.value = response
+      modelResult.value = 'success'
+      modelStale.value = false
+      return { status: 'success', workspace, generation }
+    } catch (error: unknown) {
+      if (!current()) return { status: 'superseded', workspace, generation }
+      modelError.value = error instanceof Error ? error.message : 'Could not load models.'
+      modelResult.value = 'error'
+      return { status: 'error', workspace, generation, error: modelError.value }
+    } finally {
+      if (current()) modelLoading.value = false
+    }
   }
 
   async function fetchAll() {
@@ -183,7 +241,7 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, schedulesByChat, status, models, loading,
+    schedules, schedulesByChat, status, models, loading, modelLoading, modelError, modelResult, modelStale, modelEmpty, modelTransition, modelWorkspaceEligible,
     scheduleLoading, scheduleLoadError, schedulesLoaded,
     fetchSchedules, fetchStatus, fetchModels, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,

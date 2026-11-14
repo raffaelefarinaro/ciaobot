@@ -237,7 +237,7 @@ watch(workspace, () => {
   // the same id against a workspace that never had it.
   if (overlay.value) finishOverlayClose()
   load()
-})
+}, { flush: 'sync' })
 
 // ── Filters ───────────────────────────────────────────────────────────────
 
@@ -923,6 +923,8 @@ const DELEGATE_DEFAULT_KEY = '__workspace-default__'
 const delegateRuntime = ref<NewChatRuntime | null>(null)
 const delegateModelPickerOpen = ref(false)
 const delegateModelTrigger = ref<HTMLButtonElement | null>(null)
+const delegateModelRegion = ref<HTMLElement | null>(null)
+const delegateModelWorkspace = ref('')
 const taskStore = useTaskStore()
 
 // The provider the workspace starts chats on; names the default row.
@@ -954,8 +956,14 @@ const delegateModelSections = computed<ModelSection[]>(() => [
 // The triggerless selector does not own the chip, so return focus to it
 // ourselves when the list closes (Escape, outside click, or a pick).
 function closeDelegateModelPicker(): void {
+  const focused = document.activeElement
+  const restore = !!focused && !!delegateModelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
   delegateModelPickerOpen.value = false
-  void nextTick(() => delegateModelTrigger.value?.focus())
+  const transition = taskStore.modelTransition
+  void nextTick(() => {
+    if (restore && transition === taskStore.modelTransition && delegateModelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) delegateModelTrigger.value.focus()
+  })
 }
 
 function toggleDelegateModelPicker(): void {
@@ -971,6 +979,29 @@ function selectDelegateModel(value: string | string[], sectionKey: string): void
     return
   }
   delegateRuntime.value = { model, provider: providerForModelSection(sectionKey) }
+}
+
+watch(() => projectStore.activeWorkspace, () => { delegateRuntime.value = null }, { flush: 'sync' })
+watch(() => taskStore.modelTransition, transition => {
+  const focused = document.activeElement
+  const restore = !!focused && !!delegateModelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
+  delegateModelPickerOpen.value = false
+  void nextTick(() => {
+    if (restore && transition === taskStore.modelTransition && delegateModelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) delegateModelTrigger.value.focus()
+  })
+  if (delegateOpen.value && delegateModelWorkspace.value === projectStore.activeWorkspace
+    && delegateTakesInstructions.value && taskStore.modelWorkspaceEligible
+    && !taskStore.modelLoading && !taskStore.models) void taskStore.fetchModels()
+}, { flush: 'sync' })
+
+function delegateSelectionHandler(transition: number) {
+  return (value: string | string[], section: string) => {
+    if (transition === taskStore.modelTransition && taskStore.modelWorkspaceEligible) selectDelegateModel(value, section)
+  }
+}
+function delegateCloseHandler(transition: number) {
+  return () => { if (transition === taskStore.modelTransition) closeDelegateModelPicker() }
 }
 
 const delegateFocusActive = computed(
@@ -1082,6 +1113,7 @@ async function openDelegate(task: Task, mode?: DelegateMode) {
   delegateBody.value = ''
   delegateRevision.value = ''
   delegateBodyState.value = 'loading'
+  delegateModelWorkspace.value = workspace.value
   delegateOpen.value = true
   const seq = ++delegateSeq
   const read = await board.get(workspace.value, task.id)
@@ -3600,7 +3632,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
             <div>
               <dt>Provider &amp; model</dt>
               <dd>
-                <div v-if="delegateTakesInstructions" class="task-delegate-model-wrap">
+                <div v-if="delegateTakesInstructions" ref="delegateModelRegion" class="task-delegate-model-wrap">
                   <button
                     ref="delegateModelTrigger"
                     type="button"
@@ -3618,9 +3650,17 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                     :sections="delegateModelSections"
                     placeholder="Model"
                     placement="bottom-start"
-                    @select="selectDelegateModel"
-                    @close="closeDelegateModelPicker"
+                    v-on="{ select: delegateSelectionHandler(taskStore.modelTransition), close: delegateCloseHandler(taskStore.modelTransition) }"
                   />
+                  <span v-if="projectStore.workspaceRegistryStatus === 'error'" role="alert">Workspace list unavailable.
+                    <button type="button" class="btn-small" aria-label="Retry workspace list for delegation models" @click="projectStore.fetchWorkspaces()">Retry</button>
+                  </span>
+                  <span v-else-if="!taskStore.modelWorkspaceEligible" role="status" aria-label="Delegation models" aria-live="polite">Delegation models unavailable until this workspace is registered.</span>
+                  <span v-else-if="taskStore.modelError" role="alert" aria-label="Delegation models">Delegation models unavailable: {{ taskStore.modelError }}
+                    <template v-if="taskStore.modelStale"> Previously loaded models may be out of date.</template>
+                    <button type="button" class="btn-small" aria-label="Retry delegation models" @click="taskStore.fetchModels()">Retry</button>
+                  </span>
+                  <span v-else role="status" aria-label="Delegation models" aria-live="polite">{{ taskStore.modelLoading ? (taskStore.modelStale ? 'Loading delegation models; previous models may be out of date.' : 'Loading delegation models…') : taskStore.modelEmpty ? 'No models listed; availability is unknown.' : taskStore.models ? 'Delegation models loaded. Availability may be incomplete.' : 'Delegation models not loaded.' }}</span>
                 </div>
                 <template v-else>The attempt's own chat</template>
               </dd>

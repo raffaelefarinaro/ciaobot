@@ -79,7 +79,7 @@ async function mountPanel(schedule = makeSchedule()): Promise<VueWrapper> {
   store.schedulesLoaded = true
   store.scheduleLoadError = ''
   store.fetchSchedules = vi.fn(async () => {})
-  store.fetchModels = vi.fn(async () => {})
+  store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
   store.updateSchedule = vi.fn(async () => schedule)
 
   const projectStore = useProjectStore()
@@ -263,7 +263,10 @@ describe('SchedulePanel property cards', () => {
       provider_models: { claude: ['claude-sonnet-4-5'] },
       provider_defaults: { claude: 'claude-sonnet-4-5' },
     }
-    store.fetchModels = vi.fn(async () => { store.models = models })
+    store.fetchModels = vi.fn(async () => {
+      store.models = models
+      return { status: 'success' as const, workspace: 'work', generation: 0 }
+    })
 
     await card(wrapper, 'Model').find('.card-edit').trigger('click')
     await flushPromises()
@@ -279,7 +282,7 @@ describe('SchedulePanel property cards', () => {
   it('fetches a cold model catalog for an ordinary schedule Model edit', async () => {
     const wrapper = await mountPanel()
     const store = useTaskStore()
-    store.fetchModels = vi.fn(async () => {})
+    store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
 
     await card(wrapper, 'Model').find('.card-edit').trigger('click')
 
@@ -295,7 +298,7 @@ describe('SchedulePanel property cards', () => {
       provider_models: { claude: ['claude-sonnet-4-5'] },
       provider_defaults: { claude: 'claude-sonnet-4-5' },
     }
-    store.fetchModels = vi.fn(async () => {})
+    store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
 
     await card(wrapper, 'Model').find('.card-edit').trigger('click')
 
@@ -310,7 +313,7 @@ describe('SchedulePanel property cards', () => {
       web_project_id: null,
     }))
     const store = useTaskStore()
-    store.fetchModels = vi.fn(async () => {})
+    store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
 
     await card(wrapper, 'Model').find('.card-edit').trigger('click')
 
@@ -523,7 +526,7 @@ describe('SchedulePanel overview', () => {
     store.schedulesLoaded = true
     store.scheduleLoadError = ''
     store.fetchSchedules = vi.fn(async () => {})
-    store.fetchModels = vi.fn(async () => {})
+    store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
     useProjectStore().activeWorkspace = 'work'
     // The webhook section reads its own store on mount. Seeded as already read so
     // this file never reaches the network for it: the section's five load states

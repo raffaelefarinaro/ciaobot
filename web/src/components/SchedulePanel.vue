@@ -356,10 +356,14 @@
                 </optgroup>
               </select>
             </div>
+            <label v-if="workspaceMoveNeedsDefault">
+              <input v-model="acceptDestinationDefault" type="checkbox" aria-label="Use destination workspace default model">
+              Clear the current model override and use the destination workspace default.
+            </label>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid || (workspaceMoveNeedsDefault && !acceptDestinationDefault)" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -397,22 +401,35 @@
               chat's own model. Change it from the chat's model picker.
             </p>
             <template v-else>
-              <div class="form-group">
+              <p v-if="!editModelWorkspaceMatches" class="hint" role="status">Switch to {{ editData.workspace }} to choose automation models.</p>
+              <div v-else ref="editModelRegion" class="form-group">
                 <label>Model</label>
                 <ModelSelector
+                  :key="store.modelTransition"
                   :model-value="editData.model"
                   :sections="scheduleModelSections"
                   :placeholder="editInheritedModelLabel"
                   :empty-placeholder="editInheritedModelLabel"
-                  @select="selectScheduleModel"
+                  v-on="{ select: editModelSelectionHandler(store.modelTransition) }"
                 />
               </div>
+              <template v-if="editModelWorkspaceMatches">
+                <p v-if="projectStore.workspaceRegistryStatus === 'error'" role="alert">Workspace list unavailable.
+                  <button type="button" class="btn-small" aria-label="Retry workspace list for automation models" @click="projectStore.fetchWorkspaces()">Retry</button>
+                </p>
+                <p v-else-if="!store.modelWorkspaceEligible" role="status" aria-label="Automation models" aria-live="polite">Automation models unavailable until this workspace is registered.</p>
+                <p v-else-if="store.modelError" role="alert" aria-label="Automation models">Automation models unavailable: {{ store.modelError }}
+                  <template v-if="store.modelStale"> Previously loaded models may be out of date.</template>
+                  <button type="button" class="btn-small" aria-label="Retry automation models" @click="store.fetchModels()">Retry</button>
+                </p>
+                <p v-else role="status" aria-label="Automation models" aria-live="polite">{{ store.modelLoading ? (store.modelStale ? 'Loading automation models; previous models may be out of date.' : 'Loading automation models…') : store.modelEmpty ? 'No models listed; availability is unknown.' : store.models ? 'Automation models loaded. Availability may be incomplete.' : 'Automation models not loaded.' }}</p>
+              </template>
               <p class="hint">Leave empty to inherit the workspace default.</p>
             </template>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
               <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
-              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid" @click="saveCardEdit">Save</button>
+              <button class="btn-primary" :disabled="!cardDirty || !cardEditValid || (!inheritsChatModel && !editModelWorkspaceMatches)" @click="saveCardEdit">Save</button>
             </div>
           </div>
         </section>
@@ -705,7 +722,7 @@
 
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
-import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { DropdownMenuItem } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { cadenceSummary } from '../lib/scheduleClock'
@@ -1034,6 +1051,28 @@ function lastRunChatTitle(s: Schedule): string {
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 const editModelProvider = ref<RuntimeProvider | ''>('')
+const editModelRegion = ref<HTMLElement | null>(null)
+const editModelWorkspaceMatches = computed(() => !!editData.value.workspace && editData.value.workspace === projectStore.activeWorkspace)
+
+watch(() => store.modelTransition, transition => {
+  const region = editModelRegion.value
+  const focused = document.activeElement
+  const restore = !!focused && !!region?.querySelector('.model-selector__popover')?.contains(focused)
+  void nextTick(() => {
+    if (restore && transition === store.modelTransition && region?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) {
+      region.querySelector<HTMLButtonElement>('.model-selector__trigger')?.focus()
+    }
+  })
+  if (editingCard.value === 'engine' && !inheritsChatModel.value && editModelWorkspaceMatches.value
+    && store.modelWorkspaceEligible && !store.modelLoading && !store.models) void store.fetchModels()
+}, { flush: 'sync' })
+
+function editModelSelectionHandler(transition: number) {
+  return (value: string | string[], section: string) => {
+    if (transition === store.modelTransition && editModelWorkspaceMatches.value && store.modelWorkspaceEligible) selectScheduleModel(value, section)
+  }
+}
 
 const editWorkspaceConfig = computed(() =>
   projectStore.workspaceOptions.find(workspace => workspace.name === editData.value.workspace),
@@ -1043,7 +1082,7 @@ const editInheritedModelLabel = computed(() => {
   const provider = projectStore.workspaceProviderOptions.find(
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
-  const model = effectiveWorkspaceDefaultModel(workspace, store.models)
+  const model = effectiveWorkspaceDefaultModel(workspace, editModelWorkspaceMatches.value ? store.models : null)
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
 })
 
@@ -1285,13 +1324,25 @@ function defaultProjectContext(workspace: string): string {
 
 function onEditWorkspaceChange() {
   editData.value.contextKey = defaultProjectContext(editData.value.workspace)
+  acceptDestinationDefault.value = false
   if (!editData.value.model) editModelProvider.value = ''
 }
+const acceptDestinationDefault = ref(false)
+const workspaceMoveNeedsDefault = computed(() =>
+  editingCard.value === 'delivery' && !!schedule.value?.model
+  && editData.value.workspace !== (schedule.value.workspace || projectStore.activeWorkspace),
+)
 async function onSystemWorkspaceChange(event: Event) {
   if (!schedule.value) return
-  const workspace = (event.target as HTMLSelectElement).value
+  const select = event.target as HTMLSelectElement
+  const workspace = select.value
   const scheduleId = schedule.value.schedule_id
-  await store.updateSchedule(scheduleId, { workspace })
+  const changingModel = !!schedule.value.model && workspace !== schedule.value.workspace
+  if (changingModel && !(await askConfirm('Clear the current model override and use the destination workspace default?'))) {
+    select.value = schedule.value.workspace || projectStore.activeWorkspace
+    return
+  }
+  await store.updateSchedule(scheduleId, changingModel ? { workspace, model: '', provider: '' } : { workspace })
   if (projectStore.activeWorkspace !== workspace) {
     if ((await projectStore.switchWorkspace(workspace, { transition: false })) === false) return
   }
@@ -1311,9 +1362,7 @@ const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== 
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
   if (!schedule.value) return
-  if (card === 'engine' && !inheritsChatModel.value && !store.models) {
-    void store.fetchModels()
-  }
+  acceptDestinationDefault.value = false
   const isSystem = schedule.value.scope === 'system'
   if (isSystem) {
     if (card !== 'engine' && card !== 'advanced') return
@@ -1337,6 +1386,7 @@ function startCardEdit(card: Exclude<EditCard, ''>) {
   editModelProvider.value = schedule.value.provider || ''
   editBaseline.value = editSnapshot()
   editingCard.value = card
+  if (card === 'engine' && !inheritsChatModel.value && editModelWorkspaceMatches.value && !store.models) void store.fetchModels()
 }
 
 async function cancelCardEdit() {
@@ -1347,6 +1397,8 @@ async function cancelCardEdit() {
 
 async function saveCardEdit() {
   if (!schedule.value) return
+  if (editingCard.value === 'engine' && !inheritsChatModel.value && !editModelWorkspaceMatches.value) return
+  if (workspaceMoveNeedsDefault.value && !acceptDestinationDefault.value) return
   const d = editData.value
   // System routines persist only a small overlay (enabled + workspace + engine + archive).
   // Sending the full user-schedule payload would try to change title/prompt/cadence
@@ -1378,8 +1430,8 @@ async function saveCardEdit() {
     interval_minutes: d.frequency === 'interval' ? d.interval_minutes : undefined,
     days_of_week: d.frequency === 'weekly' && d.days_of_week.length > 0 ? d.days_of_week : null,
     day_of_month: d.frequency === 'monthly' ? d.day_of_month : null,
-    model: d.model,
-    provider: d.model ? (editModelProvider.value || schedule.value.provider || 'claude') : '',
+    model: workspaceMoveNeedsDefault.value ? '' : d.model,
+    provider: workspaceMoveNeedsDefault.value ? '' : d.model ? (editModelProvider.value || schedule.value.provider || 'claude') : '',
     archive_policy: d.archive_policy,
   }
   if (d.contextKey.startsWith('proj:')) {

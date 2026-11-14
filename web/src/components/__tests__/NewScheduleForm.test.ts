@@ -15,7 +15,7 @@ const mounted: VueWrapper[] = []
 
 async function mountForm(): Promise<VueWrapper> {
   const tasks = useTaskStore()
-  tasks.fetchModels = vi.fn(async () => {}) as typeof tasks.fetchModels
+  tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
   tasks.createSchedule = vi.fn(async () => {}) as unknown as typeof tasks.createSchedule
   const projects = useProjectStore()
   projects.activeWorkspace = 'work'
@@ -45,7 +45,7 @@ describe('NewScheduleForm', () => {
 
   it('keeps focus on the prompt when dismissing the real model picker by clicking it', async () => {
     const tasks = useTaskStore()
-    tasks.fetchModels = vi.fn(async () => {}) as typeof tasks.fetchModels
+    tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
     const wrapper = mount(NewScheduleForm, { attachTo: document.body })
     mounted.push(wrapper)
     await flushPromises()

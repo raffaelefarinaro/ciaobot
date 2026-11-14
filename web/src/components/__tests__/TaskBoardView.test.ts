@@ -2333,6 +2333,7 @@ describe('TaskBoardView', () => {
 
   it('delegates on the model picked in the sheet', async () => {
     apiPost.mockResolvedValue(delegateAnswer())
+    useProjectStore().workspaceRegistryStatus = 'ready'
     useTaskStore().models = {
       models: ['opus', 'sonnet'], default: 'opus',
       provider_models: { claude: ['opus', 'sonnet'] },
@@ -2348,6 +2349,7 @@ describe('TaskBoardView', () => {
     expect(sonnet).toBeTruthy()
     sonnet!.click()
     await flushPromises()
+    expect(wrapper.get('.task-delegate-model').text()).toContain('sonnet')
     await wrapper.get('.task-sheet .btn-primary').trigger('click')
     await flushPromises()
 
@@ -2361,6 +2363,7 @@ describe('TaskBoardView', () => {
   })
 
   it('closes an open model list on Escape before the sheet', async () => {
+    useProjectStore().workspaceRegistryStatus = 'ready'
     useTaskStore().models = {
       models: ['opus', 'sonnet'], default: 'opus',
       provider_models: { claude: ['opus', 'sonnet'] },
