@@ -555,6 +555,18 @@ export const useProjectStore = defineStore('projects', () => {
   // existence right as the panel switched to it. Keying the pending promise
   // by project makes a second call join the first instead of double-posting.
   const pendingChatCreations: Record<string, Promise<ChatInfo>> = {}
+  const chatMutationQueues = new Map<string, Promise<unknown>>()
+  const pendingChatModeWrites = ref<Record<string, number>>({})
+
+  function enqueueChatMutation<T>(chatId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = chatMutationQueues.get(chatId) || Promise.resolve()
+    const current = previous.catch(() => {}).then(operation)
+    chatMutationQueues.set(chatId, current)
+    void current.finally(() => {
+      if (chatMutationQueues.get(chatId) === current) chatMutationQueues.delete(chatId)
+    }).catch(() => {})
+    return current
+  }
   // AskUserQuestion arrives from headless providers with empty answers, so the
   // PWA renders its own picker above the composer. Native V2 forms remain
   // active until an acknowledged reply/cancel; legacy cards without a request
@@ -2031,8 +2043,8 @@ export const useProjectStore = defineStore('projects', () => {
     if (chatIsMemoryPass(chatId)) return false
     if (chatNeedsInput(chatId)) return true
     if (chatFailed(chatId)) return true
-    // A needs-you card (an MCP sign-in, ...) is waiting on the user.
-    if (chatActions.value[chatId]?.length) return true
+    // MCP recovery belongs to Chat details, not chat attention.
+    if (chatActions.value[chatId]?.some(a => a.kind !== 'mcp_auth')) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return false
     // Only the loaded workspace's tasks are held, and slugs collide across
@@ -3230,31 +3242,45 @@ export const useProjectStore = defineStore('projects', () => {
       thinking_level?: string
     },
   ) {
-    const readStart = chatReadStart()
-    const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
-    const idx = chats.value.findIndex(x => x.chat_id === chatId)
-    if (idx >= 0) chats.value[idx] = c
-    applyChatPinFromChatInfo(c)
-    applyChatActionsFromChatInfo(c, readStart)
+    const tracksMode = updates.mode !== undefined
+    if (tracksMode) pendingChatModeWrites.value[chatId] = (pendingChatModeWrites.value[chatId] || 0) + 1
+    try {
+      return await enqueueChatMutation(chatId, async () => {
+        const readStart = chatReadStart()
+        const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
+        const idx = chats.value.findIndex(x => x.chat_id === chatId)
+        if (idx >= 0) chats.value[idx] = c
+        applyChatPinFromChatInfo(c)
+        applyChatActionsFromChatInfo(c, readStart)
+      })
+    } finally {
+      if (tracksMode) {
+        const remaining = (pendingChatModeWrites.value[chatId] || 1) - 1
+        if (remaining) pendingChatModeWrites.value[chatId] = remaining
+        else delete pendingChatModeWrites.value[chatId]
+      }
+    }
   }
 
   async function handoverChat(
     chatId: string,
     updates: { model: string; provider: RuntimeProvider },
   ) {
-    const visibleMessages = normalizeMessages(messages.value[chatId] || [])
-    const readStart = chatReadStart()
-    const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
-      ...updates,
-      messages: visibleMessages,
+    return enqueueChatMutation(chatId, async () => {
+      const visibleMessages = normalizeMessages(messages.value[chatId] || [])
+      const readStart = chatReadStart()
+      const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
+        ...updates,
+        messages: visibleMessages,
+      })
+      replaceChat(c, readStart)
+      await loadMessages(chatId)
+      if (isViewedChat(chatId)) {
+        disconnectWs(chatId)
+        connectWs(chatId)
+      }
+      return c
     })
-    replaceChat(c, readStart)
-    await loadMessages(chatId)
-    if (isViewedChat(chatId)) {
-      disconnectWs(chatId)
-      connectWs(chatId)
-    }
-    return c
   }
 
   async function forkChat(
@@ -7592,7 +7618,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceRegistryStatus, workspaceRegistryError, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
-    chatActions,
+    chatActions, pendingChatModeWrites,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,

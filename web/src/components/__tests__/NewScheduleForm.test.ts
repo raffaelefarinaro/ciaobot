@@ -45,7 +45,7 @@ describe('NewScheduleForm', () => {
 
   it('keeps focus on the prompt when dismissing the real model picker by clicking it', async () => {
     const tasks = useTaskStore()
-    tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
+    tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'personal', generation: 0 }))
     const wrapper = mount(NewScheduleForm, { attachTo: document.body })
     mounted.push(wrapper)
     await flushPromises()

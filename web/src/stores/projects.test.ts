@@ -1142,6 +1142,285 @@ beforeEach(() => {
   vi.stubGlobal('WebSocket', FakeWebSocket)
 })
 
+describe('chat mutation ordering', () => {
+  function fullChat(chatId: string, fields: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'project',
+      title: 'Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'normal',
+      session_id: 'session',
+      created_at: '2026-11-14T00:00:00Z',
+      archived: false,
+      ...fields,
+    }
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  it.each([
+    ['mode first', { mode: 'plan' }, { thinking_level: 'high' }],
+    ['thinking first', { thinking_level: 'high' }, { mode: 'bypass' }],
+  ] as const)('serializes mode and thinking updates for the same chat (%s)', async (_name, firstUpdate, secondUpdate) => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'same' } as ChatInfo]
+    const firstResponse = deferred<ChatInfo>()
+    const firstMode = 'mode' in firstUpdate ? firstUpdate.mode : undefined
+    const secondMode = 'mode' in secondUpdate ? secondUpdate.mode : undefined
+    const firstThinking = 'thinking_level' in firstUpdate ? firstUpdate.thinking_level : undefined
+    const secondThinking = 'thinking_level' in secondUpdate ? secondUpdate.thinking_level : undefined
+    const laterMode = secondMode || firstMode || 'normal'
+    const laterThinking = secondThinking || firstThinking || 'medium'
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockResolvedValueOnce(fullChat('same', {
+      mode: laterMode, thinking_level: laterThinking,
+    }))
+    const first = store.updateChat('same', firstUpdate)
+    const second = store.updateChat('same', secondUpdate)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(apiPatch).toHaveBeenNthCalledWith(1, '/api/chats/same', firstUpdate)
+    firstResponse.resolve(fullChat('same', {
+      mode: firstMode || 'normal',
+      thinking_level: firstThinking || 'medium',
+    }))
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    expect(apiPatch).toHaveBeenNthCalledWith(2, '/api/chats/same', secondUpdate)
+    await Promise.all([first, second])
+    expect(store.chats.find(chat => chat.chat_id === 'same')).toMatchObject({
+      mode: laterMode, thinking_level: laterThinking, provider: 'claude', model: 'sonnet',
+    })
+  })
+
+  it('updates different chats independently', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'chat-a' } as ChatInfo, { chat_id: 'chat-b' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('chat-b', { mode: 'plan' }))
+    const a = store.updateChat('chat-a', { mode: 'normal' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    const b = store.updateChat('chat-b', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    await b
+    expect(store.chats.find(chat => chat.chat_id === 'chat-b')?.mode).toBe('plan')
+    held.resolve(fullChat('chat-a', { mode: 'normal' }))
+    await a
+  })
+
+  it('continues queued updates after a rejected update', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'failure' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('failure', { mode: 'plan' }))
+    const failed = store.updateChat('failure', { mode: 'normal' })
+    const queued = store.updateChat('failure', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first update failed'))
+    await expect(failed).rejects.toThrow('first update failed')
+    await expect(queued).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(store.chats.find(chat => chat.chat_id === 'failure')?.mode).toBe('plan')
+  })
+
+  it('clears mode pending after success or failure and continues the queue', async () => {
+    const store = useProjectStore()
+    const firstResponse = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockImplementationOnce(() => secondResponse.promise)
+    const failed = store.updateChat('pending', { mode: 'normal' })
+    const queued = store.updateChat('pending', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.pending).toBe(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    firstResponse.reject(new Error('mode write failed'))
+    await expect(failed).rejects.toThrow('mode write failed')
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    secondResponse.resolve({
+      ...fullChat('pending', { mode: 'plan' }),
+    })
+    await queued
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+
+    apiPatch.mockResolvedValueOnce(fullChat('pending', { mode: 'bypass' }))
+    const success = store.updateChat('pending', { mode: 'bypass' })
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    await success
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+  })
+
+  it('counts multiple queued mode writes but not thinking writes', async () => {
+    const store = useProjectStore()
+    const thinkingResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => thinkingResponse.promise)
+    const thinkingOnly = store.updateChat('other', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.other).toBeUndefined()
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    thinkingResponse.resolve({ chat_id: 'other', thinking_level: 'high' } as ChatInfo)
+    await thinkingOnly
+
+    apiPatch.mockReset()
+    const held = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+      .mockImplementationOnce(() => secondResponse.promise)
+      .mockResolvedValueOnce(fullChat('count', { mode: 'auto' }))
+      .mockResolvedValueOnce(fullChat('count', { mode: 'bypass' }))
+    const first = store.updateChat('count', { mode: 'normal' })
+    expect(store.pendingChatModeWrites.count).toBe(1)
+    const second = store.updateChat('count', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    const third = store.updateChat('count', { mode: 'auto' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    const thinking = store.updateChat('count', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first failed'))
+    await expect(first).rejects.toThrow('first failed')
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    secondResponse.resolve(fullChat('count', { mode: 'plan' }))
+    await Promise.all([second, third, thinking])
+    expect(store.pendingChatModeWrites.count).toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(4)
+  })
+
+  it.each(['post-first', 'patch-first'] as const)(
+    'serializes handover and mode in both orders without stale chat replacement (%s)',
+    async order => {
+      const store = useProjectStore()
+      const patch = deferred<ChatInfo>()
+      const post = deferred<ChatInfo>()
+      apiGet.mockResolvedValue([])
+      apiPatch.mockImplementationOnce(() => patch.promise)
+      apiPost.mockImplementationOnce(() => post.promise)
+      let handover!: Promise<ChatInfo>
+      let update!: Promise<void>
+      if (order === 'post-first') {
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        update = store.updateChat('combined', { mode: 'plan' })
+        expect(apiPatch).not.toHaveBeenCalled()
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'normal' }))
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        patch.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      } else {
+        update = store.updateChat('combined', { mode: 'plan' })
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        expect(apiPost).not.toHaveBeenCalled()
+        patch.resolve(fullChat('combined', { provider: 'opencode', model: 'old', mode: 'plan' }))
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      }
+      await update
+      await expect(handover).resolves.toMatchObject({ provider: 'claude', model: 'sonnet' })
+      expect(store.chats.find(chat => chat.chat_id === 'combined')).toMatchObject({
+        provider: 'claude', model: 'sonnet', mode: 'plan',
+      })
+    },
+  )
+
+  it('handover holds the queue through history load and reconnect', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'viewed'
+    store.connectWs('viewed')
+    const oldSocket = fakeSockets.at(-1)!
+    const history = deferred<ChatMessage[]>()
+    apiPost.mockResolvedValueOnce({ chat_id: 'viewed', provider: 'claude', model: 'sonnet' })
+    apiGet.mockImplementationOnce(() => history.promise)
+    const order: string[] = []
+    apiPatch.mockImplementationOnce(() => {
+      order.push('patch')
+      return Promise.resolve({ chat_id: 'viewed', mode: 'plan' })
+    })
+    class ObservedWebSocket extends FakeWebSocket {
+      constructor(url: string) {
+        super(url)
+        order.push('replacement socket')
+      }
+    }
+    vi.stubGlobal('WebSocket', ObservedWebSocket)
+    const handover = store.handoverChat('viewed', { provider: 'claude', model: 'sonnet' })
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/chats/viewed/messages?limit=50'))
+    const update = store.updateChat('viewed', { mode: 'plan' })
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(oldSocket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(fakeSockets).toHaveLength(1)
+    history.resolve([])
+    await handover
+    expect(oldSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets).toHaveLength(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(order.indexOf('replacement socket')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('replacement socket')).toBeLessThan(order.indexOf('patch'))
+    await update
+  })
+
+  it('handover snapshots visible messages when its queued operation starts', async () => {
+    const store = useProjectStore()
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+    apiPost.mockResolvedValueOnce({ chat_id: 'snapshot', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValue([])
+    store.messages.snapshot = [{ role: 'user', content: 'old text', timestamp: '' }]
+    const update = store.updateChat('snapshot', { mode: 'plan' })
+    const handover = store.handoverChat('snapshot', { provider: 'claude', model: 'sonnet' })
+    store.messages.snapshot = [
+      { role: 'user', content: '  new visible text  ', timestamp: '' },
+      { role: 'assistant', content: '   ', timestamp: '' },
+    ]
+    held.resolve({ chat_id: 'snapshot', mode: 'plan' } as ChatInfo)
+    await update
+    await handover
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/snapshot/handover', {
+      provider: 'claude', model: 'sonnet',
+      messages: [{ role: 'user', content: 'new visible text', timestamp: '' }],
+    })
+  })
+
+  it('releases the queue after a post-response handover failure', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'ws-failure'
+    store.connectWs('ws-failure')
+    const initialSocket = fakeSockets[0]
+    apiPost.mockResolvedValueOnce({ chat_id: 'ws-failure', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValueOnce([])
+    apiPatch.mockResolvedValueOnce({ chat_id: 'ws-failure', mode: 'plan' })
+    class ThrowingWebSocket {
+      constructor() { throw new Error('replacement socket failed') }
+    }
+    vi.stubGlobal('WebSocket', ThrowingWebSocket)
+    const handover = store.handoverChat('ws-failure', { provider: 'claude', model: 'sonnet' })
+    const update = store.updateChat('ws-failure', { mode: 'plan' })
+    await expect(handover).rejects.toThrow('replacement socket failed')
+    await expect(update).resolves.toBeUndefined()
+    expect(initialSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('staged thinking after handover does not deadlock', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValueOnce({ chat_id: 'thinking', provider: 'claude', model: 'sonnet' })
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', thinking_level: 'high' })
+    await store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    await expect(store.updateChat('thinking', { thinking_level: 'high' })).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledWith('/api/chats/thinking', { thinking_level: 'high' })
+
+    apiPost.mockRejectedValueOnce(new Error('handover rejected'))
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', mode: 'bypass' })
+    const rejected = store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    const mode = store.updateChat('thinking', { mode: 'bypass' })
+    await expect(rejected).rejects.toThrow('handover rejected')
+    await expect(mode).resolves.toBeUndefined()
+    expect(store.chats.find(chat => chat.chat_id === 'thinking')?.mode).toBe('bypass')
+  })
+})
+
 describe('chat websocket URL containment', () => {
   test('keeps a plain chat id verbatim', () => {
     const store = useProjectStore()
@@ -3845,10 +4124,67 @@ describe('needs-you chat actions', () => {
     const sock = events(store)
     expect(store.chatNeedsYou('c-1')).toBe(false)
 
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { kind: 'command', params: { command: 'echo review-only' } })])))
     expect(store.chatNeedsYou('c-1')).toBe(true)
 
     sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+  })
+
+  test.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
+    'MCP action in %s state is retained without creating attention',
+    (state) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      const sock = events(store)
+      const mcp = action('a1', { state })
+      sock.onmessage?.(frame(actionsChanged('c-1', [mcp])))
+      expect(store.chatActions['c-1']).toEqual([mcp])
+      expect(store.chatNeedsYou('c-1')).toBe(false)
+      sock.onmessage?.(frame(actionsChanged('c-1', [])))
+      expect(store.chatActions['c-1']).toBeUndefined()
+    },
+  )
+
+  test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
+    'non-MCP %s action still creates attention alongside MCP',
+    (kind) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      store.chatActions['c-1'] = [action('mcp'), action('other', { kind })]
+      expect(store.chatNeedsYou('c-1')).toBe(true)
+    },
+  )
+
+  test.each([
+    { last_error: 'MCP turn failed' },
+    { pending_permission: '{"tool":"Bash"}' },
+    { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) },
+  ])('real chat blocker remains attention alongside MCP: %o', (blocker) => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', blocker)]
+    store.chatActions['c-1'] = [action('mcp')]
+    expect(store.chatNeedsYou('c-1')).toBe(true)
+  })
+
+  test('snapshot and subsequent event retain and clear MCP without attention', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('mcp')] } })))
+    expect(store.chatActions['c-1']).toEqual([action('mcp')])
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+    sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('memory pass remains excluded even with a real blocker and MCP', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', {
+      last_error: 'failed turn',
+      helper: { kind: 'memory_pass', state: 'running' } as never,
+    })]
+    store.chatActions['c-1'] = [action('mcp'), action('command', { kind: 'command' })]
     expect(store.chatNeedsYou('c-1')).toBe(false)
   })
 
@@ -10170,6 +10506,17 @@ describe('delegated task signals', () => {
     expect(store.chatIsAttentionItem(chat)).toBe(true)
     expect(store.attentionChatCount).toBe(1)
     expect(store.chatNeedsYou('c-plain')).toBe(false)
+  })
+
+  test('a scoped blocked task still needs you with MCP, but another workspace does not', async () => {
+    const store = await seeded([taskRow({ attempt_outcome: 'blocked' })])
+    store.chatActions['c-task'] = [{
+      id: 'mcp', kind: 'mcp_auth', origin: 'engine', state: 'open',
+      params: { server: 'linear', provider: 'claude' }, error: '', created_at: 1,
+    }]
+    expect(store.chatNeedsYou('c-task')).toBe(true)
+    store.projects[0].workspace = 'other'
+    expect(store.chatNeedsYou('c-task')).toBe(false)
   })
 
   test('the project counts a chat whose task stopped for the user', async () => {

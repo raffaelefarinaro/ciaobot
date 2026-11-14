@@ -1109,10 +1109,60 @@ def test_cli_posts_the_operation_with_the_bearer_token(
 
 
 def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) -> None:
+    entry = agent_cli._SKILL_PATH.read_text(encoding="utf-8")
+    reference = agent_cli._SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8")
+    assert agent_cli.main(["help"]) == 0
+    out = capsys.readouterr().out
+    assert out == entry + "\n" + reference
+    assert out.startswith("---\nname: ciao-cli")
+    assert "vault search" in out
+
+
+def test_cli_help_is_available_without_an_agent_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(AGENT_URL_ENV, raising=False)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
     assert agent_cli.main(["help"]) == 0
     out = capsys.readouterr().out
     assert out.startswith("---\nname: ciao-cli")
-    assert "vault search" in out
+    assert "## Worked examples" in out
+
+
+@pytest.mark.parametrize("failing_read", [1, 2])
+def test_cli_help_preserves_missing_resource_fallback(
+    failing_read: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    entry_path = agent_cli._SKILL_PATH
+    reference_path = entry_path.with_name("reference.md")
+    entry = entry_path.read_text(encoding="utf-8")
+    parser_text = agent_cli.build_parser().format_help()
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in (entry_path, reference_path):
+            reads.append(self)
+            if len(reads) == failing_read:
+                raise OSError("missing packaged resource")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    assert agent_cli.main(["help"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == (parser_text if failing_read == 1 else entry + parser_text)
+    assert captured.err == ""
+    assert reads == [entry_path, reference_path][:failing_read]
 
 
 def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
@@ -1125,7 +1175,7 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     assert "`AGENTS.md`" in append
     assert "ciao chat reload" in append
     assert "terminal slash commands are not available here" in append
-    reference = Path(agent_cli._SKILL_PATH).read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     assert "`/mcp`, `/reload-plugins`" in reference
 
 
@@ -1141,7 +1191,7 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     skills/help rather than another budget increase.
     """
     cli = system_prompt_payload("")["append"]
-    reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     missing = [command for command in _commands() if command not in reference]
     assert missing == []
     assert "ciao help" in cli and "ciao <noun> --help" in cli
