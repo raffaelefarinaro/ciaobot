@@ -72,22 +72,11 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
-**The develop push run is the fast gates only.** A develop PR and the push
-after it merge run Linux plus the fast Windows gates (imports, win32 mypy,
-ConPTY). They do not run the Windows pytest and vitest suites or the macOS
-job. Do not wait for those before cutting:
-
-```bash
-gh run list --repo raffaelefarinaro/ciaobot --workflow ci.yml --branch develop \
-  --event push --limit 1 --json headSha,status,conclusion,url
-```
-
-If that run exists, `headSha` must equal `git rev-parse origin/develop`. A
-`failure` or `cancelled` conclusion stops the cut: file it as an issue, fix
-it on `develop`, and start again from the top of this step. A run still in
-progress does not block the cut. The Windows pytest and vitest suites and
-the macOS job (`test`) run on this release PR into `main`. Step 6 merges
-only when that PR's `windows` and `test` checks are green.
+Develop PRs run Linux gates; full Windows, Python 3.14 and macOS coverage runs
+on the release PR. Inspect nightly CI for known failures, but an older green
+SHA is not proof of this candidate. Step 6 merges only when the release PR's
+required checks, including `windows` (which also requires Python 3.14) and
+`test`, are green.
 
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and

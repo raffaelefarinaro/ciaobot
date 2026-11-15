@@ -37,6 +37,10 @@ develop push that no longer runs those jobs as a faster copy of the
 "Develop push, full platforms" profile above. Compare that profile with the
 release PR instead.
 
+After the follow-up CI reduction, develop pushes do not trigger CI at all;
+compare develop PR checks with earlier PRs, and full nightly runs with release
+PRs rather than the former push profile.
+
 ### Local context, not a statistical baseline
 
 One contended macOS run of candidate `6cc0b911c`:
