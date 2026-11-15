@@ -765,6 +765,10 @@ class _FakeEngine:
         self.starts = 0
         self.launchctl_calls: list[list[str]] = []
         self.posts: list[str] = []
+        self.bodies: list[dict[str, Any] | None] = []
+        # What the drain reports for scheduled work; None models an engine that
+        # predates the field and so cannot say.
+        self.schedule_work: int | None = 0
         self.active_script: list[list[str]] = []
         self.polls = 0
         # True while the engine never runs out of work, so a drain cannot
@@ -785,17 +789,21 @@ class _FakeEngine:
     def version(self) -> str:
         return _env_version(self.live_env)
 
-    def post(self, url: str) -> dict[str, Any]:
+    def post(self, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         self.posts.append(url)
+        self.bodies.append(body)
         if self.post_error is not None:
             raise self.post_error
         if url.endswith("/api/admin/drain"):
             # The drain is polled by asking again, so this is where the active
             # chat list is read from.
             self.polls += 1
+            answer: dict[str, Any] = {"draining": True}
+            if self.schedule_work is not None:
+                answer["schedule_work_count"] = self.schedule_work
             if self.active_script:
-                return {"draining": True, "active_chat_ids": self.active_script.pop(0)}
-            return {"draining": True, "active_chat_ids": ["still-busy"] if self.busy else []}
+                return {**answer, "active_chat_ids": self.active_script.pop(0)}
+            return {**answer, "active_chat_ids": ["still-busy"] if self.busy else []}
         return {}
 
     def get(self, url: str) -> dict[str, Any] | None:
@@ -1008,7 +1016,7 @@ def _recover_apply(
 def _recorder(calls: list[str]) -> Any:
     """An injected `http_post` that records every URL it is handed."""
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         calls.append(url)
         return {}
 
@@ -1374,7 +1382,7 @@ def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
 
     def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         seen.append((url, body))
-        return engine.post(url)
+        return engine.post(url, body)
 
     with pytest.raises(UpdateError, match="left untouched"):
         apply_update(
@@ -1399,15 +1407,15 @@ def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
         f"{BASE}/api/admin/drain/cancel",
     }
 
-    # A manual apply sends no body at all, so its handshake is byte-identical
-    # to the one it has always sent.
-    _, manual_state, _, manual_engine = _staged(tmp_path / "manual")
+    # A manual apply names its own operation as the owner, so even without a
+    # coordinator the drain belongs to exactly one operation.
+    _, manual_state, manual_op, manual_engine = _staged(tmp_path / "manual")
     manual_engine.busy = True
     manual_seen: list[tuple[str, dict[str, Any] | None]] = []
 
     def manual_post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         manual_seen.append((url, body))
-        return manual_engine.post(url)
+        return manual_engine.post(url, body)
 
     with pytest.raises(UpdateError, match="left untouched"):
         apply_update(
@@ -1422,7 +1430,34 @@ def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
         )
 
     assert manual_seen
-    assert all(body is None for _url, body in manual_seen)
+    owner = f"update-{read_operation(manual_state).id}"
+    assert all(body == {"owner": owner} for _url, body in manual_seen)
+
+
+def test_apply_refuses_an_engine_that_does_not_report_scheduled_work(tmp_path: Path) -> None:
+    """A missing count is "unknown", never idle: nothing is swapped, admission reopens."""
+    _, state, _, engine = _staged(tmp_path)
+    engine.schedule_work = None
+
+    with pytest.raises(UpdateError, match="does not report scheduled work"):
+        _apply_with_post(engine, state, engine.post)
+
+    assert engine.changed_jobs() == []
+    assert engine.posts[-1] == f"{BASE}/api/admin/drain/cancel"
+
+
+def test_apply_waits_for_scheduled_work_to_finish(tmp_path: Path) -> None:
+    """Idle chats are not enough: the drain waits until the scheduled work is gone."""
+    _, state, _, engine = _staged(tmp_path)
+    counts = iter([3, 2, 1, 0, 0, 0, 0, 0])
+
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        engine.schedule_work = next(counts, 0) if url.endswith("/api/admin/drain") else 0
+        return engine.post(url, body)
+
+    _apply_with_post(engine, state, post)
+
+    assert engine.polls >= 6  # three idle readings only after the work reached zero
 
 
 def _apply_with_post(engine: _FakeEngine, state: Path, post: Any) -> Operation:
@@ -1441,7 +1476,7 @@ def test_apply_drain_request_timeout_names_the_step(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
     posts: list[str] = []
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         posts.append(url)
         if url.endswith("/drain/cancel"):
             return {}
@@ -1462,7 +1497,7 @@ def test_apply_drain_poll_timeout_names_the_poll(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
     calls = {"drain": 0}
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         if url.endswith("/drain/cancel"):
             return {}
         calls["drain"] += 1
@@ -1480,7 +1515,7 @@ def test_apply_drain_poll_timeout_names_the_poll(tmp_path: Path) -> None:
 def test_apply_drain_refused_reports_the_engine_reason(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         if url.endswith("/drain/cancel"):
             return {}
         raise urllib.error.HTTPError(
@@ -1496,7 +1531,7 @@ def test_apply_drain_refused_reports_the_engine_reason(tmp_path: Path) -> None:
 def test_apply_unreachable_engine_names_the_drain_request(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         if url.endswith("/drain/cancel"):
             return {}
         raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
@@ -1510,7 +1545,7 @@ def test_apply_unreachable_engine_names_the_drain_request(tmp_path: Path) -> Non
 def test_apply_failed_cancel_is_recorded(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         raise TimeoutError("timed out")
 
     with pytest.raises(UpdateError) as info:

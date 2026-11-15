@@ -59,7 +59,17 @@ def _restarting() -> _Manager:
     return pcm
 
 
-def _client(pcm: object) -> TestClient:
+class _Schedules:
+    """The schedule manager, with the one count the drain route reads."""
+
+    def __init__(self, count: int = 0) -> None:
+        self.count = count
+
+    def work_count(self) -> int:
+        return self.count
+
+
+def _client(pcm: object, schedules: object | None = None) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/admin/drain", admin_drain, methods=["POST"]),
@@ -67,6 +77,8 @@ def _client(pcm: object) -> TestClient:
         ]
     )
     app.state.project_chat_manager = pcm
+    if schedules is not None:
+        app.state.schedule_manager = schedules
     # The real caller addresses the engine as `localhost`; the routes refuse
     # any other Host, and TestClient's own default is `testserver`.
     return TestClient(app, base_url="http://localhost")
@@ -76,16 +88,20 @@ def test_drain_closes_admission_and_reports_active_chats() -> None:
     pcm = _manager()
     client = _client(pcm)
 
-    resp = client.post("/api/admin/drain")
+    resp = client.post("/api/admin/drain", json={"owner": "op-1"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"draining": True, "active_chat_ids": ["c-1", "c-2"]}
+    assert resp.json() == {
+        "draining": True, "active_chat_ids": ["c-1", "c-2"], "schedule_work_count": 0,
+    }
     # The caller polls by asking again rather than reading a separate chat list,
     # so the drain has to have actually happened rather than merely be
     # acknowledged — and asking again must stay idempotent.
-    again = client.post("/api/admin/drain")
+    again = client.post("/api/admin/drain", json={"owner": "op-1"})
     assert again.status_code == 200
-    assert again.json() == {"draining": True, "active_chat_ids": ["c-1", "c-2"]}
+    assert again.json() == {
+        "draining": True, "active_chat_ids": ["c-1", "c-2"], "schedule_work_count": 0,
+    }
     assert pcm.calls == ["begin", "begin"]
     assert pcm.restart_draining is True
 
@@ -93,9 +109,9 @@ def test_drain_closes_admission_and_reports_active_chats() -> None:
 def test_drain_cancel_reopens_admission() -> None:
     pcm = _manager()
     client = _client(pcm)
-    client.post("/api/admin/drain")
+    client.post("/api/admin/drain", json={"owner": "op-1"})
 
-    resp = client.post("/api/admin/drain/cancel")
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "op-1"})
 
     assert resp.status_code == 200
     assert resp.json() == {"draining": False}
@@ -104,7 +120,7 @@ def test_drain_cancel_reopens_admission() -> None:
 
 
 def test_drain_without_manager_is_a_clear_failure() -> None:
-    resp = _client(pcm=None).post("/api/admin/drain")
+    resp = _client(pcm=None).post("/api/admin/drain", json={"owner": "op-1"})
 
     # 503 rather than a silent success: the updater's foreground half must not
     # think admission is closed when there is no chat manager to close it on.
@@ -131,7 +147,7 @@ def test_drain_routes_refuse_a_foreign_host() -> None:
     client = _client(pcm)
 
     for path in ("/api/admin/drain", "/api/admin/drain/cancel"):
-        resp = client.post(path, headers={"Host": "evil.example"})
+        resp = client.post(path, headers={"Host": "evil.example"}, json={"owner": "op-1"})
         assert resp.status_code == 403, path
         assert resp.json() == {"error": "forbidden host"}
 
@@ -144,7 +160,7 @@ def test_drain_refuses_while_a_settings_restart_is_draining() -> None:
     pcm = _restarting()
     client = _client(pcm)
 
-    resp = client.post("/api/admin/drain")
+    resp = client.post("/api/admin/drain", json={"owner": "op-1"})
 
     # 409: taking the shared flag over would let the update's cancel reopen
     # admission under a restart that is still waiting for its chats.
@@ -159,7 +175,7 @@ def test_drain_cancel_leaves_a_settings_restart_alone() -> None:
     pcm = _restarting()
     client = _client(pcm)
 
-    resp = client.post("/api/admin/drain/cancel")
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "op-1"})
 
     # Not the update's drain to cancel: reported as still draining, and left
     # that way.
@@ -205,7 +221,7 @@ def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
 
     # A manual drain cannot take the claim. It gets the same 409 a Settings
     # restart gets, and admission stays exactly as the claim left it.
-    resp = client.post("/api/admin/drain")
+    resp = client.post("/api/admin/drain", json={"owner": "manual-1"})
     assert resp.status_code == 409
     assert resp.json() == {"error": "a restart is already draining"}
     assert pcm.restart_draining is True
@@ -214,12 +230,11 @@ def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
     # never leaked past the operation that made it.
     assert pcm.cancel_restart_drain("auto-1") is True
     assert pcm.restart_draining is False
-    resp = client.post("/api/admin/drain")
+    resp = client.post("/api/admin/drain", json={"owner": "manual-1"})
     assert resp.status_code == 200
-    assert resp.json() == {"draining": True, "active_chat_ids": []}
-    # A body that is not JSON is "no owner", not a refusal: the manual caller
-    # never sent one and must keep working.
-    assert client.post("/api/admin/drain", content=b"{oops").status_code == 200
+    assert resp.json() == {"draining": True, "active_chat_ids": [], "schedule_work_count": 0}
+    # A body that is not JSON names no owner, and no owner is refused.
+    assert client.post("/api/admin/drain", content=b"{oops").status_code == 400
 
 
 def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
@@ -248,12 +263,8 @@ def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
     assert pcm._drain_owner == ""
 
 
-def test_bodyless_cancel_cannot_reopen_an_owned_claim(tmp_path: Path) -> None:
-    """The manual cancel has no owner, and an owned claim is not its to reopen.
-
-    A bodyless cancel is what the operator path sends; during a claimed update
-    it must be the 409 the mismatch already earns, not a silent steal.
-    """
+def test_ownerless_cancel_cannot_reopen_an_owned_claim(tmp_path: Path) -> None:
+    """A cancel naming no owner is refused outright, and cannot steal a claim."""
     pcm = _real_manager(tmp_path)
     client = _client(pcm)
 
@@ -263,16 +274,51 @@ def test_bodyless_cancel_cannot_reopen_an_owned_claim(tmp_path: Path) -> None:
     assert pcm.drain_owner == "auto-9"
 
     resp = client.post("/api/admin/drain/cancel")
-    assert resp.status_code == 409
-    assert resp.json() == {"error": "drain owned by another operation"}
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "drain owner required"}
+    assert client.post("/api/admin/drain/cancel", content=b"{oops").status_code == 400
     assert pcm.restart_draining is True
     assert pcm.drain_owner == "auto-9"
-
-    # A body that is not JSON is still "no owner", so it cannot reopen either.
-    assert client.post("/api/admin/drain/cancel", content=b"{oops").status_code == 409
-    assert pcm.restart_draining is True
 
     resp = client.post("/api/admin/drain/cancel", json={"owner": "auto-9"})
     assert resp.status_code == 200
     assert resp.json() == {"draining": False}
     assert pcm.restart_draining is False
+
+
+def test_ownerless_drain_is_refused_and_changes_nothing() -> None:
+    pcm = _manager()
+    client = _client(pcm)
+
+    for kwargs in ({}, {"json": {}}, {"json": {"owner": ""}}, {"json": {"owner": 7}}, {"json": []}):
+        resp = client.post("/api/admin/drain", **kwargs)
+        assert resp.status_code == 400, kwargs
+        assert resp.json() == {"error": "drain owner required"}
+    assert pcm.calls == []
+    assert pcm.restart_draining is False
+
+
+def test_a_second_owner_cannot_poll_or_take_a_held_drain() -> None:
+    pcm = _manager()
+    client = _client(pcm)
+    assert client.post("/api/admin/drain", json={"owner": "move-1"}).status_code == 200
+
+    resp = client.post("/api/admin/drain", json={"owner": "update-2"})
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "drain owned by another operation"}
+    assert pcm.owner == "move-1"
+    assert pcm.calls == ["begin"]
+
+
+def test_drain_reports_the_scheduled_work_still_running() -> None:
+    pcm = _manager()
+    schedules = _Schedules(count=2)
+    client = _client(pcm, schedules)
+
+    busy = client.post("/api/admin/drain", json={"owner": "op-1"}).json()
+    schedules.count = 0
+    idle = client.post("/api/admin/drain", json={"owner": "op-1"}).json()
+
+    assert busy["schedule_work_count"] == 2
+    assert idle["schedule_work_count"] == 0

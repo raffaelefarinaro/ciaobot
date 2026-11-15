@@ -168,3 +168,26 @@ async def test_stop_reports_a_run_that_ignores_cancellation(tmp_path: Path) -> N
     assert await manager.stop(settle_timeout=0.1) == 1
     release.set()
     await asyncio.sleep(0.05)
+
+
+async def test_work_count_covers_inflight_runs_and_live_tasks(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        started.set()
+        await release.wait()
+
+    manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
+    assert manager.work_count() == 0
+    entry = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency="manual", title="t",
+    )
+    await manager.dispatch_now(entry.schedule_id, now=_NOW)
+    await asyncio.wait_for(started.wait(), 2)
+    assert manager.work_count() >= 1
+    release.set()
+    await asyncio.sleep(0.05)
+    assert manager.work_count() == 0
