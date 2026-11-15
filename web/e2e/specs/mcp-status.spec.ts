@@ -207,25 +207,21 @@ test(`MCP reveal scrolls only its own rail at ${view.label} size`, async ({ brow
   expect(await rail.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
   if (view.label !== 'desktop') {
     const headingScroll = await rail.evaluate(el => el.scrollTop)
+    await expect(heading).toBeFocused()
     const seeded = await page.request.post('/__fixture__/chat-action', { data: {
       chat_id: 'alpha-chat-1', kind: 'mcp_auth', state: 'open', params: { provider: 'claude', server: 'linear' },
     } })
     expect(seeded.ok()).toBe(true)
     const card = rail.locator('.needs-you-card')
     await expect(card).toBeVisible()
-    await expect.poll(() => rail.evaluate(el => el.scrollTop)).toBeGreaterThan(headingScroll)
+    await expect(heading).toBeFocused()
+    expect(await rail.evaluate(el => el.scrollTop)).toBe(headingScroll)
     const final = await page.evaluate(() => ({
       page: window.scrollY,
       ancestor: document.querySelector<HTMLElement>('#test-scroll-host')!.scrollTop,
       other: document.querySelector<HTMLElement>('.chat-split-side .messages[data-test-scroll-other]')?.scrollTop ?? null,
     }))
     expect(final).toEqual(before)
-    const signIn = card.getByRole('button', { name: 'Sign in', exact: true })
-    const [buttonBox, railBox] = await Promise.all([signIn.boundingBox(), rail.boundingBox()])
-    expect(buttonBox!.y).toBeGreaterThanOrEqual(railBox!.y)
-    expect(buttonBox!.y + buttonBox!.height).toBeLessThanOrEqual(railBox!.y + railBox!.height)
-    await signIn.click({ trial: true })
-    await page.screenshot({ path: `${previews}/${view.label}-later-action.png`, animations: 'disabled' })
   }
   await context.close()
 })

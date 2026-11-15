@@ -2468,7 +2468,7 @@ function toggleWorkDetails() {
       if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
       clearMcpHeadingPriority()
       await nextTick()
-      mcpConnections.value?.revealDrawerAction()
+      mcpConnections.value?.revealDrawerAction(true)
     })
   }
 }
