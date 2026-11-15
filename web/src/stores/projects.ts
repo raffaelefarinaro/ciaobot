@@ -7,7 +7,6 @@ import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
-import { applyTurnVerification } from '../lib/turnVerification'
 import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
 import {
   isRestartDrainMessage,
@@ -5614,7 +5613,15 @@ export const useProjectStore = defineStore('projects', () => {
       case 'turn_verification': {
         // Uncached chat: nothing to update; the next history load carries the overlay.
         const rows = messages.value[msg.chat_id]
-        if (rows) applyTurnVerification(rows, msg.turn_index, msg.verification)
+        if (rows) {
+          const start = rows.findIndex(row => row.role === 'user' && row.turn_index === msg.turn_index)
+          let target = -1
+          for (let i = start + 1; start >= 0 && i < rows.length && rows[i].role !== 'user'; i++) {
+            if (rows[i].role === 'assistant') target = i
+          }
+          // Keep the verdict on history metadata; this UI slice only retires its presentation.
+          if (target >= 0) rows[target].verification = msg.verification
+        }
         break
       }
       case 'chat_pin_changed': {

@@ -47,6 +47,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.curation_run import Worklist
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -6298,20 +6299,27 @@ def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _CurationPlanningResult:
+    payload: dict[str, Any]
+    discovered: Worklist
+    remaining: Worklist
+
+
 def _curation_plan(
     args: argparse.Namespace,
     *,
     category_items: tuple[Any, ...] = (),
     category_generation_attempted: bool = False,
-) -> tuple[dict[str, Any], Any]:
-    from ciao.curation_run import build_worklist, load_state, plan_run
+) -> _CurationPlanningResult:
+    from ciao.curation_run import build_worklist_views, load_state, plan_run
     from ciao.entity_types import load_entity_types
     from ciao.vault_index import VAULT_RENDER_PREFIX
 
     workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
     handover = _workspace_handover(workspace, name)
-    worklist = build_worklist(
+    views = build_worklist_views(
         handover=handover,
         vault_root=vault,
         guide_path=guide,
@@ -6334,6 +6342,7 @@ def _curation_plan(
         # says so in the worklist notes.
         workspace=name,
     )
+    worklist = views.remaining
     plan = plan_run(worklist, budget)
     coverage_notes = [
         "coverage is incomplete: discovery is not exhaustive and observed work may omit items"
@@ -6353,7 +6362,7 @@ def _curation_plan(
         "coverage_notes": coverage_notes,
         "last_run": state.last_run,
     }
-    return payload, worklist
+    return _CurationPlanningResult(payload, views.discovered, views.remaining)
 
 
 def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -6392,11 +6401,11 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     from ciao.curation_run import CurationStateError
 
     try:
-        payload, _ = _curation_plan(args)
+        result = _curation_plan(args)
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
-    _print_curation(payload, as_json=args.json)
+    _print_curation(result.payload, as_json=args.json)
     return 0
 
 
@@ -6425,12 +6434,13 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         _category_cluster_items(vault, registry=load_entity_types(registry_root))
     )
     try:
-        payload, _worklist = _curation_plan(
+        result = _curation_plan(
             args, category_items=categories, category_generation_attempted=True
         )
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
+    payload = result.payload
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
         try:
@@ -6520,11 +6530,12 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     if not holder:
         return 2
     try:
-        payload, worklist = _curation_plan(args)
+        result = _curation_plan(args)
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
-    live_keys = frozenset(key for item in worklist.items for key in item.keys)
+    payload = result.payload
+    live_keys = frozenset(key for item in result.remaining.items for key in item.keys)
     deferred = int(payload.get("deferred_count", 0))
     try:
         # `end_run` stamps the marker itself, inside the lease check. Stamping

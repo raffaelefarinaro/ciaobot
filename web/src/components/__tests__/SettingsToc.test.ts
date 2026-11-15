@@ -81,7 +81,10 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
       'Notifications',
       'Keyboard shortcuts',
     ])
-    expect(labels.slice(5)).toEqual(['Resume after restart', 'Check vault answers', 'Start at sign-in', 'Open source'])
+    expect(labels.slice(5)).toEqual(['Resume after restart', 'Start at sign-in', 'Open source'])
+    expect(labels).not.toContain('Check vault answers')
+    expect(wrapper.findAll('.settings-main .section-title').map(heading => heading.text()))
+      .not.toContain('Check vault answers')
     expect(labels).not.toContain('Memory handover')
     expect(labels).not.toContain('Update task history')
     expect(labels).not.toContain('Session insights')

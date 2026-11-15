@@ -1349,7 +1349,6 @@ class ProjectChatManager:
         # so we notify the user so they can answer in the next turn.
         self.notify_question_cb: Optional[Callable[[str, str], None]] = None
         # Whether a turn that read vault notes gets a claim check (Settings → General).
-        self.verify_vault_answers_enabled: Callable[[], bool] = lambda: True
         # Fired after a read mutation so the macOS companion and remote PWA
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
@@ -9602,53 +9601,6 @@ class ProjectChatManager:
         if isinstance(timing, dict):
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
-
-    async def _verify_turn_and_publish(
-        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
-    ) -> None:
-        """Check a vault-grounded answer against its notes and publish the verdict.
-
-        Advisory: any failure records nothing. Runs as a background task, so the
-        turn's result frame never waits on it.
-        """
-        try:
-            from ciao.insights import resolve_helper_model
-
-            chat = self._chats.get(chat_id)
-            project = self._projects.get(chat.project_id) if chat else None
-            if chat is None or project is None:
-                return
-            workspace = project.workspace
-            provider = chat.provider or "claude"
-            model = resolve_helper_model(
-                self._config, workspace, provider, source_model=chat.model
-            )
-            vault_root = Path(self._config.workspace_vault_root(workspace))
-            result: dict | None = await vault_verification.verify_answer(
-                answer,
-                note_paths,
-                vault_root=vault_root,
-                model=model,
-                provider=provider,
-                cwd=self._agent_root_for_chat(chat_id),
-            )
-        except Exception:  # noqa: BLE001 — the check is advisory
-            logger.info("Vault answer check failed for %s", chat_id, exc_info=True)
-            return
-        if result is None:
-            return
-        # Re-fetch: the chat may have been deleted while the check ran.
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return
-        chat.turn_verification[str(turn_index)] = result
-        self._save()
-        self._events.publish({
-            "type": "turn_verification",
-            "chat_id": chat_id,
-            "turn_index": turn_index,
-            "verification": result,
-        })
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str

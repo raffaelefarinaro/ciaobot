@@ -322,11 +322,6 @@
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
         />
-        <SettingsVaultCheck
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
 
         <!-- Start at sign-in. It changes whether the engine service starts at
              the *next* sign-in, never the engine running now, and never the
@@ -1482,7 +1477,6 @@ import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
-import SettingsVaultCheck from './settings/SettingsVaultCheck.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'

@@ -36,7 +36,7 @@ export const inventory: InventoryEntry[] = [
     kind: 'component',
     owner: { path: 'web/src/components/settings/SettingsSwitch.vue', anchor: 'class="settings-switch"' },
     sources: [],
-    consumers: ['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
+    consumers: ['web/src/components/settings/SettingsRestartResume.vue'],
     variants: ['checked', 'disabled', 'busy'],
     variantNotes: 'Controlled native switch; checked controls On/Off, disabled blocks activation, busy shows an ellipsis without disabling. Parents own saves.',
     states: [
@@ -48,7 +48,7 @@ export const inventory: InventoryEntry[] = [
       { name: 'reduced-motion', coverage: 'uncovered', storyIds: [], note: 'Track transitions stop under reduced motion; no dedicated rendered-state story.' },
     ],
     loading: { status: 'none', detail: 'No initial or refresh fetch. Busy is supplied by a parent, not owner-level loading coverage.' },
-    migration: { status: 'migrated', note: 'Approved shared-switch slice 1: only vault check and restart resume use this component; remaining native Settings switches are not migrated.' },
+    migration: { status: 'migrated', note: 'Approved shared-switch slice 1: restart resume is the remaining Settings consumer; other native Settings switches are not migrated.' },
   },
   {
     "id": "app",
@@ -952,14 +952,13 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "With/without DecisionReason; actual Reka dialog semantics. Detailed variants are unassessed.",
+    "variantNotes": "Production askConfirm/askConfirmReason requests with one mounted host per canvas; no inline Docs. Enter confirms even with Cancel focused, except inside the reason field or chips. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ConfirmDialog.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "default", "coverage": "covered", "storyIds": ["confirm-dialog--normal"], "note": "Normal opens a non-destructive request through askConfirm." },
+      { "name": "destructive", "coverage": "covered", "storyIds": ["confirm-dialog--destructive"], "note": "Destructive uses the actual danger action." },
+      { "name": "reason", "coverage": "covered", "storyIds": ["confirm-dialog--reason"], "note": "Reason uses askConfirmReason and the production DecisionReason." },
+      { "name": "long-content", "coverage": "covered", "storyIds": ["confirm-dialog--long-content"], "note": "Long title, multiline message and longer action label." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["confirm-dialog--narrow"], "note": "Reason dialog in a maximum 390px, 640px-high containing block; also check a real narrow viewport." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -1075,14 +1074,14 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
     "variants": [],
-    "variantNotes": "Actual shared reason field, not a new generic form wrapper. Detailed variants are unassessed.",
+    "variantNotes": "Production controlled field with default quick reasons, custom text and disabled controls; no persistence. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in DecisionReason.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "empty", "coverage": "covered", "storyIds": ["decision-reason--empty"], "note": "Empty controlled textarea and unselected quick reasons." },
+      { "name": "quick-reason", "coverage": "covered", "storyIds": ["decision-reason--quick-reason"], "note": "Already done is selected in the actual chip group." },
+      { "name": "custom", "coverage": "covered", "storyIds": ["decision-reason--custom"], "note": "Custom text with no selected quick reason." },
+      { "name": "disabled", "coverage": "covered", "storyIds": ["decision-reason--disabled"], "note": "All chips and the textarea disabled with a selected reason." },
+      { "name": "long-content", "coverage": "covered", "storyIds": ["decision-reason--long-content"], "note": "Long text at the 1000-character field limit." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["decision-reason--narrow"], "note": "Custom text and wrapping chips in a maximum 390px container." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -1595,9 +1594,27 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeTodayStats.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--default"],
+        "note": "Real owner, project store, memory RouterLink and stats normalization; synthetic GET fixture, no bootstrap."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--loading"],
+        "note": "Held initial stats read: six dashes, no averages. The owner has no loading announcement or skeleton."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--failed"],
+        "note": "Synthetic HTTP 503: six dashes, no averages. The owner catches the error and renders no distinct error message."
+      },
+      {
+        "name": "partial",
+        "coverage": "covered",
+        "storyIds": ["connected-home-today-stats--partial"],
+        "note": "Real normalization of valid zeroes, missing and nonnumeric fields; only valid averages render."
       },
       {
         "name": "other states",
@@ -1607,8 +1624,8 @@ export const inventory: InventoryEntry[] = [
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeTodayStats.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeTodayStats clears values before each read: initial and workspace refresh show dashes. The held initial read is covered; loading and failure are visually identical. Other refresh/race states are not claimed."
     },
     "migration": {
       "status": "unassessed",
@@ -3025,14 +3042,14 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Production askPrompt request after host mount. Empty/whitespace disable submission; no whole-dialog disabled API exists. One host per canvas; no inline Docs. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in PromptDialog.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "empty", "coverage": "covered", "storyIds": ["prompt-dialog--empty"], "note": "Empty input, placeholder and disabled Create action." },
+      { "name": "whitespace", "coverage": "covered", "storyIds": ["prompt-dialog--whitespace"], "note": "Whitespace-only request value cannot submit." },
+      { "name": "prefilled", "coverage": "covered", "storyIds": ["prompt-dialog--prefilled"], "note": "Rename request seeds and selects an existing name." },
+      { "name": "populated", "coverage": "covered", "storyIds": ["prompt-dialog--populated"], "note": "Nonblank text enables submission; returned text is trimmed." },
+      { "name": "disabled", "coverage": "covered", "storyIds": ["prompt-dialog--disabled"], "note": "Actual validation-disabled submit action with whitespace; input and Cancel remain enabled." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["prompt-dialog--narrow"], "note": "Prefilled request in a maximum 390px, 640px-high containing block; also check a real narrow viewport." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -4357,44 +4374,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in TitleRail.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "components-turn-verification-badge",
-    "name": "TurnVerificationBadge",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/TurnVerificationBadge.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatPanel.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Badge/open claim list/source states. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TurnVerificationBadge.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TurnVerificationBadge.vue has not yet been audited."
     },
     "migration": {
       "status": "unassessed",
@@ -6449,19 +6428,43 @@ export const inventory: InventoryEntry[] = [
       "selected",
       "fontFamily"
     ],
-    "variantNotes": "Observed branches in SettingsRadioGroup.vue; remaining variants have not been audited.",
+    "variantNotes": "Controlled label/options/modelValue radio group; Theme, Text contrast and Body font use production consumer options, including per-option fontFamily.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsRadioGroup.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--default"],
+        "note": "Theme with Dark selected in the dark theme; local state accepts production update:modelValue events."
       },
       {
         "name": "selected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsRadioGroup.vue has a selected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--selected"],
+        "note": "Theme with Light selected in the light theme."
+      },
+      {
+        "name": "text-contrast",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--text-contrast"],
+        "note": "Normal/Soft consumer options with Soft selected and the production soft text contrast applied."
+      },
+      {
+        "name": "body-font",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--body-font"],
+        "note": "System/Serif/Mono consumer options in their actual font families, with Serif selected."
+      },
+      {
+        "name": "unselected",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--unselected"],
+        "note": "Null modelValue leaves all options unchecked and the first option tabbable."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--narrow"],
+        "note": "Body font options with Serif selected in a maximum 390px container."
       },
       {
         "name": "disabled",
@@ -6470,19 +6473,19 @@ export const inventory: InventoryEntry[] = [
         "note": "SettingsRadioGroup.vue defines no disabled prop or disabled branch."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "keyboard-focus",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Arrow wraparound, Home/End and focus movement are interactive behavior, not a dedicated rendered focus story."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsRadioGroup.vue has not yet been audited."
+      "status": "none",
+      "detail": "Synchronous controlled component with no fetch, loading or busy branch; parents own persistence."
     },
     "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
+      "status": "retained",
+      "note": "Existing production component and CSS retained; stories do not migrate connected Settings consumers."
     }
   },
   {
@@ -6600,44 +6603,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-settings-vault-check",
-    "name": "SettingsVaultCheck",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/SettingsVaultCheck.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/SettingsView.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsVaultCheck.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsVaultCheck.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-settings-settings-workspace-models",
     "name": "SettingsWorkspaceModels",
     "family": "Settings",
@@ -6744,45 +6709,70 @@ export const inventory: InventoryEntry[] = [
       "path": "web/src/components/settings/WorkspaceColorPicker.vue",
       "anchor": "<template>"
     },
-    "sources": [],
+    "sources": ["web/src/lib/workspaceColors.ts"],
     "consumers": [
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": [
       "selected",
-      "expanded"
+      "expanded",
+      "disabled"
     ],
-    "variantNotes": "Observed branches in WorkspaceColorPicker.vue; remaining variants have not been audited.",
+    "variantNotes": "Controlled modelValue, disabled native buttons and local disclosure; five base presets and four extras. Selected extra remains visible after collapse.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceColorPicker.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--default"],
+        "note": "Amber selected with five base presets and a closed disclosure."
       },
       {
         "name": "selected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceColorPicker.vue has a selected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--selected"],
+        "note": "Pink selected; story parent feeds emitted choices back into modelValue."
       },
       {
         "name": "expanded",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceColorPicker.vue has a expanded branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--expanded"],
+        "note": "Teal selected, all nine presets visible on mount."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "selected-extra-collapsed",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--selected-extra-collapsed"],
+        "note": "Story closes the real disclosure; selected teal remains beside the five base presets."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--disabled"],
+        "note": "Amber selected, collapsed; every swatch and disclosure disabled."
+      },
+      {
+        "name": "disabled-expanded",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--disabled-expanded"],
+        "note": "Teal selected, all nine presets and disclosure disabled."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-workspace-color-picker--narrow"],
+        "note": "Teal selected, expanded inside a maximum 390px container."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Native buttons support Tab and activation with focus-visible styling; no dedicated focus story. Radio arrow-key navigation is not implemented."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceColorPicker.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch or loading branch; the parent supplies modelValue and disabled."
     },
     "migration": {
       "status": "unassessed",
@@ -7210,7 +7200,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7438,7 +7427,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TerminalKeyRow.vue",
       "web/src/components/TerminalPane.vue",
       "web/src/components/TitleRail.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
@@ -7470,7 +7458,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceColorPicker.vue",
@@ -7613,7 +7600,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7701,7 +7687,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProposalHistoryList.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/WebhookTriggers.vue",
       "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7821,7 +7806,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
@@ -7977,7 +7961,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
@@ -8096,7 +8079,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TerminalKeyRow.vue",
       "web/src/components/TerminalPane.vue",
       "web/src/components/TitleRail.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
@@ -8135,7 +8117,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceColorPicker.vue",

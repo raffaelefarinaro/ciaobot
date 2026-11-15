@@ -48,3 +48,46 @@ it('disables every swatch and the disclosure', () => {
   const wrapper = build('amber', { disabled: true })
   for (const button of wrapper.findAll('button')) expect(button.attributes('disabled')).toBeDefined()
 })
+
+it('keeps selection controlled until the parent updates its prop', async () => {
+  const wrapper = build('amber')
+  await wrapper.get('[aria-label="Rose Pink"]').trigger('click')
+  expect(wrapper.get('[aria-label="Ciao Orange"]').attributes('aria-checked')).toBe('true')
+  expect(wrapper.get('[aria-label="Rose Pink"]').attributes('aria-checked')).toBe('false')
+  await wrapper.setProps({ modelValue: 'pink' })
+  expect(wrapper.get('[aria-label="Ciao Orange"]').attributes('aria-checked')).toBe('false')
+  expect(wrapper.get('[aria-label="Rose Pink"]').attributes('aria-checked')).toBe('true')
+  expect(wrapper.findAll('[aria-checked="true"]')).toHaveLength(1)
+})
+
+it('retains the selected extra preset after a genuine disclosure close', async () => {
+  const wrapper = build('amber')
+  await wrapper.get('.workspace-color-swatch--more').trigger('click')
+  await wrapper.get('[aria-label="Deep Teal"]').trigger('click')
+  expect(wrapper.emitted('update:modelValue')).toEqual([['teal']])
+  await wrapper.setProps({ modelValue: 'teal' })
+  await wrapper.get('.workspace-color-swatch--more').trigger('click')
+  expect(wrapper.findAll('[role="radio"]')).toHaveLength(6)
+  expect(wrapper.get('[aria-label="Deep Teal"]').attributes('aria-checked')).toBe('true')
+  expect(wrapper.find('[aria-label="Sky Blue"]').exists()).toBe(false)
+  expect(wrapper.get('.workspace-color-swatch--more').attributes('aria-expanded')).toBe('false')
+  await wrapper.setProps({ modelValue: 'pink' })
+  expect(wrapper.findAll('[role="radio"]')).toHaveLength(5)
+})
+
+it('labels the disabled expanded group with real text and blocks both actions', async () => {
+  const wrapper = mount({
+    components: { WorkspaceColorPicker },
+    template: '<div><p id="colour-label">Workspace colour</p><WorkspaceColorPicker model-value="teal" labelledby="colour-label" disabled /></div>',
+  })
+  const group = wrapper.get('[role="radiogroup"]')
+  expect(wrapper.get(`#${group.attributes('aria-labelledby')}`).text()).toBe('Workspace colour')
+  expect(wrapper.findAll('[role="radio"]')).toHaveLength(9)
+  for (const button of wrapper.findAll('button')) {
+    expect(button.attributes('disabled')).toBeDefined()
+    await button.trigger('click')
+  }
+  expect(wrapper.get('[aria-label="Deep Teal"]').attributes('aria-checked')).toBe('true')
+  expect(wrapper.get('.workspace-color-swatch--more').attributes('aria-expanded')).toBe('true')
+  expect(wrapper.getComponent(WorkspaceColorPicker).emitted('update:modelValue')).toBeUndefined()
+})

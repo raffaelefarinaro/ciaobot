@@ -44,7 +44,7 @@ import socket
 import stat
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -277,6 +277,25 @@ class Worklist:
             "items": [item.as_dict() for item in self.items],
             "notes": list(self.notes),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class WorklistViews:
+    discovered: Worklist
+    remaining: Worklist
+
+
+def remaining_items(
+    discovered: tuple[WorklistItem, ...],
+    done_keys: frozenset[str] | set[str] | None = None,
+) -> tuple[WorklistItem, ...]:
+    done = frozenset(done_keys or ())
+    remaining: list[WorklistItem] = []
+    for item in discovered:
+        keys = tuple(key for key in item.keys if key and key not in done)
+        if keys:
+            remaining.append(replace(item, keys=keys))
+    return tuple(remaining)
 
 
 def _read_text(path: Path) -> str:
@@ -1404,7 +1423,7 @@ def _skill_proposal_items(vault_root: Path) -> list[WorklistItem]:
     ]
 
 
-def build_worklist(
+def build_worklist_views(
     *,
     vault_root: Path,
     guide_path: Path,
@@ -1419,7 +1438,7 @@ def build_worklist(
     user_char_limit: int | None = None,
     workspace: str | None,
     handover: str = "off",
-) -> Worklist:
+) -> WorklistViews:
     """Compute tonight's work from files alone.
 
     ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
@@ -1474,7 +1493,6 @@ def build_worklist(
     guide_path = Path(guide_path)
     workspace_dir = Path(workspace_dir) if workspace_dir is not None else guide_path.parent
     today = today or datetime.now(UTC).date()
-    done = frozenset(done_keys or ())
     memory_limit = memory_char_limit if memory_char_limit is not None else DEFAULT_MEMORY_CHAR_LIMIT
     user_limit = user_char_limit if user_char_limit is not None else DEFAULT_USER_CHAR_LIMIT
 
@@ -1576,27 +1594,60 @@ def build_worklist(
     collected.extend(_skill_proposal_items(vault_root))
 
     order = {pass_id: index for index, pass_id in enumerate(PASS_ORDER)}
-    remaining: list[WorklistItem] = []
-    for item in sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER))):
-        keys = tuple(key for key in item.keys if key not in done)
-        if not keys:
-            continue
-        remaining.append(
-            WorklistItem(
-                pass_id=item.pass_id,
-                label=item.label,
-                reason=item.reason,
-                keys=keys,
-                weekly=item.weekly,
-            )
-        )
-    return Worklist(
-        items=tuple(remaining),
-        weekly_due=weekly_due,
-        last_full_pass=last_full_pass,
-        generated_at=_now_iso(),
-        notes=tuple(notes),
+    discovered_items = tuple(
+        sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER)))
     )
+    remaining = remaining_items(discovered_items, done_keys)
+    generated_at = _now_iso()
+    return WorklistViews(
+        discovered=Worklist(
+            items=discovered_items,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+        remaining=Worklist(
+            items=remaining,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+    )
+
+
+def build_worklist(
+    *,
+    vault_root: Path,
+    guide_path: Path,
+    category_registry: EntityTypeRegistry,
+    config: Any = None,
+    workspace_dir: Path | None = None,
+    path_prefix: Path | None = None,
+    today: date | None = None,
+    done_keys: frozenset[str] | set[str] | None = None,
+    category_items: tuple[WorklistItem, ...] = (),
+    memory_char_limit: int | None = None,
+    user_char_limit: int | None = None,
+    workspace: str | None,
+    handover: str = "off",
+) -> Worklist:
+    return build_worklist_views(
+        vault_root=vault_root,
+        guide_path=guide_path,
+        category_registry=category_registry,
+        config=config,
+        workspace_dir=workspace_dir,
+        path_prefix=path_prefix,
+        today=today,
+        done_keys=done_keys,
+        category_items=category_items,
+        memory_char_limit=memory_char_limit,
+        user_char_limit=user_char_limit,
+        workspace=workspace,
+        handover=handover,
+    ).remaining
 
 
 # ── Budget ────────────────────────────────────────────────────────────────
