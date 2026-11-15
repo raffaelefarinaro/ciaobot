@@ -13,7 +13,7 @@ const meta = {
       const checked = ref(args.checked)
       return { args, checked }
     },
-    template: '<SettingsSwitch v-bind="args" aria-label="Check vault answers" :checked="checked" @toggle="checked = !checked" />',
+    template: '<SettingsSwitch v-bind="args" aria-label="Resume after restart" :checked="checked" @toggle="checked = !checked" />',
   }),
 } satisfies Meta<typeof SettingsSwitch>
 export default meta

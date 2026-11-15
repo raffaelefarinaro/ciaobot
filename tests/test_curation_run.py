@@ -1220,7 +1220,7 @@ def test_an_expired_lease_does_not_wedge_the_vault(tmp_path: Path) -> None:
     cr.begin_run(vault, holder="next", now=started + timedelta(seconds=120))
 
 
-def test_an_unreadable_expiry_reads_as_expired(tmp_path: Path) -> None:
+def test_an_unreadable_expiry_fails_closed_without_overwriting_state(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     cr.begin_run(vault, holder="run-a")
     path = cr.state_path(vault)
@@ -1228,8 +1228,12 @@ def test_an_unreadable_expiry_reads_as_expired(tmp_path: Path) -> None:
     payload["lease"]["expires_at"] = "whenever"
     path.write_text(json.dumps(payload), encoding="utf-8", newline="")
 
-    assert cr.active_lease(vault) is None
-    cr.begin_run(vault, holder="run-b")
+    original = path.read_bytes()
+    with pytest.raises(cr.CurationStateError):
+        cr.active_lease(vault)
+    with pytest.raises(cr.CurationStateError):
+        cr.begin_run(vault, holder="run-b")
+    assert path.read_bytes() == original
 
 
 def test_a_run_that_lost_its_lease_cannot_keep_stamping_work_done(tmp_path: Path) -> None:
@@ -1394,6 +1398,105 @@ def test_curation_begin_exits_temp_fail_when_another_run_holds_the_lease(
     code = _curation_begin_command(_args(tmp_path, vault, guide, holder="run-b"))
 
     assert code == CURATION_BUSY_EXIT
+
+
+@pytest.mark.parametrize("command", ["plan", "begin", "progress", "end"])
+def test_corrupt_state_care_commands_fail_without_success_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    from ciao.cli import (
+        _curation_begin_command,
+        _curation_end_command,
+        _curation_plan_command,
+        _curation_progress_command,
+    )
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date.today().isoformat())
+    path = cr.state_path(vault)
+    path.write_text('{"version":', encoding="utf-8")
+    before = path.read_bytes()
+    args = _args(tmp_path, vault, guide, holder="run", key=["pass:item"])
+    handlers = {
+        "plan": _curation_plan_command,
+        "begin": _curation_begin_command,
+        "progress": _curation_progress_command,
+        "end": _curation_end_command,
+    }
+
+    assert handlers[command](args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert "JSONDecodeError" not in captured.err
+    assert path.read_bytes() == before
+
+
+def test_parser_recursion_is_controlled_by_curation_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao.cli import _curation_plan_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    path = cr.state_path(vault)
+    path.write_text(
+        '{"version":1,"done_keys":{},"lease":{},"last_run":{},"x":'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "}",
+        encoding="utf-8",
+    )
+
+    assert _curation_plan_command(_args(tmp_path, vault, guide)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert "RecursionError" not in captured.err
+
+
+@pytest.mark.parametrize("failure_point", ["planning", "empty-cleanup", "final-check"])
+def test_curation_begin_state_uncertainty_at_each_post_acquisition_seam_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_point: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date.today().isoformat())
+    path = cr.state_path(vault)
+    monkeypatch.setattr(cr, "_category_cluster_items", lambda *_args, **_kwargs: [])
+
+    def corrupt() -> None:
+        path.write_text('{"version":', encoding="utf-8")
+
+    def plan(*_args: object, **_kwargs: object):
+        if failure_point in {"planning", "final-check"}:
+            corrupt()
+        if failure_point == "planning":
+            raise cr.CurationStateError("controlled test uncertainty")
+        return {"empty": failure_point == "empty-cleanup"}, SimpleNamespace(items=[])
+
+    monkeypatch.setattr("ciao.cli._curation_plan", plan)
+    if failure_point == "empty-cleanup":
+        def fail_cleanup(*_args: object, **_kwargs: object) -> object:
+            raise cr.CurationStateError("controlled test uncertainty")
+
+        monkeypatch.setattr(cr, "end_run", fail_cleanup)
+
+    assert _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    if failure_point != "empty-cleanup":
+        assert path.read_text(encoding="utf-8") == '{"version":'
 
 
 def test_curation_begin_releases_the_lease_on_a_quiet_night(
@@ -1589,6 +1692,46 @@ def test_cli_end_expired_unreplaced_holder_returns_busy_without_mutation(
     assert printed == []
     assert cr.state_path(vault).read_bytes() == before_state
     assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before_log
+
+
+def test_cli_end_rejects_corruption_after_planning_without_advancing_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    lease = cr.begin_run(vault, holder="nightly")
+    state_path = cr.state_path(vault)
+    log_path = vault / cr.CURATION_LOG_RELATIVE
+    log_before = log_path.read_bytes()
+    real_end = cr.end_run
+
+    def corrupt_before_commit(*args: object, **kwargs: object) -> dict[str, object]:
+        state_path.write_text('{"version":', encoding="utf-8")
+        return real_end(*args, **kwargs)
+
+    monkeypatch.setattr(cr, "end_run", corrupt_before_commit)
+    monkeypatch.setattr(
+        "ciao.cli._curation_plan",
+        lambda _args: (
+            {"deferred_count": 0, "remaining_observed_count": 0},
+            SimpleNamespace(items=[]),
+        ),
+    )
+
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder=lease.holder)
+    ) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert state_path.read_text(encoding="utf-8") == '{"version":'
+    assert log_path.read_bytes() == log_before
 
 
 def test_cli_end_replacement_during_planning_preserves_replacement_state_and_marker(

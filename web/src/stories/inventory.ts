@@ -13,13 +13,30 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-chat-mcp-terminal-recovery',
+    name: 'ChatMcpTerminalRecovery',
+    family: 'Chat, messages, composer, activity and context',
+    kind: 'component',
+    owner: { path: 'web/src/components/ChatMcpTerminalRecovery.vue', anchor: '<template>' },
+    sources: ['web/src/lib/shellQuote.ts', 'web/src/lib/codeCopy.ts'],
+    consumers: ['web/src/components/ChatMcpConnections.vue'],
+    variants: ['list', 'manual sign-in'],
+    variantNotes: 'Copy-only recovery in ChatMcpConnections; no terminal operation is initiated.',
+    states: [
+      { name: 'closed', coverage: 'uncovered', storyIds: [], note: 'Eligible recovery starts closed; no story exists.' },
+      { name: 'commands and copy result', coverage: 'uncovered', storyIds: [], note: 'Command previews and clipboard outcomes have no stories.' },
+    ],
+    loading: { status: 'none', detail: 'No fetch; clipboard writes have a local busy state.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',
     kind: 'component',
     owner: { path: 'web/src/components/settings/SettingsSwitch.vue', anchor: 'class="settings-switch"' },
     sources: [],
-    consumers: ['web/src/components/settings/SettingsVaultCheck.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
+    consumers: ['web/src/components/settings/SettingsRestartResume.vue'],
     variants: ['checked', 'disabled', 'busy'],
     variantNotes: 'Controlled native switch; checked controls On/Off, disabled blocks activation, busy shows an ellipsis without disabling. Parents own saves.',
     states: [
@@ -31,7 +48,7 @@ export const inventory: InventoryEntry[] = [
       { name: 'reduced-motion', coverage: 'uncovered', storyIds: [], note: 'Track transitions stop under reduced motion; no dedicated rendered-state story.' },
     ],
     loading: { status: 'none', detail: 'No initial or refresh fetch. Busy is supplied by a parent, not owner-level loading coverage.' },
-    migration: { status: 'migrated', note: 'Approved shared-switch slice 1: only vault check and restart resume use this component; remaining native Settings switches are not migrated.' },
+    migration: { status: 'migrated', note: 'Approved shared-switch slice 1: restart resume is the remaining Settings consumer; other native Settings switches are not migrated.' },
   },
   {
     "id": "app",
@@ -4347,44 +4364,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-turn-verification-badge",
-    "name": "TurnVerificationBadge",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/TurnVerificationBadge.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatPanel.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Badge/open claim list/source states. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TurnVerificationBadge.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TurnVerificationBadge.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-update-progress-view",
     "name": "UpdateProgressView",
     "family": "Root, navigation and common presentation",
@@ -6583,44 +6562,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-settings-vault-check",
-    "name": "SettingsVaultCheck",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/SettingsVaultCheck.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/SettingsView.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsVaultCheck.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsVaultCheck.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-settings-settings-workspace-models",
     "name": "SettingsWorkspaceModels",
     "family": "Settings",
@@ -7193,7 +7134,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7421,7 +7361,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TerminalKeyRow.vue",
       "web/src/components/TerminalPane.vue",
       "web/src/components/TitleRail.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
@@ -7453,7 +7392,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceColorPicker.vue",
@@ -7596,7 +7534,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7684,7 +7621,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProposalHistoryList.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/WebhookTriggers.vue",
       "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
@@ -7804,7 +7740,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
@@ -7960,7 +7895,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
@@ -8079,7 +8013,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TerminalKeyRow.vue",
       "web/src/components/TerminalPane.vue",
       "web/src/components/TitleRail.vue",
-      "web/src/components/TurnVerificationBadge.vue",
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
@@ -8118,7 +8051,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsRestartResume.vue",
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
-      "web/src/components/settings/SettingsVaultCheck.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
       "web/src/components/settings/WorkspaceColorPicker.vue",

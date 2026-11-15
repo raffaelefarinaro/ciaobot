@@ -149,12 +149,13 @@ const TURN_FACTS_TRANSCRIPT = [
 ]
 
 /**
- * One vault-grounded turn whose answer the engine checked against the notes it
- * read: one claim supported, one not in the notes, one general knowledge. A
- * browser spec checks the badge is visible without hover and opens its list.
+ * Historical verdict metadata stays in the transcript fixture after the
+ * dedicated answer-check UI is removed. Keep ordinary tool activity alongside
+ * it so the removal regression also guards the normal activity trace.
  */
 const VAULT_CHECK_TRANSCRIPT = [
   { role: 'user', content: 'Where does Ann live now?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'system', content: '$ Bash git status', tool_name: '_activity' },
   {
     role: 'assistant',
     content: 'Ann moved to Rome in March and works at the Bergamo office twice a week. Rome is the capital of Italy.',
@@ -664,9 +665,39 @@ const GET_ROUTES = {
   '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
-    models: ['synthetic-model'],
+    // A realistic picker needs enough options to exercise its own scroll
+    // container; a single model never overflows at the constrained viewport.
+    models: [
+      'synthetic-model',
+      'claude-opus-4-1',
+      'claude-opus-4',
+      'claude-sonnet-4-5',
+      'claude-sonnet-4',
+      'claude-sonnet-3-7',
+      'claude-sonnet-3-5',
+      'claude-haiku-3-5',
+      'claude-haiku-3',
+      'claude-3-opus-20240229',
+      'claude-3-sonnet-20240229',
+      'claude-3-haiku-20240307',
+    ],
     default: 'synthetic-model',
-    provider_models: { claude: ['synthetic-model'] },
+    provider_models: {
+      claude: [
+        'synthetic-model',
+        'claude-opus-4-1',
+        'claude-opus-4',
+        'claude-sonnet-4-5',
+        'claude-sonnet-4',
+        'claude-sonnet-3-7',
+        'claude-sonnet-3-5',
+        'claude-haiku-3-5',
+        'claude-haiku-3',
+        'claude-3-opus-20240229',
+        'claude-3-sonnet-20240229',
+        'claude-3-haiku-20240307',
+      ],
+    },
     provider_defaults: { claude: 'synthetic-model' },
     providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }],
     thinking_levels: { claude: ['low', 'high'] },

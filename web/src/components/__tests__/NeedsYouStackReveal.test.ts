@@ -16,12 +16,6 @@ const apiPost = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: apiPost, patch: vi.fn(), del: vi.fn(), postForm: vi.fn() },
 }))
-// Off-loopback, so a waiting sign-in with a url shows its paste field.
-vi.mock('../../lib/loopback', () => ({
-  isLoopbackPage: () => false,
-  isLoopbackHostname: () => false,
-}))
-
 const CHAT_ID = 'chat-1'
 /** The stack's box is 0..300. */
 const STACK = { top: 0, bottom: 300 }
@@ -36,16 +30,14 @@ function rect(top: number, bottom: number): DOMRect {
   return { top, bottom, left: 0, right: 0, x: 0, y: top, width: 0, height: bottom - top, toJSON() {} } as DOMRect
 }
 
-function signIn(id: string, state: ChatAction['state'] = 'open', server = 'linear'): ChatAction {
-  return {
-    id,
-    kind: 'mcp_auth',
-    origin: 'engine',
-    state,
-    params: { server, provider: 'claude', url: 'https://auth.example.invalid/a' },
-    error: '',
-    created_at: 1,
-  }
+function device(id: string, state: ChatAction['state'] = 'open'): ChatAction {
+  return { id, kind: 'device_code', origin: 'engine', state,
+    params: { tool: 'gh', code: 'ABCD-1234', url: 'https://github.com/login/device' }, error: '', created_at: 1 }
+}
+
+function command(id: string): ChatAction {
+  return { id, kind: 'command', origin: 'engine', state: 'open',
+    params: { command: 'echo hello' }, error: '', created_at: 1 }
 }
 
 let wrapper: VueWrapper | null = null
@@ -74,7 +66,7 @@ beforeEach(() => {
   }))
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
     if (this.classList.contains('needs-you-stack')) return rect(STACK.top, STACK.bottom)
-    if (this.hasAttribute('data-needs-you-primary')) return rect(primary.top, primary.bottom)
+    if (this.hasAttribute('data-needs-you-primary') || this.classList.contains('needs-you-btn--primary')) return rect(primary.top, primary.bottom)
     return rect(0, 0)
   })
 })
@@ -89,15 +81,16 @@ afterEach(() => {
 })
 
 describe('NeedsYouStack reveal', () => {
-  it('scrolls a waiting sign-in so its paste field is in view, without moving the focus', async () => {
-    const w = mountStack([signIn('a1', 'open')])
+  it('scrolls a waiting device code into view without moving the focus', async () => {
+    const w = mountStack([device('a1', 'open')])
     await flushPromises()
-    expect(scrollTo).not.toHaveBeenCalled()
+    scrollTo.mockReset()
 
     const before = document.activeElement
-    await w.setProps({ actions: [signIn('a1', 'waiting')] })
+    await w.setProps({ actions: [device('a1', 'waiting')] })
     await flushPromises()
 
+    expect(w.find('[data-needs-you-primary]').text()).toBe('ABCD-1234')
     expect(scrollTo).toHaveBeenCalledTimes(1)
     expect(scrollTo.mock.contexts[0]).toBe(w.find('.needs-you-stack').element)
     // 460 + 8 pad - 300 bottom = 168 more to scroll.
@@ -107,7 +100,7 @@ describe('NeedsYouStack reveal', () => {
 
   it('jumps instead of gliding under reduced motion', async () => {
     reduce = true
-    const w = mountStack([signIn('a1', 'waiting')])
+    const w = mountStack([device('a1', 'waiting')])
     await flushPromises()
 
     expect(scrollTo).toHaveBeenCalledWith({ top: 168, behavior: 'auto' })
@@ -115,26 +108,34 @@ describe('NeedsYouStack reveal', () => {
   })
 
   it('does not scroll while the focus is in another card', async () => {
-    const w = mountStack([signIn('a1', 'waiting')])
+    const w = mountStack([device('a1', 'waiting')])
     await flushPromises()
     scrollTo.mockReset()
 
-    const input = w.find('[data-action-id="a1"] input').element as HTMLInputElement
-    input.focus()
-    expect(document.activeElement).toBe(input)
+    const button = w.find('[data-action-id="a1"] button').element as HTMLButtonElement
+    button.focus()
+    expect(document.activeElement).toBe(button)
 
-    await w.setProps({ actions: [signIn('a1', 'waiting'), signIn('a2', 'waiting', 'sentry')] })
+    await w.setProps({ actions: [device('a1', 'waiting'), device('a2', 'waiting')] })
     await flushPromises()
 
     expect(scrollTo).not.toHaveBeenCalled()
-    expect(document.activeElement).toBe(input)
+    expect(document.activeElement).toBe(button)
   })
 
   it('does not scroll when the key control is already in view', async () => {
     primary = { top: 100, bottom: 200 }
-    mountStack([signIn('a1', 'waiting')])
+    mountStack([device('a1', 'waiting')])
     await flushPromises()
 
     expect(scrollTo).not.toHaveBeenCalled()
+  })
+
+  it('reveals a command primary button in the stack', async () => {
+    const w = mountStack([command('c1')])
+    await flushPromises()
+    expect(w.find('.needs-you-btn--primary').text()).toBe('Type it in a terminal')
+    expect(scrollTo).toHaveBeenCalledWith({ top: 168, behavior: 'smooth' })
+    expect(scrollTo.mock.contexts[0]).toBe(w.find('.needs-you-stack').element)
   })
 })

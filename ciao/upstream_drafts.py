@@ -1042,7 +1042,7 @@ def unattended_run(config: CiaoConfig, workspace: str) -> str:
     is not an unattended run, and refusing on a guess would block a person from
     deciding their own draft.
     """
-    from ciao.curation_run import active_lease
+    from ciao.curation_run import CurationStateError, active_lease
 
     try:
         vault = Path(config.workspace_vault_root(workspace))
@@ -1050,9 +1050,15 @@ def unattended_run(config: CiaoConfig, workspace: str) -> str:
         return ""
     try:
         lease = active_lease(vault)
+    except CurationStateError:
+        raise UnattendedRefused(
+            "curation state is uncertain; attended-only draft actions are refused"
+        ) from None
     except OSError:  # pragma: no cover - an unreadable state file decides nothing
         logger.debug("Could not read the curation state of %s", vault, exc_info=True)
-        return ""
+        raise UnattendedRefused(
+            "curation state could not be read; attended-only draft actions are refused"
+        ) from None
     if not lease:
         return ""
     return str(lease.get("holder") or "an unattended run")
