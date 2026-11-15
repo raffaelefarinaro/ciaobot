@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import errno
 import functools
 import hashlib
@@ -21,7 +22,6 @@ import tempfile
 import time
 import unicodedata
 from collections import defaultdict
-import dataclasses
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -6478,7 +6478,12 @@ async def schedule_detail(request: Request) -> JSONResponse:
     schedule_id = request.path_params["schedule_id"]
     if request.method == "DELETE":
         sm = request.app.state.schedule_manager
-        ok = sm.delete(schedule_id)
+        try:
+            ok = sm.delete(schedule_id)
+        except ScheduleStoreCorrupt:
+            return JSONResponse(
+                {"error": "schedule store is unreadable; nothing was changed"}, status_code=503
+            )
         publish_automations_changed(request.app.state.project_chat_manager)
         return JSONResponse({"ok": ok})
     # PATCH

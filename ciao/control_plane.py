@@ -6954,7 +6954,7 @@ class CiaoControlPlane:
         return check
 
     @staticmethod
-    def _schedule_store_errors(schedule_id: str):
+    def _schedule_store_errors(schedule_id: str) -> contextlib.AbstractContextManager[None]:
         """Translate store failures of a scoped write into tool errors."""
 
         @contextlib.contextmanager

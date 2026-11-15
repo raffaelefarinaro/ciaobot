@@ -6,6 +6,7 @@ import dataclasses
 import json
 import multiprocessing
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,7 @@ def test_corrupt_store_is_never_overwritten_as_empty(tmp_path: Path, name: str) 
         if name == "schedules.json":
             _create(store)
         else:
-            store.record_system_first_seen(__import__("datetime").datetime.now())
+            store.record_system_first_seen(datetime.now())
     assert (tmp_path / name).read_text(encoding="utf-8") == "{not json"
 
 
@@ -188,3 +189,46 @@ def test_system_overlay_scoped_write_keeps_concurrent_field(tmp_path: Path) -> N
     assert final is not None
     assert final.enabled is stale_a.enabled
     assert final.archive_policy == stale_b.archive_policy
+
+
+@pytest.mark.asyncio
+async def test_corrupt_system_state_does_not_stop_the_tick(tmp_path: Path) -> None:
+    from ciao.schedules import ScheduleManager
+
+    store = ScheduleStore(tmp_path, include_system=True)
+    (tmp_path / "system_schedules_state.json").write_text("{bad", encoding="utf-8")
+
+    async def dispatch(*_a, **_k) -> None:
+        return None
+
+    manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
+    await manager.tick()
+    assert (tmp_path / "system_schedules_state.json").read_text(encoding="utf-8") == "{bad"
+
+
+def test_scoped_write_keeps_state_inherited_from_a_legacy_overlay(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True, workspace_names=lambda: ["ws"])
+    fanned = next(e for e in store.list_entries() if "@ws" in e.schedule_id)
+    base_id = fanned.schedule_id.split("@")[0]
+    (tmp_path / "system_schedules_state.json").write_text(
+        json.dumps({"schedules": {base_id: {"enabled": False, "last_status": "ok"}}}),
+        encoding="utf-8",
+    )
+    current = store.get(fanned.schedule_id)
+    assert current is not None and current.enabled is False
+    base = dataclasses.replace(current)
+    current.archive_policy = "auto" if current.archive_policy != "auto" else "manual"
+    store.replace(current, base=base)
+    after = store.get(fanned.schedule_id)
+    assert after is not None
+    assert after.enabled is False
+    assert after.last_status == "ok"
+
+
+def test_rename_with_corrupt_overlay_changes_nothing(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    _create(store, workspace="old")
+    (tmp_path / "system_schedules_state.json").write_text("{bad", encoding="utf-8")
+    with pytest.raises(ScheduleStoreCorrupt):
+        store.rename_workspace("old", "new")
+    assert _raw(tmp_path)["schedules"][0]["workspace"] == "old"

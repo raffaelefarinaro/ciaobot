@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
 import re
 import threading
 import uuid
-import dataclasses
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -1253,7 +1253,7 @@ _ROOT_LOCKS_GUARD = threading.Lock()
 
 
 def _root_lock(runtime_root: Path) -> _RootLock:
-    key = os.path.realpath(runtime_root)
+    key = os.path.normcase(os.path.realpath(runtime_root))
     with _ROOT_LOCKS_GUARD:
         lock = _ROOT_LOCKS.get(key)
         if lock is None:
@@ -1465,8 +1465,9 @@ class ScheduleStore:
         with self._txn():
             if authorize is not None:
                 current = self.get(entry.schedule_id)
-                if current is not None:
-                    authorize(current)
+                if current is None:
+                    raise ScheduleNotFound(entry.schedule_id)
+                authorize(current)
             if entry.scope == "system":
                 self._replace_system_state(entry, timing_fields=timing_fields)
                 return
@@ -1494,6 +1495,13 @@ class ScheduleStore:
                 if entry.scope == "system":
                     return False
             data = self._load_for_write()
+            if (
+                entry is None
+                and authorize is not None
+                and any(isinstance(i, dict) and i.get("schedule_id") == schedule_id for i in data.get("schedules", []))
+            ):
+                # A stored row that cannot be listed cannot be authorized.
+                raise ScheduleNotFound(schedule_id)
             before = len(data.setdefault("schedules", []))
             data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
             if len(data["schedules"]) == before:
@@ -1565,6 +1573,9 @@ class ScheduleStore:
         renamed = 0
         with self._txn():
             data = self._load_for_write()
+            # Load both stores before writing either, so an unreadable overlay
+            # refuses the whole rename instead of leaving it half-applied.
+            state = self._load_system_state(strict=True)
             dirty = False
             for item in data.get("schedules", []):
                 if (
@@ -1577,7 +1588,6 @@ class ScheduleStore:
                     renamed += 1
             if dirty:
                 self._save(data)
-            state = self._load_system_state(strict=True)
             rebuilt: dict[str, dict] = {}
             relocated = 0
             for schedule_id, overlay in state.items():
@@ -1949,8 +1959,11 @@ class ScheduleStore:
         was_direct = entry.schedule_id in state
         current = state.setdefault(entry.schedule_id, {})
         if not was_direct:
+            # The new direct key shadows the legacy overlay entirely, so carry
+            # every inherited field across or a disabled routine comes back
+            # enabled and its last-run stamps are lost.
             inherited = state.get(system_base_id(entry.schedule_id), {})
-            for field in SYSTEM_TIMING_FIELDS:
+            for field in SYSTEM_STATE_FIELDS | {SYSTEM_FIRST_SEEN_KEY}:
                 if field in inherited:
                     current[field] = inherited[field]
         for field in SYSTEM_STATE_FIELDS:
@@ -2658,6 +2671,15 @@ class ScheduleManager:
             self._store.replace(entry)
         return result
 
+    def _record_first_seen(self, now: datetime) -> None:
+        # An unreadable overlay file blocks the stamp (writes fail closed) but
+        # must not stop the scheduler: due rows still fire and the stamp is
+        # retried on the next tick once the file is repaired.
+        try:
+            self._store.record_system_first_seen(now)
+        except ScheduleStoreCorrupt:
+            logger.exception("system schedule state is unreadable; not stamping first-seen")
+
     async def tick(self, now: datetime | None = None) -> None:
         if self._admission_refuses():
             # A claim holds admission closed. Nothing is evaluated, so nothing
@@ -2667,7 +2689,7 @@ class ScheduleManager:
         if self._is_node_active is not None and not self._is_node_active():
             return
         current = now or _now_utc()
-        self._store.record_system_first_seen(current)
+        self._record_first_seen(current)
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
@@ -2864,7 +2886,7 @@ class ScheduleManager:
         current = now or _now_utc()
         # Even under skip_system: the post-setup grace startup is exactly when
         # a fresh install's rows must be stamped.
-        self._store.record_system_first_seen(current)
+        self._record_first_seen(current)
         fired: list[str] = []
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
