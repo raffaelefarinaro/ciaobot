@@ -31,7 +31,8 @@
               :items="titleRail.items.value"
               :current-id="schedule.schedule_id"
               group-label="Automations in this workspace"
-              @select="titleRail.select"
+              :busy="titleRail.switching.value"
+              @select="onRailSelect"
               @lean="railLean = $event"
               @pull="emit('pull', $event)"
               @pull-end="(dy: number, v: number) => emit('pull-end', dy, v)"
@@ -878,6 +879,13 @@ const titleRailOn = computed(() => !props.showNew && titleRail.items.value.lengt
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
 const railLean = ref(0)
 const railArrival = ref<-1 | 1 | 0>(0)
+async function onRailSelect(id: string): Promise<void> {
+  try {
+    await titleRail.select(id)
+  } catch {
+    railLean.value = 0
+  }
+}
 // Only the page's own arrival ends it, not an animation bubbling up from inside it.
 function onArrivalEnd(e: AnimationEvent): void {
   if (e.target === e.currentTarget) railArrival.value = 0

@@ -90,7 +90,9 @@ describe('useChatRail', () => {
 
   it('a rail select makes the next instance reuse the order', async () => {
     const store = seed()
-    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue()
+    const switchChat = vi.spyOn(store, 'switchChat').mockImplementation(async id => {
+      store.activeChatId = id
+    })
     const rail = useChatRail(() => 'b')
     const before = ids(rail)
 

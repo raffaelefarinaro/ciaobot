@@ -30,6 +30,7 @@
               :items="titleRail.items.value"
               :current-id="project.project_id"
               group-label="Projects in this workspace"
+              :busy="titleRail.switching.value"
               @select="onRailSelect"
               @rename="startEditName"
               @lean="railLean = $event"

@@ -3824,6 +3824,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                 :items="taskRail.items.value"
                 :current-id="detailId"
                 group-label="Tasks on this board"
+                :busy="taskRail.switching.value"
                 @select="onTaskRailSelect"
                 @rename="detailTitleField?.focus()"
                 @lean="taskRailLean = $event"

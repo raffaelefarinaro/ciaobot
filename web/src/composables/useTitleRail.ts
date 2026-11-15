@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef } from 'vue'
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 import { railNeighbours, stableRailOrder, type RailItem } from '../lib/titleRail'
 
 /**
@@ -17,7 +17,7 @@ interface RailState {
   // mounts or updates for it, so its body can slide in from that side.
   arrival: -1 | 1 | 0
   // True while a switch is in flight; a second swipe during it is ignored.
-  switching: boolean
+  switching: Ref<boolean>
 }
 
 // Module-level so it survives remounts (ChatLayout keys ChatPanel by chat id).
@@ -25,7 +25,7 @@ const states = new Map<string, RailState>()
 function stateFor(key: string): RailState {
   let state = states.get(key)
   if (!state) {
-    state = { snapshot: null, arrival: 0, switching: false }
+    state = { snapshot: null, arrival: 0, switching: ref(false) }
     states.set(key, state)
   }
   return state
@@ -50,12 +50,13 @@ export function resetRailState(key: string): void {
   if (!state) return
   state.snapshot = null
   state.arrival = 0
-  state.switching = false
+  state.switching.value = false
 }
 
 export interface TitleRail {
   items: ComputedRef<RailItem[]>
   neighbours: ComputedRef<{ index: number; previous: string | null; next: string | null }>
+  switching: Ref<boolean>
   select: (id: string) => Promise<void>
   step: (direction: -1 | 1) => boolean
 }
@@ -66,7 +67,7 @@ export function useTitleRail(key: string, options: {
   currentId: () => string
   /** The live list, in sidebar order. */
   entries: ComputedRef<RailItem[]>
-  /** Open another item. Rejects when the switch fails. */
+  /** Open another item. Rejects on failure and resolves false when a guard vetoes it. */
   navigate: (id: string) => Promise<unknown>
 }): TitleRail {
   const state = stateFor(key)
@@ -95,19 +96,23 @@ export function useTitleRail(key: string, options: {
 
   async function select(id: string): Promise<void> {
     const current = options.currentId()
-    if (state.switching || id === current) return
-    state.switching = true
+    if (state.switching.value || id === current) return
+    state.switching.value = true
     try {
       const ids = items.value.map(i => i.id)
       state.snapshot = { scope: options.scope(), id, ids }
       state.arrival = ids.indexOf(id) > ids.indexOf(current) ? 1 : -1
-      await options.navigate(id)
+      const accepted = await options.navigate(id)
+      if (accepted === false) {
+        state.snapshot = null
+        state.arrival = 0
+      }
     } catch (err) {
       state.snapshot = null
       state.arrival = 0
       throw err
     } finally {
-      state.switching = false
+      state.switching.value = false
     }
   }
 
@@ -119,5 +124,5 @@ export function useTitleRail(key: string, options: {
     return true
   }
 
-  return { items, neighbours, select, step }
+  return { items, neighbours, switching: state.switching, select, step }
 }

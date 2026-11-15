@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test'
 import { COMPOSER, boot, isolate } from '../support/app'
 
 /**
- * The chat title rail needs a real layout: jsdom has no scroll snapping, no
- * touch scrolling and no box geometry. The fixture gives workspace alpha two
+ * The chat title rail needs real browser geometry; jsdom has no box layout.
+ * The fixture gives workspace alpha two
  * active chats with the same timestamps, both read, so the rail order is
  * [alpha-chat-1, alpha-chat-2].
  */
@@ -58,6 +58,55 @@ test.describe('chat title rail, desktop', () => {
     await page.keyboard.press('ArrowRight')
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
     await expect(page.locator('.title-rail-item[aria-current="page"]')).toContainText('alpha second conversation')
+  })
+
+  test('recentres the current title after the pane is resized mid-gesture', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-2', COMPOSER)
+    await page.locator('.title-rail-strip').evaluate(strip => {
+      strip.scrollLeft += strip.clientWidth * 0.3
+      strip.dispatchEvent(new Event('scroll'))
+    })
+    await page.setViewportSize({ width: 700, height: 800 })
+    const title = page.locator('.title-rail-item[aria-current="page"] .title-rail-title')
+    const column = page.locator('.messages-content')
+    await expect.poll(async () => {
+      const [titleBox, columnBox] = await Promise.all([title.boundingBox(), column.boundingBox()])
+      return Math.abs((titleBox!.x + titleBox!.width / 2) - (columnBox!.x + columnBox!.width / 2))
+    }).toBeLessThanOrEqual(2)
+    await page.screenshot({ path: 'test-results/title-rail-resize-recenter.png' })
+  })
+
+  test('a large wheel fling advances one chat and ignores momentum while it loads', async ({ page }) => {
+    await page.route(/\/api\/chats(\?.*)?$/, async route => {
+      const response = await route.fetch()
+      const chats = await response.json() as Array<Record<string, unknown>>
+      const base = chats.find(c => c.chat_id === 'alpha-chat-2')!
+      const extra = Array.from({ length: 11 }, (_, i) => ({ ...base, chat_id: `alpha-extra-${i}`, title: `alpha extra ${i}` }))
+      await route.fulfill({ response, json: [...chats, ...extra] })
+    })
+    await page.route('**/api/chats/alpha-chat-2/messages*', async route => {
+      await new Promise(resolve => setTimeout(resolve, 600))
+      await route.continue()
+    })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    const strip = page.locator('.title-rail-strip')
+    await strip.evaluate(el => el.dispatchEvent(new WheelEvent('wheel', {
+      deltaX: el.clientWidth * 10,
+      deltaY: 0,
+      bubbles: true,
+      cancelable: true,
+    })))
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+    await strip.evaluate(el => el.dispatchEvent(new WheelEvent('wheel', {
+      deltaX: el.clientWidth * 10,
+      deltaY: 0,
+      bubbles: true,
+      cancelable: true,
+    })))
+
+    await expect(page.locator('.title-rail-item[aria-current="page"]')).toContainText('alpha second conversation')
+    await expect(page.locator('.chat-panel')).not.toHaveClass(/rail-leaning/)
   })
 
   test('with 13 chats the track keeps one segment per chat inside the rail and the header stays 61px', async ({ page }) => {

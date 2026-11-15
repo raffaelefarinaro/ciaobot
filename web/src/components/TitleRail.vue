@@ -85,7 +85,7 @@ import { prefersReducedMotion } from '../lib/motion'
  * `data-rail-column`, so the title centres on the column rather than the header;
  * an element that leans or slides with the rail carries `data-rail-lean`.
  */
-const props = defineProps<{ items: RailItem[]; currentId: string; groupLabel: string }>()
+const props = defineProps<{ items: RailItem[]; currentId: string; groupLabel: string; busy?: boolean }>()
 
 const emit = defineEmits<{
   select: [id: string]
@@ -171,12 +171,30 @@ function itemEls(): HTMLElement[] {
   return Array.from(strip.value?.querySelectorAll<HTMLElement>('.title-rail-item') ?? [])
 }
 
+function centredLeft(item: HTMLElement, el: HTMLElement): number {
+  return item.offsetLeft + item.offsetWidth / 2 - el.clientWidth / 2
+}
+
+function boundedLeft(left: number, index = neighbours.value.index): number {
+  const el = strip.value
+  const items = itemEls()
+  const current = items[index]
+  if (!el || !current) return left
+  const min = centredLeft(items[index - 1] ?? current, el)
+  const max = centredLeft(items[index + 1] ?? current, el)
+  return Math.max(min, Math.min(max, left))
+}
+
 // Instant, no animation: puts the current item in view.
 function centre(): void {
   const el = strip.value
   const cur = itemEls()[neighbours.value.index]
-  if (el && cur) el.scrollLeft = cur.offsetLeft + cur.offsetWidth / 2 - el.clientWidth / 2
+  if (timer) { clearTimeout(timer); timer = null }
+  gestureSeen = false
+  moving.value = false
+  if (el && cur) el.scrollLeft = centredLeft(cur, el)
   position.value = neighbours.value.index
+  emit('lean', 0)
 }
 
 /**
@@ -187,7 +205,7 @@ function centre(): void {
 let sliding: ReturnType<typeof setTimeout> | null = null
 function slide(direction: -1 | 1): boolean {
   const target = direction < 0 ? neighbours.value.previous : neighbours.value.next
-  if (!target || sliding) return false
+  if (!target || sliding || props.busy) return false
   const el = strip.value
   const to = itemEls()[neighbours.value.index + direction]
   if (!el || !to || prefersReducedMotion()) {
@@ -195,7 +213,7 @@ function slide(direction: -1 | 1): boolean {
     return true
   }
   gestureSeen = false
-  el.scrollTo({ left: to.offsetLeft + to.offsetWidth / 2 - el.clientWidth / 2, behavior: 'smooth' })
+  el.scrollTo({ left: centredLeft(to, el), behavior: 'smooth' })
   sliding = setTimeout(() => { sliding = null; emit('select', target) }, RAIL_SLIDE_MS)
   return true
 }
@@ -211,7 +229,8 @@ function settle(): void {
     strip.value.scrollLeft + strip.value.clientWidth / 2,
     itemEls().map(e => e.offsetLeft + e.offsetWidth / 2),
   )
-  const target = props.items[i]
+  const boundedIndex = Math.max(neighbours.value.index - 1, Math.min(neighbours.value.index + 1, i))
+  const target = props.items[boundedIndex]
   if (target && target.id !== props.currentId) { emit('select', target.id); return }
   // Settled on the current item but off centre (a wheel nudge short of halfway): spring back.
   // Without scroll-snap nothing else re-centres it.
@@ -229,10 +248,10 @@ function onScroll(): void {
 // Only a sideways wheel is a strip gesture; a vertical one is the page scrolling. The strip
 // is not a native scroller, so a sideways wheel moves it here, then settles like a swipe.
 function onWheel(e: WheelEvent): void {
-  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || !strip.value || sliding || drag) return
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || !strip.value || sliding || props.busy || drag) return
   e.preventDefault()
   gestureSeen = true
-  strip.value.scrollLeft += e.deltaX
+  strip.value.scrollLeft = boundedLeft(strip.value.scrollLeft + e.deltaX)
   onScroll()
 }
 
@@ -241,6 +260,10 @@ watch(
   () => { void nextTick(centre) },
   { flush: 'post' },
 )
+
+watch(() => props.busy, (busy, wasBusy) => {
+  if (wasBusy && !busy) centre()
+})
 
 /**
  * Pointer gestures on the title. After 8px the drag locks to an axis:
@@ -252,7 +275,7 @@ watch(
 const PULL_LOCK_PX = 8
 let drag: { id: number; x0: number; y0: number; t0: number; left0: number; axis: 'x' | 'y' | 'none' | null } | null = null
 function onPointerDown(e: PointerEvent): void {
-  if (e.button !== 0 || sliding || drag) return
+  if (e.button !== 0 || sliding || props.busy || drag) return
   drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), left0: strip.value?.scrollLeft ?? 0, axis: null }
 }
 function onPointerMove(e: PointerEvent): void {
@@ -267,7 +290,7 @@ function onPointerMove(e: PointerEvent): void {
   if (drag.axis === 'y') {
     emit('pull', Math.max(0, dy))
   } else if (drag.axis === 'x' && strip.value) {
-    strip.value.scrollLeft = drag.left0 - dx
+    strip.value.scrollLeft = boundedLeft(drag.left0 - dx)
     onScroll()
   }
 }
@@ -284,8 +307,7 @@ function onPointerUp(e: PointerEvent): void {
     const passed = Math.abs(dx) > width * 0.25 || (velocity > 0.45 && Math.abs(dx) > 30)
     const direction = dx < 0 ? 1 : -1
     if (!passed || !slide(direction)) {
-      const cur = itemEls()[neighbours.value.index]
-      strip.value.scrollTo({ left: cur ? cur.offsetLeft : 0, behavior: 'smooth' })
+      restoreCurrentTitle()
     }
   }
 }
@@ -303,18 +325,26 @@ function onPointerCancel(e: PointerEvent): void {
 
 function restoreCurrentTitle(): void {
   if (!strip.value) return
+  if (timer) { clearTimeout(timer); timer = null }
+  gestureSeen = false
+  moving.value = false
   const cur = itemEls()[neighbours.value.index]
-  strip.value.scrollTo({ left: cur ? cur.offsetLeft + cur.offsetWidth / 2 - strip.value.clientWidth / 2 : 0, behavior: 'smooth' })
+  strip.value.scrollTo({ left: cur ? centredLeft(cur, strip.value) : 0, behavior: 'smooth' })
+  position.value = neighbours.value.index
   emit('lean', 0)
 }
 
 onMounted(() => {
-  centre()
   measureTrack()
+  centre()
   const header = root.value?.closest('.pane-header')
   if (header && typeof ResizeObserver === 'function') {
-    headerObserver = new ResizeObserver(measureTrack)
+    headerObserver = new ResizeObserver(() => {
+      measureTrack()
+      centre()
+    })
     headerObserver.observe(header)
+    if (root.value) headerObserver.observe(root.value)
     // The column moves when Chat details opens or closes, without resizing the header.
     const column = readingColumn()
     if (column) headerObserver.observe(column)
