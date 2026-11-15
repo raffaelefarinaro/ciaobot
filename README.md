@@ -28,19 +28,11 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 
 The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
 
-**Windows 11 (x64 or ARM64):**
-
-```powershell
-irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
-```
-
-No administrator rights needed. It opens Ciaobot signed in, with your workspace in `%USERPROFILE%\Ciaobot` (`-Workspace` picks another folder). See the [Windows guide](docs/WINDOWS.md) for requirements, install options, updates, uninstalling, and troubleshooting.
-
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`. On Windows, install it with `irm https://claude.ai/install.ps1 | iex` instead.
+- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
 - **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
@@ -48,9 +40,8 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors runnin
 ### Existing installs
 
 - **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
-- **Updates:** use **Settings → General** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app) or [Windows update guide](docs/WINDOWS.md#update-and-rollback).
-- **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept. [Windows service details](docs/WINDOWS.md#how-the-engine-runs).
-- **Uninstall on Windows:** follow the [uninstall guide](docs/WINDOWS.md#uninstall). For a leftover legacy macOS app, see the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app).
+- **Updates:** use **Settings → General** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app).
+- **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept.
 
 ## How it works
 

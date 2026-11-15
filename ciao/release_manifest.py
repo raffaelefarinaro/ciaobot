@@ -76,7 +76,6 @@ INSTALLER_KIND = "installer"
 INSTALLER_PLATFORMS: dict[str, str] = {
     "install.sh": "macos",
     "install-engine.sh": "macos",
-    "install.ps1": "windows",
 }
 
 
@@ -514,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         action="append",
         default=[],
-        help="installer script to list (install.sh, install-engine.sh, install.ps1); repeatable",
+        help="installer script to list (install.sh, install-engine.sh); repeatable",
     )
     build.add_argument("wheels", nargs="+", type=Path, help="wheels to list")
 

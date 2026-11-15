@@ -81,17 +81,10 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   after the fast `web-scope` detector. Its stable check fails if detection fails;
   non-web PRs run only that scope validation.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
-  terminal harness before Playwright. Ordinary develop PRs skip Windows;
-  `windows-full` opts into full Windows checks. Windows, Python 3.14 and macOS
-  run on release PRs and manual full runs. A green develop PR is not proof the release PR's Windows or
-  macOS jobs will pass. Windows backend and frontend suites run
-  in parallel jobs; the stable required `windows` summary requires every
-  applicable job to succeed (a full run cannot pass on a skipped suite).
-  Path handling is the usual Windows
-  break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
-  string literals.
-  A test that hands a path to code that checks it is absolute builds it from
-  `tmp_path`: `/nonexistent/x` has no drive and is relative on Windows.
+  terminal harness before Playwright. Python 3.14
+  (`linux-server-latest-python`) and macOS (`test`) run on release PRs and
+  manual full runs; a green develop PR is not proof the release PR's macOS
+  job will pass.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
 - Run one full backend suite and one frontend run at a time, here and in any
@@ -102,8 +95,8 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   budget a loaded machine can miss.
 - Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
   failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
-  that attempt's jobs, so required checks such as `linux-server`, `linux-web`,
-  conditional `linux-e2e` and `windows` go missing and the PR shows BLOCKED
+  that attempt's jobs, so required checks such as `linux-server`, `linux-web` and the
+  conditional `linux-e2e` go missing and the PR shows BLOCKED
   while everything is green.
 - Assert a guard where it acts, not only in the finished output. When a change
   bounds, redacts, filters or fences untrusted text, the test should observe the
@@ -117,7 +110,6 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   - a new `CIAO_*` env var goes in `INTEGRATIONS.md` (`tests/test_env_vars_documented.py`);
   - a new module under `ciao/` goes in `docs/ARCHITECTURE.md`'s repo layout
     (`tests/test_architecture_doc.py`);
-  - Windows installer or service changes go in `docs/WINDOWS.md` (`tests/test_windows_docs.py`).
 - For UI changes, verify keyboard focus, browser zoom, and 44px mobile touch
   targets. Every new feature must be visually inspected in the browser before
   pushing.
@@ -184,9 +176,8 @@ this file; the gates are the ones under Verification.
   suites/browser runs share the lock. Lock exit 75 is deferred, not red.
 - Merge reviewed, locally gated and PR-green changes into `develop` without
   waiting for full-platform CI between them. A known red on a required develop
-  check stops the queue; fix it before merging more. The Windows pytest and
-  vitest suites and the macOS job run on the release PR into `main` and
-  full manual/nightly runs; `windows-full` opts a develop PR into Windows.
+  check stops the queue; fix it before merging more. The Python 3.14 backend gates and
+  the macOS job run on the release PR into `main` and full manual/nightly runs.
   Installer, migration, service,
   provider lifecycle, auth/security and CI/release work still gets the ship
   fan-out and a PR-scoped security review before merge. Preserve disjoint
@@ -208,12 +199,12 @@ this file; the gates are the ones under Verification.
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
 - No CI runs on develop pushes. The full suites run on the release PR into
   `main`, and `/ciao-release` merges
-  only when that PR's `windows` and `test` checks are green. If a required
+  only when that PR's `linux-server-latest-python` and `test` checks are green. If a required
   develop check is already red, open a `bug` issue naming the failing tests
   and the merge that broke them, and fix it before merging more.
-- Hands-on device testing (a real Windows or macOS install) is for diffs that
-  touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
-  service or scheduled-task code, engine update/migration, or `desktop/`.
+- Hands-on device testing (a real macOS install) is for diffs that
+  touch the installers (`scripts/install*.sh`), the
+  service code, engine update/migration, or `desktop/`.
   Other issues rely on CI.
 - Security-sensitive diffs (ship fan-out plus a PR-scoped security review):
   auth, secrets, `/api` or `/ws` routes, `docs/REMOTE_BOUNDARY.md`, `desktop/`
@@ -223,10 +214,10 @@ this file; the gates are the ones under Verification.
   `git diff origin/develop...HEAD`.
 - Other sessions merge into `develop` all day, so use the skill's serial merge
   queue. The `gates.sh` for this repo runs, from the worktree root: `PYTHONPATH=$PWD
-  ~/repos/ciaobot/.venv/bin/python -m mypy ciao`, the same with `--platform
-  win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
-  tests/` (re-run only `--lf` before calling it red; latency tests flake under
-  load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
+  ~/repos/ciaobot/.venv/bin/python -m mypy ciao`, `PYTHONPATH=$PWD
+  ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/` (re-run only `--lf`
+  before calling it red; latency tests flake under load), and, after symlinking
+  `web/node_modules`, `npm test` and `npm run build`
   in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
   also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
   harness before the browser suite. Develop PRs changing `web/` run the

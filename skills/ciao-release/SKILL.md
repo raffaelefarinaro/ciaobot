@@ -72,10 +72,10 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
-Develop PRs run Linux gates; full Windows, Python 3.14 and macOS coverage runs
+Develop PRs run Linux gates; Python 3.14 and macOS coverage runs
 on the release PR. Inspect nightly CI for known failures, but an older green
 SHA is not proof of this candidate. Step 6 merges only when the release PR's
-required checks, including `windows` (which also requires Python 3.14) and
+required checks, including `linux-server-latest-python` (Python 3.14) and
 `test`, are green.
 
 **Decide scope with the user.** Run `gh pr list --state open` and
@@ -294,21 +294,6 @@ broken. Run both. Report what the tasks found; do not fix it here.
 `AGENTS.md` requires visual browser inspection before *pushing*. A release is
 the one moment where all of it is true at once, which is why these live here.
 
-### Windows smoke (#696 C10/C11)
-
-The macOS walk above does not touch the Windows engine, and `release-smoke` has no Windows job, so a release candidate still gets this manual check. Use the clean-install Windows 11 VM snapshot (or a fresh local Windows account) and run it over SSH or in the console. It needs the release candidate's files, so run it after `publish` has attached them, or build them locally the way the CI end-to-end step does and use `-ReleaseDir <folder> -Version <x.y.z>`:
-
-1. Restore the clean snapshot (or create a new account that has never had Ciaobot).
-2. Install: `irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex` (or the `-ReleaseDir`/`-Version` form for a candidate that is not published). Expect a sign-in URL and no error.
-3. In a **new** terminal: `uv tool list` shows `ciaobot v<candidate>`, and `ciao service status` reports the engine as running.
-4. Open the sign-in URL, sign in, and run one real chat turn with each installed provider.
-5. Settings -> Restart: the engine comes back (this is the exit-code-75 path under `ciao supervise`).
-6. Sign out and back in (or reboot and sign in): the engine starts by itself.
-7. Uninstall: run the installer with `-Uninstall`. Expect `Ciaobot is uninstalled.`, `schtasks /Query /TN \Ciaobot\Engine` failing, the PATH entry removed only if the installer added it and the tool bin directory is empty (a shared uv tools directory can keep it on PATH), and the workspace folder still present.
-8. Record the VM snapshot, the commit, the date and pass/fail per step in the #696 parity matrix. Anything broken becomes an issue; this skill does not fix it.
-
-Engine update and rollback are not part of this smoke until #857 lands; add them then.
-
 **Then ask the user to test.** Say plainly what is installed, what version, and
 that the engine is live on their real workspace. They are the only reviewer
 whose verdict covers "is this good", as opposed to "does this work".
@@ -320,7 +305,7 @@ Once the release PR is open, give its diff one more read before merging — the
 not in the Step 3 review. Prefer `/code-review --comment` on the open PR so
 findings land as inline comments.
 
-1. CI must be green (`mergeStateStatus` CLEAN), including `windows` and `test`.
+1. CI must be green (`mergeStateStatus` CLEAN), including `linux-server-latest-python` and `test`.
 2. Merge into `main`. This runs `.github/workflows/release-on-main.yml`, which
    creates the `vX.Y.Z` tag and GitHub release using `RELEASE_PAT` (a plain
    `GITHUB_TOKEN` release would **not** fire `release: published`).
@@ -329,7 +314,7 @@ findings land as inline comments.
      wheel in a clean environment, signs the engine manifest with the release
      minisign key, and attaches the wheel, the manifest and its signature, plus
      the engine installer as both `install.sh` and `install-engine.sh` (the same
-     bytes under both names, #651) and the Windows installer `install.ps1`.
+     bytes under both names, #651).
      Since #653 there is no app archive, no updater feed, no native verifier and
      no bundled runtime.
    - `release-smoke` (macos) — installs the engine from the release's one-line
@@ -367,7 +352,7 @@ watch the *previous* release's run. Wait for a `Release on main` run on the
 merge commit, then take the `publish` run newer than it.
 
 After it ships, confirm the tag, the GitHub release, the wheel, the signed
-manifest, both installer names and `install.ps1`. `pgrep` proves a process
+manifest and both installer names. `pgrep` proves a process
 exists, not that the engine runs — the smoke test checks the startup API and the
 installed `ciao`.
 
@@ -492,7 +477,7 @@ Release-cutting traps. Bugs in the code are not here — file them.
   adding `--load-launchd` to the workflow. That would hide a genuine cold-start
   defect.
 - **Release propagation lag.** Verify the GitHub release contains the wheel, its
-  signed manifest, both installer names and `install.ps1` before diagnosing an
+  signed manifest and both installer names before diagnosing an
   installer failure.
 - **Absolute repo_root.** Pass an absolute path — shell cwd persistence between
   tool calls is unreliable.
