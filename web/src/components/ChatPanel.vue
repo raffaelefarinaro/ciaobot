@@ -1183,6 +1183,7 @@
               <ModelSelector
                 v-if="showModelPicker"
                 triggerless
+                mobile-sheet
                 :model-value="canonicalTier(activeModelId)"
                 :active-models="activeModelHighlights"
                 :sections="pickerModelSections"
@@ -5306,7 +5307,7 @@ function toggleModelPicker() {
   showModelPicker.value = true
 }
 
-function handleModelPickerClose(reason: 'escape' | 'other') {
+function handleModelPickerClose(reason: 'escape' | 'other' | 'close') {
   const chatId = chat.value?.chat_id
   const mode = pickerMode.value
   const generation = pickerGeneration
@@ -5316,7 +5317,7 @@ function handleModelPickerClose(reason: 'escape' | 'other') {
   const focusWasInClosingPicker = !!focusedAtClose
     && (!!closingPicker?.contains(focusedAtClose) || !!closingPopover?.contains(focusedAtClose))
   showModelPicker.value = false
-  if (reason !== 'escape' || mode !== 'normal') return
+  if ((reason !== 'escape' && reason !== 'close') || mode !== 'normal') return
   void nextTick(() => {
     const active = document.activeElement
     const focusStillBelongsToPicker = (focusWasInClosingPicker && active === focusedAtClose)
@@ -5582,7 +5583,7 @@ async function selectThinking(level: string) {
   }
 }
 
-/* Close picker on click outside or Escape */
+/* Refresh available models on open and clear picker-specific state on close. */
 watch(showModelPicker, (open) => {
   if (!open) {
     // A capability-card "Open picker" filtered the sections; drop the filter
@@ -5597,20 +5598,6 @@ watch(showModelPicker, (open) => {
   // still loading when the chat opened would otherwise stay missing from the
   // picker until the chat is reopened. The server caches the list.
   void loadModels()
-  const clickHandler = (e: MouseEvent) => {
-    if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
-      showModelPicker.value = false
-    }
-  }
-  const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      showModelPicker.value = false
-    }
-  }
-  setTimeout(() => {
-    window.addEventListener('click', clickHandler, { once: true })
-    window.addEventListener('keydown', keyHandler, { once: true })
-  }, 0)
 })
 
 /** The task note's Mark done already asked, and said the chat would be archived. */

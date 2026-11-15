@@ -29,6 +29,7 @@ interface Props {
   placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end'
   activeModels?: string[]
   triggerless?: boolean
+  mobileSheet?: boolean
   // When set, only the section with this key is shown. Used by the
   // image-capability card's "Open picker" to land the user on the current
   // backend instead of the full cross-provider list.
@@ -53,6 +54,7 @@ const props = withDefaults(defineProps<Props>(), {
   placement: 'bottom-start',
   activeModels: () => [],
   triggerless: false,
+  mobileSheet: false,
   labelledBy: '',
   describedBy: '',
 })
@@ -60,7 +62,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   'update:modelValue': [value: string | string[]]
   select: [value: string | string[], sectionKey: string]
-  close: [reason: 'escape' | 'other']
+  close: [reason: 'escape' | 'other' | 'close']
 }>()
 
 const open = ref(false)
@@ -163,7 +165,7 @@ function onPopoverOpenChange(nextOpen: boolean): void {
   close('other')
 }
 
-function close(reason: 'escape' | 'other' = 'other') {
+function close(reason: 'escape' | 'other' | 'close' = 'other') {
   const returnFocus = !props.triggerless ? triggerRef.value : null
   const active = document.activeElement
   const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
@@ -364,6 +366,7 @@ onMounted(() => {
           'model-selector--open': popoverVisible,
           'model-selector--disabled': disabled,
           'model-selector--triggerless': triggerless,
+          'model-selector--mobile-sheet': mobileSheet,
         }"
       >
         <PopoverTrigger v-if="!triggerless" as-child :disabled="disabled">
@@ -400,6 +403,15 @@ onMounted(() => {
           :class="[`model-selector__popover--${placement}`, 'model-selector__popover--placed']"
           aria-label="Model selector"
         >
+          <div v-if="mobileSheet" class="model-selector__mobile-header">
+            <span>Choose model</span>
+            <button
+              type="button"
+              class="model-selector__close"
+              aria-label="Close model picker"
+              @click.stop="close('close')"
+            >×</button>
+          </div>
           <div
             class="model-selector__listbox"
           role="listbox"
@@ -828,6 +840,10 @@ onMounted(() => {
   border-radius: var(--radius) var(--radius) 0 0;
 }
 
+.model-selector__mobile-header {
+  display: none;
+}
+
 @media (max-width: 768px) {
   /* Header selectors have no trigger box of their own, so anchor their menu
      to the viewport below the shared top bar and keep both edges visible. */
@@ -837,16 +853,30 @@ onMounted(() => {
        below the shared top bar. */
     position: fixed !important;
     top: 0 !important;
-    right: calc(12px + var(--safe-right)) !important;
     bottom: auto !important;
+    right: calc(12px + var(--safe-right)) !important;
     left: calc(12px + var(--safe-left)) !important;
     width: auto !important;
     min-width: 0 !important;
     max-width: none !important;
     transform: none !important;
   }
-  .model-selector--triggerless .model-selector__popover {
+  .model-selector--mobile-sheet :deep([data-reka-popper-content-wrapper]) {
+    bottom: 0 !important;
+    height: auto !important;
+    pointer-events: none;
+  }
+  .model-selector--mobile-sheet :deep([data-reka-popper-content-wrapper])::before {
+    position: fixed;
+    z-index: 0;
+    inset: 0 calc(-12px - var(--safe-right)) 0 calc(-12px - var(--safe-left));
+    background: color-mix(in srgb, var(--bg) 66%, transparent);
+    content: '';
+    pointer-events: auto;
+  }
+  .model-selector--mobile-sheet .model-selector__popover {
     position: absolute !important;
+    z-index: 1;
     top: calc(61px + var(--safe-top) + 4px);
     right: 0;
     bottom: auto;
@@ -854,7 +884,47 @@ onMounted(() => {
     width: auto;
     min-width: 0;
     max-width: none;
-    max-height: calc(100dvh - 61px - var(--safe-top) - var(--safe-bottom) - 20px);
+    max-height: calc(var(--app-h, 100dvh) - 61px - var(--safe-top) - var(--safe-bottom) - 24px);
+    pointer-events: auto;
+  }
+  .model-selector--mobile-sheet .model-selector__mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 0 0 auto;
+    min-height: 48px;
+    padding: 0 4px 0 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    color: var(--fg);
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+  .model-selector__close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--touch, 44px);
+    min-width: var(--touch, 44px);
+    height: var(--touch, 44px);
+    min-height: var(--touch, 44px);
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg2);
+    font: inherit;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .model-selector__close:hover,
+  .model-selector__close:focus-visible {
+    background: var(--bg3);
+    color: var(--fg);
+  }
+  .model-selector__close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 }
 </style>
