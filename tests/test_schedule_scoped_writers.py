@@ -22,6 +22,17 @@ def _create(store: ScheduleStore, **kw):
     return store.create(**values)
 
 
+def _edit(store: ScheduleStore, schedule_id: str, **changes) -> None:
+    import dataclasses
+
+    current = store.get(schedule_id)
+    assert current is not None
+    base = dataclasses.replace(current)
+    for key, value in changes.items():
+        setattr(current, key, value)
+    store.replace(current, base=base)
+
+
 def _manager(store: ScheduleStore) -> ScheduleManager:
     async def dispatch(*_a, **_k) -> None:
         return None
@@ -48,10 +59,10 @@ def test_update_fields_changes_only_named_fields_on_the_current_row(tmp_path: Pa
 def test_update_fields_never_resurrects_and_honours_only_if(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     entry = _create(store)
-    assert store.update_fields(entry.schedule_id, {"title": "x"}, only_if=lambda e: False) is False
-    assert store.get(entry.schedule_id).title == "t"  # type: ignore[union-attr]
+    assert store.update_fields(entry.schedule_id, {"last_status": "x"}, only_if=lambda e: False) is False
+    assert store.get(entry.schedule_id).last_status == ""  # type: ignore[union-attr]
     store.delete(entry.schedule_id)
-    assert store.update_fields(entry.schedule_id, {"title": "x"}) is False
+    assert store.update_fields(entry.schedule_id, {"last_status": "x"}) is False
     assert store.get(entry.schedule_id) is None
 
 
@@ -101,7 +112,7 @@ def test_backfill_keeps_a_concurrent_edit_to_another_field(tmp_path: Path) -> No
     def list_then_edit(*args, **kwargs):
         rows = original_list(*args, **kwargs)
         # Another writer lands between the backfill's read and its write.
-        ScheduleStore(tmp_path).update_fields(entry.schedule_id, {"title": "edited"})
+        _edit(ScheduleStore(tmp_path), entry.schedule_id, title="edited")
         return rows
 
     store.list_entries = list_then_edit  # type: ignore[method-assign]
@@ -151,7 +162,7 @@ def test_revert_rename_keeps_edits_made_after_the_rename(tmp_path: Path) -> None
     state_before = (tmp_path / "system_schedules_state.json").read_bytes() if (tmp_path / "system_schedules_state.json").exists() else None
     assert store.rename_workspace("old", "new") == 1
     other = ScheduleStore(tmp_path)
-    other.update_fields(entry.schedule_id, {"title": "edited after rename"})
+    _edit(other, entry.schedule_id, title="edited after rename")
     store.revert_rename("old", "new", original_schedules=original, original_state=state_before)
     row = store.get(entry.schedule_id)
     assert row is not None
@@ -168,3 +179,39 @@ def test_revert_rename_leaves_rows_that_were_already_at_the_new_name(tmp_path: P
     store.revert_rename("old", "new", original_schedules=original, original_state=None)
     assert store.get(moved.schedule_id).workspace == "old"  # type: ignore[union-attr]
     assert store.get(resident.schedule_id).workspace == "new"  # type: ignore[union-attr]
+
+
+def test_update_fields_refuses_fields_outside_the_bookkeeping_allowlist(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = _create(store)
+    for field in ("scope", "workspace", "enabled", "prompt", "command"):
+        with pytest.raises(ValueError):
+            store.update_fields(entry.schedule_id, {field: "x"})
+
+
+def test_add_if_absent_after_delete_gets_a_new_revision(tmp_path: Path) -> None:
+    import dataclasses
+
+    store = ScheduleStore(tmp_path)
+    entry = _create(store)
+    clone = dataclasses.replace(entry)
+    first = store.revision(entry.schedule_id)
+    store.delete(entry.schedule_id)
+    assert store.add_if_absent(clone) is True
+    assert store.revision(entry.schedule_id) != first
+
+
+def test_revert_rename_does_not_move_an_overlay_that_was_already_at_the_new_name(tmp_path: Path) -> None:
+    import json as _json
+
+    store = ScheduleStore(tmp_path)
+    state_file = tmp_path / "system_schedules_state.json"
+    state_file.write_text(_json.dumps({"schedules": {
+        "sys-a@old": {"enabled": True, "workspace": "old"},
+        "sys-a@new": {"enabled": False, "workspace": "new"},
+    }}), encoding="utf-8")
+    original = state_file.read_bytes()
+    store.revert_rename("old", "new", original_schedules=None, original_state=original)
+    after = _json.loads(state_file.read_text(encoding="utf-8"))["schedules"]
+    assert after["sys-a@new"]["workspace"] == "new"
+    assert "sys-a@old" in after

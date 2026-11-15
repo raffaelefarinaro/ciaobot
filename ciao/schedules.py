@@ -1326,6 +1326,22 @@ def schedule_store_lock(runtime_root: Path):
     return _root_lock(runtime_root).hold()
 
 
+# The only fields ``update_fields`` may set: the system's own bookkeeping
+# stamps. Anything a user or agent edits goes through ``replace`` with an
+# authorization and a revision, never through here.
+_SCOPED_FIELDS = RUN_STATE_FIELDS | {"web_project_name", "fallback_project_id"}
+
+
+def _original_overlay_keys(raw: bytes | None) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        overlays = json.loads(raw.decode("utf-8")).get("schedules", {})
+    except (ValueError, AttributeError):
+        return set()
+    return {str(key) for key in overlays} if isinstance(overlays, dict) else set()
+
+
 def _original_user_ids(raw: bytes | None, workspace: str) -> set[str]:
     if raw is None:
         return set()
@@ -1709,6 +1725,9 @@ class ScheduleStore:
         guard refuses: a row deleted meanwhile is never resurrected and another
         writer's edit to any other field is kept.
         """
+        unsupported = set(changes) - _SCOPED_FIELDS
+        if unsupported:
+            raise ValueError(f"update_fields cannot set: {', '.join(sorted(unsupported))}")
         with self._txn():
             current = self.get(schedule_id)
             if current is None or (only_if is not None and not only_if(current)):
@@ -1729,7 +1748,9 @@ class ScheduleStore:
             if any(isinstance(i, dict) and i.get("schedule_id") == entry.schedule_id for i in items):
                 return False
             row = self._serialize_entry(entry)
-            row[_REV_KEY] = 0
+            # Caller-supplied ids repeat across delete and re-import (loop ids
+            # are deterministic), so start from a fresh epoch, not 0.
+            row[_REV_KEY] = _fresh_epoch()
             items.append(row)
             self._save(data)
             return True
@@ -1756,36 +1777,50 @@ class ScheduleStore:
         a row, and every row added since, is left as it is now.
         """
         with self._txn():
-            moved_ids = _original_user_ids(original_schedules, old)
-            if moved_ids:
-                data = self._load_for_write()
-                dirty = False
-                for item in data.get("schedules", []):
-                    if (
-                        isinstance(item, dict)
-                        and item.get("schedule_id") in moved_ids
-                        and item.get("workspace") == new
-                    ):
-                        item["workspace"] = old
-                        bump_row_revision(item)
-                        dirty = True
-                if dirty:
-                    self._save(data)
-            moved_keys = _original_overlay_bases(original_state, old)
-            if moved_keys:
-                state = self._load_system_state(strict=True)
-                changed = False
-                for base in moved_keys:
-                    new_key = system_schedule_id(base, new)
-                    old_key = system_schedule_id(base, old)
-                    if new_key in state and old_key not in state:
-                        overlay = dict(state.pop(new_key))
-                        overlay["workspace"] = old
-                        overlay[_REV_KEY] = _rev_value(overlay.get(_REV_KEY)) + 1
-                        state[old_key] = overlay
-                        changed = True
-                if changed:
-                    self._save_system_state(state)
+            try:
+                self._revert_user_rows(old, new, original_schedules)
+            finally:
+                # The overlay step runs even if the user-row step could not.
+                self._revert_overlays(old, new, original_state)
+
+    def _revert_user_rows(self, old: str, new: str, original: bytes | None) -> None:
+        moved_ids = _original_user_ids(original, old)
+        if moved_ids:
+            data = self._load_for_write()
+            dirty = False
+            for item in data.get("schedules", []):
+                if (
+                    isinstance(item, dict)
+                    and item.get("schedule_id") in moved_ids
+                    and item.get("workspace") == new
+                ):
+                    item["workspace"] = old
+                    bump_row_revision(item)
+                    dirty = True
+            if dirty:
+                self._save(data)
+
+    def _revert_overlays(self, old: str, new: str, original_state: bytes | None) -> None:
+        moved_keys = _original_overlay_bases(original_state, old)
+        if moved_keys:
+            state = self._load_system_state(strict=True)
+            existing = _original_overlay_keys(original_state)
+            changed = False
+            for base in moved_keys:
+                new_key = system_schedule_id(base, new)
+                old_key = system_schedule_id(base, old)
+                # An overlay already at the new name before the rename is
+                # not the rename's to move back.
+                if new_key in existing:
+                    continue
+                if new_key in state and old_key not in state:
+                    overlay = dict(state.pop(new_key))
+                    overlay["workspace"] = old
+                    overlay[_REV_KEY] = _rev_value(overlay.get(_REV_KEY)) + 1
+                    state[old_key] = overlay
+                    changed = True
+            if changed:
+                self._save_system_state(state)
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """Remove the user schedules ``predicate`` selects and return them raw.
