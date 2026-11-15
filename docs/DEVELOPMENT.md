@@ -1063,10 +1063,13 @@ while the server is running, because the live schedule store may be writing it.
   `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
   minutes). For a PR into `develop` whose three-dot diff from its base changes
-  `web/`, `linux-e2e` runs after `linux-web`: it installs Chromium on Ubuntu
+  `web/`, `linux-e2e` runs alongside `linux-web`, after the fast `web-scope`
+  detector: it installs Chromium on Ubuntu
   and runs `npm run test:e2e` from the PR merge checkout. That command's npm
   prehook builds both the PWA and terminal harness from the tested checkout.
-  PRs without a `web/` change skip this job. Failed Linux browser runs upload
+  PRs without a `web/` change run only the scope-validation step. A detector
+  failure fails the stable `linux-e2e` check rather than silently skipping it.
+  Failed Linux browser runs upload
   `linux-playwright-traces` when Playwright produced traces.
   `linux-server-latest-python` repeats the `linux-server` gates on
   Python 3.14, the newest interpreter `requires-python` admits; it is not a
@@ -1080,24 +1083,30 @@ while the server is running, because the live schedule store may be writing it.
   no diff for it to react to. The macOS job retains browser coverage on pushes
   to `develop` and PRs into `main`; web changes in develop PRs also get the
   Linux browser check before merge.
-  The `windows` job (`windows-latest`, every PR and push) is blocking since
-  #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
+  The stable required `windows` check aggregates independent
+  `windows-backend` and `windows-web` jobs (`windows-latest`).
+  The backend runs on every PR and push, imports every `ciao` module and runs `mypy ciao`
   (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate: on
   pushes and PRs into `main` it also runs `pytest -n auto --durations=30 tests/`
-  and `npm test`, which take about 15 minutes on a hosted runner, so a PR into
+  while the frontend runs `npm test` in parallel, avoiding the previous serial
+  backend-plus-frontend wait. The combined suites used to take about 15 minutes
+  on a hosted runner, so a PR into
   `develop` skips them and waits about 2 minutes. A `develop` PR labelled
   `windows-full` runs them too; use it for path, filesystem, process or
   installer changes. The label is read from the event, so add it and then push
   (an empty commit is enough) — re-running a job replays the old event and does
   not see a new label. A Windows test failure therefore surfaces on the
   post-merge push run, and `/ciao-release` will not cut while that run is red.
-  The job fails on any gate that ran. Every gate runs even after an earlier one
+  The summary fails if any applicable job fails, is cancelled, or unexpectedly
+  skips; a full run requires both jobs to succeed. Every backend gate runs even after an earlier one
   failed, the job summary lists the counts and the failing tests by name, and
-  the full logs are in its `windows-results` artifact. Its install.ps1 steps
+  the full logs are in `windows-results` and `windows-web-results` artifacts. Its install.ps1 steps
   (full runs only) (dry runs under both PowerShell hosts, the analyzer, and a
   real end-to-end install and `-Uninstall`) stay advisory: a hosted runner has
   no interactive logon, so a task that does not start there is a datum, not a
   verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
+  Superseded PR runs are cancelled by PR number; develop push runs are isolated
+  by commit SHA and never cancelled, preserving every merge's platform evidence.
   The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
   contributor's Windows account usually has neither the symlink privilege nor
   the coreutils. Without Developer Mode, a test that creates a symlink of its
@@ -3104,4 +3113,4 @@ against a fake manager over a temp packaged root.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
 - Keyboard shortcut changes also need coverage for shared `/ws/events` updates, custom-binding conflicts, IME composition, picker precedence, and Enter behavior on touch layouts.
 
-MCP status verification: cover native Claude/OpenCode configuration, scope precedence, workspace isolation, safe metadata, multiple chat connections, failed/unknown/needs-auth states, and unavailable provider status. Settings reads running provider sessions only; no status check should start a provider or MCP subprocess. Provider-native setup and authentication are performed from the workspace through each provider's CLI; Settings does not edit configuration or credentials. Browser coverage lives in `web/e2e/specs/mcp-status.spec.ts`.
+MCP status verification: cover native Claude/OpenCode configuration, scope precedence, workspace isolation, safe metadata, multiple chat connections, duplicate raw-name and current-action precedence, failed/unknown/needs-auth states, and unavailable provider status. Status reads use already running sessions only and start no provider or MCP subprocess; explicit on/off controls write provider configuration, never credentials. Exercise closed-details observer cleanup, late responses, guarded Settings workspace switches and latest-intent/query-reveal races, plus disposed delayed OAuth popup safe-link recovery. Managed sign-in, callback paste-back, verification and cancellation remain for both providers. Verify MCP-only produces neither inline cards nor Needs you, while failed turns, questions, permission/task blockers and generic cards still do; test independent mobile diamond and inbox markers. Test standalone `/mcp` navigation, remount and streaming Stop/Open matrix, invalid provider/workspace without network or draft consumption, arguments as messages, and preservation of all staged arrays, history, queue, offline state and uploads; retain IME, picker, touch and pane guards. Manual recovery Copy must send zero terminal bytes and leave pre-existing SSH/TUI input and session/target untouched; test that a stale preview cannot invoke `lib/codeCopy.ts`'s insecure-origin legacy-copy fallback after an asynchronous clipboard rejection. Separately open Terminal, choose Workspace if offered, and review/paste/run. A paste without Enter is not an ownership guarantee. Existing generic reviewed command cards and Settings Run in terminal remain distinct. Browser coverage lives in `web/e2e/specs/mcp-status.spec.ts` and `web/e2e/specs/chat-mcp-sidebar.spec.ts`.

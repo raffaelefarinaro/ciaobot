@@ -77,15 +77,20 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   4. `cd web && npm run build` after frontend changes.
   PRs into `develop` run the Linux backend and frontend gates in parallel
   (`linux-server` and `linux-web`). A develop PR whose diff changes `web/`
-  also runs the conditional `linux-e2e` Chromium check after `linux-web`.
+  also runs the conditional `linux-e2e` Chromium check alongside `linux-web`,
+  after the fast `web-scope` detector. Its stable check fails if detection fails;
+  non-web PRs run only that scope validation.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
   terminal harness before Playwright. On Windows a develop PR
-  runs only the fast gates: every module importing and `python -m mypy ciao`
+  runs only the fast backend gates: every module importing and `python -m mypy ciao`
   (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
   outside a platform branch fails it). The Windows `pytest` and `npm test`
   suites and the macOS job (browser tests and an engine cold-start) run on
   the push to `develop` after merge and on release PRs into `main`, so a PR
-  going green is not proof those will. Path handling is the usual Windows
+  going green is not proof those will. Windows backend and frontend suites run
+  in parallel jobs; the stable required `windows` summary requires every
+  applicable job to succeed (a full run cannot pass on a skipped suite).
+  Path handling is the usual Windows
   break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
   string literals.
   A test that hands a path to code that checks it is absolute builds it from
@@ -123,7 +128,12 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   must remain inert while a text field is focused. The Settings keyboard
   shortcuts card can disable or rebind them; preferences are shared through the
   engine. Enter-to-send is also shared, but touch keyboards always insert a
-  newline. Preserve picker precedence and IME composition handling.
+  newline. Preserve picker precedence and IME composition handling. The standalone
+  `/mcp` token is local chat navigation (arguments remain ordinary messages):
+  retain the owning workspace, actual provider, staged attachments and pane. Only
+  MCP actions are quiet in attention projections; never hide failed turns or
+  questions. MCP terminal recovery copies only; the user opens Terminal and
+  reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
 - OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
   the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
   server; do not restore V1 route or response-shape fallbacks.
@@ -163,6 +173,29 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 ## Loop engineering notes
 Facts the user-level `loop-engineering` skill (`~/.claude/skills`) reads from
 this file; the gates are the ones under Verification.
+- Finish the authorized graph without routine continuation questions. Keep one
+  coordinator and a verified wake source while work is pending; a schedule is an
+  observer that wakes the original authorized chat, not an unattended replacement
+  executor. Respect real access, permission and model-budget boundaries.
+- Workers run focused affected tests and static checks. The primary owns one
+  final full local gate after review fixes settle, before pushing. Do not repeat
+  a primary-owned pass on unchanged inputs: record the tree, gate commands,
+  toolchain versions and dependency-install fingerprint. Changed inputs invalidate
+  affected gates; uncertain dependencies require rerunning. Markdown/comment
+  corrections still need applicable backend/doc checks, not an automatic repeat
+  of unchanged frontend/browser gates. Focused small checks run directly; heavy
+  suites/browser runs share the lock. Lock exit 75 is deferred, not red.
+- Merge at most three low-risk independent, reviewed, locally gated and PR-green
+  changes serially before waiting for complete full-platform CI on the final
+  combined merge SHA. Check for known red before each merge; stop and fix it
+  immediately. Installer, migration, service, provider lifecycle, auth/security
+  and CI/release work waits for full post-merge CI after each merge. Do not merge
+  more while a three-change batch awaits acceptance.
+- Complete final-merge CI (Linux, full Windows and macOS) may replace a duplicate
+  local post-batch run, not candidate local gates, required PR checks, visual or
+  native acceptance. If that combined evidence is absent, run the fresh-worktree
+  post-batch gates. Preserve disjoint clean PR heads rather than syncing and
+  restarting CI merely because develop moved.
 - PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
   close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
   next release."
@@ -204,7 +237,8 @@ this file; the gates are the ones under Verification.
   in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
   also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
   harness before the browser suite. Develop PRs changing `web/` run the
-  conditional Linux Chromium gate before merge, while the macOS job retains
+  conditional Linux Chromium gate in parallel with unit/build work before merge,
+  while the macOS job retains
   browser coverage on develop pushes and PRs into `main`. The terminal-renderer specs need
   `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and

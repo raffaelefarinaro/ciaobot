@@ -2,7 +2,7 @@
 
 ## Automations
 
-- One primitive covers every cadence. An automation dispatches its prompt as a chat turn at a time of day (daily/weekly/monthly/once, timezone-aware), every N minutes, or only when the user clicks Run. Configure from the **Automations page** or directly in chat (`ciao schedule create|preview|update` carries the full field semantics in `ciao help`; `ciao schedule pause|resume|run|delete` handles the lifecycle).
+- One primitive covers every cadence. An automation dispatches its prompt as a chat turn at a time of day (daily/weekly/monthly/once, timezone-aware), every N minutes, or only when the user clicks Run. Configure from the **Automations page** or directly in chat (`ciao schedule create|preview|update` carries the full field semantics in `ciao help schedule`; `ciao schedule pause|resume|run|delete` handles the lifecycle).
 - **Two targets, and the choice matters.** Point an automation at a **project** and each run opens a fresh chat there with its own model and provider — right for briefings, reports, and maintenance. Point it at an existing **chat** (chosen on the Automations page; the CLI binds to projects only) and every run continues that conversation, inheriting its model and mode — right when continuity between runs is the point ("check my PRs every 10 minutes and tell me what changed").
 - **Every N minutes** is `frequency="interval"` with `interval_minutes` (minimum 1). Combined with a chat it is what used to be called a loop, and behaves the same way: a run that comes due while the chat is still working is skipped and retried shortly after, never queued, and the cadence resumes after a restart rather than replaying what it missed. Combined with a project it opens a fresh chat each time.
 - **When to create one**: the agent creates automations conversationally when the user asks — this is an agent action, not a PWA-only button. Show a concise draft (cadence, next_run, target workspace, target project) and get confirmation before creating, unless the user already explicitly asked to apply it. Call `ciao schedule preview` first to validate. Ask which workspace/project when it isn't obvious from the request. An automation always belongs to one logical workspace and shows under Automations for that workspace.
@@ -14,7 +14,7 @@
 Automations run because a time arrived. A **webhook trigger** runs because
 something outside called a URL: a CI provider, a monitoring agent, a
 home-automation box. Configure them on the Automations page or in chat with
-`ciao webhook list|create|update|rotate|delete` (`ciao help` for the flags), and
+`ciao webhook list|create|update|rotate|delete` (`ciao help webhook` for the flags), and
 the sender's own call is a short `curl` recipe in `PWA_API.md`.
 
 - **Each trigger has its own revocable secret**, shown once when it is created
