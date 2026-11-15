@@ -1430,7 +1430,7 @@ def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
         )
 
     assert manual_seen
-    owner = f"update-{read_operation(manual_state).id}"
+    owner = read_operation(manual_state).id
     assert all(body == {"owner": owner} for _url, body in manual_seen)
 
 

@@ -118,7 +118,7 @@ async def test_interval_start_refuses_a_row_deleted_before_the_stamp(tmp_path: P
     result = await manager.dispatch_now(entry.schedule_id, now=_NOW)
     await asyncio.sleep(0.05)
     assert dispatched == []
-    assert result["status"] == "missing-chat"
+    assert result["status"] == "refused"
     assert store.get(entry.schedule_id) is None
 
 
@@ -191,3 +191,29 @@ async def test_work_count_covers_inflight_runs_and_live_tasks(tmp_path: Path) ->
     release.set()
     await asyncio.sleep(0.05)
     assert manager.work_count() == 0
+
+
+async def test_command_interval_deleted_mid_fire_reports_nothing_started(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        frequency="interval", interval_minutes=5, command="true", title="t",
+    )
+    dispatched: list[str] = []
+
+    async def dispatch(e, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(e.schedule_id)
+
+    original = store.replace
+
+    def delete_then_replace(*args, **kwargs):
+        ScheduleStore(tmp_path).delete(entry.schedule_id)
+        return original(*args, **kwargs)
+
+    store.replace = delete_then_replace  # type: ignore[method-assign]
+    manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
+    result = await manager.dispatch_now(entry.schedule_id, now=_NOW)
+    await asyncio.sleep(0.05)
+    assert dispatched == []
+    assert result["status"] == "refused"
+    assert store.get(entry.schedule_id) is None

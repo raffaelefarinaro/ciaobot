@@ -92,7 +92,7 @@ def test_drain_closes_admission_and_reports_active_chats() -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {
-        "draining": True, "active_chat_ids": ["c-1", "c-2"], "schedule_work_count": 0,
+        "draining": True, "active_chat_ids": ["c-1", "c-2"],
     }
     # The caller polls by asking again rather than reading a separate chat list,
     # so the drain has to have actually happened rather than merely be
@@ -100,7 +100,7 @@ def test_drain_closes_admission_and_reports_active_chats() -> None:
     again = client.post("/api/admin/drain", json={"owner": "op-1"})
     assert again.status_code == 200
     assert again.json() == {
-        "draining": True, "active_chat_ids": ["c-1", "c-2"], "schedule_work_count": 0,
+        "draining": True, "active_chat_ids": ["c-1", "c-2"],
     }
     assert pcm.calls == ["begin", "begin"]
     assert pcm.restart_draining is True
@@ -232,7 +232,7 @@ def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
     assert pcm.restart_draining is False
     resp = client.post("/api/admin/drain", json={"owner": "manual-1"})
     assert resp.status_code == 200
-    assert resp.json() == {"draining": True, "active_chat_ids": [], "schedule_work_count": 0}
+    assert resp.json() == {"draining": True, "active_chat_ids": []}
     # A body that is not JSON names no owner, and no owner is refused.
     assert client.post("/api/admin/drain", content=b"{oops").status_code == 400
 
@@ -322,3 +322,8 @@ def test_drain_reports_the_scheduled_work_still_running() -> None:
 
     assert busy["schedule_work_count"] == 2
     assert idle["schedule_work_count"] == 0
+
+
+def test_drain_omits_the_count_without_a_schedule_manager() -> None:
+    body = _client(_manager()).post("/api/admin/drain", json={"owner": "op-1"}).json()
+    assert "schedule_work_count" not in body

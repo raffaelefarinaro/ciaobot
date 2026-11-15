@@ -8338,12 +8338,12 @@ async def admin_drain(request: Request) -> JSONResponse:
         return JSONResponse({"error": "drain owned by another operation"}, status_code=409)
     request.app.state.update_drain_active = True
     pcm.begin_restart_drain(owner)
+    answer: dict[str, Any] = {"draining": True, "active_chat_ids": pcm.active_chat_ids()}
     schedules = getattr(request.app.state, "schedule_manager", None)
-    return JSONResponse({
-        "draining": True,
-        "active_chat_ids": pcm.active_chat_ids(),
-        "schedule_work_count": schedules.work_count() if schedules is not None else 0,
-    })
+    if schedules is not None:
+        # Omitted without a manager: clients read a missing count as "not idle".
+        answer["schedule_work_count"] = schedules.work_count()
+    return JSONResponse(answer)
 
 
 async def admin_drain_cancel(request: Request) -> JSONResponse:

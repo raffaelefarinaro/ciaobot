@@ -19,6 +19,7 @@ collaborator has no ``Any``-based dependency contract.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -1063,10 +1064,14 @@ class ScheduleDispatcher:
         if store is None:
             return
         latest = store.get(schedule_id)
-        if latest is not None and schedule_support.stamp_run_outcome(
-            latest, dispatch_id, status
-        ):
-            store.replace(latest)
+        if latest is None:
+            return
+        base = dataclasses.replace(latest)
+        if schedule_support.stamp_run_outcome(latest, dispatch_id, status):
+            try:
+                store.replace(latest, base=base)
+            except schedule_support.ScheduleNotFound:
+                return
             # An open sidebar or Automations page only refetches on the
             # schedules_changed event; without publishing it the newly stamped
             # health (a failure that needs attention, or a skipped run waiting

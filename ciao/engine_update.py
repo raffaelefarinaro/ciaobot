@@ -793,8 +793,12 @@ def _drain_timeout_arg(value: str) -> float:
 
 
 def drain_owner_for(operation_id: str, explicit: str = "") -> str:
-    """The owner an update's drain carries: the coordinator's, else its own id."""
-    return explicit or f"update-{operation_id}"
+    """The owner an update's drain carries: the coordinator's, else its own id.
+
+    The coordinator (automatic update) claims with the operation id, so the
+    default is that same id and the detached job agrees with it.
+    """
+    return explicit or operation_id
 
 
 def schedule_work_idle(body: dict[str, Any]) -> bool:
@@ -2047,7 +2051,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="OPERATION_ID",
         help=(
             "own the drain as this operation, so only it may cancel; "
-            "omit for a manual apply"
+            "omit to use the operation's own id"
         ),
     )
     apply_cmd.add_argument("--json", action="store_true", help="print the operation record")

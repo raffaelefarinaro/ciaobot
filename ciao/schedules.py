@@ -3002,6 +3002,9 @@ class ScheduleManager:
                 "chat_id": entry.web_chat_id or "",
             }
         chat_id = await self._fire_interval(entry, now or _now_utc())
+        if self._store.get(entry.schedule_id) is None:
+            # Deleted while the run was being started: nothing started.
+            return {**result, "status": "refused", "error": "the schedule was deleted"}
         if chat_id is None and not entry.command:
             return {**result, "status": "missing-chat"}
         return {**result, "status": "started", "chat_id": chat_id or ""}
