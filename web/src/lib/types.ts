@@ -154,7 +154,7 @@ export interface McpStatus {
   workspace: string
   agent_root: string
   providers: McpProviderInventory[]
-  shell: { kind: 'posix' | 'powershell'; cd_prefix: string }
+  shell: { kind: 'posix'; cd_prefix: string }
 }
 
 export interface McpToggleResult {

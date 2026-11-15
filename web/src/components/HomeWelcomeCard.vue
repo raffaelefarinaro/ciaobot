@@ -41,7 +41,6 @@ onBeforeUnmount(() => {
 const folderLabel = computed(() => {
   const platform = status.value?.platform
   if (platform === 'darwin') return 'Show in Finder'
-  if (platform === 'win32') return 'Show in File Explorer'
   return 'Open folder'
 })
 

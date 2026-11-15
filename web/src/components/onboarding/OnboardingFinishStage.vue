@@ -233,7 +233,7 @@ defineExpose({ refresh: loadSummary })
           </p>
           <ul>
             <li><strong>Dictation</strong> — FluidVoice, on-device speech to text (macOS).</li>
-            <li><strong>Keeping the host awake</strong> — KeepingYouAwake (macOS); use the system power settings on Windows and Linux.</li>
+            <li><strong>Keeping the host awake</strong> — KeepingYouAwake (macOS); use the system power settings on Linux.</li>
             <li><strong>An agent browser</strong> — ego lite, for pages without an API.</li>
             <li><strong>Usage left</strong> — OpenUsage, to see a subscription limit coming.</li>
           </ul>

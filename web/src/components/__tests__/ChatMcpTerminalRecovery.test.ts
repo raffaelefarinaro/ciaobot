@@ -8,22 +8,22 @@ import type { McpNativeServer, McpStatus } from '../../lib/types'
 const clipboard = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/codeCopy', () => ({ writeClipboard: clipboard }))
 const server = (over: Partial<McpNativeServer> = {}): McpNativeServer => ({ name: 'linear', scope: 'project', source: 'settings', kind: 'http', allowed: true, connections: [], ...over })
-const status = (kind: 'posix' | 'powershell' = 'posix'): McpStatus => ({ workspace: 'work', agent_root: '/work', providers: [], shell: { kind, cd_prefix: kind === 'posix' ? "cd '/work/it'\\''s' && " : "Set-Location 'C:\\work\\it''s'; " } })
+const status = (): McpStatus => ({ workspace: 'work', agent_root: '/work', providers: [], shell: { kind: 'posix', cd_prefix: "cd '/work/it'\\''s' && " } })
 const props = () => ({ chatId: 'a', provider: 'claude' as const, server: server(), status: status() })
 afterEach(() => { clipboard.mockReset(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 describe('terminal recovery', () => {
   it('eligibility matrix', () => {
-    for (const provider of ['claude', 'opencode'] as const) for (const shell of ['posix', 'powershell'] as const) {
+    for (const provider of ['claude', 'opencode'] as const) {
       for (const bad of [{ enabled: false }, { allowed: false }, { scope: 'claudeai' }, { name: 'bad;touch' }, { name: 'bad\nname' }]) {
-        const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status(shell), server: server(bad) } })
+        const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status(), server: server(bad) } })
         expect(w.find('details').exists()).toBe(false); w.unmount()
       }
       for (const allowed of [true, null]) for (const enabled of [true, undefined]) for (const kind of ['http', 'sse', 'remote', 'stdio', 'local', 'unknown', undefined]) {
-        const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status(shell), server: server({ allowed, enabled, kind }) } })
+        const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status(), server: server({ allowed, enabled, kind }) } })
         expect(w.get('details').attributes('open')).toBeUndefined()
         expect(w.findAll('code')).toHaveLength(['http', 'sse', 'remote'].includes(kind ?? '') ? 2 : 1); w.unmount()
       }
-      const noShell = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: { ...status(shell), shell: undefined } as never } })
+      const noShell = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: { ...status(), shell: undefined } as never } })
       expect(noShell.find('details').exists()).toBe(false); noShell.unmount()
       const noServer = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, server: undefined as never } })
       expect(noServer.find('details').exists()).toBe(false); noServer.unmount()
@@ -32,11 +32,11 @@ describe('terminal recovery', () => {
   it('copy has no terminal effects and copies exact displayed command', async () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
     const open = vi.spyOn(window, 'open'); clipboard.mockResolvedValue(true)
-    for (const provider of ['claude', 'opencode'] as const) for (const shell of ['posix', 'powershell'] as const) {
-      const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status(shell) } })
+    for (const provider of ['claude', 'opencode'] as const) {
+      const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), provider, status: status() } })
       const commands = w.findAll('code').map(e => e.text())
-      expect(commands[0]).toBe(status(shell).shell.cd_prefix + `${provider} mcp list`)
-      expect(commands[1]).toBe(status(shell).shell.cd_prefix + (provider === 'claude' ? 'claude mcp login linear' : 'opencode mcp auth linear'))
+      expect(commands[0]).toBe(status().shell.cd_prefix + `${provider} mcp list`)
+      expect(commands[1]).toBe(status().shell.cd_prefix + (provider === 'claude' ? 'claude mcp login linear' : 'opencode mcp auth linear'))
       await w.findAll('button')[0]!.trigger('click'); await flushPromises()
       expect(clipboard).toHaveBeenLastCalledWith(commands[0], expect.any(Function))
       await w.findAll('button')[1]!.trigger('click'); await flushPromises()
@@ -85,5 +85,10 @@ describe('terminal recovery', () => {
     button.click(); await nextTick()
     expect(clipboard).not.toHaveBeenCalled()
     expect(w.find('details').exists()).toBe(false); w.unmount()
+  })
+  it('hides recovery when the engine still reports powershell', () => {
+    const w = mount(ChatMcpTerminalRecovery, { props: { ...props(), status: { ...status(), shell: { kind: 'powershell', cd_prefix: 'x' } } as never } })
+    expect(w.find('details').exists()).toBe(false)
+    w.unmount()
   })
 })

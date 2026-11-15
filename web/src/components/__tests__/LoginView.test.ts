@@ -138,7 +138,7 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('claude auth login')
     expect(wrapper.text()).toContain('Keep the terminal that started Ciaobot open while you finish this setup')
     expect(wrapper.text()).toContain('you can close the terminal and keep using this tab')
-    // The same wizard runs on Windows and Linux: no macOS-only app names.
+    // The same wizard runs on Linux too: no macOS-only app names.
     expect(wrapper.text()).not.toContain('Server.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot

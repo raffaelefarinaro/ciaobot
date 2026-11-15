@@ -10,7 +10,7 @@ describe('quoteArg', () => {
     expect(quoteArg("it's", 'posix')).toBe("'it'\\''s'")
     expect(quoteArg('a b; rm -rf /', 'posix')).toBe("'a b; rm -rf /'")
     expect(quoteArg('', 'posix')).toBe("''")
-    expect(quoteArg("it's", 'powershell')).toBe("'it''s'")
+    expect(quoteArg('https://a.com/a,b', 'posix')).toBe('https://a.com/a,b')
   })
 })
 
@@ -46,21 +46,16 @@ describe('mcpCommand', () => {
     expect(mcpCommand({ ...base, provider: 'claude', action: 'add', name: 'a b', url: args.url })).toBeNull()
     expect(mcpCommand({ ...base, provider: 'claude', action: 'add', name: 'notion', url: 'ftp://x' })).toBeNull()
     expect(mcpCommand({ ...base, provider: 'claude', action: 'add', name: 'notion', url: "https://example.com/a'b" })).toBe(`${PREFIX}claude mcp add --scope local --transport http notion 'https://example.com/a'\\''b'`)
-    expect(mcpCommand({ shell: 'powershell', cdPrefix: "Set-Location -LiteralPath 'C:\\w'; ", provider: 'claude', action: 'add', name: 'notion', url: "https://example.com/a'b" })).toBe("Set-Location -LiteralPath 'C:\\w'; claude mcp add --scope local --transport http notion 'https://example.com/a''b'")
   })
-})
-
-describe('powershell commas', () => {
-  it('quotes a url containing a comma so it is not split into an array', () => {
-    expect(quoteArg('https://a.com/a,b', 'powershell')).toBe("'https://a.com/a,b'")
-    expect(quoteArg('https://a.com/a,b', 'posix')).toBe('https://a.com/a,b')
-    expect(mcpCommand({ shell: 'powershell', cdPrefix: 'P; ', provider: 'claude', action: 'add', name: 'notion', url: 'https://a.com/a,b' })).toBe("P; claude mcp add --scope local --transport http notion 'https://a.com/a,b'")
+  it('returns null for a non-posix shell and tells the user to type the add command', () => {
+    const url = "https://x.com/a';calc;'"
+    expect(mcpCommand({ shell: 'powershell' as never, cdPrefix: "Set-Location -LiteralPath 'C:\\w'; ", provider: 'claude', action: 'add', name: 'notion', url })).toBeNull()
+    expect(serverUrlError(url, 'powershell' as never)).toBe('Type the add command yourself in a terminal.')
   })
 })
 
 describe('url hardening', () => {
-  const add = (url: string, shell: 'posix' | 'powershell' = 'posix', cdPrefix = PREFIX) =>
-    mcpCommand({ shell, cdPrefix, provider: 'claude', action: 'add', name: 'notion', url })
+  const add = (url: string) => mcpCommand({ shell: 'posix', cdPrefix: PREFIX, provider: 'claude', action: 'add', name: 'notion', url })
   const tail = (cmd: string | null) => cmd?.split('http notion ')[1]
 
   it('percent-encodes curly quotes and braces instead of passing them through', () => {
@@ -68,8 +63,6 @@ describe('url hardening', () => {
       const cmd = add(`https://example.com/a${ch}b`)
       expect(cmd, ch).not.toBeNull()
       expect(cmd!).not.toContain(ch)
-      // Percent-encoding puts a % in the href, which PowerShell refuses.
-      expect(add(`https://example.com/a${ch}b`, 'powershell'), ch).toBeNull()
     }
     expect(tail(add('https://example.com/{a,b}'))).toBe('https://example.com/%7Ba,b%7D')
   })
@@ -79,17 +72,9 @@ describe('url hardening', () => {
   it('uses the ascii href for non-ascii hosts', () => {
     expect(tail(add('https://exämple.com/mcp'))).toBe('https://xn--exmple-cua.com/mcp')
   })
-  it('rejects cmd.exe metacharacters under powershell only', () => {
-    for (const ch of ['&', '|', '<', '>', '^', '%', '"', '!']) {
-      const url = `https://example.com/a${ch}b`
-      expect(add(url, 'powershell'), ch).toBeNull()
-      expect(serverUrlError(url, 'powershell'), ch).toContain("Windows terminal can't pass safely")
-    }
+  it('passes shell metacharacters through, quoted', () => {
     expect(add('https://example.com/a&b')).toBe(`${PREFIX}claude mcp add --scope local --transport http notion 'https://example.com/a&b'`)
     expect(serverUrlError('https://example.com/a&b', 'posix')).toBeNull()
-  })
-  it('doubles every curly quote in a powershell argument', () => {
-    expect(quoteArg('a\u2018b\u2019c\u201Ad\u201Be', 'powershell')).toBe("'a\u2018\u2018b\u2019\u2019c\u201A\u201Ad\u201B\u201Be'")
   })
   it('handles a very long url without breaking the quoting', () => {
     const url = `https://example.com/${'a'.repeat(2500)}`

@@ -73,6 +73,16 @@ describe('OnboardingAccessStage', () => {
     expect(wrapper.text()).toContain('platform was not reported')
   })
 
+  it('treats a win32 or windows host as an unknown platform', async () => {
+    for (const platform of ['win32', 'windows']) {
+      const wrapper = await mounted({ platform })
+      expect((wrapper.find('input[value="workspace"]').element as HTMLInputElement).disabled).toBe(false)
+      expect(wrapper.text()).not.toContain('Windows')
+      expect(wrapper.text()).toContain('platform was not reported')
+      wrapper.unmount()
+    }
+  })
+
   it('loads the saved scope without saving anything', async () => {
     const wrapper = await mounted()
     expect(api.patch).not.toHaveBeenCalled()
@@ -84,12 +94,6 @@ describe('OnboardingAccessStage', () => {
     expect((wrapper.get('input[name="approval"][value="manual"]').element as HTMLInputElement).checked).toBe(true)
     expect(wrapper.text()).toContain('Engine default (auto)')
     expect(api.patch).not.toHaveBeenCalled()
-  })
-
-  it('disables workspace-only scope on Windows and explains why', async () => {
-    const wrapper = await mounted({ platform: 'win32' })
-    expect((wrapper.find('input[value="workspace"]').element as HTMLInputElement).disabled).toBe(true)
-    expect(wrapper.text()).toContain('Windows has no filesystem sandbox')
   })
 
   it('says the platform is unknown instead of implying a sandbox', async () => {
