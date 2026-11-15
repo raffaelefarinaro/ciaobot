@@ -180,9 +180,9 @@ export const useTaskStore = defineStore('tasks', () => {
       modelResult.value = 'success'
       modelStale.value = false
       return { status: 'success', workspace, generation }
-    } catch (error: unknown) {
+    } catch {
       if (!current()) return { status: 'superseded', workspace, generation }
-      modelError.value = error instanceof Error ? error.message : 'Could not load models.'
+      modelError.value = 'Could not load models.'
       modelResult.value = 'error'
       return { status: 'error', workspace, generation, error: modelError.value }
     } finally {

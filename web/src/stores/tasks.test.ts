@@ -165,9 +165,10 @@ it('reports a current failure without rejecting and clears it on successful retr
   projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
   const store = useTaskStore()
-  get.mockRejectedValueOnce(new Error('offline'))
-  await expect(store.fetchModels()).resolves.toMatchObject({ status: 'error', workspace: 'personal' })
-  expect(store.modelError).toBe('offline')
+  get.mockRejectedValueOnce(new Error('server token: secret-model-key'))
+  await expect(store.fetchModels()).resolves.toMatchObject({ status: 'error', workspace: 'personal', error: 'Could not load models.' })
+  expect(store.modelError).toBe('Could not load models.')
+  expect(store.modelError).not.toContain('secret-model-key')
   expect(store.modelResult).toBe('error')
   expect(store.modelLoading).toBe(false)
   get.mockResolvedValueOnce({ models: [] })
@@ -294,7 +295,7 @@ it('keeps schedule failures observable through fetchAll while model failures do 
   })
   await expect(store.fetchAll()).rejects.toThrow('schedule offline')
   expect(store.scheduleLoadError).toBe('schedule offline')
-  expect(store.modelError).toBe('models offline')
+  expect(store.modelError).toBe('Could not load models.')
   expect(store.loading).toBe(false)
 })
 
