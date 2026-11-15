@@ -128,7 +128,12 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   must remain inert while a text field is focused. The Settings keyboard
   shortcuts card can disable or rebind them; preferences are shared through the
   engine. Enter-to-send is also shared, but touch keyboards always insert a
-  newline. Preserve picker precedence and IME composition handling.
+  newline. Preserve picker precedence and IME composition handling. The standalone
+  `/mcp` token is local chat navigation (arguments remain ordinary messages):
+  retain the owning workspace, actual provider, staged attachments and pane. Only
+  MCP actions are quiet in attention projections; never hide failed turns or
+  questions. MCP terminal recovery copies only; the user opens Terminal and
+  reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
 - OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
   the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
   server; do not restore V1 route or response-shape fallbacks.

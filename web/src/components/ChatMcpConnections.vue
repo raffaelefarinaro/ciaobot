@@ -47,8 +47,8 @@ async function signIn(row: ChatMcpRow) {
   await startController.start()
 }
 function focusSection() { (root.value?.querySelector('.chat-mcp-heading') as HTMLElement | null)?.focus({ preventScroll: true }) }
-function revealDrawerAction() {
-  if (props.prioritizeHeading) return
+function revealDrawerAction(force = false) {
+  if (!force && (props.prioritizeHeading || document.activeElement === root.value?.querySelector('.chat-mcp-heading'))) return
   const rail = root.value?.closest<HTMLElement>('.chat-rail--drawer')
   const card = root.value?.querySelector<HTMLElement>('.needs-you-card')
   if (!rail || !card) return
@@ -68,8 +68,9 @@ watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (n
     focusSection()
   }
   if (next.some(([name, id]) => id && !previous.some(([previousName, previousId]) => name === previousName && id === previousId))) {
+    const headingHasPriority = props.prioritizeHeading
     await nextTick()
-    revealDrawerAction()
+    if (!headingHasPriority) revealDrawerAction()
   }
 }, { flush: 'pre' })
 </script>

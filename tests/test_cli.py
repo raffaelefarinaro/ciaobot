@@ -4136,6 +4136,63 @@ def test_an_unattended_run_cannot_file_create_or_settle_through_the_cli(
     assert all(row["lifecycle"] == "pending" for row in rows)
 
 
+def test_uncertain_state_cli_preflight_refuses_before_draft_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import upstream_drafts
+    from ciao.curation_run import state_path
+
+    reached: list[str] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **_kwargs: reached.append("create")
+    )
+    monkeypatch.setattr(
+        upstream_drafts,
+        "search_existing_issues",
+        lambda **_kwargs: reached.append("search"),
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    config = _workspace_config(workspace)
+    stock = json.loads(_run_draft_add(capsys, _draft_payload(tmp_path)))["id"]
+    new = json.loads(
+        _run_draft_add(
+            capsys,
+            _draft_payload(
+                tmp_path,
+                target="new_skill",
+                skill="invoice-recon",
+                body="",
+                change="Create skills/invoice-recon with a trigger and one step.",
+            ),
+        )
+    )["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text("---\nname: invoice-recon\n---\n\nOne step.\n", encoding="utf-8")
+    path = state_path(Path(config.workspace_vault_root("personal")))
+    path.write_text('{"version":', encoding="utf-8")
+    before = path.read_bytes()
+
+    assert cli.main(["skill-draft-approve", stock, "--json"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(
+        ["skill-draft-approve", new, "--content-file", str(content), "--json"]
+    ) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(["skill-draft-reject", new, "--reason", "no"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+
+    assert reached == []
+    assert not (workspace / "skills" / "invoice-recon").exists()
+    assert path.read_bytes() == before
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert sorted(row["id"] for row in rows) == sorted([stock, new])
+    assert all(row["lifecycle"] == "pending" for row in rows)
+
+
 
 def _workspace_config(root: Path):
     """The config the CLI itself would build for ``root``, for a direct assertion."""

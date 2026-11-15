@@ -103,7 +103,7 @@ describe('query reveal tokens', () => {
     expect(document.activeElement).toBe(panels[0]!.get('.chat-mcp-heading').element)
     expect(intoView).not.toHaveBeenCalled()
   })
-  it('reveals a later action in the owning drawer after the one-shot heading focus', async () => {
+  it('does not scroll a later action over the focused deep-link heading', async () => {
     const { panels, store } = await setup('/chat/chat-a?details=mcp')
     const panel = panels[0]!
     const heading = panel.get('.chat-mcp-heading')
@@ -119,7 +119,7 @@ describe('query reveal tokens', () => {
     store.chatActions['chat-a'] = [{ id: 'new-action', kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: 'linear', provider: 'opencode' }, error: '', created_at: 1 }]
     await flushPromises()
     expect(panel.find('.needs-you-card').exists()).toBe(true)
-    expect(scroll).toHaveBeenCalledWith({ top: 600, behavior: 'auto' })
+    expect(scroll).not.toHaveBeenCalled()
     expect(document.activeElement).toBe(heading.element)
   })
   it('does not reopen for unrelated query changes, but reopens for an identical link', async () => {
