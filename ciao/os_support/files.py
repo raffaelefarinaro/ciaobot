@@ -64,6 +64,17 @@ if sys.platform == "win32":
     _SetEndOfFile = _kernel32.SetEndOfFile
     _SetEndOfFile.argtypes = [wintypes.HANDLE]
     _SetEndOfFile.restype = wintypes.BOOL
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+    _SetFileTime = _kernel32.SetFileTime
+    _SetFileTime.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_FileTime),
+        ctypes.POINTER(_FileTime),
+        ctypes.POINTER(_FileTime),
+    ]
+    _SetFileTime.restype = wintypes.BOOL
     _CloseHandle = _kernel32.CloseHandle
     _CloseHandle.argtypes = [wintypes.HANDLE]
     _CloseHandle.restype = wintypes.BOOL
@@ -73,6 +84,7 @@ if sys.platform == "win32":
     _GENERIC_WRITE = 0x40000000
     # What the C runtime's `_wopen` shares (`_SH_DENYNO`).
     _FILE_SHARE_READ_WRITE = 0x1 | 0x2
+    _FILE_SHARE_DELETE = 0x4
     _CREATE_NEW = 1
     _CREATE_ALWAYS = 2
     _OPEN_EXISTING = 3
@@ -114,6 +126,7 @@ if sys.platform == "win32":
         mode: int = 0o777,
         *,
         follow_symlinks: bool = True,
+        share_delete: bool = False,
         security_attributes: Any = None,
     ) -> int:
         """``os.open`` through ``CreateFileW``; see the module docstring.
@@ -121,6 +134,8 @@ if sys.platform == "win32":
         ``security_attributes`` (a ``SECURITY_ATTRIBUTES`` structure) applies
         only when this call creates the file: an existing file keeps its own
         security, exactly as an existing file keeps its mode under ``O_CREAT``.
+        ``share_delete`` opts into Windows delete-sharing for short-lived
+        descriptors whose path may be unlinked by a concurrent writer.
         """
         name = os.fspath(path)
         access = {os.O_RDONLY: _GENERIC_READ, os.O_WRONLY: _GENERIC_WRITE}.get(
@@ -144,7 +159,7 @@ if sys.platform == "win32":
             handle = _CreateFileW(
                 name,
                 access,
-                _FILE_SHARE_READ_WRITE,
+                _FILE_SHARE_READ_WRITE | (_FILE_SHARE_DELETE if share_delete else 0),
                 None if security_attributes is None else ctypes.byref(security_attributes),
                 disposition,
                 attributes,
@@ -190,11 +205,60 @@ if sys.platform == "win32":
         mode: int = 0o777,
         *,
         follow_symlinks: bool = True,
+        share_delete: bool = False,
     ) -> int:
-        """``os.open`` with POSIX semantics; see the module docstring."""
-        if not follow_symlinks:
-            return create_fd(path, flags, mode, follow_symlinks=False)
+        """``os.open`` with POSIX semantics; see the module docstring.
+
+        ``share_delete`` is a Windows-only opt-in for files that may be
+        atomically removed or replaced while this descriptor is open.
+        """
+        if not follow_symlinks or share_delete:
+            return create_fd(
+                path, flags, mode, follow_symlinks=follow_symlinks,
+                share_delete=share_delete,
+            )
         return os.open(path, flags | os.O_BINARY, mode)
+
+    def set_file_times(fd: int, *, atime_ns: int, mtime_ns: int) -> None:
+        """Set timestamps on the already-open file, without re-resolving its path."""
+        epoch_delta = 116_444_736_000_000_000
+
+        def filetime(timestamp_ns: int) -> _FileTime:
+            ticks = timestamp_ns // 100 + epoch_delta
+            return _FileTime(ticks & 0xFFFFFFFF, ticks >> 32)
+
+        access_time, modified_time = filetime(atime_ns), filetime(mtime_ns)
+        if not _SetFileTime(
+            msvcrt.get_osfhandle(fd), None,
+            ctypes.byref(access_time), ctypes.byref(modified_time),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def same_file_signature(
+        left: os.stat_result | tuple[int, ...],
+        right: os.stat_result | tuple[int, ...],
+    ) -> bool:
+        """Compare complete snapshots from the same stat API."""
+        left_values = tuple(left) if not isinstance(left, os.stat_result) else (
+            left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns
+        )
+        right_values = tuple(right) if not isinstance(right, os.stat_result) else (
+            right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns
+        )
+        return left_values == right_values
+
+    def same_file_identity(
+        left: os.stat_result | tuple[int, ...],
+        right: os.stat_result | tuple[int, ...],
+    ) -> bool:
+        """Compare path and CRT-handle snapshots, excluding Windows ctime."""
+        left_values = tuple(left) if not isinstance(left, os.stat_result) else (
+            left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns
+        )
+        right_values = tuple(right) if not isinstance(right, os.stat_result) else (
+            right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns
+        )
+        return left_values[:4] == right_values[:4]
 
 else:
 
@@ -204,11 +268,36 @@ else:
         mode: int = 0o777,
         *,
         follow_symlinks: bool = True,
+        share_delete: bool = False,
     ) -> int:
         """``os.open`` with POSIX semantics; see the module docstring."""
         if not follow_symlinks:
             flags |= os.O_NOFOLLOW
         return os.open(path, flags, mode)
+
+    def set_file_times(fd: int, *, atime_ns: int, mtime_ns: int) -> None:
+        """Set timestamps on the already-open file, without re-resolving its path."""
+        os.utime(fd, ns=(atime_ns, mtime_ns))
+
+    def same_file_signature(
+        left: os.stat_result | tuple[int, ...],
+        right: os.stat_result | tuple[int, ...],
+    ) -> bool:
+        """Compare file identity and mutation metadata from path and descriptor stats."""
+        left_values = tuple(left) if not isinstance(left, os.stat_result) else (
+            left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns
+        )
+        right_values = tuple(right) if not isinstance(right, os.stat_result) else (
+            right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns
+        )
+        return left_values == right_values
+
+    def same_file_identity(
+        left: os.stat_result | tuple[int, ...],
+        right: os.stat_result | tuple[int, ...],
+    ) -> bool:
+        """Compare path and descriptor snapshots by identity and modification state."""
+        return same_file_signature(left, right)
 
 
 # ── Replacing a file that another writer may be replacing too ─────────────

@@ -1671,6 +1671,7 @@ def _finding_dependency_capture(
     max_total_bytes: int = 64 * 1024 * 1024, max_files: int = 4096,
 ) -> tuple[str, tuple[tuple[skill_proposals.SkillProposal, ...], tuple[upstream_drafts.UpstreamDraft, ...]]]:
     """Fingerprint all owner-parsed findings, refusing unstable or unsafe scans."""
+    from ciao.os_support.files import same_file_identity, same_file_signature
     rows: list[dict[str, Any]] = []
     directories: dict[str, tuple[int, int] | None] = {}
     total = 0
@@ -1715,7 +1716,7 @@ def _finding_dependency_capture(
                 fd = os.open(path, flags)
                 with os.fdopen(fd, "rb") as handle:
                     opened = os.fstat(handle.fileno())
-                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                    if not stat.S_ISREG(opened.st_mode) or not same_file_identity(before, opened):
                         raise ValueError("finding changed before reading")
                     raw = handle.read(max_file_bytes + 1)
                     finished = os.fstat(handle.fileno())
@@ -1723,8 +1724,7 @@ def _finding_dependency_capture(
                 if len(raw) > max_file_bytes or total > max_total_bytes:
                     raise ValueError("finding snapshot too large")
                 identity = (before.st_dev, before.st_ino)
-                signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-                if signature(before) != signature(opened) or signature(opened) != signature(finished):
+                if not same_file_identity(before, opened) or not same_file_signature(opened, finished):
                     raise ValueError("finding changed while reading")
                 captured_text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
                 _validate_automatic_origins(store, captured_text, workspace)
@@ -1738,7 +1738,7 @@ def _finding_dependency_capture(
                     assert isinstance(parsed, upstream_drafts.UpstreamDraft)
                     drafts.append(parsed)
                 after = path.lstat()
-                if signature(after) != signature(before):
+                if not same_file_signature(after, before):
                     raise ValueError("finding changed while parsing")
                 rows.append({"store": store, "name": name, "sha256": hashlib.sha256(raw).hexdigest(), "identity": list(identity)})
             if bounded_names(directory, suffix, len(names)) != names or (directory.lstat().st_dev, directory.lstat().st_ino) != (directory_stat.st_dev, directory_stat.st_ino):
@@ -1776,10 +1776,8 @@ def _finding_dependency_capture(
                 current = path.lstat()
                 if (len(raw) > max_file_bytes or not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(current.st_mode) or
                     [before.st_dev, before.st_ino] != row["identity"] or
-                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
-                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
-                    (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) !=
-                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                    not same_file_signature(before, after) or
+                    not same_file_identity(current, after) or
                     hashlib.sha256(raw).hexdigest() != row["sha256"]):
                     raise ValueError("finding changed during snapshot")
     except (OSError, UnicodeError) as exc:
@@ -1944,8 +1942,8 @@ def _update_fence_receipt(path: Path, expected: dict[str, Any]) -> bool:
             os.fsync(directory)
             after = os.fstat(handle.fileno())
             named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-            signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            if signature(before) != signature(after) or signature(after) != signature(named):
+            from ciao.os_support.files import same_file_identity, same_file_signature
+            if not same_file_signature(before, after) or not same_file_identity(after, named):
                 return False
             _update_check_directory(directory, path.parent)
         return True
@@ -1964,6 +1962,7 @@ def _deferred_references_valid(root: Path, workspace: str, verdicts: list[dict[s
     relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
     try:
         from ciao.memory_proposals import _one_line, _sidecar_paths
+        from ciao.os_support.files import same_file_identity, same_file_signature
 
         def evidence(path: Path) -> str:
             try:
@@ -1978,10 +1977,9 @@ def _deferred_references_valid(root: Path, workspace: str, verdicts: list[dict[s
                 raw = handle.read(8 * 1024 * 1024 + 1)
                 after = os.fstat(handle.fileno())
             named = path.lstat()
-            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
             if (len(raw) > 8 * 1024 * 1024 or not stat.S_ISREG(opened.st_mode) or
-                signature(before) != signature(opened) or signature(opened) != signature(after) or
-                signature(after) != signature(named)):
+                not same_file_identity(before, opened) or not same_file_signature(opened, after) or
+                not same_file_identity(after, named)):
                 raise ValueError("deferred evidence changed")
             return raw.decode("utf-8")
 
@@ -2048,9 +2046,8 @@ def _deferred_references_valid(root: Path, workspace: str, verdicts: list[dict[s
                             matched.add((wanted, source))
                 after = os.fstat(handle.fileno())
             named = path.lstat()
-            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-            if (not stat.S_ISREG(opened.st_mode) or signature(before) != signature(opened) or
-                    signature(opened) != signature(after) or signature(after) != signature(named)):
+            if (not stat.S_ISREG(opened.st_mode) or not same_file_identity(before, opened) or
+                    not same_file_signature(opened, after) or not same_file_identity(after, named)):
                 raise ValueError("deferred evidence changed")
         return all(item in matched for item in unresolved)
     except (OSError, UnicodeError, KeyError, TypeError, ValueError):

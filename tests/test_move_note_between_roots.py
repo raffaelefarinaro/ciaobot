@@ -209,10 +209,21 @@ def test_untracked_move_copies_exclusively_when_hardlinks_unavailable(tmp_path: 
     destination = root / "work/memory-vault/People/Mo.md"
     monkeypatch.setattr(vault_rehome, "run_git", lambda *args: (1, "untracked"))
     monkeypatch.setattr(vault_rehome.os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross device")))
+    timestamp_fds: list[int] = []
+
+    from ciao.os_support import files
+    real_set_file_times = files.set_file_times
+
+    def set_file_times(fd, *, atime_ns, mtime_ns):
+        timestamp_fds.append(fd)
+        return real_set_file_times(fd, atime_ns=atime_ns, mtime_ns=mtime_ns)
+
+    monkeypatch.setattr(files, "set_file_times", set_file_times)
     result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
     assert result["applied"], result["refusals"]
     assert not source.exists()
     assert destination.is_file()
+    assert len(timestamp_fds) == 1
     if os.name == "nt":
         import stat
         assert destination.stat().st_mode & stat.S_IWRITE == source_mode & stat.S_IWRITE

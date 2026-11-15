@@ -349,7 +349,9 @@ def test_sqlite_real_full_error_does_not_create_or_erase_proof(tmp_path: Path) -
 
 
 def test_sqlite_live_rollback_journal_is_private_and_contains_no_raw_scope(tmp_path: Path) -> None:
-    from ciao.os_support.private import is_private_strict
+    import os
+    from ciao.os_support.private import is_private_descriptor, is_private_strict
+    from ciao.os_support.files import open_fd
     from ciao.web.proposal_reservations import DurableReservationRegistry
     directory = tmp_path / "reservations"
     registry = DurableReservationRegistry(directory)
@@ -361,7 +363,16 @@ def test_sqlite_live_rollback_journal_is_private_and_contains_no_raw_scope(tmp_p
     with registry._connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE reservations SET state='active' WHERE token=?", (key,))
-        assert journal.exists() and is_private_strict(journal)
+        assert journal.exists()
+        if os.name == "nt":
+            assert is_private_strict(directory)
+            journal_fd = open_fd(journal, os.O_RDONLY, follow_symlinks=False)
+            try:
+                assert is_private_descriptor(journal_fd)
+            finally:
+                os.close(journal_fd)
+        else:
+            assert is_private_strict(journal)
         for path in (registry.database, journal):
             content = path.read_bytes()
             assert token.encode() not in content
@@ -371,6 +382,32 @@ def test_sqlite_live_rollback_journal_is_private_and_contains_no_raw_scope(tmp_p
         assert not (directory / "reservations.sqlite3-shm").exists()
         conn.rollback()
     assert registry.admit(token, scope)
+
+
+def test_connection_tolerates_journal_disappearing_during_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    from ciao.os_support import files
+    from ciao.os_support.private import open_private
+    from ciao.web.proposal_reservations import DurableReservationRegistry
+
+    registry = DurableReservationRegistry(tmp_path / "reservations")
+    registry.reserve(validate_scope(SCOPE, {"personal"}))
+    journal = Path(str(registry.database) + "-journal")
+    fd = open_private(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    os.close(fd)
+    real_open_fd = files.open_fd
+
+    def unlink_before_open(path, *args, **kwargs):
+        if Path(path) == journal:
+            journal.unlink()
+            raise FileNotFoundError(journal)
+        return real_open_fd(path, *args, **kwargs)
+
+    monkeypatch.setattr(files, "open_fd", unlink_before_open)
+    with registry._connection():
+        pass
 
 
 def test_sqlite_core_admission_owner_and_restart(tmp_path: Path) -> None:
@@ -406,7 +443,8 @@ def test_sqlite_core_admission_owner_and_restart(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="requires native Windows inherited DACLs")
 def test_windows_live_inherited_journal_allows_verified_registry_reopen(tmp_path: Path) -> None:
-    from ciao.os_support.private import is_private_strict
+    from ciao.os_support.private import is_private_descriptor, is_private_strict
+    from ciao.os_support.files import open_fd
     from ciao.web.proposal_reservations import DurableReservationRegistry
     registry = DurableReservationRegistry(tmp_path / "reservations")
     scope = validate_scope(SCOPE, {"personal"})
@@ -417,7 +455,13 @@ def test_windows_live_inherited_journal_allows_verified_registry_reopen(tmp_path
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE reservations SET state='active' WHERE token=?", (key,))
         assert journal.exists()
-        assert is_private_strict(journal)
+        assert is_private_strict(registry.directory)
+        journal_fd = open_fd(journal, os.O_RDONLY, follow_symlinks=False)
+        try:
+            assert is_private_descriptor(journal_fd)
+        finally:
+            os.close(journal_fd)
+        assert not is_private_strict(journal)
         with registry._connection():
             pass
         conn.rollback()

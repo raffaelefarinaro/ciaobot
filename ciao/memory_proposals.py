@@ -2258,6 +2258,7 @@ class DecisionSidecarStream:
 
     def __iter__(self) -> Iterator[tuple[int, dict[str, Any], str]]:
         from ciao.proposal_predictions import _CAP_ROW_BYTES, _cap_invalid_constant, _cap_unique_object
+        from ciao.os_support.files import same_file_identity, same_file_signature
 
         if self._started:
             raise ValueError("sidecar stream already consumed")
@@ -2273,12 +2274,12 @@ class DecisionSidecarStream:
         ordinal = 0
         prefix_boundary = self.prefix_length in (None, 0)
         signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-        if self.expected_identity is not None and signature(before) != self.expected_identity:
+        if self.expected_identity is not None and not same_file_identity(signature(before), self.expected_identity):
             os.close(fd)
             raise ValueError("decision sidecar identity changed between scans")
         with os.fdopen(fd, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode) or signature(before) != signature(opened):
+            if not stat.S_ISREG(opened.st_mode) or not same_file_identity(before, opened):
                 raise ValueError("decision sidecar changed before reading")
             while line := handle.readline(_CAP_ROW_BYTES + 2):
                 if len(line) > _CAP_ROW_BYTES + 1 or not line.endswith(b"\n"):
@@ -2316,7 +2317,7 @@ class DecisionSidecarStream:
                 os.fsync(handle.fileno())
             after = os.fstat(handle.fileno())
             named = self.path.lstat()
-            if (signature(opened) != signature(after) or signature(after) != signature(named)
+            if (not same_file_signature(opened, after) or not same_file_identity(after, named)
                     or size != opened.st_size):
                 raise ValueError("decision sidecar changed while reading")
             if not prefix_boundary:

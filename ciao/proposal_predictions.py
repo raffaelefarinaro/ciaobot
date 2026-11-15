@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.config import MEMORY_HANDOVERS
+from ciao.os_support.files import same_file_identity
 
 REGION_KINDS: frozenset[str] = frozenset({"memory", "profile"})
 VERDICTS: tuple[str, ...] = ("accept", "dismiss")
@@ -455,14 +456,15 @@ def _stream_checkpoint_events(
     if checkpoint != expected:
         raise ValueError("invalid checkpoint evidence")
     for suffix, path in paths.items():
-        if identities[suffix] is None:
+        expected_identity = identities[suffix]
+        if expected_identity is None:
             try:
                 path.lstat()
             except FileNotFoundError:
                 continue
             raise ValueError("decision sidecar appeared during scan")
         info = path.lstat()
-        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != identities[suffix]:
+        if not same_file_identity(info, expected_identity):
             raise ValueError("decision sidecar changed during scan")
     if capture is not None:
         capture["bindings"] = successor_bindings

@@ -131,7 +131,43 @@ def test_decision_sidecar_stream_rejects_changes_and_partial_iteration(tmp_path:
     else:
         replacement = tmp_path / "replacement"
         replacement.write_bytes(row * 3)
-        replacement.replace(path)
+        try:
+            replacement.replace(path)
+        except PermissionError as exc:
+            if os.name != "nt":
+                raise
+            assert exc.winerror == 5
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_for_delete = kernel32.CreateFileW
+            open_for_delete.argtypes = [
+                wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+            ]
+            open_for_delete.restype = wintypes.HANDLE
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            delete_handle = open_for_delete(
+                str(path), 0x00010000, 0x1 | 0x2 | 0x4, None, 3, 0x80, None,
+            )
+            if delete_handle != wintypes.HANDLE(-1).value:
+                close_handle(delete_handle)
+                pytest.fail("an open decision stream unexpectedly allowed delete sharing")
+            assert ctypes.get_last_error() == 32  # ERROR_SHARING_VIOLATION
+            import hashlib
+
+            # The open CRT handle denies delete sharing. Windows itself keeps
+            # the pathname bound until the strict stream has finished.
+            assert path.read_bytes() == row * 3
+            assert len(list(iterator)) == 2
+            assert stream.binding == {
+                "length": len(row) * 3,
+                "sha256": hashlib.sha256(row * 3).hexdigest(),
+            }
+            return
     with pytest.raises(ValueError):
         list(iterator)
     assert stream.binding is None

@@ -736,6 +736,7 @@ def selected_queue_receipts_for_gate(journal: Path) -> list[dict[str, Any]]:
 def compact_cap_checkpoint(queue: Path, vault_root: Path, *, config: Any) -> bool:
     """Compact old proved agent receipts under queue → journal lock ordering."""
     from ciao import proposal_predictions
+    from ciao.os_support.files import same_file_identity
     from ciao.os_support.private import carry_mode, is_private, mkstemp_private
 
     journal = journal_path(vault_root, None)
@@ -873,7 +874,7 @@ def compact_cap_checkpoint(queue: Path, vault_root: Path, *, config: Any) -> boo
                             if expected is not None:
                                 raise ValueError("decision sidecar disappeared before replacement")
                         else:
-                            if expected != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+                            if expected is None or not same_file_identity(expected, info):
                                 raise ValueError("decision sidecar changed before replacement")
                     os.replace(tmp_name, journal)
                     if os.name != "nt":

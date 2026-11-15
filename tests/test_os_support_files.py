@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from ciao.os_support.files import open_fd
+from ciao.os_support.files import (
+    open_fd,
+    same_file_identity,
+    same_file_signature,
+    set_file_times,
+)
 
 # Every byte a text-mode descriptor would rewrite or stop at on Windows.
 _AWKWARD = b"a\nb\r\nc\x1ad\n"
@@ -39,6 +44,50 @@ def test_bytes_read_are_bytes_stored(tmp_path: Path) -> None:
     fd = open_fd(path, os.O_RDONLY)
     try:
         assert os.read(fd, 64) == _AWKWARD
+    finally:
+        os.close(fd)
+
+
+def test_set_file_times_targets_the_open_file(tmp_path: Path) -> None:
+    path = tmp_path / "timestamped"
+    fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, b"content")
+        set_file_times(fd, atime_ns=1_700_000_000_000_000_000,
+                       mtime_ns=1_700_000_000_000_000_000)
+    finally:
+        os.close(fd)
+    assert path.stat().st_mtime_ns == 1_700_000_000_000_000_000
+
+
+def test_file_signature_uses_cross_api_metadata_without_dropping_identity(tmp_path: Path) -> None:
+    path = tmp_path / "signature"
+    path.write_bytes(b"one")
+    info = path.stat()
+    values = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    ctime_only = (*values[:4], values[4] + 1)
+    changed_identity = (values[0], values[1] + 1, *values[2:])
+    if os.name == "nt":
+        assert same_file_identity(info, ctime_only)
+    else:
+        assert not same_file_identity(info, ctime_only)
+    assert not same_file_identity(info, changed_identity)
+    assert not same_file_signature(info, ctime_only)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows sharing semantics")
+def test_open_fd_can_allow_a_path_to_be_replaced(tmp_path: Path) -> None:
+    from ciao.os_support.files import replace_file
+
+    path = tmp_path / "state"
+    replacement = tmp_path / "replacement"
+    path.write_bytes(b"old")
+    replacement.write_bytes(b"new")
+    fd = open_fd(path, os.O_RDONLY, share_delete=True)
+    try:
+        replace_file(replacement, path)
+        assert os.read(fd, 3) == b"old"
+        assert path.read_bytes() == b"new"
     finally:
         os.close(fd)
 

@@ -288,7 +288,12 @@ class DurableReservationRegistry:
     @contextmanager
     def _connection(self, *, initialize: bool = False) -> Iterator[sqlite3.Connection]:
         from ciao.os_support.files import open_fd
-        from ciao.os_support.private import is_private_strict
+        from ciao.os_support.private import (
+            is_owned_descriptor,
+            is_private_descriptor,
+            is_private_descriptor_strict,
+            is_private_strict,
+        )
         self._check_node(self.directory, directory=True)
         if not is_private_strict(self.directory):
             raise PermissionError("unsafe reservation directory")
@@ -298,9 +303,36 @@ class DurableReservationRegistry:
                 sidecar.lstat()
             except FileNotFoundError:
                 continue
-            self._check_node(sidecar)
-            if not is_private_strict(sidecar):
-                raise PermissionError("unsafe reservation sidecar")
+            try:
+                self._check_node(sidecar)
+                sidecar_fd = open_fd(
+                    sidecar, os.O_RDONLY, follow_symlinks=False, share_delete=os.name == "nt",
+                )
+            except FileNotFoundError:
+                # SQLite can unlink a rollback journal as another connection
+                # finishes committing between the existence check and open.
+                continue
+            try:
+                opened = os.fstat(sidecar_fd)
+                try:
+                    named = sidecar.lstat()
+                except FileNotFoundError:
+                    continue
+                if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                        or opened.st_nlink != 1):
+                    raise PermissionError("unsafe reservation sidecar")
+                if os.name == "nt":
+                    # SQLite creates rollback journals with an inherited DACL.
+                    # The protected, owner-only parent bounds those inherited
+                    # grants; the file itself must still be owned by this
+                    # account and grant access only to the account/SYSTEM.
+                    private = is_owned_descriptor(sidecar_fd) and is_private_descriptor(sidecar_fd)
+                else:
+                    private = is_private_descriptor_strict(sidecar_fd)
+                if not private:
+                    raise PermissionError("unsafe reservation sidecar")
+            finally:
+                os.close(sidecar_fd)
         fd = open_fd(self.database, os.O_RDONLY, follow_symlinks=False)
         try:
             self._check_descriptor(fd, self.database)

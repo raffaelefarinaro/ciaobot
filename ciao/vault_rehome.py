@@ -1633,12 +1633,17 @@ def move_note_between_roots(
                                 binary_handle.flush()
                                 if hasattr(os, "fchmod"):
                                     os.fchmod(binary_handle.fileno(), source_stat.st_mode & 0o7777)
+                                from ciao.os_support.files import set_file_times
+
+                                set_file_times(
+                                    binary_handle.fileno(),
+                                    atime_ns=source_stat.st_atime_ns,
+                                    mtime_ns=source_stat.st_mtime_ns,
+                                )
                                 os.fsync(binary_handle.fileno())
-                            current_dest = dest_file.lstat()
-                            if (current_dest.st_dev, current_dest.st_ino) != (linked.st_dev, linked.st_ino):
-                                raise OSError("destination changed during the move")
-                            os.utime(dest_file, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
-                                     follow_symlinks=False)
+                                current_dest = dest_file.lstat()
+                                if (current_dest.st_dev, current_dest.st_ino) != (linked.st_dev, linked.st_ino):
+                                    raise OSError("destination changed during the move")
                         except BaseException:
                             try:
                                 owned = dest_file.lstat()
