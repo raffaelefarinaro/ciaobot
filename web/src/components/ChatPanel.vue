@@ -900,12 +900,10 @@
       </div>
     </div>
 
-    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer. Keyed by id: a
-         replaced action is a new card. The stack folds several untouched
-         sign-ins into one row and caps its height, so the transcript keeps
-         its room. -->
-    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
+    <!-- Needs-you cards: generic actions this chat is waiting on the user for.
+         Kept above the queue and composer, keyed by action id so a replaced
+         action becomes a new card. MCP recovery remains in Chat details. -->
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
