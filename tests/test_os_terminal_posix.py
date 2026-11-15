@@ -5,9 +5,6 @@ adapter, drive a real ``$SHELL``, and read what the terminal actually says.
 The only things patched are the seams that must not reach a real process (the
 session-membership check, the signal, the process listing) and the two seams
 the races need (a pause inside an I/O call, the tree constructor).
-
-The tests run on POSIX only. Windows has no equivalent adapter yet (#1692 says
-so); the module still imports there, which the Windows import gate checks.
 """
 
 from __future__ import annotations
@@ -24,10 +21,6 @@ from typing import Any
 import pytest
 
 from ciao.os_support import terminal_posix
-
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="the POSIX terminal adapter is not defined on Windows"
-)
 
 CHILD_HELPER = Path(__file__).resolve().parents[1] / "ciao" / "os_support" / "terminal_child.py"
 
