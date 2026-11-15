@@ -502,8 +502,8 @@ def test_first_party_install_command_stays_install_sh() -> None:
 def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
     # The `changes` job existed to decide whether a desktop change needed the
     # macOS runner. Nothing builds the app any more, so the decision it made
-    # has no meaning, and the macOS job runs on develop pushes and PRs to main
-    # regardless - which is the coverage that matters.
+    # has no meaning, and the macOS job runs on release PRs into main
+    # regardless of which files changed - which is the coverage that matters.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
@@ -514,9 +514,9 @@ def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
     assert "runs-on: macos-latest" in workflow
     # #655: dropping the `changes` job also dropped the `if:` it fed, and
     # without a gate the macOS job would run on every develop PR. The gate is
-    # exactly develop pushes and PRs into main.
+    # release PRs into main only.
     assert (
-        "if: github.event_name != 'pull_request' || github.base_ref == 'main'"
+        "if: github.event_name == 'pull_request' && github.base_ref == 'main'"
         in workflow
     )
 
@@ -808,8 +808,8 @@ def test_branch_protection_declares_conditional_linux_e2e_for_develop() -> None:
 def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     # A develop PR waits on the two parallel Linux jobs, conditional Linux
     # browser coverage for web changes, and the Windows import/win32 mypy
-    # gates. The Windows suites take over a quarter hour, so they run on pushes
-    # to develop and release PRs into main.
+    # gates. The Windows suites take over a quarter hour, so they run on
+    # release PRs into main and on a develop PR labelled windows-full.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
@@ -826,7 +826,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
 
     windows = by_name["windows-backend"]
     assert (
-        "WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}"
+        "WINDOWS_FULL: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')) }}"
         in windows
     )
     steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))

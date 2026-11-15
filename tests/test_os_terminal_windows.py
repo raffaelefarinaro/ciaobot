@@ -3183,8 +3183,8 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
     """The native binding must be proved before the change is merged.
 
     Only a Windows runner can spawn a real pseudoconsole, and the whole
-    Windows suite shares the macOS job's gate (pushes to develop and release
-    PRs into main). A step of its own, outside that gate, is what makes the
+    Windows suite runs on release PRs into main and on a develop PR labelled
+    windows-full. A step of its own, outside that gate, is what makes the
     native evidence arrive before the merge instead of after it.
     """
     workflow = (

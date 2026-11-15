@@ -86,8 +86,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
   outside a platform branch fails it). The Windows `pytest` and `npm test`
   suites and the macOS job (browser tests and an engine cold-start) run on
-  the push to `develop` after merge and on release PRs into `main`, so a PR
-  going green is not proof those will. Windows backend and frontend suites run
+  release PRs into `main`. A develop PR labelled `windows-full` also runs the
+  Windows suites. A green develop PR is not proof the release PR's Windows or
+  macOS jobs will pass. Windows backend and frontend suites run
   in parallel jobs; the stable required `windows` summary requires every
   applicable job to succeed (a full run cannot pass on a skipped suite).
   Path handling is the usual Windows
@@ -185,17 +186,17 @@ this file; the gates are the ones under Verification.
   corrections still need applicable backend/doc checks, not an automatic repeat
   of unchanged frontend/browser gates. Focused small checks run directly; heavy
   suites/browser runs share the lock. Lock exit 75 is deferred, not red.
-- Merge at most three low-risk independent, reviewed, locally gated and PR-green
-  changes serially before waiting for complete full-platform CI on the final
-  combined merge SHA. Check for known red before each merge; stop and fix it
-  immediately. Installer, migration, service, provider lifecycle, auth/security
-  and CI/release work waits for full post-merge CI after each merge. Do not merge
-  more while a three-change batch awaits acceptance.
-- Complete final-merge CI (Linux, full Windows and macOS) may replace a duplicate
-  local post-batch run, not candidate local gates, required PR checks, visual or
-  native acceptance. If that combined evidence is absent, run the fresh-worktree
-  post-batch gates. Preserve disjoint clean PR heads rather than syncing and
-  restarting CI merely because develop moved.
+- Merge reviewed, locally gated and PR-green changes into `develop` without
+  waiting for full-platform CI between them. A known red on a required develop
+  check stops the queue; fix it before merging more. The Windows pytest and
+  vitest suites and the macOS job run on the release PR into `main`, not on
+  the push to `develop`. A develop PR whose diff touches path handling, the
+  filesystem, subprocesses or Windows code still takes the `windows-full`
+  label so those Windows suites run on that PR. Installer, migration, service,
+  provider lifecycle, auth/security and CI/release work still gets the ship
+  fan-out and a PR-scoped security review before merge. Preserve disjoint
+  clean PR heads rather than syncing and restarting CI merely because
+  develop moved.
 - PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
   close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
   next release."
@@ -210,14 +211,14 @@ this file; the gates are the ones under Verification.
 - New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
   `ciao-support` skill). `report`-labelled issues are auto-opened and may be
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
-- After merging a batch into `develop`, watch the post-merge push run
-  (`gh run list --workflow ci.yml --branch develop --event push --limit 1`).
-  The Windows suites and the macOS job run only there. If it goes red, open a
-  `bug` issue naming the failing tests and the merge that broke them, and fix
-  it before merging more on top. `/ciao-release` will not cut over a red run.
-  Before queuing a PR whose diff touches path handling, the filesystem,
-  subprocesses or Windows code, add the `windows-full` label and push once, so
-  the full Windows suites run on the PR instead of after merge.
+- Do not watch a develop push run for the Windows pytest suite or the macOS
+  job. Those run on the release PR into `main`, and `/ciao-release` merges
+  only when that PR's `windows` and `test` checks are green. If a required
+  develop check is already red, open a `bug` issue naming the failing tests
+  and the merge that broke them, and fix it before merging more. Before
+  queuing a PR whose diff touches path handling, the filesystem, subprocesses
+  or Windows code, add the `windows-full` label and push once, so the full
+  Windows suites run on that PR.
 - Hands-on device testing (a real Windows or macOS install) is for diffs that
   touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
   service or scheduled-task code, engine update/migration, or `desktop/`.
@@ -237,9 +238,8 @@ this file; the gates are the ones under Verification.
   in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
   also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
   harness before the browser suite. Develop PRs changing `web/` run the
-  conditional Linux Chromium gate in parallel with unit/build work before merge,
-  while the macOS job retains
-  browser coverage on develop pushes and PRs into `main`. The terminal-renderer specs need
+  conditional Linux Chromium gate in parallel with unit/build work before merge.
+  The macOS job runs on release PRs into `main`. The terminal-renderer specs need
   `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
   `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
