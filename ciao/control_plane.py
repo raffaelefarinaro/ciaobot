@@ -56,6 +56,7 @@ from ciao.schedules import (
     DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
+    ScheduleConflict,
     ScheduleEntry,
     ScheduleNotFound,
     ScheduleStoreCorrupt,
@@ -6738,8 +6739,15 @@ class CiaoControlPlane:
 
     # ---- schedules ----------------------------------------------------
 
-    def _schedule_payload(self, entry: ScheduleEntry) -> dict[str, Any]:
+    def _schedule_payload(
+        self, entry: ScheduleEntry, revisions: Mapping[str, str] | None = None
+    ) -> dict[str, Any]:
         data = asdict(entry)
+        data["revision"] = (
+            revisions.get(entry.schedule_id)
+            if revisions is not None
+            else self.schedules.revision(entry.schedule_id)
+        )
         next_run = compute_next_run(entry)
         data["next_run"] = next_run.isoformat() if next_run else None
         # Name the target project here so every schedule tool reports it the
@@ -6751,8 +6759,9 @@ class CiaoControlPlane:
 
     def schedules_list(self, principal: AgentPrincipal) -> dict[str, Any]:
         workspace = self._workspace(principal)
+        revisions = self.schedules.revisions()
         rows = [
-            self._schedule_payload(entry)
+            self._schedule_payload(entry, revisions)
             for entry in self.schedules.list_entries()
             if not entry.workspace or entry.workspace == workspace
         ]
@@ -6961,6 +6970,11 @@ class CiaoControlPlane:
         def translate():
             try:
                 yield
+            except ScheduleConflict as exc:
+                raise ControlPlaneError(
+                    "schedule_conflict",
+                    "The schedule changed since you read it; re-read it and retry. Nothing was changed.",
+                ) from exc
             except ScheduleNotFound as exc:
                 raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.") from exc
             except ScheduleStoreCorrupt as exc:
@@ -6976,7 +6990,14 @@ class CiaoControlPlane:
         resolved: ScheduleEntry = entry
         return resolved
 
-    def schedule_update(self, principal: AgentPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
+    def schedule_update(
+        self,
+        principal: AgentPrincipal,
+        schedule_id: str,
+        *,
+        revision: str | None = None,
+        **changes: Any,
+    ) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
         system_timing_fields: frozenset[str] = frozenset()
         if entry.scope == "system":
@@ -7162,6 +7183,7 @@ class CiaoControlPlane:
                 timing_fields=system_timing_fields if entry.scope == "system" else frozenset(),
                 base=entry,
                 authorize=self._schedule_access_check(principal),
+                expected_revision=revision or None,
             )
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
@@ -7200,7 +7222,9 @@ class CiaoControlPlane:
         publish_automations_changed(self.pcm)
         return _ok(result)
 
-    def schedule_delete(self, principal: AgentPrincipal, schedule_id: str) -> dict[str, Any]:
+    def schedule_delete(
+        self, principal: AgentPrincipal, schedule_id: str, *, revision: str | None = None
+    ) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" or not entry.removable:
             raise ControlPlaneError("schedule_not_removable", "This schedule cannot be removed.")
@@ -7208,6 +7232,7 @@ class CiaoControlPlane:
             deleted = self.schedules.delete(
                 schedule_id,
                 authorize=self._schedule_access_check(principal, removing=True),
+                expected_revision=revision or None,
             )
         publish_automations_changed(self.pcm)
         return _ok({"deleted": deleted, "schedule_id": schedule_id})

@@ -771,6 +771,9 @@ export type ScheduleArchivePolicy = 'manual' | 'auto'
 
 export interface Schedule {
   schedule_id: string
+  // Opaque token for the editable content; sent back on update/delete so the
+  // engine refuses an edit made from a row that has changed since.
+  revision?: string
   daily_time_utc: string
   prompt: string
   chat_id: number

@@ -18,6 +18,8 @@ import type {
  * edit forms sent them through an `as any` cast. They are real Schedule fields.
  */
 export interface ScheduleUpdate {
+  // The `revision` the edit was made from; filled in from the cached row.
+  revision?: string
   time?: string
   prompt?: string
   timezone?: string
@@ -270,7 +272,15 @@ export const useTaskStore = defineStore('tasks', () => {
     const owner = reservation ?? reserveScheduleUpdate(scheduleId)
     if (!owner || scheduleUpdateOwners.get(scheduleId) !== owner) throw new Error('This automation is already being updated.')
     try {
-      const s = await api.patch<Schedule>(`/api/schedules/${scheduleId}`, updates)
+      const known = schedules.value.find(x => x.schedule_id === scheduleId)?.revision
+      const body = known && updates.revision === undefined ? { ...updates, revision: known } : updates
+      let s: Schedule
+      try {
+        s = await api.patch<Schedule>(`/api/schedules/${scheduleId}`, body)
+      } catch (error) {
+        await refetchOnScheduleConflict(error)
+        throw error
+      }
       scheduleUpdateVersion++
       const idx = schedules.value.findIndex(x => x.schedule_id === scheduleId)
       if (idx >= 0) schedules.value[idx] = s
@@ -280,8 +290,23 @@ export const useTaskStore = defineStore('tasks', () => {
     }
   }
 
+  // A 409 on an update or delete means the row changed since it was read:
+  // load the current rows so the screen shows what to review, and let the
+  // caller surface the error.
+  async function refetchOnScheduleConflict(error: unknown) {
+    if ((error as { status?: number } | null)?.status === 409) {
+      await fetchSchedules().catch(() => undefined)
+    }
+  }
+
   async function deleteSchedule(scheduleId: string) {
-    await api.del(`/api/schedules/${scheduleId}`)
+    const known = schedules.value.find(x => x.schedule_id === scheduleId)?.revision
+    try {
+      await api.del(`/api/schedules/${scheduleId}${known ? `?revision=${encodeURIComponent(known)}` : ''}`)
+    } catch (error) {
+      await refetchOnScheduleConflict(error)
+      throw error
+    }
     schedules.value = schedules.value.filter(s => s.schedule_id !== scheduleId)
   }
 

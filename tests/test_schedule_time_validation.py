@@ -103,6 +103,12 @@ class _Store:
         self.replaced.append(entry)
         self.entries = [entry]
 
+    def revision(self, schedule_id: str) -> str:
+        return "0-test"
+
+    def revisions(self) -> dict[str, str]:
+        return {e.schedule_id: "0-test" for e in self.entries}
+
 
 @pytest.fixture
 def plane(tmp_path: Path):
@@ -234,3 +240,29 @@ def test_update_normalises_a_full_day_name_before_storing(plane) -> None:
     plane.plane.schedule_update(_principal(), "loop-abc", days_of_week=["Saturday"])
 
     assert plane.store.entries[0].days_of_week == ["sat"]
+
+
+def test_mcp_update_and_delete_pass_the_revision_and_map_a_conflict(plane) -> None:
+    from ciao.schedules import ScheduleConflict
+
+    seen: dict[str, object] = {}
+
+    def refuse(entry, **scope):
+        seen.update(scope)
+        raise ScheduleConflict(entry.schedule_id)
+
+    plane.store.replace = refuse
+    with pytest.raises(ControlPlaneError) as update:
+        plane.plane.schedule_update(_principal(), "loop-abc", revision="3-abc", title="x")
+    assert update.value.code == "schedule_conflict"
+    assert seen["expected_revision"] == "3-abc"
+
+    def refuse_delete(schedule_id, **scope):
+        seen["delete_revision"] = scope.get("expected_revision")
+        raise ScheduleConflict(schedule_id)
+
+    plane.store.delete = refuse_delete
+    with pytest.raises(ControlPlaneError) as removal:
+        plane.plane.schedule_delete(_principal(), "loop-abc", revision="3-abc")
+    assert removal.value.code == "schedule_conflict"
+    assert seen["delete_revision"] == "3-abc"

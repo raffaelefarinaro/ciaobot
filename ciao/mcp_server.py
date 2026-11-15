@@ -905,7 +905,7 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
                        description: str | None = None, provider: str | None = None,
                        model: str | None = None, archive_policy: str | None = None,
                        workspace: str | None = None, command: str | None = None,
-                       schedule_id: str = "") -> dict[str, Any]:
+                       schedule_id: str = "", revision: str | None = None) -> dict[str, Any]:
     """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
 
     action:
@@ -1001,6 +1001,11 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             workspace, work from a chat scoped to it or ask the
             operator.
         schedule_id: (update only) The schedule to update.
+        revision: (update only, optional) The `revision` from schedules_list
+            or the last update. When given, the update is refused with
+            schedule_conflict, changing nothing, if the schedule's editable
+            content changed since; re-read it and retry. Omit it to apply
+            the fields you pass to the current row.
 
     An enabled schedule with a missed latest occurrence (e.g. the
     server was off, or a run stopped before it finished) runs once on
@@ -1015,7 +1020,7 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
     # `Unknown schedule fields: _defaults`.
     supplied: dict[str, Any] = {
         key: value for key, value in locals().items()
-        if key not in {"service", "action", "schedule_id"}
+        if key not in {"service", "action", "schedule_id", "revision"}
     }
     # Refuse chat bindings at the tool surface, before the control
     # plane, so the caller learns the stance even on an update payload
@@ -1066,13 +1071,15 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             )
         return await service._invoke(
             "schedule",
-            lambda cp, p: cp.schedule_update(p, schedule_id, **values),
+            lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, **values),
             mutating=True,
         )
     raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
 
 
-async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action: str) -> dict[str, Any]:
+async def _op_schedule_action(
+    service: CiaoMcpService, schedule_id: str, action: str, revision: str | None = None
+) -> dict[str, Any]:
     """Run one lifecycle action on a schedule.
 
     action:
@@ -1082,12 +1089,15 @@ async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action:
         "delete" — delete a removable user schedule (destructive). System
             schedules (scope=system) cannot be deleted — this raises
             schedule_not_removable instead.
+
+    revision: optional, for pause/resume/delete — the schedule's `revision`;
+        a mismatch is refused with schedule_conflict and nothing changes.
     """
     dispatch = {
-        "pause": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=False),
-        "resume": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=True),
+        "pause": lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, enabled=False),
+        "resume": lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, enabled=True),
         "run": lambda cp, p: cp.schedule_run(p, schedule_id),
-        "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
+        "delete": lambda cp, p: cp.schedule_delete(p, schedule_id, revision=revision),
     }
     op = dispatch.get(action)
     if op is None:
