@@ -241,6 +241,10 @@ function scrollActiveIntoView() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) {
+    if (event.key === 'Escape') event.stopPropagation()
+    return
+  }
   if (event.key === 'Escape') {
     // Claim the key. Dismissing this popover is the whole meaning of the press,
     // and the global handler in ChatLayout treats an unclaimed Escape as "go
@@ -310,6 +314,11 @@ function onCloseAutoFocus(event: Event): void {
 }
 
 function onEscapeKeyDown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) {
+    // Reka dismisses its layer unless this window-level event is prevented.
+    event.preventDefault()
+    return
+  }
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
   event.preventDefault()

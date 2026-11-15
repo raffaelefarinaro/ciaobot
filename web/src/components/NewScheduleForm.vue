@@ -132,15 +132,25 @@
         <div class="nsf-row nsf-row--top">
           <span class="nsf-k">Model</span>
           <div v-if="!inheritsChatModel" class="nsf-v">
-            <div class="nsf-model">
+            <div ref="modelRegion" class="nsf-model">
             <ModelSelector
+              :key="store.modelTransition"
               :model-value="model"
               :sections="scheduleModelSections"
               :placeholder="inheritedModelLabel"
               :empty-placeholder="inheritedModelLabel"
-              @select="selectScheduleModel"
+              v-on="{ select: modelSelectionHandler(store.modelTransition) }"
             />
             </div>
+            <p v-if="projectStore.workspaceRegistryStatus === 'error'" role="alert">Workspace list unavailable.
+              <button type="button" class="btn-small" aria-label="Retry workspace list for automation models" @click="projectStore.fetchWorkspaces()">Retry</button>
+            </p>
+            <p v-else-if="!store.modelWorkspaceEligible" role="status" aria-label="Automation models" aria-live="polite">Automation models unavailable until this workspace is registered.</p>
+            <p v-else-if="store.modelError" role="alert" aria-label="Automation models">Automation models unavailable: {{ store.modelError }}
+              <template v-if="store.modelStale"> Previously loaded models may be out of date.</template>
+              <button type="button" class="btn-small" aria-label="Retry automation models" @click="store.fetchModels()">Retry</button>
+            </p>
+            <p v-else role="status" aria-label="Automation models" aria-live="polite">{{ store.modelLoading ? (store.modelStale ? 'Loading automation models; previous models may be out of date.' : 'Loading automation models…') : store.modelEmpty ? 'No models listed; availability is unknown.' : store.models ? 'Automation models loaded. Availability may be incomplete.' : 'Automation models not loaded.' }}</p>
             <p class="nsf-note">Uses {{ workspaceLabel }}'s default unless you pick another.</p>
           </div>
           <div v-else class="nsf-v">
@@ -204,7 +214,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
@@ -257,6 +267,10 @@ const supportsAutoArchive = computed(() => !inheritsChatModel.value)
 watch(supportsAutoArchive, (supported) => {
   if (!supported) archivePolicy.value = 'manual'
 })
+watch(inheritsChatModel, (inherited) => {
+  if (!inherited && store.modelWorkspaceEligible && !store.models
+    && !store.modelLoading && !store.modelResult) void store.fetchModels()
+}, { flush: 'sync' })
 
 const canSubmit = computed(() => {
   if (!prompt.value || !contextKey.value) return false
@@ -289,6 +303,31 @@ const inheritedModelLabel = computed(() => {
 })
 
 const selectedProvider = ref<RuntimeProvider | undefined>(undefined)
+const modelRegion = ref<HTMLElement | null>(null)
+
+watch(() => projectStore.activeWorkspace, () => {
+  model.value = ''
+  selectedProvider.value = undefined
+}, { flush: 'sync' })
+
+watch(() => store.modelTransition, transition => {
+  const region = modelRegion.value
+  const focused = document.activeElement as HTMLElement | null
+  const restore = !!focused && !!region?.querySelector('.model-selector__popover')?.contains(focused)
+  void nextTick(() => {
+    if (restore && transition === store.modelTransition && region?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) {
+      region.querySelector<HTMLButtonElement>('.model-selector__trigger')?.focus()
+    }
+  })
+  if (!inheritsChatModel.value && store.modelWorkspaceEligible && !store.modelLoading && !store.models) void store.fetchModels()
+}, { flush: 'sync' })
+
+function modelSelectionHandler(transition: number) {
+  return (value: string | string[], sectionKey: string) => {
+    if (transition === store.modelTransition && store.modelWorkspaceEligible) selectScheduleModel(value, sectionKey)
+  }
+}
 
 function selectScheduleModel(value: string | string[], sectionKey: string) {
   model.value = Array.isArray(value) ? value[0] || '' : value

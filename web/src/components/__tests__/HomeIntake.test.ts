@@ -297,6 +297,7 @@ describe('HomeIntake', () => {
     store.workspaces = [
       { name: 'personal', vault_root: '', default_provider: 'opencode', gws_profile: '' },
     ] as unknown as typeof store.workspaces
+    store.workspaceRegistryStatus = 'ready'
     store.workspaceProviderOptions = [
       { value: 'claude', label: 'Claude' },
       { value: 'opencode', label: 'opencode' },

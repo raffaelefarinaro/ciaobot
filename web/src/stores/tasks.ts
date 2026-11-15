@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { api } from '../lib/api'
+import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { useProjectStore } from './projects'
 import type {
   RuntimeProvider,
   Schedule,
@@ -39,15 +41,65 @@ export interface ScheduleUpdate {
   command?: string
 }
 
+export type ModelFetchResult =
+  | { status: 'success'; workspace: string; generation: number }
+  | { status: 'error'; workspace: string; generation: number; error: string }
+  | { status: 'superseded'; workspace: string; generation: number | null }
+
 export const useTaskStore = defineStore('tasks', () => {
   const schedules = ref<Schedule[]>([])
   const status = ref<StatusResponse | null>(null)
   const models = ref<ModelsResponse | null>(null)
+  const modelLoading = ref(false)
+  const modelError = ref('')
+  const modelResult = ref<'success' | 'error' | null>(null)
+  const modelStale = ref(false)
+  const modelEmpty = computed(() => !!models.value && !sectionsFromModelsResponse(models.value).some(section => section.models.length))
+  const modelGeneration = ref(0)
+  onScopeDispose(() => { modelGeneration.value++ })
+  const modelTransition = ref(0)
+  const projects = useProjectStore()
+  const modelWorkspaceEligible = computed(() =>
+    projects.workspaceRegistryStatus === 'ready'
+    && !!projects.activeWorkspace
+    && projects.workspaces.some(workspace => workspace.name === projects.activeWorkspace),
+  )
+  watch(
+    () => [projects.activeWorkspace, projects.workspaceRegistryStatus, projects.workspaces.map(w => w.name).join('\0')],
+    () => {
+      modelGeneration.value++
+      models.value = null
+      modelLoading.value = false
+      modelError.value = ''
+      modelResult.value = null
+      modelStale.value = false
+      modelTransition.value++
+    },
+    { flush: 'sync' },
+  )
   const loading = ref(false)
   const scheduleLoading = ref(false)
   const scheduleLoadError = ref('')
   const schedulesLoaded = ref(false)
   let scheduleRequestId = 0
+  let scheduleUpdateVersion = 0
+  let activeScheduleRead: { promise: Promise<void>; supersede: () => void } | null = null
+  const scheduleUpdateOwners = new Map<string, symbol>()
+  const updatingSchedules = ref<Set<string>>(new Set())
+
+  function reserveScheduleUpdate(id: string): symbol | null {
+    if (scheduleUpdateOwners.has(id)) return null
+    const owner = Symbol(id)
+    scheduleUpdateOwners.set(id, owner)
+    updatingSchedules.value = new Set(scheduleUpdateOwners.keys())
+    return owner
+  }
+
+  function releaseScheduleUpdate(id: string, owner: symbol): void {
+    if (scheduleUpdateOwners.get(id) !== owner) return
+    scheduleUpdateOwners.delete(id)
+    updatingSchedules.value = new Set(scheduleUpdateOwners.keys())
+  }
 
   // Automations of any cadence bound to one existing chat. Kept as one shared
   // lookup because every list that shows a chat must agree about both the
@@ -65,33 +117,77 @@ export const useTaskStore = defineStore('tasks', () => {
     return byChat
   })
 
-  async function fetchSchedules(): Promise<void> {
+  function fetchSchedules(): Promise<void> {
     const requestId = ++scheduleRequestId
+    const previous = activeScheduleRead
+    let supersede!: () => void
+    const superseded = new Promise<void>(resolve => { supersede = resolve })
     scheduleLoading.value = true
     scheduleLoadError.value = ''
-    try {
-      const next = await api.get<Schedule[]>('/api/schedules')
-      if (requestId !== scheduleRequestId) return
-      schedules.value = next
-      schedulesLoaded.value = true
-    } catch (error: unknown) {
-      if (requestId === scheduleRequestId) {
+    const promise = (async () => {
+      try {
+        while (true) {
+          const version = scheduleUpdateVersion
+          const result = await Promise.race([
+            api.get<Schedule[]>('/api/schedules').then(
+              value => ({ kind: 'success' as const, value }),
+              error => ({ kind: 'error' as const, error }),
+            ),
+            superseded.then(() => ({ kind: 'superseded' as const })),
+          ])
+          if (requestId !== scheduleRequestId) return await activeScheduleRead!.promise
+          if (result.kind === 'superseded') return
+          if (result.kind === 'error') throw result.error
+          if (version !== scheduleUpdateVersion) continue
+          schedules.value = result.value
+          schedulesLoaded.value = true
+          return
+        }
+      } catch (error: unknown) {
+        if (requestId !== scheduleRequestId) return await activeScheduleRead!.promise
         scheduleLoadError.value = error instanceof Error
           ? error.message
           : 'Could not load automations.'
+        throw error
+      } finally {
+        if (requestId === scheduleRequestId) scheduleLoading.value = false
       }
-      throw error
-    } finally {
-      if (requestId === scheduleRequestId) scheduleLoading.value = false
-    }
+    })()
+    activeScheduleRead = { promise, supersede }
+    previous?.supersede()
+    return promise
   }
 
   async function fetchStatus() {
     status.value = await api.get<StatusResponse>('/api/status')
   }
 
-  async function fetchModels() {
-    models.value = await api.get<ModelsResponse>('/api/models')
+  async function fetchModels(workspace = projects.activeWorkspace): Promise<ModelFetchResult> {
+    if (!modelWorkspaceEligible.value || workspace !== projects.activeWorkspace) {
+      return { status: 'superseded', workspace, generation: null }
+    }
+    const generation = ++modelGeneration.value
+    const current = () => generation === modelGeneration.value
+      && modelWorkspaceEligible.value && workspace === projects.activeWorkspace
+    modelLoading.value = true
+    modelError.value = ''
+    modelResult.value = null
+    modelStale.value = models.value !== null
+    try {
+      const response = await api.get<ModelsResponse>(`/api/models?${new URLSearchParams({ workspace })}`)
+      if (!current()) return { status: 'superseded', workspace, generation }
+      models.value = response
+      modelResult.value = 'success'
+      modelStale.value = false
+      return { status: 'success', workspace, generation }
+    } catch {
+      if (!current()) return { status: 'superseded', workspace, generation }
+      modelError.value = 'Could not load models.'
+      modelResult.value = 'error'
+      return { status: 'error', workspace, generation, error: modelError.value }
+    } finally {
+      if (current()) modelLoading.value = false
+    }
   }
 
   async function fetchAll() {
@@ -170,11 +266,18 @@ export const useTaskStore = defineStore('tasks', () => {
     )
   }
 
-  async function updateSchedule(scheduleId: string, updates: ScheduleUpdate) {
-    const s = await api.patch<Schedule>(`/api/schedules/${scheduleId}`, updates)
-    const idx = schedules.value.findIndex(x => x.schedule_id === scheduleId)
-    if (idx >= 0) schedules.value[idx] = s
-    return s
+  async function updateSchedule(scheduleId: string, updates: ScheduleUpdate, reservation?: symbol) {
+    const owner = reservation ?? reserveScheduleUpdate(scheduleId)
+    if (!owner || scheduleUpdateOwners.get(scheduleId) !== owner) throw new Error('This automation is already being updated.')
+    try {
+      const s = await api.patch<Schedule>(`/api/schedules/${scheduleId}`, updates)
+      scheduleUpdateVersion++
+      const idx = schedules.value.findIndex(x => x.schedule_id === scheduleId)
+      if (idx >= 0) schedules.value[idx] = s
+      return s
+    } finally {
+      if (!reservation) releaseScheduleUpdate(scheduleId, owner)
+    }
   }
 
   async function deleteSchedule(scheduleId: string) {
@@ -183,9 +286,9 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, schedulesByChat, status, models, loading,
+    schedules, schedulesByChat, status, models, loading, modelLoading, modelError, modelResult, modelStale, modelEmpty, modelTransition, modelWorkspaceEligible, updatingSchedules,
     scheduleLoading, scheduleLoadError, schedulesLoaded,
     fetchSchedules, fetchStatus, fetchModels, fetchAll,
-    createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,
+    createSchedule, runScheduleNow, updateSchedule, reserveScheduleUpdate, releaseScheduleUpdate, deleteSchedule, updateStatus,
   }
 })

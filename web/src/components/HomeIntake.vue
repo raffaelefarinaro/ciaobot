@@ -76,7 +76,7 @@
 
         <!-- The model the next chat starts on. Unset means the workspace
              default, which the server resolves; a pick rides the create call. -->
-        <div class="home-intake-model">
+        <div ref="modelRegion" class="home-intake-model">
           <button
             ref="modelTrigger"
             type="button"
@@ -99,8 +99,7 @@
             :sections="modelSections"
             placeholder="Model"
             placement="bottom-start"
-            @select="selectModel"
-            @close="closeModelPicker"
+            v-on="{ select: modelSelectionHandler(tasks.modelTransition), close: modelCloseHandler(tasks.modelTransition) }"
           />
         </div>
 
@@ -129,6 +128,17 @@
         </button>
       </div>
     </form>
+    <template v-if="modelRequested">
+      <p v-if="store.workspaceRegistryStatus === 'error'" role="alert">Workspace list unavailable.
+        <button type="button" class="btn-small" aria-label="Retry workspace list for new chat models" @click="store.fetchWorkspaces()">Retry</button>
+      </p>
+      <p v-else-if="!tasks.modelWorkspaceEligible" role="status" aria-label="New chat models" aria-live="polite">New chat models unavailable until this workspace is registered.</p>
+      <p v-else-if="tasks.modelError" role="alert" aria-label="New chat models">New chat models unavailable: {{ tasks.modelError }}
+        <template v-if="tasks.modelStale"> Previously loaded models may be out of date.</template>
+        <button type="button" class="btn-small" aria-label="Retry new chat models" @click="tasks.fetchModels()">Retry</button>
+      </p>
+      <p v-else role="status" aria-label="New chat models" aria-live="polite" :class="{ 'sr-only': !tasks.modelLoading && !tasks.modelEmpty }">{{ tasks.modelLoading ? (tasks.modelStale ? 'Loading new chat models; previous models may be out of date.' : 'Loading new chat models…') : tasks.modelEmpty ? 'No models listed; availability is unknown.' : tasks.models ? 'New chat models loaded. Availability may be incomplete.' : 'New chat models not loaded.' }}</p>
+    </template>
   </section>
 </template>
 
@@ -219,17 +229,46 @@ const modelSections = computed<ModelSection[]>(() => [
 ])
 
 const modelTrigger = ref<HTMLButtonElement | null>(null)
+const modelRegion = ref<HTMLElement | null>(null)
+const modelRequested = ref(false)
 
 // The triggerless selector does not own the chip, so return focus to it
 // ourselves when the list closes (Escape, outside click, or a pick).
 function closeModelPicker(): void {
+  const focused = document.activeElement
+  const restore = !!focused && !!modelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
   showModelPicker.value = false
-  void nextTick(() => modelTrigger.value?.focus())
+  const transition = tasks.modelTransition
+  void nextTick(() => {
+    if (restore && transition === tasks.modelTransition && modelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) modelTrigger.value.focus()
+  })
 }
 
 function toggleModelPicker(): void {
+  modelRequested.value = true
   if (!showModelPicker.value && !tasks.models) void tasks.fetchModels()
   showModelPicker.value = !showModelPicker.value
+}
+
+watch(() => tasks.modelTransition, transition => {
+  const focused = document.activeElement
+  const restore = !!focused && !!modelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
+  showModelPicker.value = false
+  void nextTick(() => {
+    if (restore && transition === tasks.modelTransition && modelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) modelTrigger.value.focus()
+  })
+  if (modelRequested.value && tasks.modelWorkspaceEligible && !tasks.modelLoading && !tasks.models) void tasks.fetchModels()
+}, { flush: 'sync' })
+
+function modelSelectionHandler(transition: number) {
+  return (value: string | string[], section: string) => {
+    if (transition === tasks.modelTransition && tasks.modelWorkspaceEligible) selectModel(value, section)
+  }
+}
+function modelCloseHandler(transition: number) {
+  return () => { if (transition === tasks.modelTransition) closeModelPicker() }
 }
 
 function selectModel(value: string | string[], sectionKey: string): void {
@@ -264,7 +303,7 @@ watch(
     // this one must not silently carry across.
     selectedModel.value = null
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
 watch(prompt, value => draftsByWorkspace.set(store.activeWorkspace, value))
 
