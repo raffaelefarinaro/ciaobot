@@ -42,6 +42,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        id: probe-python
         with:
           python-version: '3.12'
       - name: Verify current job runner using GitHub API
@@ -78,9 +79,38 @@ jobs:
           }
       - name: Externally sanitized native baseline
         shell: pwsh
+        env:
+          PROBE_SETUP_PYTHON: ${{ steps.probe-python.outputs.python-path }}
+          PROBE_TEMP_ROOT: ${{ runner.temp }}
+          PROBE_HOSTED_RUNNER: ${{ runner.environment }}
         run: |
-          & harness/scripts/probes/3061/launch.ps1 `
-            -Python (Get-Command python -CommandType Application).Source `
-            -Repository baseline `
-            -TempRoot '${{ runner.temp }}' `
-            -HostedRunner '${{ runner.environment }}'
+          $ErrorActionPreference = "Stop"
+          try {
+            # Match the pinned setup-python find-python.ts executable layout.
+            # Never pick a PATH result or run an unsanitized validation interpreter.
+            if ([string]::IsNullOrWhiteSpace($env:pythonLocation) -or
+                -not [IO.Path]::IsPathFullyQualified($env:pythonLocation) -or
+                -not (Test-Path -LiteralPath $env:pythonLocation -PathType Container)) { throw "location" }
+            if ($IsWindows) {
+              $pythonExe = Join-Path $env:pythonLocation "python.exe"
+              $comparison = [StringComparison]::OrdinalIgnoreCase
+            } elseif ($IsLinux -or $IsMacOS) {
+              $pythonExe = Join-Path (Join-Path $env:pythonLocation "bin") "python"
+              $comparison = [StringComparison]::Ordinal
+            } else { throw "platform" }
+            if ([string]::IsNullOrWhiteSpace($env:PROBE_SETUP_PYTHON) -or
+                -not [IO.Path]::IsPathFullyQualified($env:PROBE_SETUP_PYTHON)) { throw "output" }
+            $pythonExe = [IO.Path]::GetFullPath($pythonExe)
+            if (-not [string]::Equals($pythonExe, [IO.Path]::GetFullPath($env:PROBE_SETUP_PYTHON), $comparison) -or
+                -not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) { throw "executable" }
+            # Scalar absolute path; launcher still sanitizes env before -I -S -B.
+            & ./harness/scripts/probes/3061/launch.ps1 `
+              -Python ([string]$pythonExe) `
+              -Repository baseline `
+              -TempRoot $env:PROBE_TEMP_ROOT `
+              -HostedRunner $env:PROBE_HOSTED_RUNNER
+            exit $LASTEXITCODE
+          } catch {
+            Write-Output '{"event":"BLOCKED","reason":"setup-python-executable-unverified-redacted"}'
+            exit 1
+          }

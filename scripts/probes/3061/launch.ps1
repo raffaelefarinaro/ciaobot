@@ -9,9 +9,21 @@ $ErrorActionPreference = "Stop"
 $exitCode = 1
 $root = $null
 try {
-    # Resolve executable paths before removing environment; no interpreter yet.
-    $pythonExe = (Get-Command $Python -CommandType Application).Source
-    $gitExe = (Get-Command git -CommandType Application).Source
+    # Python is the workflow-validated setup-python path, never PATH discovery.
+    # Resolve both scalar paths before removing environment; no interpreter yet.
+    if ([string]::IsNullOrWhiteSpace($Python) -or
+        -not [IO.Path]::IsPathFullyQualified($Python) -or
+        -not (Test-Path -LiteralPath $Python -PathType Leaf)) { throw "python executable" }
+    [string]$pythonExe = [IO.Path]::GetFullPath($Python)
+    # Trust the reviewed runner PATH for Git only; explicitly select ONE app.
+    $gitApplication = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    if ($null -eq $gitApplication -or
+        $gitApplication.CommandType -ne [System.Management.Automation.CommandTypes]::Application -or
+        $gitApplication.Source -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($gitApplication.Source) -or
+        -not [IO.Path]::IsPathFullyQualified($gitApplication.Source) -or
+        -not (Test-Path -LiteralPath $gitApplication.Source -PathType Leaf)) { throw "git executable" }
+    [string]$gitExe = [IO.Path]::GetFullPath($gitApplication.Source)
     $repo = (Resolve-Path -LiteralPath $Repository).Path
     $bootstrap = Join-Path $PSScriptRoot "bootstrap.py"
     $harness = Join-Path $PSScriptRoot "baseline.py"
