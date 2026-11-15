@@ -407,11 +407,20 @@ def test_uncertain_lstat_classification_fails_closed(
     assert "private lstat detail" not in str(raised.value)
 
 
-def test_state_diagnostic_escapes_and_bounds_adversarial_path(tmp_path: Path) -> None:
-    vault = tmp_path / ("root\n\x1b" + "x" * 180)
+def test_state_diagnostic_escapes_and_bounds_adversarial_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
     path = cr.state_path(vault)
     path.parent.mkdir(parents=True)
     path.write_text('{"secret":"do-not-echo"', encoding="utf-8")
+    original_state_error = cr._state_error
+    adversarial_path = Path("root\n\x1b")
+
+    def adversarial_diagnostic_path(_path: Path, reason: str) -> cr.CurationStateError:
+        return original_state_error(adversarial_path, reason)
+
+    monkeypatch.setattr(cr, "_state_error", adversarial_diagnostic_path)
 
     with pytest.raises(cr.CurationStateError) as raised:
         cr.load_state(vault)
@@ -419,8 +428,13 @@ def test_state_diagnostic_escapes_and_bounds_adversarial_path(tmp_path: Path) ->
     message = str(raised.value)
     assert "\x1b" not in message
     assert "\n" not in message
+    assert r"\n" in message
+    assert r"\x1b" in message
     assert "do-not-echo" not in message
-    assert len(message) < 250
+    long_path_message = str(
+        original_state_error(Path("x" * 180), "invalid JSON state document")
+    )
+    assert len(long_path_message) < 250
 
 
 def test_invalid_utf8_is_rejected_without_changing_the_file(tmp_path: Path) -> None:
