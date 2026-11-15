@@ -25,7 +25,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025, ubuntu-24.04, macos-15]
+        # Targeted rerun only. Linux evidence retained from 43726618884;
+        # Windows explicitly excluded by the user's instruction.
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     steps:

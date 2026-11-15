@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import plistlib
 import queue
+import re
 import stat
 import subprocess
 import sys
@@ -117,7 +118,16 @@ def filesystem(root, provenance):
         require(kind.value.upper() == "NTFS", "requires-ntfs")
         return kind.value
     if sys.platform == "darwin":
-        data = plistlib.loads(command("diskutil", "info", "-plist", str(root)).encode("utf-8"))
+        # diskutil info accepts a device/mountpoint, not an arbitrary directory.
+        # Resolve the actual fixture's containing device; never assume "/" is it.
+        lines = command("/bin/df", "-P", str(root)).splitlines()
+        require(len(lines) == 2, "macos-device-lookup-shape")
+        fields = lines[1].split()
+        require(len(fields) >= 6 and re.fullmatch(r"/dev/disk[0-9]+(?:s[0-9]+)+", fields[0]),
+                "macos-device-lookup-unrecognized")
+        device = fields[0]
+        data = plistlib.loads(command("/usr/sbin/diskutil", "info", "-plist", device).encode("utf-8"))
+        require(data.get("DeviceNode") == device, "macos-device-query-mismatch")
         kind = data.get("FilesystemType", "").lower()
         require(kind == "apfs", "requires-apfs")
         return kind
