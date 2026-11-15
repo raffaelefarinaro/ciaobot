@@ -17,7 +17,7 @@
       :tabindex="hasJob ? -1 : undefined"
     >
       <div class="update-progress-head">
-        <span class="wordmark wordmark--lg">ciaobot</span>
+        <Wordmark size="lg" />
         <span class="update-progress-version">update · v{{ version || '…' }}</span>
       </div>
 
@@ -75,6 +75,7 @@
 </template>
 
 <script setup lang="ts">
+import Wordmark from './Wordmark.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   UPDATE_APPLIED_PHASE,

@@ -261,15 +261,18 @@ body {
   color: var(--fg);
   display: inline-flex;
   align-items: baseline;
-  gap: 0.18em;
+  gap: 0;
   line-height: 1;
   user-select: none;
 }
-.wordmark::before {
-  content: "›";
-  color: var(--accent);
-  font-weight: 400;
-  font-size: 1.1em;
+.wordmark-dot {
+  display: inline-block;
+  width: 0.34em;
+  height: 0.34em;
+  margin: 0 0.08em 0.08em;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
 }
 .wordmark--lg { font-size: 32px; }
 .wordmark--md { font-size: 20px; }
