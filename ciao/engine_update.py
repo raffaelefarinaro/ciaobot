@@ -29,7 +29,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import sysconfig
 import time
 import urllib.error
 import urllib.request
@@ -178,11 +177,9 @@ class Operation:
     """The durable record of one staging run, rewritten at every phase.
 
     ``env_freeze`` is what the staged environment was resolved to, recorded
-    while it is still only a directory nobody runs. On macOS the apply moves
-    that very env rather than resolving anything, so there it is audit-only. On
-    Windows the apply rebuilds the live env from the wheel offline, and these
-    are the pins it constrains that rebuild to (#857); a record written before
-    the field existed reads as ``""``, which the Windows apply refuses.
+    while it is still only a directory nobody runs. The apply moves that very
+    env rather than resolving anything, so it is audit-only; a record written
+    before the field existed reads as ``""``.
     """
 
     id: str
@@ -330,9 +327,7 @@ def default_fetch(
                     # answering fine, it is just serving something this release
                     # does not describe. The partial bytes are dropped first:
                     # they are not a release anybody can install, and leaving
-                    # them makes a retry look like it is resuming. Dropped
-                    # after the handle is closed: Windows refuses to delete a
-                    # file that is still open (WinError 32).
+                    # them makes a retry look like it is resuming.
                     part.unlink(missing_ok=True)
                     raise UpdateError(
                         f"{url} is larger than the {max_bytes} bytes expected"
@@ -363,17 +358,8 @@ def resolve_latest_version() -> str:
 
 
 def python_request() -> str:
-    """The uv ``--python`` request that restages the engine like this one.
-
-    The running version, and on Windows its architecture too: Windows on Arm
-    runs the engine as x64 (cryptography ships no win_arm64 wheel), and a bare
-    version would let uv pick an Arm64 interpreter that cannot install it.
-    """
-    version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    arch = {"win-amd64": "x86_64", "win-arm64": "aarch64"}.get(sysconfig.get_platform())
-    if sys.platform != "win32" or arch is None:
-        return version
-    return f"cpython-{version}-windows-{arch}-none"
+    """The uv ``--python`` request that restages the engine like this one: the running version."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def find_uv(receipt_uv: str = "", *, host: UpdateHost | None = None) -> str:
@@ -1192,11 +1178,11 @@ def _rollback(
         lambda: _wait_until_unreachable(get, status_url, _STOP_TIMEOUT, sleep, clock),
     )
     if env_moved and not stopped:
-        # A host that could not confirm the stop (Windows: the engine still
-        # holds its runtime lock) must not have its env deleted or renamed from
-        # under it. Nothing is touched, the receipt included, and the record
-        # says so; `previous-env` is still on disk, so the recovery task retries
-        # the whole rollback on its next tick (see `_restore_pending`).
+        # A host that could not confirm the stop must not have its env deleted
+        # or renamed from under it. Nothing is touched, the receipt included,
+        # and the record says so; `previous-env` is still on disk, so the
+        # recovery task retries the whole rollback on its next tick (see
+        # `_restore_pending`).
         errors.append(
             "the engine did not stop, so the environment and receipt were left in "
             "place for the recovery task to retry"
@@ -1888,8 +1874,7 @@ def recover_apply(
             # the swap that is actually in flight. Once the newer record is
             # settled (only staged, say), nothing will ever retire this one but
             # itself: the host retires it, after deleting whatever a
-            # best-effort delete left behind, which on Windows can keep it
-            # registered for another tick. The record is not touched.
+            # best-effort delete left behind. The record is not touched.
             if not _update_pending(op):
                 platform.retire_recovery_agent(root)
                 return None
@@ -1905,8 +1890,7 @@ def recover_apply(
             # moved anything (this process holds the lock, so it is not still
             # running). Nothing is undone because nothing moved; the engine is
             # started again, since a supervisor that saw it stopped on purpose
-            # will not (Windows: `/End` does not trigger `RestartOnFailure`),
-            # and the record says what happened.
+            # will not, and the record says what happened.
             logger.warning(
                 "engine update %s was interrupted while stopping the engine; "
                 "nothing was moved, starting the engine again",

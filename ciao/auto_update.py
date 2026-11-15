@@ -6,8 +6,8 @@ roll back. What it never had was a reason to run on its own, and the two
 reasons it could not be pointed at a timer are the whole of this module.
 
 **Which installs may be updated unattended.** Not "does an update host exist"
-— ``default_update_host()`` deliberately answers with the macOS host on any
-non-Windows platform so the transaction's tests can run on Linux CI, and
+— ``default_update_host()`` deliberately answers with the macOS host on every
+platform so the transaction's tests can run on Linux CI, and
 ``detect_install_mode()`` proves the interpreter matches a receipt without
 noticing which service runs it. So :func:`auto_update_support` asks all four
 questions in one place — platform, install mode, a receipt for *this*
@@ -91,11 +91,11 @@ _MIN_BACKOFF_SECONDS = 300
 _MAX_BACKOFF_SECONDS = 6 * 3600
 
 #: The platforms with a supervisor the transaction can hand a swap to.
-SUPPORTED_PLATFORMS = ("darwin", "win32")
+SUPPORTED_PLATFORMS = ("darwin",)
 
 #: The supervisor each platform must actually be using. A receipt naming
 #: another one describes an install this engine cannot restart safely.
-_PLATFORM_BACKENDS = {"darwin": "launchd", "win32": "windows-task"}
+_PLATFORM_BACKENDS = {"darwin": "launchd"}
 
 #: Phases after which the record describes a finished run. Anything else is a
 #: run that is still going, or a record nobody can call finished.
@@ -152,7 +152,7 @@ def auto_update_support(
     if resolved_platform not in SUPPORTED_PLATFORMS:
         return AutoUpdateSupport(
             False,
-            f"automatic updates run on macOS and Windows only "
+            f"automatic updates run on macOS only "
             f"(this engine is on {resolved_platform})",
         )
 

@@ -1437,8 +1437,8 @@ def test_path_export_hint_names_the_installed_launcher_dir(
     # PATH; `ciao` is the launcher in uv's bin dir, which the installer adds.
     launcher_dir = tmp_path / "First Last" / ".local" / "bin"
     install_receipt.write_receipt(install_receipt.InstallReceipt(
-        version="1.2.3", executable=str(launcher_dir / "ciao.exe"), python=sys.executable,
-        service_backend="windows-task", service_label="\\Ciaobot\\Engine",
+        version="1.2.3", executable=str(launcher_dir / "ciao"), python=sys.executable,
+        service_backend="launchd", service_label="com.ciao.server",
         installed_at="2026-10-05T00:00:00+00:00",
     ))
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(launcher_dir)]))
