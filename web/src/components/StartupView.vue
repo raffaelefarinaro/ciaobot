@@ -1,7 +1,7 @@
 <template>
   <div class="startup-overlay">
     <div class="startup-content" role="status" aria-live="polite">
-      <span class="wordmark wordmark--md">ciaobot</span>
+      <Wordmark size="md" />
       <h1>{{ overallReady ? 'Connected to Ciaobot' : 'Connecting to Ciaobot' }}</h1>
       <p class="startup-description">
         {{ phases.length ? 'Getting your workspace ready.' : 'Checking the connection to your workspace.' }}
@@ -24,6 +24,8 @@
 </template>
 
 <script setup lang="ts">
+import Wordmark from './Wordmark.vue'
+
 interface Phase {
   name: string
   status: string

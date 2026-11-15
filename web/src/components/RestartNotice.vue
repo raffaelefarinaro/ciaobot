@@ -20,7 +20,7 @@
     @keydown="onKeydown"
   >
     <div class="restart-head">
-      <span class="wordmark wordmark--sm">ciaobot</span>
+      <Wordmark size="sm" />
       <span class="restart-tag">restart</span>
     </div>
 
@@ -40,6 +40,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { DEFAULT_RESTART_MESSAGE } from '../lib/serverRestart'
+import Wordmark from './Wordmark.vue'
 
 defineProps<{
   // Already normalised and length-capped by restartMessageForDisplay(); the

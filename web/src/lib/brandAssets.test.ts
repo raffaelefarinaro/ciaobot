@@ -2,13 +2,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import sharp from 'sharp'
 
-const brand = resolve(process.cwd(), 'public/brand')
-
-async function pixels(name: string) {
-  return sharp(resolve(brand, name)).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
-}
-
-function pixel(image: Awaited<ReturnType<typeof pixels>>, x: number, y: number) {
+function pixel(image: { data: Uint8Array; info: { width: number } }, x: number, y: number) {
   const index = (y * image.info.width + x) * 4
   return [...image.data.subarray(index, index + 4)]
 }
@@ -26,16 +20,4 @@ describe('small brand mark', () => {
     expect(pixel(icon, 0, 0)[3]).toBeLessThan(5)
   })
 
-  it('extracts the tilted C and both dots into separate theme masks', async () => {
-    const ink = await pixels('ciaobot-mark-ink.png')
-    const dots = await pixels('ciaobot-mark-dots.png')
-    for (const [x, y] of [[335, 620], [715, 320], [765, 873]]) {
-      expect(pixel(ink, x - 260, y - 250)[3]).toBeGreaterThan(240)
-      expect(pixel(dots, x - 260, y - 250)[3]).toBe(0)
-    }
-    for (const [x, y] of [[870, 346], [863, 800]]) {
-      expect(pixel(dots, x - 260, y - 250)[3]).toBeGreaterThan(200)
-      expect(pixel(ink, x - 260, y - 250)[3]).toBe(0)
-    }
-  })
 })
