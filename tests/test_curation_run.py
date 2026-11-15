@@ -92,7 +92,130 @@ def _categories(vault: Path) -> "EntityTypeRegistry":
     return load_entity_types(vault)
 
 
+def _planning_result(payload: dict[str, object] | None = None):
+    from ciao.cli import _CurationPlanningResult
+
+    worklist = cr.Worklist((), False, "", "")
+    return _CurationPlanningResult(payload or {}, worklist, worklist)
+
+
 # ── Worklist ──────────────────────────────────────────────────────────────
+
+
+def test_remaining_items_filters_only_done_and_empty_keys_without_mutating() -> None:
+    discovered = (
+        cr.WorklistItem("first", "First", "reason", ("done", "", "pending", "pending"), True),
+        cr.WorklistItem("second", "Second", "other", ("also-done", "later")),
+    )
+
+    remaining = cr.remaining_items(discovered, {"done", "also-done"})
+
+    assert tuple((item.pass_id, item.keys) for item in remaining) == (
+        ("first", ("pending", "pending")),
+        ("second", ("later",)),
+    )
+    assert (remaining[0].label, remaining[0].reason, remaining[0].weekly) == (
+        "First", "reason", True
+    )
+    assert discovered[0].keys == ("done", "", "pending", "pending")
+    assert discovered[1].keys == ("also-done", "later")
+
+
+@pytest.mark.parametrize("done_keys", [None, set(), frozenset()])
+def test_remaining_items_always_removes_empty_keys(done_keys) -> None:
+    item = cr.WorklistItem("pass", "Pass", "reason", ("", "key"))
+
+    assert cr.remaining_items((item,), done_keys)[0].keys == ("key",)
+
+
+@pytest.mark.parametrize("done_keys", [None, set(), frozenset()])
+def test_remaining_items_drops_zero_key_item_without_done_keys(done_keys) -> None:
+    item = cr.WorklistItem("empty", "Empty", "no keys", ())
+
+    assert cr.remaining_items((item,), done_keys) == ()
+
+
+def test_remaining_items_drops_entirely_completed_item() -> None:
+    item = cr.WorklistItem("completed", "Completed", "all done", ("done",))
+
+    assert cr.remaining_items((item,), {"done"}) == ()
+
+
+def test_remaining_items_does_not_sample_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = cr.WorklistItem("pass", "Pass", "reason", ("done", "pending"), weekly=True)
+
+    def unexpected_clock() -> str:
+        pytest.fail("pure filtering must not sample the clock")
+
+    monkeypatch.setattr(cr, "_now_iso", unexpected_clock)
+
+    assert cr.remaining_items((item,), {"done"}) == (
+        replace(item, keys=("pending",)),
+    )
+
+
+def test_worklist_views_keep_discovery_and_sample_one_timestamp_after_filtering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    item = cr.WorklistItem("synthetic", "Synthetic", "reason", ("done", "pending"))
+    events: list[str] = []
+    original_filter = cr.remaining_items
+
+    def filter_items(discovered, done_keys=None):
+        events.append("filter")
+        return original_filter(discovered, done_keys)
+
+    monkeypatch.setattr(cr, "remaining_items", filter_items)
+    monkeypatch.setattr(cr, "_now_iso", lambda: events.append("clock") or "now")
+    views = cr.build_worklist_views(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        today=date(2026, 9, 19),
+        done_keys={"done"},
+        category_items=(item,),
+        workspace=vault.name,
+    )
+
+    assert events == ["filter", "clock"]
+    discovered = next(entry for entry in views.discovered.items if entry.pass_id == "synthetic")
+    remaining = next(entry for entry in views.remaining.items if entry.pass_id == "synthetic")
+    assert discovered == item
+    assert remaining.keys == ("pending",)
+    assert views.discovered.generated_at == views.remaining.generated_at == "now"
+
+
+def test_legacy_builder_filters_before_its_single_timestamp_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    item = cr.WorklistItem("synthetic", "Synthetic", "reason", ("done", "pending"))
+    events: list[str] = []
+    original_filter = cr.remaining_items
+
+    def filter_items(discovered, done_keys=None):
+        events.append("filter")
+        return original_filter(discovered, done_keys)
+
+    monkeypatch.setattr(cr, "remaining_items", filter_items)
+    monkeypatch.setattr(cr, "_now_iso", lambda: events.append("clock") or "now")
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        today=date(2026, 9, 19),
+        done_keys={"done"},
+        category_items=(item,),
+        workspace=vault.name,
+    )
+
+    assert events == ["filter", "clock"]
+    synthetic = next(entry for entry in worklist.items if entry.pass_id == "synthetic")
+    assert synthetic.keys == ("pending",)
+    assert worklist.generated_at == "now"
 
 
 def test_a_fresh_idle_workspace_has_nothing_to_do(tmp_path: Path) -> None:
@@ -1482,7 +1605,7 @@ def test_curation_begin_state_uncertainty_at_each_post_acquisition_seam_fails_cl
             corrupt()
         if failure_point == "planning":
             raise cr.CurationStateError("controlled test uncertainty")
-        return {"empty": failure_point == "empty-cleanup"}, SimpleNamespace(items=[])
+        return _planning_result({"empty": failure_point == "empty-cleanup"})
 
     monkeypatch.setattr("ciao.cli._curation_plan", plan)
     if failure_point == "empty-cleanup":
@@ -1571,7 +1694,7 @@ def test_nonempty_begin_checks_ownership_after_planning(
         else:
             cr.end_run(vault, holder=old)
             cr.begin_run(vault, holder="replacement")
-        return {"empty": False}, SimpleNamespace(items=[])
+        return _planning_result({"empty": False})
 
     monkeypatch.setattr(cr, "_category_cluster_items", generate_category)
     monkeypatch.setattr("ciao.cli._curation_plan", replace_while_planning)
@@ -1602,7 +1725,7 @@ def test_successful_nonempty_begin_check_does_not_extend_lease(
     monkeypatch.setattr(cr, "_category_cluster_items", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "ciao.cli._curation_plan",
-        lambda *_args, **_kwargs: ({"empty": False}, SimpleNamespace(items=[])),
+        lambda *_args, **_kwargs: _planning_result({"empty": False}),
     )
 
     assert _curation_begin_command(
@@ -1680,9 +1803,8 @@ def test_cli_end_expired_unreplaced_holder_returns_busy_without_mutation(
     printed = _capture(monkeypatch)
     monkeypatch.setattr(
         "ciao.cli._curation_plan",
-        lambda _args: (
-            {"deferred_count": 0, "remaining_observed_count": 0},
-            SimpleNamespace(items=[]),
+        lambda _args: _planning_result(
+            {"deferred_count": 0, "remaining_observed_count": 0}
         ),
     )
 
@@ -1718,9 +1840,8 @@ def test_cli_end_rejects_corruption_after_planning_without_advancing_marker(
     monkeypatch.setattr(cr, "end_run", corrupt_before_commit)
     monkeypatch.setattr(
         "ciao.cli._curation_plan",
-        lambda _args: (
-            {"deferred_count": 0, "remaining_observed_count": 0},
-            SimpleNamespace(items=[]),
+        lambda _args: _planning_result(
+            {"deferred_count": 0, "remaining_observed_count": 0}
         ),
     )
 
@@ -1759,9 +1880,7 @@ def test_cli_end_replacement_during_planning_preserves_replacement_state_and_mar
                 (vault / cr.CURATION_LOG_RELATIVE).read_bytes(),
             )
         )
-        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
-            items=[]
-        )
+        return _planning_result({"deferred_count": 0, "remaining_observed_count": 0})
 
     monkeypatch.setattr("ciao.cli._curation_plan", replace_during_plan)
     assert _curation_end_command(
@@ -1808,9 +1927,7 @@ def test_end_plans_without_holding_state_lock_and_rechecks_after_scan(
             datetime.now(UTC) - timedelta(seconds=1)
         ).isoformat()
         cr._store(cr.state_path(vault), state)
-        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
-            items=[]
-        )
+        return _planning_result({"deferred_count": 0, "remaining_observed_count": 0})
 
     from types import SimpleNamespace
 
