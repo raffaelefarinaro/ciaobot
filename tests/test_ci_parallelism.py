@@ -22,7 +22,7 @@ def test_windows_suites_run_independently_and_summary_fails_closed() -> None:
     assert "npm ci && npm test" in frontend
     assert "needs:" not in backend
     assert "needs:" not in frontend
-    assert "needs: [windows-backend, windows-web]" in summary
+    assert "needs: [windows-backend, windows-web, linux-server-latest-python]" in summary
     assert "if: always()" in summary
     assert "shell: python" in summary
     assert 'os.environ["BACKEND"]' in summary
@@ -49,6 +49,20 @@ def test_only_superseded_pr_runs_are_cancelled() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
 
 
+def test_lean_develop_and_full_release_scopes() -> None:
+    workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    assert "  push:" not in workflow.split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in workflow
+    jobs = _jobs()
+    assert "github.base_ref == 'main'" in jobs["linux-server-latest-python"].split("steps:", 1)[0]
+    for name in ("windows-backend", "windows-web", "windows"):
+        assert "windows-full" in jobs[name]
+        assert "workflow_dispatch" in jobs[name]
+    nightly = (Path(__file__).parents[1] / ".github/workflows/nightly-ci.yml").read_text()
+    assert "schedule:" in nightly
+    assert "gh workflow run ci.yml --ref develop" in nightly
+
+
 @pytest.mark.parametrize("full,backend,frontend,passes", [
     ("true", "success", "success", True),
     ("true", "success", "skipped", False),
@@ -56,7 +70,8 @@ def test_only_superseded_pr_runs_are_cancelled() -> None:
     ("true", "failure", "success", False),
     ("true", "success", "failure", False),
     ("true", "success", "cancelled", False),
-    ("false", "success", "skipped", True),
+    ("false", "skipped", "skipped", True),
+    ("false", "success", "skipped", False),
     ("false", "failure", "skipped", False),
     ("false", "cancelled", "skipped", False),
     ("false", "success", "failure", False),
@@ -68,7 +83,33 @@ def test_actual_windows_summary_script(full, backend, frontend, passes) -> None:
     script = "\n".join(line[8:] for line in script.splitlines() if line.startswith("        "))
     result = subprocess.run(
         [sys.executable, "-c", script],
-        env={**os.environ, "FULL": full, "BACKEND": backend, "FRONTEND": frontend},
+        env={**os.environ, "FULL": full, "BACKEND": backend, "FRONTEND": frontend,
+             "RELEASE": full, "PYTHON": "success" if full == "true" else "skipped"},
         capture_output=True,
     )
     assert (result.returncode == 0) is passes, (result.args, result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
+def test_release_summary_rejects_unsuccessful_latest_python(result: str) -> None:
+    script = _jobs()["windows"].split("      run: |\n", 1)[1]
+    script = "\n".join(line[8:] for line in script.splitlines() if line.startswith("        "))
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "FULL": "true", "BACKEND": "success",
+             "FRONTEND": "success", "RELEASE": "true", "PYTHON": result},
+        capture_output=True,
+    )
+    assert run.returncode != 0
+
+
+def test_windows_opt_in_does_not_require_latest_python() -> None:
+    script = _jobs()["windows"].split("      run: |\n", 1)[1]
+    script = "\n".join(line[8:] for line in script.splitlines() if line.startswith("        "))
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "FULL": "true", "BACKEND": "success",
+             "FRONTEND": "success", "RELEASE": "false", "PYTHON": "skipped"},
+        capture_output=True,
+    )
+    assert run.returncode == 0

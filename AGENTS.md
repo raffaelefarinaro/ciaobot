@@ -81,12 +81,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   after the fast `web-scope` detector. Its stable check fails if detection fails;
   non-web PRs run only that scope validation.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
-  terminal harness before Playwright. On Windows a develop PR
-  runs only the fast backend gates: every module importing and `python -m mypy ciao`
-  (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
-  outside a platform branch fails it). The Windows `pytest` and `npm test`
-  suites and the macOS job (browser tests and an engine cold-start) run on
-  release PRs into `main`. A green develop PR is not proof the release PR's Windows or
+  terminal harness before Playwright. Ordinary develop PRs skip Windows;
+  `windows-full` opts into full Windows checks. Windows, Python 3.14 and macOS
+  run on release PRs and manual full runs. A green develop PR is not proof the release PR's Windows or
   macOS jobs will pass. Windows backend and frontend suites run
   in parallel jobs; the stable required `windows` summary requires every
   applicable job to succeed (a full run cannot pass on a skipped suite).
@@ -188,9 +185,9 @@ this file; the gates are the ones under Verification.
 - Merge reviewed, locally gated and PR-green changes into `develop` without
   waiting for full-platform CI between them. A known red on a required develop
   check stops the queue; fix it before merging more. The Windows pytest and
-  vitest suites and the macOS job run on the release PR into `main`, not on
-  the push to `develop`, so Windows-only breakage in path, filesystem or
-  subprocess code surfaces on the release PR. Installer, migration, service,
+  vitest suites and the macOS job run on the release PR into `main` and
+  full manual/nightly runs; `windows-full` opts a develop PR into Windows.
+  Installer, migration, service,
   provider lifecycle, auth/security and CI/release work still gets the ship
   fan-out and a PR-scoped security review before merge. Preserve disjoint
   clean PR heads rather than syncing and restarting CI merely because
@@ -209,8 +206,8 @@ this file; the gates are the ones under Verification.
 - New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
   `ciao-support` skill). `report`-labelled issues are auto-opened and may be
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
-- Do not watch a develop push run for the Windows pytest suite or the macOS
-  job. Those run on the release PR into `main`, and `/ciao-release` merges
+- No CI runs on develop pushes. The full suites run on the release PR into
+  `main`, and `/ciao-release` merges
   only when that PR's `windows` and `test` checks are green. If a required
   develop check is already red, open a `bug` issue naming the failing tests
   and the merge that broke them, and fix it before merging more.

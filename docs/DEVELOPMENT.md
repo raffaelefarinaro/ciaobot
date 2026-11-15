@@ -1058,7 +1058,7 @@ while the server is running, because the live schedule store may be writing it.
 
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
-- **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
+- **CI** (`.github/workflows/ci.yml`) runs on pull requests into `develop` or `main` and manual dispatch.
   Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
   `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
@@ -1072,24 +1072,21 @@ while the server is running, because the live schedule store may be writing it.
   Failed Linux browser runs upload
   `linux-playwright-traces` when Playwright produced traces.
   `linux-server-latest-python` repeats the `linux-server` gates on
-  Python 3.14, the newest interpreter `requires-python` admits; it is not a
-  required check. The
+  Python 3.14, the newest interpreter `requires-python` admits, on release PRs
+  and manual full runs. The required `windows` summary also checks its result. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
-  is gated by `if: github.event_name == 'pull_request' && github.base_ref ==
-  'main'`, so it runs on release PRs into `main` and not on pushes to
-  `develop` or on PRs into `develop`. Nothing builds the app any more, so
+  runs on release PRs and manual full runs, not ordinary develop PRs. Nothing builds the app any more, so
   there is no diff for it to react to. Web changes in develop PRs get the
   Linux browser check before merge; the macOS browser run is the release PR.
   The stable required `windows` check aggregates independent
   `windows-backend` and `windows-web` jobs (`windows-latest`).
-  The backend runs on every PR and push, imports every `ciao` module and runs `mypy ciao`
-  (natively win32). Its job-level `WINDOWS_FULL` flag is true on release PRs
-  into `main` only. Those runs also
+  The backend imports every `ciao` module and runs `mypy ciao` natively on win32.
+  It and the full suite run on release PRs, manual runs, and develop PRs labelled
+  `windows-full`. Those runs also
   execute `pytest -n auto --durations=30 tests/` while the frontend runs
-  `npm test` in parallel. A develop push and any develop PR skip
-  them and wait about 2 minutes. A full Windows or macOS failure
+  `npm test` in parallel. Ordinary develop PRs skip both Windows jobs. A full Windows or macOS failure
   therefore surfaces on the release PR, and `/ciao-release` merges into
   `main` only when that PR's `windows` and `test` checks are green.
   The summary fails if any applicable job fails, is cancelled, or unexpectedly
@@ -1100,8 +1097,12 @@ while the server is running, because the live schedule store may be writing it.
   real end-to-end install and `-Uninstall`) stay advisory: a hosted runner has
   no interactive logon, so a task that does not start there is a datum, not a
   verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
-  Superseded PR runs are cancelled by PR number; develop push runs are isolated
-  by commit SHA and never cancelled, preserving every merge's fast-gate result.
+  Superseded PR runs are cancelled by PR number; manual full runs are independent.
+  A nightly dispatcher starts full CI on the current `develop` at 02:23 UTC.
+  GitHub requires both workflow files on its default branch (`main`) before
+  nightly or manual dispatch becomes available, so this starts after release.
+  Until then, use a `windows-full` PR for early Windows checks and a release PR
+  for full platform checks. Adding a label needs a subsequent push to refresh CI.
   The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
   contributor's Windows account usually has neither the symlink privilege nor
   the coreutils. Without Developer Mode, a test that creates a symlink of its
@@ -1111,7 +1112,7 @@ while the server is running, because the live schedule store may be writing it.
   one on Windows. The suite also points `LOCALAPPDATA` at each test's home, so a
   machine with Ciaobot installed does not hand its real logon-task workspace to
   config-discovery tests.
-  One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
+  One step runs on every Windows job:
   `Windows ConPTY terminal tests`, which is `pytest -q -rfE
   tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
   hangs on a pipe fails the job instead of holding the runner. The native

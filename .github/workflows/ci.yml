@@ -1,19 +1,16 @@
 name: Ciao CI
 
 on:
-  push:
-    branches: [ develop ]
   pull_request:
     branches: [ develop, main ]
+  workflow_dispatch:
 
 # The suite only needs to check out code and run tests; the GITHUB_TOKEN never
 # needs to write anything.
 permissions:
   contents: read
 
-# A newer PR head supersedes its older run. Develop push runs are never
-# cancelled: each merge keeps its fast Linux and Windows-import result.
-# The full Windows suites and the macOS job run on release PRs into main.
+# A newer PR head supersedes its older run; full manual runs remain independent.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,23 +22,17 @@ concurrency:
 # unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
 # `linux-server-latest-python` runs the same backend gates
-# on the newest Python `requires-python` admits (3.14); it runs on every PR in
-# parallel but is not a required check. `test` is the full macOS job —
+# on the newest Python `requires-python` admits (3.14) on release and manual
+# runs; the required `windows` summary checks its outcome. `test` is the macOS job —
 # coverage, browser tests, the launchd service, and an engine wheel built from
 # this branch, installed into a throwaway venv and cold-started. It is the only
 # place the launchd, installer, engine-update and migration machinery runs on
-# the real platform. It runs on release PRs into main, not on develop pushes
-# or develop PRs. Web changes in develop PRs are covered before merge by
+# the real platform. It runs on release PRs and manual runs. Web changes in develop PRs are covered by
 # `linux-e2e`.
 #
 # `windows` is the stable required summary of parallel `windows-backend` and
-# `windows-web` jobs. On a develop PR and on a develop push the backend runs
-# only the fast gates — every module imports and `mypy ciao` passes natively
-# on win32, which is where POSIX-only calls get caught — in about two minutes.
-# The Windows pytest and vitest suites and the install.ps1 checks take over a
-# quarter of an hour on a hosted runner, so they run on release PRs into main
-# only. /ciao-release merges into main
-# only when that release PR's full Windows and macOS jobs are green.
+# `windows-web` jobs. Windows runs in full for release PRs, manual runs, and
+# develop PRs labelled `windows-full`; otherwise the summary verifies skips.
 jobs:
   linux-server:
     runs-on: ubuntu-24.04
@@ -63,6 +54,7 @@ jobs:
   # Ciaobot supports. A separate job (not a matrix) keeps the required
   # `linux-server` check name unchanged.
   linux-server-latest-python:
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
@@ -180,14 +172,15 @@ jobs:
         if-no-files-found: ignore
 
   windows-backend:
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')
     runs-on: windows-latest
     # A normal run takes about 16 minutes. A step that waits on input it will
     # never get (a fresh install.ps1 serving the setup wizard) must not hold
     # the runner for GitHub's six-hour default.
     timeout-minutes: 45
     env:
-      # 'true' on release PRs into main; 'false' on develop pushes and develop PRs.
-      WINDOWS_FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+      # Full on release PRs, manual runs and opted-in develop PRs.
+      WINDOWS_FULL: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
     defaults:
       run:
         shell: bash
@@ -236,9 +229,7 @@ jobs:
         set -o pipefail
         python -m mypy ciao 2>&1 | tee windows-mypy.txt
     # The ConPTY adapter only exists on Windows, and only a Windows runner can
-    # prove that a real pseudoconsole works. This step runs on every PR, not
-    # only on the ones that run the whole Windows suite, so the native binding
-    # is exercised before the change is merged instead of after it.
+    # prove that a real pseudoconsole works. Run it with the full Windows suite.
     # The timeout is a bound, not a hope: a terminal test that hangs on a
     # pipe must fail the job rather than hold the runner for six hours.
     - name: Windows ConPTY terminal tests
@@ -448,7 +439,6 @@ jobs:
         {
           echo "### Windows (#696)"
           echo
-          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run on the release PR."
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
@@ -484,7 +474,7 @@ jobs:
         if-no-files-found: ignore
 
   windows-web:
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -514,7 +504,7 @@ jobs:
   # Keep the existing required status name. Skips are accepted only when the
   # event genuinely excludes the full frontend run; failure/cancellation block.
   windows:
-    needs: [windows-backend, windows-web]
+    needs: [windows-backend, windows-web, linux-server-latest-python]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -523,23 +513,30 @@ jobs:
       env:
         BACKEND: ${{ needs.windows-backend.result }}
         FRONTEND: ${{ needs.windows-web.result }}
-        FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+        PYTHON: ${{ needs.linux-server-latest-python.result }}
+        RELEASE: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' }}
+        FULL: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
       run: |
         import os
         import sys
         if os.environ["FULL"] not in {"true", "false"}:
             sys.exit("Invalid full-Windows scope")
-        if os.environ["BACKEND"] != "success":
-            sys.exit("Windows backend checks did not succeed")
         expected = "success" if os.environ["FULL"] == "true" else "skipped"
+        if os.environ["BACKEND"] != expected:
+            sys.exit("Windows backend checks did not reach the required outcome")
         if os.environ["FRONTEND"] != expected:
             sys.exit("Windows frontend checks did not reach the required outcome")
+        if os.environ["RELEASE"] not in {"true", "false"}:
+            sys.exit("Invalid release scope")
+        expected_python = "success" if os.environ["RELEASE"] == "true" else "skipped"
+        if os.environ["PYTHON"] != expected_python:
+            sys.exit("Latest Python checks did not reach the required outcome")
 
   test:
     # Engine-only coverage that only the real platform can give. This job runs
     # on release PRs into main. Browser tests for changed web paths also run
     # pre-merge in linux-e2e.
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v7

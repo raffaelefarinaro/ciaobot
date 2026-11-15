@@ -23,7 +23,7 @@ def test_public_ci_matches_release_contract() -> None:
     assert "pytest" in workflow
     assert "tests/" in workflow
     assert "ciao package-smoke --skip-frontend" in workflow
-    assert "branches: [ develop ]" in workflow
+    assert "workflow_dispatch:" in workflow
     assert "branches: [ develop, main ]" in workflow
 
 
@@ -516,7 +516,7 @@ def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
     # without a gate the macOS job would run on every develop PR. The gate is
     # release PRs into main only.
     assert (
-        "if: github.event_name == 'pull_request' && github.base_ref == 'main'"
+        "if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'"
         in workflow
     )
 
@@ -763,7 +763,7 @@ def test_develop_web_prs_run_linux_e2e() -> None:
     assert "fetch-depth: 0" in workflow
     assert "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}" in workflow
     assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in workflow
-    assert "on:\n  push:\n    branches: [ develop ]\n  pull_request:\n    branches: [ develop, main ]" in workflow
+    assert "on:\n  pull_request:\n    branches: [ develop, main ]\n  workflow_dispatch:" in workflow
     assert "git diff --no-renames --name-only \"${PR_BASE_SHA}...${PR_HEAD_SHA}\" -- web/" in _web_changes_script()
     assert "github.event_name == 'pull_request' && github.base_ref == 'develop'" in workflow
     jobs = re.split(r"(?m)^  (?=[a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
@@ -826,7 +826,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
 
     windows = by_name["windows-backend"]
     assert (
-        "WINDOWS_FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}"
+        "WINDOWS_FULL: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}"
         in windows
     )
     steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))
@@ -845,14 +845,14 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     assert "github.base_ref == 'main'" in by_name["windows-web"]
 
 
-def test_develop_prs_do_not_opt_into_the_full_windows_suites() -> None:
-    # Only release PRs into main run the full Windows suites; there is no label.
+def test_develop_prs_can_opt_into_the_full_windows_suites() -> None:
+    # The label allows platform-sensitive changes to run Windows early.
     # The pull_request trigger keeps no `types:` filter, so no label change
     # reruns CI.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
-    assert "windows-full" not in workflow
+    assert "windows-full" in workflow
     on_block = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert "types:" not in on_block.split("  pull_request:", 1)[1]
 
