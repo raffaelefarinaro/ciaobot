@@ -31,6 +31,12 @@ starting Chromium earlier does not make macOS faster, so a shorter PR critical
 path need not shorten full post-merge acceptance. Batching changes how often the
 orchestrator waits for that acceptance; it does not remove the checks.
 
+On 2026-11-15 the full Windows suites and the macOS job moved off pushes to
+`develop` and onto release PRs into `main`. A later sample must not treat a
+develop push that no longer runs those jobs as a faster copy of the
+"Develop push, full platforms" profile above. Compare that profile with the
+release PR instead.
+
 ### Local context, not a statistical baseline
 
 One contended macOS run of candidate `6cc0b911c`:

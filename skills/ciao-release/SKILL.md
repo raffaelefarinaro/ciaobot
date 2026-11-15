@@ -72,22 +72,22 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
-**The post-merge CI run must be green on every platform.** A develop PR runs
-only Linux plus the fast Windows gates (imports, win32 mypy); the Windows
-pytest and vitest suites and the macOS job (browser tests, engine cold-start)
-run on the push to `develop` after merge. That push run is the only place
-those suites ran on what you are about to ship:
+**The develop push run is the fast gates only.** A develop PR and the push
+after it merge run Linux plus the fast Windows gates (imports, win32 mypy,
+ConPTY). They do not run the Windows pytest and vitest suites or the macOS
+job. Do not wait for those before cutting:
 
 ```bash
 gh run list --repo raffaelefarinaro/ciaobot --workflow ci.yml --branch develop \
   --event push --limit 1 --json headSha,status,conclusion,url
 ```
 
-`headSha` must equal `git rev-parse origin/develop`, `status` must be
-`completed` and `conclusion` `success`. A run still in progress means wait; a
-red one stops the cut. File the failure as an issue, fix it on `develop`, and
-start again from the top of this step. The release PR into `main` re-runs the
-full matrix, but finding a Windows break there means fixing it mid-cut.
+If that run exists, `headSha` must equal `git rev-parse origin/develop`. A
+`failure` or `cancelled` conclusion stops the cut: file it as an issue, fix
+it on `develop`, and start again from the top of this step. A run still in
+progress does not block the cut. The Windows pytest and vitest suites and
+the macOS job (`test`) run on this release PR into `main`. Step 6 merges
+only when that PR's `windows` and `test` checks are green.
 
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and
@@ -331,7 +331,7 @@ Once the release PR is open, give its diff one more read before merging — the
 not in the Step 3 review. Prefer `/code-review --comment` on the open PR so
 findings land as inline comments.
 
-1. CI (`test`) must be green (`mergeStateStatus` CLEAN).
+1. CI must be green (`mergeStateStatus` CLEAN), including `windows` and `test`.
 2. Merge into `main`. This runs `.github/workflows/release-on-main.yml`, which
    creates the `vX.Y.Z` tag and GitHub release using `RELEASE_PAT` (a plain
    `GITHUB_TOKEN` release would **not** fire `release: published`).

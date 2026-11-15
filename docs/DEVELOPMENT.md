@@ -1077,26 +1077,24 @@ while the server is running, because the live schedule store may be writing it.
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
-  is gated by `if: github.event_name != 'pull_request' || github.base_ref ==
-  'main'`, so it runs on pushes (including to `develop`) and on PRs into `main`,
-  but not on a PR into `develop`. Nothing builds the app any more, so there is
-  no diff for it to react to. The macOS job retains browser coverage on pushes
-  to `develop` and PRs into `main`; web changes in develop PRs also get the
-  Linux browser check before merge.
+  is gated by `if: github.event_name == 'pull_request' && github.base_ref ==
+  'main'`, so it runs on release PRs into `main` and not on pushes to
+  `develop` or on PRs into `develop`. Nothing builds the app any more, so
+  there is no diff for it to react to. Web changes in develop PRs get the
+  Linux browser check before merge; the macOS browser run is the release PR.
   The stable required `windows` check aggregates independent
   `windows-backend` and `windows-web` jobs (`windows-latest`).
   The backend runs on every PR and push, imports every `ciao` module and runs `mypy ciao`
-  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate: on
-  pushes and PRs into `main` it also runs `pytest -n auto --durations=30 tests/`
-  while the frontend runs `npm test` in parallel, avoiding the previous serial
-  backend-plus-frontend wait. The combined suites used to take about 15 minutes
-  on a hosted runner, so a PR into
-  `develop` skips them and waits about 2 minutes. A `develop` PR labelled
-  `windows-full` runs them too; use it for path, filesystem, process or
-  installer changes. The label is read from the event, so add it and then push
-  (an empty commit is enough) — re-running a job replays the old event and does
-  not see a new label. A Windows test failure therefore surfaces on the
-  post-merge push run, and `/ciao-release` will not cut while that run is red.
+  (natively win32). Its job-level `WINDOWS_FULL` flag is true on release PRs
+  into `main` and on a develop PR labelled `windows-full`. Those runs also
+  execute `pytest -n auto --durations=30 tests/` while the frontend runs
+  `npm test` in parallel. A develop push and an unlabelled develop PR skip
+  them and wait about 2 minutes. Use `windows-full` for path, filesystem,
+  process or installer changes. The label is read from the event, so add it
+  and then push (an empty commit is enough) — re-running a job replays the
+  old event and does not see a new label. A full Windows or macOS failure
+  therefore surfaces on the release PR, and `/ciao-release` merges into
+  `main` only when that PR's `windows` and `test` checks are green.
   The summary fails if any applicable job fails, is cancelled, or unexpectedly
   skips; a full run requires both jobs to succeed. Every backend gate runs even after an earlier one
   failed, the job summary lists the counts and the failing tests by name, and
@@ -1106,7 +1104,7 @@ while the server is running, because the live schedule store may be writing it.
   no interactive logon, so a task that does not start there is a datum, not a
   verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
   Superseded PR runs are cancelled by PR number; develop push runs are isolated
-  by commit SHA and never cancelled, preserving every merge's platform evidence.
+  by commit SHA and never cancelled, preserving every merge's fast-gate result.
   The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
   contributor's Windows account usually has neither the symlink privilege nor
   the coreutils. Without Developer Mode, a test that creates a symlink of its
