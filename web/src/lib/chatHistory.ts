@@ -406,9 +406,10 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * rendering the reply once whole and then again in pieces.
  *
  * The server's copy is authoritative once the turn has settled, which is what
- * a window row for an assistant answer carrying a completion `timestamp` says
- * (only the turn-final row gets one, from `_overlay_assistant_timings`). Until
- * then the live tail is all the user has, so it stays.
+ * a window row for an assistant answer or error carrying a completion
+ * `timestamp` says (only the turn-final row gets one, from
+ * `_overlay_assistant_timings`). Until then the live tail is all the user has,
+ * so it stays.
  *
  * Settling is judged per turn: the tail is split at user bubbles, and only a
  * turn whose own settled answer arrived in `windowRows` loses its live copies.
@@ -416,10 +417,10 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * reconciled, so one refresh may settle several turns at once, while a
  * follow-up still streaming keeps its trace.
  *
- * Only trace rows go. An un-indexed plain system row is a client-side notice
- * — the failed-send warning `recoverUnackedSend` pushes — with no server
- * counterpart to replace it, and an un-indexed user bubble is handled by the
- * optimistic-bubble pruning instead.
+ * Trace rows go. A client-side `Error: …` notice also goes when its exact
+ * message appears as a settled server error row. Other un-indexed system rows
+ * are notices with no server counterpart to replace them, and an un-indexed
+ * user bubble is handled by optimistic-bubble pruning instead.
  */
 export function dropSupersededLiveTail(
   merged: ChatMessage[], tailStart: number, windowRows: ChatMessage[],
@@ -429,7 +430,6 @@ export function dropSupersededLiveTail(
     if (
       typeof row.i === 'number'
       && row.role === 'assistant'
-      && !row.is_error
       && Boolean(row.timestamp)
     ) settledIndices.add(row.i)
   }
@@ -466,7 +466,25 @@ export function dropSupersededLiveTail(
     const carried: Partial<ChatMessage> = {}
     const rows: ChatMessage[] = []
     let target = -1
+    const settledErrors = turn.filter(
+      row => row.role === 'assistant'
+        && row.is_error
+        && typeof row.i === 'number'
+        && settledIndices.has(row.i),
+    )
     for (const row of turn) {
+      if (
+        typeof row.i !== 'number'
+        && row.role === 'system'
+        && /^Error:\s*/i.test(row.content)
+        && settledErrors.some(
+          error => error.content.replace(/^Error:\s*/i, '').trim()
+            === row.content.replace(/^Error:\s*/i, '').trim(),
+        )
+      ) {
+        changed = true
+        continue
+      }
       if (typeof row.i !== 'number' && isLiveTraceRow(row)) {
         if (row.usage) carried.usage = row.usage
         if (row.effective_model) carried.effective_model = row.effective_model
