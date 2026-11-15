@@ -526,6 +526,45 @@ async def test_curation_run_without_lease_records_error(
 
 
 @pytest.mark.asyncio
+async def test_curation_with_uncertain_state_records_failure_and_does_not_autoarchive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "nothing happened", "is_error": False}],
+    )
+    state = curation_run.state_path(tmp_path / "vault")
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        '{"version":1,"done_keys":{},"lease":{},"last_run":{},"x":'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "}",
+        encoding="utf-8",
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows: list[object] = []
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.job_runs.record_run",
+        lambda row: rows.append(row),
+    )
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(archive_policy="auto"),
+        "Run the routine.",
+        "opus",
+        "auto",
+        "claude",
+    )
+
+    assert result["status"] == "error"
+    assert len(rows) == 1 and rows[0].status == "error"
+    assert "curation state is uncertain" in rows[0].error
+    assert host.archives == []
+
+
+@pytest.mark.asyncio
 async def test_curation_run_that_took_the_lease_stays_ok(
     tmp_path: Path,
 ) -> None:

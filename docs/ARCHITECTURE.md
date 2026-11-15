@@ -1,5 +1,9 @@
 # Ciaobot Architecture
 
+### Curation state integrity
+
+The nightly curation state is strict v1: only a genuinely absent file initializes as empty. Malformed, unreadable, duplicate-key, partial, or unsupported state raises `CurationStateError` and remains byte-for-byte untouched. Care and lease-dependent attended actions refuse uncertainty; recovery requires restoring a known-good state file, with no automatic reset or repair. A missing file cannot prove prior state was not deleted, and validation cannot fence non-cooperating edits after the validation seam.
+
 Orientation doc for the codebase. Read this before making any change in `ciao/`, `web/`, `scripts/`, or `deploy/`. After a change that affects layout, capabilities, env vars, endpoints, or commands, update this file, `docs/DEVELOPMENT.md`, and `INTEGRATIONS.md` so they match the repo.
 
 ## A meta-harness for personal AI assistance

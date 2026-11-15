@@ -934,14 +934,12 @@ class ScheduleDispatcher:
                 unstarted_run_reason, vault, _sched_started
             )
             if reason:
-                # The agent ended its turn cleanly but never took the lease,
-                # so the nightly care did not run. Report it as the failure
-                # it is: unclean (the chat stays visible), status "error",
-                # and the reason lands in the job-run log (issue #866).
+                # A missing lease or uncertain state means the nightly care
+                # cannot be confirmed; report it as a failure and keep visible.
                 outcome.is_error = True
                 outcome.final_text = reason
                 logger.warning(
-                    "Schedule %s ended without taking the curation lease: %s",
+                    "Schedule %s curation completion could not be confirmed: %s",
                     _sched_schedule_id,
                     reason,
                 )
