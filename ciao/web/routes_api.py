@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import errno
 import functools
 import hashlib
@@ -108,6 +109,8 @@ from ciao.schedules import (
     FREQUENCIES,
     INTERVAL_FREQUENCY,
     ScheduleEntry,
+    ScheduleNotFound,
+    ScheduleStoreCorrupt,
     compute_last_expected_run,
     compute_next_run,
     is_interval,
@@ -6475,7 +6478,12 @@ async def schedule_detail(request: Request) -> JSONResponse:
     schedule_id = request.path_params["schedule_id"]
     if request.method == "DELETE":
         sm = request.app.state.schedule_manager
-        ok = sm.delete(schedule_id)
+        try:
+            ok = sm.delete(schedule_id)
+        except ScheduleStoreCorrupt:
+            return JSONResponse(
+                {"error": "schedule store is unreadable; nothing was changed"}, status_code=503
+            )
         publish_automations_changed(request.app.state.project_chat_manager)
         return JSONResponse({"ok": ok})
     # PATCH
@@ -6483,6 +6491,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     entry = store.get(schedule_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # The row as read, before the edits below: the store applies only the
+    # fields that differ from it onto the current row, so a concurrent edit to
+    # another field is kept and a row deleted meanwhile is not resurrected.
+    base = dataclasses.replace(entry)
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -6605,10 +6617,17 @@ async def schedule_detail(request: Request) -> JSONResponse:
     # project. Also clears it when the entry becomes project-bound.
     stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
-        if entry.scope == "system":
-            request.app.state.schedule_manager.replace(entry, timing_fields=frozenset(timing_fields))
-        else:
-            request.app.state.schedule_manager.replace(entry)
+        request.app.state.schedule_manager.replace(
+            entry,
+            timing_fields=frozenset(timing_fields) if entry.scope == "system" else frozenset(),
+            base=base,
+        )
+    except ScheduleNotFound:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ScheduleStoreCorrupt:
+        return JSONResponse(
+            {"error": "schedule store is unreadable; nothing was changed"}, status_code=503
+        )
     except ValueError as exc:
         # A fanned-out system routine's workspace is part of its id, so the
         # store refuses to "move" it. That is a bad request, not a server
