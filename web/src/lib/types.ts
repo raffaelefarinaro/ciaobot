@@ -466,7 +466,7 @@ export interface ChatMessage {
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
-  // Engine vault answer check for this turn (last assistant row only).
+  // Legacy engine verdict metadata for this turn (last assistant row only).
   verification?: TurnVerification
   // Populated when tool_name === '_filecard'. Drives the inline preview card
   // rendered alongside the activity trace. `file_path` is whatever the agent

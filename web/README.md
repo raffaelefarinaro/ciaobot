@@ -96,9 +96,42 @@ known not to apply. Summary categories overlap. Loading notes distinguish the
 actual owner and initial load from failure or stale refresh where known.
 Migration starts unassessed unless an actual decision supports another status.
 The four TabBar states, six plain SidebarRow states, two SidebarListSkeleton
-states and four SettingsSwitch states (six stories) have rendered stories;
-other states and owners remain unassessed or uncovered. Adding an SFC requires a separate
+states, four SettingsSwitch states (six stories), seven WorkspaceColorPicker
+states, six SettingsRadioGroup states, five ConfirmDialog states, six
+PromptDialog states, six DecisionReason states and four HomeTodayStats states
+have rendered stories (52 stories total). Other states and owners remain
+unassessed or uncovered. Adding an SFC requires a separate
 inventory row (and a rationale for a composition), not a complete story suite.
+
+**Connected / Home Today stats** is the bounded connected proof. Its four stories
+mount the production `HomeTodayStats.vue`, fresh real Pinia/project stores, a fresh
+memory router and the real `usageStats`/`api` normalization. `/stats` is an inert
+destination, not the Usage page. No app bootstrap, engine, provider or socket is
+started. The two synthetic workspaces are `storybook-alpha` and `storybook-beta`.
+Only exact GET `/api/stats?workspace=<one of those names>&range=30` is answered in
+memory; every other fetch (including same-origin assets), write, XHR, new
+WebSocket/EventSource and beacon is rejected without native fallback. Existing
+XHR open/send and WebSocket send are fenced too. The only native send exceptions
+are Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
+render lifecycle/heartbeat events plus preview keyboard reports (`previewKeydown`)
+on Storybook's established same-origin `/storybook-server-channel` with its exact
+preview page/token. Custom/invoke/save events are not allowed. Storybook's
+module/asset loading is infrastructure, not an API fixture.
+The visible request count and violation ledger remain observable when the owner
+catches an error. Teardown unmounts the isolated app, disposes its Pinia, settles
+held reads and restores transport descriptors. Concurrent mounts are refused;
+autodocs/inline docs are disabled for this owner.
+
+Default, held initial loading, HTTP failure and partial normalized data are
+rendered-state coverage only. Loading and failure both render six dashes with no
+averages: the component has no separate status/error UI. The fixture workspace
+selector exercises its real workspace watcher without invoking app-level
+`switchWorkspace` orchestration. This is a trusted-component transport harness,
+not a security sandbox for hostile code (DOM resource loads, workers and saved
+native references outside this fixture are not sandboxed). It does not prove
+the Home composition, Usage page, live engine, stale-response races, keyboard,
+reduced-motion or responsive-state coverage. Focused tests live in
+`src/stories/connectedStats.test.ts`.
 
 `npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
 after building. Every registry-linked ID must exist as a story, not Docs or
@@ -125,6 +158,27 @@ Check filtering, keyboard access, narrow/zoom layouts and story links in both
 the development and built workshop in a browser; record screenshots and network
 evidence with the change. Automated Storybook browser interactions are future work.
 
+ConfirmDialog has normal, destructive, optional-reason, long-content and narrow
+stories; PromptDialog has empty, whitespace, prefilled, populated, validation-disabled
+and narrow stories. They call `askConfirm`, `askConfirmReason` and `askPrompt`
+after mounting the real host, cancel outstanding requests on teardown, and exclude
+inline Docs because their request state is singleton. Enter in ConfirmDialog
+currently confirms even while Cancel is focused; Enter in reason text/chips does
+not. These stories preserve that production behavior, not the older desired
+native-button contract. Prompt's disabled story disables only submission through
+real blank-input validation, not the whole dialog. Narrow dialogs use a 390px
+containing block; still verify an actual narrow viewport and browser zoom.
+DecisionReason has controlled empty, quick-reason, custom, disabled, 1000-character
+and narrow stories. These admissions do not cover connected callers, loading
+fidelity, migration approval, or other unaudited states.
+
+WorkspaceColorPicker has controlled default, selected, extra-preset expanded,
+extra-preset selected while collapsed, disabled, disabled-expanded and narrow
+stories. SettingsRadioGroup has real consumer configurations for Theme, Text
+contrast and Body font, plus null selection and narrow; its keyboard-focus
+behavior remains uncovered. Neither family’s stories imply connected Settings
+consumer or migration coverage.
+
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 
 ## Layout
@@ -144,6 +198,10 @@ web/
                            /memory, /stats, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary, UsageView (the /stats Usage page; data from lib/usageStats.ts),
                            CommandPaletteModal, FileViewerModal, NotificationBell (the inbox bell and its popover or phone sheet), NotificationInboxList (the inbox body), HomeNoticeWindow, HousekeepingStrip (Home's single "Needs you" list above the composer: workspace-health errors, operator notices and update tasks, one title, one line and one primary button per row) with NeedsYouRow (the row and its ⋯ menu), and WebhookTriggers)
+    components/ChatMcpConnections.vue  chat-scoped connection health and managed recovery
+    components/ChatMcpTerminalRecovery.vue  copy-only manual terminal previews
+    composables/useChatMcpConnections.ts  scoped status observer and row derivation
+    composables/useMcpAuthStart.ts  shared start lease and popup owner
     components/TaskBoardView.vue  the `/tasks` route entry point: a thin wrapper that
                            renders `TaskWorkspaceSurface.vue` and forwards its
                            `open-sidebar` request and the open task's pull-to-close, and
@@ -180,8 +238,6 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
-    components/settings/SettingsVaultCheck.vue  the Check vault answers switch card (engine-wide, stored as verify_vault_answers)
-    components/TurnVerificationBadge.vue  the always-visible Vault n/m toggle under a turn's footer, with its claim list (ChatPanel renders it on the closing bubble; the pure helpers are lib/turnVerification.ts)
     components/TitleRail.vue  the swipeable title rail of an open chat's, automation's or project's header (ChatPanel's `plainHeader` prop turns it off);
                            railMotion.css is the lean/arrival motion of the body under it
     components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and
@@ -481,6 +537,18 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 
 ### Layout traps
 
+`PaneHeader.vue` owns the shared page-chrome rule: at viewport widths ≥769px,
+`.chat-layout.sidebar-open` compacts page-tag headers that have no item-title
+slot. Their h2 stays in the accessibility tree using visually hidden CSS,
+never `display:none` or an `aria-hidden` ancestor. Actionless headers have no
+layout footprint; an actions slot retains a compact trailing toolbar with the
+page inset (Tasks' New task), including 44px coarse-pointer targets. Closing
+the sidebar restores the full desktop header. Widths ≤768px keep the existing
+mobile grid/lead/Back, with the bell still limited to ≤767px; item titles,
+detail actions and automation forms are unchanged. Wrap the entire
+ancestor/root/descendant selector in `:global(...)` inside scoped CSS: partial
+global selectors can lose their descendants during Vue compilation.
+
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
 - **Flex children with unbreakable content need `min-width: 0`.** Without it, a long unbreakable string (a URL, a model identifier, etc.) forces the flex parent wider than the viewport and breaks horizontal layout.
 - **Tap targets** must hit the `--touch: 44px` minimum (declared in `src/styles/app.css`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
@@ -594,7 +662,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders them through `NeedsYouStack.vue`, which caps the region's height and folds two or more untouched sign-ins under one row (Show, Not now for all) in a single keyed list, so a card is never rebuilt when it leaves the fold. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders non-MCP actions in the bounded keyed `NeedsYouStack.vue`; MCP actions remain in the store for Chat details and alone do not create Needs you attention. Actual failed turns, questions, permission and task blockers and generic cards retain their attention semantics. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
@@ -723,12 +791,10 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   Settings edits native MCP configuration only to turn one server off or on
   (`POST /api/mcp/servers/enabled`); it never handles secret values or probes
   servers; commands run only in the terminal the user is watching. A server that
-  needs a sign-in in an open chat gets **Sign in** instead of **Sign in in
-  terminal** (which stays in the ··· menu): `store.requestMcpAuth` raises that
-  chat's `mcp_auth` card (`POST /api/chats/{chat_id}/actions/mcp-auth`),
-  `store.startChatAction` starts it as the card's own button does (for OpenCode
-  this may start the chat's server), the sign-in page opens and the page goes to
-  the chat. A terminal sign-in cannot update a running chat: OpenCode V2 has no
+  needs a sign-in in an open chat gets **Sign in**, which navigates to that
+  chat's MCP section rather than starting OAuth in Settings. The chat's managed
+  control raises and starts its `mcp_auth` action; OpenCode start may start the
+  chat's server. Both providers retain callback paste-back and verification. A terminal sign-in cannot update a running chat: OpenCode V2 has no
   reconnect route. The selected workspace scopes
   `/api/mcp/status`; only already running chats in that workspace contribute
   connection states. An empty connections list means unchecked, and unreadable
@@ -736,6 +802,28 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   remains authoritative and is never broadened by Settings. Add/authenticate
   servers with `claude mcp add` / `claude mcp login` or `opencode mcp add` /
   `opencode mcp auth` from that workspace's directory.
+  Chat details observes the actual chat provider and owning workspace even when
+  closed. Duplicate raw names and current actions have deterministic precedence;
+  absent or unreadable observations remain unknown. Settings workspace switches
+  serialize under the existing guard with latest-intent and query-reveal tokens;
+  the shared start lease prevents duplicate OAuth starts across surfaces and a
+  disposed popup owner preserves a safe link; `needs-you/McpAuthBody.vue` is a
+  shared caller of that lease. The standalone trimmed,
+  case-insensitive `/mcp` navigates locally only with a supported provider and
+  resolved workspace; otherwise it explains the problem without consuming the
+  draft or staged state. Arguments are ordinary messages. Successful navigation
+  clears only text, preserving all four staged arrays, history, queue, offline
+  state and uploads. While streaming Stop remains primary with a separate Open
+  action; IME, picker, touch and pane guards still apply.
+
+  MCP Terminal recovery previews the owning workspace/provider command and copies
+  only: no terminal API, input, session or target change. The user separately
+  opens Chat details → Open → Terminal, chooses Workspace if offered, and
+  reviews, pastes and runs it. Its `lib/codeCopy.ts` helper checks that preview
+  context is still current before falling back to legacy copy after an async
+  clipboard rejection, so a stale preview cannot copy an old command. This does
+  not change the existing reviewed command-card and Settings Run in terminal
+  behavior.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New

@@ -7079,7 +7079,7 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
   })
 
-  it("turn_verification sets verification on the turn's last assistant row", () => {
+  it("turn_verification sets verification on only the turn's last assistant row", () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
     const verification = {
@@ -7095,7 +7095,11 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     store.messages = {
       'c-v': [
         { role: 'user', content: 'q', timestamp: '2026-11-12T10:00:00Z', turn_index: 0 } as ChatMessage,
-        { role: 'assistant', content: 'a', timestamp: '2026-11-12T10:00:01Z' } as ChatMessage,
+        { role: 'assistant', content: 'first reply', timestamp: '2026-11-12T10:00:01Z' } as ChatMessage,
+        { role: 'system', content: 'tool activity', timestamp: '2026-11-12T10:00:02Z' } as ChatMessage,
+        { role: 'assistant', content: 'last reply', timestamp: '2026-11-12T10:00:03Z' } as ChatMessage,
+        { role: 'user', content: 'next question', timestamp: '2026-11-12T10:01:00Z', turn_index: 1 } as ChatMessage,
+        { role: 'assistant', content: 'next answer', timestamp: '2026-11-12T10:01:01Z' } as ChatMessage,
       ],
     }
     store.connectEventsWs()
@@ -7103,7 +7107,41 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     sock.onmessage?.({
       data: JSON.stringify({ type: 'turn_verification', chat_id: 'c-v', turn_index: 0, verification }),
     })
-    expect(store.messages['c-v'][1].verification).toEqual(verification)
+    expect(store.messages['c-v'].map(row => row.verification)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      verification,
+      undefined,
+      undefined,
+    ])
+  })
+
+  it('turn_verification ignores an unknown turn and a turn without an assistant row', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const rows: ChatMessage[] = [
+      { role: 'user', content: 'q', timestamp: '2026-11-12T10:00:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'another turn has an answer', timestamp: '2026-11-12T10:00:01Z' },
+      { role: 'user', content: 'next question', timestamp: '2026-11-12T10:01:00Z', turn_index: 1 },
+    ]
+    store.messages = { 'c-v': rows }
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const verification = {
+      supported: 1,
+      unsupported: 0,
+      general: 0,
+      claims: [{ text: 'Lisbon is the capital', status: 'supported' as const, source: 'notes/geo.md' }],
+      sources: ['notes/geo.md'],
+    }
+
+    for (const turn_index of [9, 1]) {
+      sock.onmessage?.({
+        data: JSON.stringify({ type: 'turn_verification', chat_id: 'c-v', turn_index, verification }),
+      })
+      expect(rows.map(row => row.verification)).toEqual([undefined, undefined, undefined])
+    }
   })
 
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {

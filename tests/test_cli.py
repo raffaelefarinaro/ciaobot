@@ -4136,6 +4136,63 @@ def test_an_unattended_run_cannot_file_create_or_settle_through_the_cli(
     assert all(row["lifecycle"] == "pending" for row in rows)
 
 
+def test_uncertain_state_cli_preflight_refuses_before_draft_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import upstream_drafts
+    from ciao.curation_run import state_path
+
+    reached: list[str] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **_kwargs: reached.append("create")
+    )
+    monkeypatch.setattr(
+        upstream_drafts,
+        "search_existing_issues",
+        lambda **_kwargs: reached.append("search"),
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    config = _workspace_config(workspace)
+    stock = json.loads(_run_draft_add(capsys, _draft_payload(tmp_path)))["id"]
+    new = json.loads(
+        _run_draft_add(
+            capsys,
+            _draft_payload(
+                tmp_path,
+                target="new_skill",
+                skill="invoice-recon",
+                body="",
+                change="Create skills/invoice-recon with a trigger and one step.",
+            ),
+        )
+    )["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text("---\nname: invoice-recon\n---\n\nOne step.\n", encoding="utf-8")
+    path = state_path(Path(config.workspace_vault_root("personal")))
+    path.write_text('{"version":', encoding="utf-8")
+    before = path.read_bytes()
+
+    assert cli.main(["skill-draft-approve", stock, "--json"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(
+        ["skill-draft-approve", new, "--content-file", str(content), "--json"]
+    ) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(["skill-draft-reject", new, "--reason", "no"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+
+    assert reached == []
+    assert not (workspace / "skills" / "invoice-recon").exists()
+    assert path.read_bytes() == before
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert sorted(row["id"] for row in rows) == sorted([stock, new])
+    assert all(row["lifecycle"] == "pending" for row in rows)
+
+
 
 def _workspace_config(root: Path):
     """The config the CLI itself would build for ``root``, for a direct assertion."""
@@ -4279,6 +4336,137 @@ def _stale_fact_note(vault: Path) -> Path:
     return note
 
 
+def test_curation_plan_retains_discovery_but_budgets_only_remaining_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        f"---\nlast_full_pass: {date.today().isoformat()}\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    completed = "synthetic:completed"
+    pending_a = "synthetic:pending-a"
+    pending_b = "synthetic:pending-b"
+    cr._store(cr.state_path(vault), cr.CurationState(done_keys={completed: "2026-11-15"}))
+    state_path = cr.state_path(vault)
+    log_path = vault / cr.CURATION_LOG_RELATIVE
+    before_state, before_log = state_path.read_bytes(), log_path.read_bytes()
+    original_load = cr.load_state
+    loads = 0
+
+    def count_loads(vault_root: Path):
+        nonlocal loads
+        loads += 1
+        return original_load(vault_root)
+
+    monkeypatch.setattr(cr, "load_state", count_loads)
+    category_items = (
+        cr.WorklistItem(
+            "synthetic",
+            "Synthetic pass",
+            "three discovered keys",
+            (completed, pending_a, pending_b),
+        ),
+    )
+
+    result = cli._curation_plan(
+        _curation_args(max_items=1),
+        category_items=category_items,
+        category_generation_attempted=True,
+    )
+
+    assert loads == 1
+    synthetic_discovered = next(
+        item for item in result.discovered.items if item.pass_id == "synthetic"
+    )
+    synthetic_remaining = next(
+        item for item in result.remaining.items if item.pass_id == "synthetic"
+    )
+    assert synthetic_discovered.keys == (completed, pending_a, pending_b)
+    assert synthetic_remaining.keys == (pending_a, pending_b)
+    assert [
+        (item["pass"], item["keys"]) for item in result.payload["planned"]
+    ] == [("synthetic", [pending_a])]
+    assert [
+        (item["pass"], item["keys"]) for item in result.payload["deferred"]
+    ] == [("synthetic", [pending_b])]
+    assert result.payload["remaining_observed_count"] == 2
+    assert result.payload["counts_complete"] is False
+    assert "discovered" not in result.payload
+    assert completed not in json.dumps(result.payload)
+    assert state_path.read_bytes() == before_state
+    assert log_path.read_bytes() == before_log
+
+
+def test_curation_end_prunes_only_remaining_keys_and_forwards_run_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    lease = cr.begin_run(vault, holder="nightly")
+    discovered = cr.Worklist(
+        (cr.WorklistItem("synthetic", "Synthetic", "found", ("done", "keep-a", "keep-b")),),
+        False,
+        "",
+        "now",
+    )
+    remaining = cr.Worklist(
+        (cr.WorklistItem("synthetic", "Synthetic", "found", ("keep-a", "keep-b")),),
+        False,
+        "",
+        "now",
+    )
+    payload = {
+        "deferred_count": 2,
+        "remaining_observed_count": 2,
+        "coverage_notes": ["incomplete"],
+    }
+    monkeypatch.setattr(
+        cli,
+        "_curation_plan",
+        lambda _args: cli._CurationPlanningResult(payload, discovered, remaining),
+    )
+    seen: dict[str, Any] = {}
+
+    def end_spy(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"full_pass_advanced": False}
+
+    monkeypatch.setattr(cr, "end_run", end_spy)
+
+    assert cli._curation_end_command(
+        _curation_args(
+            holder=lease.holder,
+            status="ok",
+            planned=7,
+            completed=5,
+            reason=["reported reason"],
+            json=True,
+        )
+    ) == 0
+
+    assert seen == {
+        "holder": lease.holder,
+        "status": "ok",
+        "planned": 7,
+        "completed": 5,
+        "deferred": 2,
+        "reasons": ["reported reason"],
+        "live_keys": frozenset({"keep-a", "keep-b"}),
+        "advance_marker": True,
+    }
+
+
 def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4307,7 +4495,8 @@ def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     assert name != resolved.name, "the directory's name is the guess this replaces"
     # And the plan it produces is keyed on identities minted under that name —
     # the one a managed `entry verify` call can actually resolve.
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     entries = [
         item for item in payload["items"] if item["pass"] == "stale_entry"
     ]
@@ -4366,7 +4555,8 @@ def test_a_rerooted_curation_plan_reads_the_workspace_guide_not_the_install_root
 
     assert name == "personal"
     assert guide == root / "personal" / "AGENTS.md"
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     assert any(item["pass"] == "regions" for item in payload["items"]), payload["items"]
 
 
@@ -4647,7 +4837,8 @@ def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
 
     monkeypatch.setattr(cli, "_curation_config", _spy)
 
-    payload, _worklist = cli._curation_plan(_curation_args(vault_root=str(vault)))
+    result = cli._curation_plan(_curation_args(vault_root=str(vault)))
+    payload = result.payload
 
     # Fails first on the unfixed code, so the identity check below is only
     # reached once the plan is known to have been keyed by the owner.
@@ -4695,7 +4886,8 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
     )
 
     assert name is None, "there is no registry to ask and no --vault-root to read"
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     assert [i for i in payload["items"] if i["pass"] == "stale_entry"] == []
     assert any("stale-entry pass was not planned" in n for n in payload["notes"]), (
         payload["notes"]

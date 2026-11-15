@@ -41,9 +41,10 @@ import json
 import logging
 import os
 import socket
+import stat
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -276,6 +277,25 @@ class Worklist:
             "items": [item.as_dict() for item in self.items],
             "notes": list(self.notes),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class WorklistViews:
+    discovered: Worklist
+    remaining: Worklist
+
+
+def remaining_items(
+    discovered: tuple[WorklistItem, ...],
+    done_keys: frozenset[str] | set[str] | None = None,
+) -> tuple[WorklistItem, ...]:
+    done = frozenset(done_keys or ())
+    remaining: list[WorklistItem] = []
+    for item in discovered:
+        keys = tuple(key for key in item.keys if key and key not in done)
+        if keys:
+            remaining.append(replace(item, keys=keys))
+    return tuple(remaining)
 
 
 def _read_text(path: Path) -> str:
@@ -1403,7 +1423,7 @@ def _skill_proposal_items(vault_root: Path) -> list[WorklistItem]:
     ]
 
 
-def build_worklist(
+def build_worklist_views(
     *,
     vault_root: Path,
     guide_path: Path,
@@ -1418,7 +1438,7 @@ def build_worklist(
     user_char_limit: int | None = None,
     workspace: str | None,
     handover: str = "off",
-) -> Worklist:
+) -> WorklistViews:
     """Compute tonight's work from files alone.
 
     ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
@@ -1473,7 +1493,6 @@ def build_worklist(
     guide_path = Path(guide_path)
     workspace_dir = Path(workspace_dir) if workspace_dir is not None else guide_path.parent
     today = today or datetime.now(UTC).date()
-    done = frozenset(done_keys or ())
     memory_limit = memory_char_limit if memory_char_limit is not None else DEFAULT_MEMORY_CHAR_LIMIT
     user_limit = user_char_limit if user_char_limit is not None else DEFAULT_USER_CHAR_LIMIT
 
@@ -1575,27 +1594,60 @@ def build_worklist(
     collected.extend(_skill_proposal_items(vault_root))
 
     order = {pass_id: index for index, pass_id in enumerate(PASS_ORDER)}
-    remaining: list[WorklistItem] = []
-    for item in sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER))):
-        keys = tuple(key for key in item.keys if key not in done)
-        if not keys:
-            continue
-        remaining.append(
-            WorklistItem(
-                pass_id=item.pass_id,
-                label=item.label,
-                reason=item.reason,
-                keys=keys,
-                weekly=item.weekly,
-            )
-        )
-    return Worklist(
-        items=tuple(remaining),
-        weekly_due=weekly_due,
-        last_full_pass=last_full_pass,
-        generated_at=_now_iso(),
-        notes=tuple(notes),
+    discovered_items = tuple(
+        sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER)))
     )
+    remaining = remaining_items(discovered_items, done_keys)
+    generated_at = _now_iso()
+    return WorklistViews(
+        discovered=Worklist(
+            items=discovered_items,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+        remaining=Worklist(
+            items=remaining,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+    )
+
+
+def build_worklist(
+    *,
+    vault_root: Path,
+    guide_path: Path,
+    category_registry: EntityTypeRegistry,
+    config: Any = None,
+    workspace_dir: Path | None = None,
+    path_prefix: Path | None = None,
+    today: date | None = None,
+    done_keys: frozenset[str] | set[str] | None = None,
+    category_items: tuple[WorklistItem, ...] = (),
+    memory_char_limit: int | None = None,
+    user_char_limit: int | None = None,
+    workspace: str | None,
+    handover: str = "off",
+) -> Worklist:
+    return build_worklist_views(
+        vault_root=vault_root,
+        guide_path=guide_path,
+        category_registry=category_registry,
+        config=config,
+        workspace_dir=workspace_dir,
+        path_prefix=path_prefix,
+        today=today,
+        done_keys=done_keys,
+        category_items=category_items,
+        memory_char_limit=memory_char_limit,
+        user_char_limit=user_char_limit,
+        workspace=workspace,
+        handover=handover,
+    ).remaining
 
 
 # ── Budget ────────────────────────────────────────────────────────────────
@@ -1710,24 +1762,121 @@ class CurationState:
         }
 
 
+class CurationStateError(RuntimeError):
+    """An existing curation state file cannot safely establish authority."""
+
+
+class _DuplicateStateKey(ValueError):
+    pass
+
+
+def _state_error(path: Path, reason: str) -> CurationStateError:
+    label = repr(str(path))
+    if len(label) > 120:
+        label = label[:117] + "..."
+    return CurationStateError(f"untrustworthy curation state at {label}: {reason}")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateStateKey
+        result[key] = value
+    return result
+
+
+def _is_reliably_absent(path: Path) -> bool:
+    """Classify ENOENT without mistaking a dangling symlink ancestor for absence."""
+    current = path
+    while True:
+        try:
+            entry = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise _state_error(path, "cannot classify state entry") from None
+        else:
+            if stat.S_ISLNK(entry.st_mode):
+                try:
+                    current.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    raise _state_error(path, "state path contains an unresolved symlink") from None
+                if current == path:
+                    return False
+            elif current == path:
+                return False
+            elif current != path and not stat.S_ISDIR(entry.st_mode):
+                raise _state_error(path, "state path has a non-directory ancestor")
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
+
+
 def state_path(vault_root: Path) -> Path:
     return Path(vault_root) / STATE_RELATIVE
 
 
 def _load(path: Path) -> CurationState:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return CurationState()
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if _is_reliably_absent(path):
+            return CurationState()
+        raise _state_error(path, "state entry is not readable") from None
+    except (OSError, UnicodeError):
+        raise _state_error(path, "state file cannot be read") from None
+    try:
+        raw = json.loads(text, object_pairs_hook=_unique_object)
+    except (_DuplicateStateKey, json.JSONDecodeError, RecursionError):
+        raise _state_error(path, "invalid JSON state document") from None
+    except (ValueError, TypeError):
+        raise _state_error(path, "invalid JSON state document") from None
     if not isinstance(raw, dict):
-        return CurationState()
+        raise _state_error(path, "state document must be an object")
+    if set(raw) != {"version", "done_keys", "lease", "last_run"}:
+        raise _state_error(path, "state document has missing or unknown fields")
+    if type(raw["version"]) is not int or raw["version"] != STATE_VERSION:
+        raise _state_error(path, "unsupported state version")
     done = raw.get("done_keys")
     lease = raw.get("lease")
     last_run = raw.get("last_run")
+    if not isinstance(done, dict) or not isinstance(lease, dict) or not isinstance(last_run, dict):
+        raise _state_error(path, "state fields have invalid types")
+    for key, value in done.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise _state_error(path, "done_keys entries have invalid types")
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError:
+            raise _state_error(path, "done_keys contains an invalid date") from None
+        if parsed_date.isoformat() != value:
+            raise _state_error(path, "done_keys contains a noncanonical date")
+    if lease:
+        holder = lease.get("holder")
+        started = lease.get("started_at")
+        expires = lease.get("expires_at")
+        if not isinstance(holder, str) or not holder.strip():
+            raise _state_error(path, "lease holder is invalid")
+        if not isinstance(started, str) or _parse_iso(started) is None:
+            raise _state_error(path, "lease start time is invalid")
+        if not isinstance(expires, str) or _parse_iso(expires) is None:
+            raise _state_error(path, "lease expiry is invalid")
+    if last_run:
+        if (
+            not isinstance(last_run.get("status"), str)
+            or not isinstance(last_run.get("finished_at"), str)
+            or _parse_iso(last_run["finished_at"]) is None
+            or any(type(last_run.get(field)) is not int for field in ("planned", "completed", "deferred"))
+            or not isinstance(last_run.get("reasons"), list)
+            or any(not isinstance(reason, str) for reason in last_run["reasons"])
+        ):
+            raise _state_error(path, "last_run summary is invalid")
     return CurationState(
-        done_keys={str(k): str(v) for k, v in done.items()} if isinstance(done, dict) else {},
-        lease=dict(lease) if isinstance(lease, dict) else {},
-        last_run=dict(last_run) if isinstance(last_run, dict) else {},
+        done_keys=dict(done),
+        lease=dict(lease),
+        last_run=dict(last_run),
     )
 
 
@@ -1739,7 +1888,7 @@ def _store(path: Path, state: CurationState) -> None:
 
 
 def load_state(vault_root: Path) -> CurationState:
-    """Read the persisted cursor. Never raises: a corrupt file reads as empty."""
+    """Read persisted state; only a genuinely absent file initializes as empty."""
     return _load(state_path(vault_root))
 
 
@@ -1796,11 +1945,10 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
     lease = state.lease
     if not lease or not lease.get("holder"):
         return None
-    expires = _parse_iso(str(lease.get("expires_at", "")))
-    # An unreadable expiry is treated as expired rather than as forever: a
-    # hand-edited or truncated record must not be able to wedge every future
-    # nightly run out of its own vault.
-    if expires is None or expires <= now:
+    expires = _parse_iso(str(lease["expires_at"]))
+    if expires is None:
+        raise CurationStateError("invalid curation lease expiry")
+    if expires <= now:
         return None
     return dict(lease)
 
@@ -1825,7 +1973,10 @@ def unstarted_run_reason(
     ``since`` must be timezone-aware: the lease stamps are written in UTC and
     a naive ``since`` would compare against nothing.
     """
-    state = load_state(vault_root)
+    try:
+        state = load_state(vault_root)
+    except CurationStateError:
+        return "curation state is uncertain; unattended run status cannot be verified"
     floor = since.astimezone(UTC).replace(microsecond=0)
     for stamp in (state.lease.get("started_at"), state.last_run.get("finished_at")):
         parsed = _parse_iso(str(stamp or ""))

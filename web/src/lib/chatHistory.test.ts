@@ -520,7 +520,7 @@ describe('toChatMessage sent_context', () => {
   })
 })
 
-describe('vault answer check', () => {
+describe('legacy turn-verification metadata', () => {
   const verification: TurnVerification = {
     supported: 1,
     unsupported: 0,

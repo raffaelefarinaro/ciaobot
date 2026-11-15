@@ -292,6 +292,13 @@ describe('ChatPanel turn footer placement', () => {
           content: second,
           sent_at: '2026-11-09T13:31:41Z',
           duration_ms: 23000,
+          verification: {
+            supported: 1,
+            unsupported: 0,
+            general: 0,
+            claims: [{ text: 'A historical claim.', status: 'supported', source: 'People/Ann.md' }],
+            sources: ['People/Ann.md'],
+          },
           ...(phase ? { phase } : {}),
         },
       ]
@@ -315,6 +322,9 @@ describe('ChatPanel turn footer placement', () => {
       expect(footer.text()).toContain('23s')
       expect(footer.text()).toContain(formatTime('2026-11-09T13:31:41Z'))
       expect(footer.html()).toContain('10,007')
+      expect(store.messages['chat-1'][5].verification?.supported).toBe(1)
+      expect(wrapper.find('.vault-check-toggle').exists()).toBe(false)
+      expect(wrapper.find('.vault-check-list').exists()).toBe(false)
 
       // One Outputs disclosure, only on the closing bubble, one file once.
       const outputs = wrapper.findAll('.outputs-summary')

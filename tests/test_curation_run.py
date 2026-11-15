@@ -92,7 +92,130 @@ def _categories(vault: Path) -> "EntityTypeRegistry":
     return load_entity_types(vault)
 
 
+def _planning_result(payload: dict[str, object] | None = None):
+    from ciao.cli import _CurationPlanningResult
+
+    worklist = cr.Worklist((), False, "", "")
+    return _CurationPlanningResult(payload or {}, worklist, worklist)
+
+
 # ── Worklist ──────────────────────────────────────────────────────────────
+
+
+def test_remaining_items_filters_only_done_and_empty_keys_without_mutating() -> None:
+    discovered = (
+        cr.WorklistItem("first", "First", "reason", ("done", "", "pending", "pending"), True),
+        cr.WorklistItem("second", "Second", "other", ("also-done", "later")),
+    )
+
+    remaining = cr.remaining_items(discovered, {"done", "also-done"})
+
+    assert tuple((item.pass_id, item.keys) for item in remaining) == (
+        ("first", ("pending", "pending")),
+        ("second", ("later",)),
+    )
+    assert (remaining[0].label, remaining[0].reason, remaining[0].weekly) == (
+        "First", "reason", True
+    )
+    assert discovered[0].keys == ("done", "", "pending", "pending")
+    assert discovered[1].keys == ("also-done", "later")
+
+
+@pytest.mark.parametrize("done_keys", [None, set(), frozenset()])
+def test_remaining_items_always_removes_empty_keys(done_keys) -> None:
+    item = cr.WorklistItem("pass", "Pass", "reason", ("", "key"))
+
+    assert cr.remaining_items((item,), done_keys)[0].keys == ("key",)
+
+
+@pytest.mark.parametrize("done_keys", [None, set(), frozenset()])
+def test_remaining_items_drops_zero_key_item_without_done_keys(done_keys) -> None:
+    item = cr.WorklistItem("empty", "Empty", "no keys", ())
+
+    assert cr.remaining_items((item,), done_keys) == ()
+
+
+def test_remaining_items_drops_entirely_completed_item() -> None:
+    item = cr.WorklistItem("completed", "Completed", "all done", ("done",))
+
+    assert cr.remaining_items((item,), {"done"}) == ()
+
+
+def test_remaining_items_does_not_sample_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = cr.WorklistItem("pass", "Pass", "reason", ("done", "pending"), weekly=True)
+
+    def unexpected_clock() -> str:
+        pytest.fail("pure filtering must not sample the clock")
+
+    monkeypatch.setattr(cr, "_now_iso", unexpected_clock)
+
+    assert cr.remaining_items((item,), {"done"}) == (
+        replace(item, keys=("pending",)),
+    )
+
+
+def test_worklist_views_keep_discovery_and_sample_one_timestamp_after_filtering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    item = cr.WorklistItem("synthetic", "Synthetic", "reason", ("done", "pending"))
+    events: list[str] = []
+    original_filter = cr.remaining_items
+
+    def filter_items(discovered, done_keys=None):
+        events.append("filter")
+        return original_filter(discovered, done_keys)
+
+    monkeypatch.setattr(cr, "remaining_items", filter_items)
+    monkeypatch.setattr(cr, "_now_iso", lambda: events.append("clock") or "now")
+    views = cr.build_worklist_views(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        today=date(2026, 9, 19),
+        done_keys={"done"},
+        category_items=(item,),
+        workspace=vault.name,
+    )
+
+    assert events == ["filter", "clock"]
+    discovered = next(entry for entry in views.discovered.items if entry.pass_id == "synthetic")
+    remaining = next(entry for entry in views.remaining.items if entry.pass_id == "synthetic")
+    assert discovered == item
+    assert remaining.keys == ("pending",)
+    assert views.discovered.generated_at == views.remaining.generated_at == "now"
+
+
+def test_legacy_builder_filters_before_its_single_timestamp_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    item = cr.WorklistItem("synthetic", "Synthetic", "reason", ("done", "pending"))
+    events: list[str] = []
+    original_filter = cr.remaining_items
+
+    def filter_items(discovered, done_keys=None):
+        events.append("filter")
+        return original_filter(discovered, done_keys)
+
+    monkeypatch.setattr(cr, "remaining_items", filter_items)
+    monkeypatch.setattr(cr, "_now_iso", lambda: events.append("clock") or "now")
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        today=date(2026, 9, 19),
+        done_keys={"done"},
+        category_items=(item,),
+        workspace=vault.name,
+    )
+
+    assert events == ["filter", "clock"]
+    synthetic = next(entry for entry in worklist.items if entry.pass_id == "synthetic")
+    assert synthetic.keys == ("pending",)
+    assert worklist.generated_at == "now"
 
 
 def test_a_fresh_idle_workspace_has_nothing_to_do(tmp_path: Path) -> None:
@@ -1220,7 +1343,7 @@ def test_an_expired_lease_does_not_wedge_the_vault(tmp_path: Path) -> None:
     cr.begin_run(vault, holder="next", now=started + timedelta(seconds=120))
 
 
-def test_an_unreadable_expiry_reads_as_expired(tmp_path: Path) -> None:
+def test_an_unreadable_expiry_fails_closed_without_overwriting_state(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     cr.begin_run(vault, holder="run-a")
     path = cr.state_path(vault)
@@ -1228,8 +1351,12 @@ def test_an_unreadable_expiry_reads_as_expired(tmp_path: Path) -> None:
     payload["lease"]["expires_at"] = "whenever"
     path.write_text(json.dumps(payload), encoding="utf-8", newline="")
 
-    assert cr.active_lease(vault) is None
-    cr.begin_run(vault, holder="run-b")
+    original = path.read_bytes()
+    with pytest.raises(cr.CurationStateError):
+        cr.active_lease(vault)
+    with pytest.raises(cr.CurationStateError):
+        cr.begin_run(vault, holder="run-b")
+    assert path.read_bytes() == original
 
 
 def test_a_run_that_lost_its_lease_cannot_keep_stamping_work_done(tmp_path: Path) -> None:
@@ -1396,6 +1523,105 @@ def test_curation_begin_exits_temp_fail_when_another_run_holds_the_lease(
     assert code == CURATION_BUSY_EXIT
 
 
+@pytest.mark.parametrize("command", ["plan", "begin", "progress", "end"])
+def test_corrupt_state_care_commands_fail_without_success_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    from ciao.cli import (
+        _curation_begin_command,
+        _curation_end_command,
+        _curation_plan_command,
+        _curation_progress_command,
+    )
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date.today().isoformat())
+    path = cr.state_path(vault)
+    path.write_text('{"version":', encoding="utf-8")
+    before = path.read_bytes()
+    args = _args(tmp_path, vault, guide, holder="run", key=["pass:item"])
+    handlers = {
+        "plan": _curation_plan_command,
+        "begin": _curation_begin_command,
+        "progress": _curation_progress_command,
+        "end": _curation_end_command,
+    }
+
+    assert handlers[command](args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert "JSONDecodeError" not in captured.err
+    assert path.read_bytes() == before
+
+
+def test_parser_recursion_is_controlled_by_curation_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao.cli import _curation_plan_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    path = cr.state_path(vault)
+    path.write_text(
+        '{"version":1,"done_keys":{},"lease":{},"last_run":{},"x":'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "}",
+        encoding="utf-8",
+    )
+
+    assert _curation_plan_command(_args(tmp_path, vault, guide)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert "RecursionError" not in captured.err
+
+
+@pytest.mark.parametrize("failure_point", ["planning", "empty-cleanup", "final-check"])
+def test_curation_begin_state_uncertainty_at_each_post_acquisition_seam_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_point: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import _curation_begin_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date.today().isoformat())
+    path = cr.state_path(vault)
+    monkeypatch.setattr(cr, "_category_cluster_items", lambda *_args, **_kwargs: [])
+
+    def corrupt() -> None:
+        path.write_text('{"version":', encoding="utf-8")
+
+    def plan(*_args: object, **_kwargs: object):
+        if failure_point in {"planning", "final-check"}:
+            corrupt()
+        if failure_point == "planning":
+            raise cr.CurationStateError("controlled test uncertainty")
+        return _planning_result({"empty": failure_point == "empty-cleanup"})
+
+    monkeypatch.setattr("ciao.cli._curation_plan", plan)
+    if failure_point == "empty-cleanup":
+        def fail_cleanup(*_args: object, **_kwargs: object) -> object:
+            raise cr.CurationStateError("controlled test uncertainty")
+
+        monkeypatch.setattr(cr, "end_run", fail_cleanup)
+
+    assert _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    if failure_point != "empty-cleanup":
+        assert path.read_text(encoding="utf-8") == '{"version":'
+
+
 def test_curation_begin_releases_the_lease_on_a_quiet_night(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1468,7 +1694,7 @@ def test_nonempty_begin_checks_ownership_after_planning(
         else:
             cr.end_run(vault, holder=old)
             cr.begin_run(vault, holder="replacement")
-        return {"empty": False}, SimpleNamespace(items=[])
+        return _planning_result({"empty": False})
 
     monkeypatch.setattr(cr, "_category_cluster_items", generate_category)
     monkeypatch.setattr("ciao.cli._curation_plan", replace_while_planning)
@@ -1499,7 +1725,7 @@ def test_successful_nonempty_begin_check_does_not_extend_lease(
     monkeypatch.setattr(cr, "_category_cluster_items", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "ciao.cli._curation_plan",
-        lambda *_args, **_kwargs: ({"empty": False}, SimpleNamespace(items=[])),
+        lambda *_args, **_kwargs: _planning_result({"empty": False}),
     )
 
     assert _curation_begin_command(
@@ -1577,9 +1803,8 @@ def test_cli_end_expired_unreplaced_holder_returns_busy_without_mutation(
     printed = _capture(monkeypatch)
     monkeypatch.setattr(
         "ciao.cli._curation_plan",
-        lambda _args: (
-            {"deferred_count": 0, "remaining_observed_count": 0},
-            SimpleNamespace(items=[]),
+        lambda _args: _planning_result(
+            {"deferred_count": 0, "remaining_observed_count": 0}
         ),
     )
 
@@ -1589,6 +1814,45 @@ def test_cli_end_expired_unreplaced_holder_returns_busy_without_mutation(
     assert printed == []
     assert cr.state_path(vault).read_bytes() == before_state
     assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before_log
+
+
+def test_cli_end_rejects_corruption_after_planning_without_advancing_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao.cli import _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    lease = cr.begin_run(vault, holder="nightly")
+    state_path = cr.state_path(vault)
+    log_path = vault / cr.CURATION_LOG_RELATIVE
+    log_before = log_path.read_bytes()
+    real_end = cr.end_run
+
+    def corrupt_before_commit(*args: object, **kwargs: object) -> dict[str, object]:
+        state_path.write_text('{"version":', encoding="utf-8")
+        return real_end(*args, **kwargs)
+
+    monkeypatch.setattr(cr, "end_run", corrupt_before_commit)
+    monkeypatch.setattr(
+        "ciao.cli._curation_plan",
+        lambda _args: _planning_result(
+            {"deferred_count": 0, "remaining_observed_count": 0}
+        ),
+    )
+
+    assert _curation_end_command(
+        _args(tmp_path, vault, guide, holder=lease.holder)
+    ) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "curation state error:" in captured.err
+    assert state_path.read_text(encoding="utf-8") == '{"version":'
+    assert log_path.read_bytes() == log_before
 
 
 def test_cli_end_replacement_during_planning_preserves_replacement_state_and_marker(
@@ -1616,9 +1880,7 @@ def test_cli_end_replacement_during_planning_preserves_replacement_state_and_mar
                 (vault / cr.CURATION_LOG_RELATIVE).read_bytes(),
             )
         )
-        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
-            items=[]
-        )
+        return _planning_result({"deferred_count": 0, "remaining_observed_count": 0})
 
     monkeypatch.setattr("ciao.cli._curation_plan", replace_during_plan)
     assert _curation_end_command(
@@ -1665,9 +1927,7 @@ def test_end_plans_without_holding_state_lock_and_rechecks_after_scan(
             datetime.now(UTC) - timedelta(seconds=1)
         ).isoformat()
         cr._store(cr.state_path(vault), state)
-        return {"deferred_count": 0, "remaining_observed_count": 0}, SimpleNamespace(
-            items=[]
-        )
+        return _planning_result({"deferred_count": 0, "remaining_observed_count": 0})
 
     from types import SimpleNamespace
 

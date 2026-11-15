@@ -4,6 +4,8 @@
     :class="{
       'pane-header--no-center': !hasCenter,
       'pane-header--tag-title': !hasTitle && !!pageTag,
+      'pane-header--compact-page': !hasTitle && !!pageTag,
+      'pane-header--page-actions': !!$slots.actions,
       'pane-header--overflow': phoneOverflow,
     }"
   >
@@ -171,6 +173,40 @@ const hasCenter = computed(() => !!props.pageTag)
       letter-spacing: -0.01em;
       text-overflow: ellipsis;
     }
+  }
+}
+
+/* The expanded desktop sidebar already names these pages. Keep their h2 in
+   the accessibility tree, but spend header space only on real actions. */
+@media (min-width: 769px) {
+  :global(.chat-layout.sidebar-open .pane-header--compact-page) {
+    height: 0;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    gap: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 0;
+  }
+  :global(.chat-layout.sidebar-open .pane-header--compact-page .page-tag) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  :global(.chat-layout.sidebar-open .pane-header--compact-page.pane-header--page-actions) {
+    height: auto;
+    grid-template-rows: auto;
+    padding: var(--space-2) var(--page-inset);
+  }
+  :global(.chat-layout.sidebar-open .pane-header--compact-page .header-trail) {
+    grid-column: 2;
+    grid-row: 1;
   }
 }
 

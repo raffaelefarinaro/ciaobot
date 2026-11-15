@@ -146,7 +146,6 @@ class ChatStreamingHost(Protocol):
     _events: EventsHub
     _snapshots: SnapshotStore
     _shutting_down: bool
-    verify_vault_answers_enabled: Callable[[], bool]
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -258,10 +257,6 @@ class ChatStreamingHost(Protocol):
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
-    ) -> None: ...
-
-    async def _verify_turn_and_publish(
-        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
     ) -> None: ...
 
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
@@ -1078,22 +1073,6 @@ class ChatStreaming:
                     # including an explicitly empty one: keeping the previous
                     # turn's text here would re-announce it (#2139 review).
                     last_answer_text = turn_answer_text
-                if (
-                    turn_succeeded
-                    and turn_vault_reads
-                    and turn_verify_index is not None
-                    and turn_answer_text.strip()
-                    and self._host.verify_vault_answers_enabled()
-                ):
-                    asyncio.create_task(
-                        self._host._verify_turn_and_publish(
-                            chat_id,
-                            turn_verify_index,
-                            turn_answer_text,
-                            list(turn_vault_reads),
-                        )
-                    )
-
                 if question_paused:
                     self._host._fallback_steers(chat_id, stream, "finished")
                     parked = stream.drain_pending()
