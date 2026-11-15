@@ -27,7 +27,7 @@ final class WorkspaceDockIconTests: XCTestCase {
 
     /// The engine's `WORKSPACE_COLOR_PRESETS` swatches. Pinned here so a drift
     /// in the client table fails locally; `testPresetsMatchTheEngineCheckout`
-    /// additionally reads the engine file when this checkout has one.
+    /// additionally reads the engine's file from the same repository.
     private struct ExpectedSwatch: Equatable {
         let red: UInt8
         let green: UInt8
@@ -65,17 +65,13 @@ final class WorkspaceDockIconTests: XCTestCase {
         XCTAssertEqual(WorkspaceColorPreset.allCases.count, 9)
     }
 
-    /// When the sibling engine checkout is present, prove the client table is
-    /// the engine's table rather than a local guess. CI checks this repository
-    /// alone, so a missing engine file is an explicit skip, not a failure.
+    /// The engine's PWA lives in the same repository, so prove the client table is the engine's table rather than a local guess.
     func testPresetsMatchTheEngineCheckout() throws {
         let engine = packageRoot
             .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("ciaobot/web/src/lib/workspaceColors.ts")
-        guard FileManager.default.fileExists(atPath: engine.path) else {
-            throw XCTSkip("The Ciaobot engine checkout is not beside this repository.")
-        }
+            .appendingPathComponent("web/src/lib/workspaceColors.ts")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: engine.path),
+                      "The engine's web/src/lib/workspaceColors.ts is missing beside mac/")
         let source = try String(contentsOf: engine, encoding: .utf8)
         for preset in WorkspaceColorPreset.allCases {
             let expected = Self.expectedSwatches[preset]!

@@ -1,7 +1,8 @@
 # Ciao Contributor Guide
 
-You are working on the Ciaobot app repository. This is the only agent rules
-file; Claude Code and opencode both load it.
+You are working on the Ciaobot app repository. This is the root agent rules
+file; Claude Code and opencode both load it. The Swift Mac app in `mac/` adds
+`mac/AGENTS.md`: read it before changing anything under `mac/`.
 
 Before changing code:
 - Read the relevant sections of `docs/ARCHITECTURE.md` (system design) and
@@ -42,6 +43,10 @@ Before changing code:
   same-origin-gated, and keep the loopback-only set (`_LOOPBACK_ONLY_API` in
   `ciao/web/auth.py`) gated on the TCP peer. The boundary audit is in
   `docs/REMOTE_BOUNDARY.md`.
+- `mac/` is the Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates),
+  imported from `ciaobot-mac` with its history. It does not bundle or import
+  the engine yet and is never part of the wheel; `mac/docs/reference.md` is
+  its reference and `/release-mac` its (frozen) release skill.
 
 ## Commands
 ```bash
@@ -80,10 +85,13 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   also runs the conditional `linux-e2e` Chromium check alongside `linux-web`,
   after the fast `web-scope` detector. Its stable check fails if detection fails;
   non-web PRs run only that scope validation.
+  A develop PR whose diff changes `mac/` (or `web/src/lib/workspaceColors.ts`)
+  also runs `mac-app` (Swift tests, build and app bundle on macOS 15) after
+  the fast `mac-scope` detector; release PRs and manual runs always run it.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
   terminal harness before Playwright. Ordinary develop PRs skip Windows;
-  `windows-full` opts into full Windows checks. Windows, Python 3.14 and macOS
-  run on release PRs and manual full runs. A green develop PR is not proof the release PR's Windows or
+  `windows-full` opts into full Windows checks. Windows, Python 3.14 and the macOS `test` job
+  run on release PRs and manual full runs; the macOS `mac-app` job also runs on develop PRs that change `mac/`. A green develop PR is not proof the release PR's Windows or
   macOS jobs will pass. Windows backend and frontend suites run
   in parallel jobs; the stable required `windows` summary requires every
   applicable job to succeed (a full run cannot pass on a skipped suite).
@@ -103,7 +111,7 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 - Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
   failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
   that attempt's jobs, so required checks such as `linux-server`, `linux-web`,
-  conditional `linux-e2e` and `windows` go missing and the PR shows BLOCKED
+  conditional `linux-e2e`, `windows` and `mac-app` go missing and the PR shows BLOCKED
   while everything is green.
 - Assert a guard where it acts, not only in the finished output. When a change
   bounds, redacts, filters or fences untrusted text, the test should observe the
@@ -208,7 +216,7 @@ this file; the gates are the ones under Verification.
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
 - No CI runs on develop pushes. The full suites run on the release PR into
   `main`, and `/ciao-release` merges
-  only when that PR's `windows` and `test` checks are green. If a required
+  only when that PR's `windows`, `test` and `mac-app` checks are green. If a required
   develop check is already red, open a `bug` issue naming the failing tests
   and the merge that broke them, and fix it before merging more.
 - Hands-on device testing (a real Windows or macOS install) is for diffs that
@@ -231,7 +239,12 @@ this file; the gates are the ones under Verification.
   also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
   harness before the browser suite. Develop PRs changing `web/` run the
   conditional Linux Chromium gate in parallel with unit/build work before merge.
-  The macOS job runs on release PRs into `main`. The terminal-renderer specs need
+  The macOS job runs on release PRs into `main`. When the diff touches `mac/`,
+  it also runs, from `mac/` and alone (no other suite in parallel),
+  `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift test`,
+  `swift build`, `scripts/build-app.sh`, `swift test --filter AppAssetsTests`
+  and `plutil -lint .build/Ciaobot.app/Contents/Info.plist` (see `mac/AGENTS.md`
+  traps). The terminal-renderer specs need
   `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
   `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land

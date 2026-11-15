@@ -113,3 +113,44 @@ def test_windows_opt_in_does_not_require_latest_python() -> None:
         capture_output=True,
     )
     assert run.returncode == 0
+
+
+def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
+    jobs = _jobs()
+    scope = jobs["mac-scope"]
+    assert "Detect mac changes" in scope
+    assert "fetch-depth: 0" in scope
+    assert (
+        "outputs:\n      mac_changed: ${{ steps.mac-changes.outputs.mac_changed "
+        "|| steps.mac-full.outputs.mac_changed }}"
+    ) in scope
+    assert "swift" not in scope
+    assert '-- mac/ web/src/lib/workspaceColors.ts)"' in scope
+    app = jobs["mac-app"]
+    assert "needs: mac-scope" in app
+    assert "if: ${{ !cancelled() }}" in app
+    assert 'test "$SCOPE_RESULT" = success' in app
+    assert "macos-15" in app
+    assert "working-directory: mac" in app
+    assert "always()" not in app
+    assert app.count("if: needs.mac-scope.outputs.mac_changed == 'true'") == 7
+    steps = [
+        "run: swift test\n",
+        "run: swift build\n",
+        "run: scripts/build-app.sh",
+        "run: swift test --filter AppAssetsTests",
+        "run: plutil -lint .build/Ciaobot.app/Contents/Info.plist",
+    ]
+    found = [app.index(step) for step in steps]
+    assert found == sorted(found)
+    assert len(found) == len(set(found))
+
+
+def test_mac_full_runs_always_build_the_app() -> None:
+    job = _jobs()["mac-scope"]
+    full = job.split("id: mac-full", 1)[1]
+    assert (
+        "if: ${{ !(github.event_name == 'pull_request' && github.base_ref == 'develop') }}"
+        in full
+    )
+    assert "printf 'mac_changed=true\\n' >> \"$GITHUB_OUTPUT\"" in full

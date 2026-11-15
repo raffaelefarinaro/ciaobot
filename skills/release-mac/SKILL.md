@@ -1,16 +1,18 @@
 ---
 name: release-mac
-description: Release Ciaobot for Mac — build, Developer ID sign, notarize, generate the signed appcast, and publish a version plus the update feed. Use whenever cutting a Mac client version, shipping an update, regenerating the appcast, or when a user asks why an installed client is not updating.
+description: Release the Ciaobot for Mac app (the Swift package in mac/) — build, Developer ID sign, notarize, generate the signed appcast, and publish a version plus the update feed. Use whenever cutting a Mac client version, shipping an update, regenerating the appcast, or when a user asks why an installed client is not updating. Not for engine releases; those use ciao-release.
 ---
 
 # Releasing Ciaobot for Mac
+
+> **Release freeze.** The app moved from `raffaelefarinaro/ciaobot-mac` into this repository's `mac/` directory. Publishing has not moved yet: releases, the `updates` appcast and the feed URL in `mac/release/update-config.env` still live on `raffaelefarinaro/ciaobot-mac`, and moving them is part of the Ciaobot 2.0 release pipeline. Until that lands, do not publish a Mac release from this repository: `scripts/publish-release.sh` without `--repo` now targets `raffaelefarinaro/ciaobot`, whose `publish.yml` runs on every published release, and the app reads that repository's latest release as the engine manifest. An urgent 1.x client fix is cut in `raffaelefarinaro/ciaobot-mac` with that repository's copy of this skill, then brought here with `git subtree pull --prefix=mac https://github.com/raffaelefarinaro/ciaobot-mac.git main`.
 
 This repository is public. Treat every committed file as publishable: no
 private keys, app-specific passwords, keychain profile names, Apple Account
 identifiers, absolute paths, or CI secrets may ever be added. Release
 credentials live in the release operator's login keychain.
 
-Read `docs/reference.md` first for the current commands; this skill is the sequence and
+Read `mac/docs/reference.md` first for the current commands; every path and command below is relative to `mac/` and runs from there; this skill is the sequence and
 the judgement around them. If a script's flags disagree with this document,
 the script wins — fix this document in the same change.
 
@@ -32,7 +34,7 @@ You need, on one trusted Mac:
 - The **Sparkle EdDSA private key** in the same keychain. Generate it once with
   Sparkle's `generate_keys`; it prints the public key that belongs in
   `release/update-config.env`. Losing this key stops all future updates.
-- Clean `main` and a green CI run for the commit you are releasing.
+- Clean `develop` and a green `mac-app` check for the commit you are releasing.
 
 Check both keys still exist before building: losing either late in the process
 wastes the whole run.
@@ -62,7 +64,7 @@ minor, a change users must act on is a major.
 
 ## 2. Land the change through a pull request
 
-Branch, push, open a PR against `main`, and wait for CI. Never tag or release a
+Branch, push, open a PR against `develop` in `raffaelefarinaro/ciaobot`, and wait for the `mac-app` check. Never tag or release a
 commit that CI has not built: the release artifact must be reproducible from a
 commit that passed the suite.
 
@@ -71,7 +73,7 @@ commit that passed the suite.
 Build the release artifact from the merged commit, not from a dirty worktree:
 
 ```sh
-git archive <commit> | tar -x -C "$SCRATCH"
+git archive <commit>:mac | tar -x -C "$SCRATCH"
 cd "$SCRATCH"
 CIAOBOT_RELEASE_UPDATES=1 \
 SIGNING_IDENTITY='Developer ID Application: …' \
