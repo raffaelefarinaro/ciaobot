@@ -2,6 +2,30 @@
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 
+Proposal settlement warnings retain the originating workspace and block both
+single and batch decisions for the affected row until the operator acknowledges
+inspection. Single and batch accept/dismiss, expiry sweep, skill implementation
+and receipt undo reserve a server operation, persist
+v2 markers before sending. For a batch, confirmed rows and individually inspected
+warnings remain blocked until all its unresolved rows are inspected and the shared
+server reservation is sealed. Review progress survives reload; storage failures
+fail closed. Uninspected batches retain finished server capacity, so abandoned
+warnings require manual resolution. A warning can retain the server-resolved
+destination of each batch re-home even if its response is lost. Legacy
+v1 warnings cannot prove server completion: stop the engine, inspect the
+destination, queue and receipts, and resolve browser storage manually. A
+nonblocking origin-wide Web Lock serializes requests and acknowledgement;
+storage events refresh warnings in other tabs. Unavailable Web Locks or storage
+block requests. This guard cannot protect another browser profile or a request
+that bypasses it.
+
+The retained-proposal browser regression runs once as part of `npm run test:e2e`
+and can be targeted with `npx playwright test -c playwright.real-server.config.ts`.
+It requires the repository Python virtual environment, web dependencies and Playwright
+Chromium. It starts a loopback-only disposable Python server with a temporary
+workspace and a test-only Vite proxy; it does not connect to the running engine.
+Run it under the same machine-wide suite lock as the other browser tests.
+
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
 
 Chat-originated file opens resolve a canonical absolute path through

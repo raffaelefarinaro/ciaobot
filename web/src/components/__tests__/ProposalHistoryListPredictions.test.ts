@@ -12,9 +12,10 @@ import type { ProposalHistoryRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+const reservationPost = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
-  api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
+  api: { get: apiGet, post: apiPost, postReservation: reservationPost, patch: vi.fn(), del: vi.fn() },
 }))
 
 function historyRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
@@ -47,9 +48,11 @@ async function mountRows(rows: ProposalHistoryRow[]) {
 }
 
 beforeEach(() => {
+  localStorage.clear()
   setActivePinia(createPinia())
   apiGet.mockReset()
   apiPost.mockReset()
+  reservationPost.mockReset()
 })
 
 afterEach(() => {
@@ -112,10 +115,20 @@ describe('History rows settled by Workspace care', () => {
   })
 
   it('offers a row-level Undo for a care-settled row and calls undoReceipt', async () => {
+    const reservation = `${'a'.repeat(32)}.${'b'.repeat(32)}`
+    const scope = { kind: 'undo', workspace: 'personal', targets: ['mrcpt_1'] }
+    reservationPost.mockResolvedValueOnce({ id: reservation, scope }).mockResolvedValueOnce({ sealed: true })
     const view = await mountRows([historyRow({ via: 'agent', change: CHANGE })])
-    apiPost.mockResolvedValue({})
+    apiPost.mockResolvedValue({ ok: true, id: 'mrcpt_1' })
     await view.find('.ph-care-undo').trigger('click')
-    expect(apiPost).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1/undo?workspace=personal')
+    await flushPromises()
+    expect(reservationPost).toHaveBeenNthCalledWith(1, '/api/proposals/reservations', scope)
+    expect(apiPost).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1/undo?workspace=personal',
+      undefined, { headers: { 'X-Ciao-Proposal-Reservation': reservation } })
+    expect(reservationPost).toHaveBeenNthCalledWith(2, '/api/proposals/reservations/seal', {
+      id: reservation, scope, inspected: true,
+    })
+    expect(localStorage.length).toBe(0)
   })
 
   it('offers no Undo when there is no change or it is not undoable', async () => {

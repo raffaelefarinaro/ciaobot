@@ -11,6 +11,18 @@ const storage: Storage = {
 }
 
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
+// jsdom does not implement Web Locks. Preserve exclusive, nonblocking behavior.
+let locked = false
+Object.defineProperty(globalThis.navigator, 'locks', {
+  configurable: true,
+  value: {
+    async request(_name: string, _options: unknown, callback: (lock: object | null) => unknown) {
+      if (locked) return callback(null)
+      locked = true
+      try { return await callback({}) } finally { locked = false }
+    },
+  },
+})
 if (typeof window !== 'undefined') {
   Object.defineProperty(window, 'localStorage', { configurable: true, value: storage })
 }

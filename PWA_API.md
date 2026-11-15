@@ -1497,6 +1497,110 @@ trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
 on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
 reason.
 
+If an accept's destination operation returned successfully but queue settlement
+could not be confirmed, the single route returns 503 with `queue_settled: false`
+and `destination_effect`; a batch includes those fields on the affected result
+and retains earlier results. `destination_effect` names the destination, its
+known `status` (`completed`, `already_present`, or `already_moved`), and a
+destination `receipt_id` when available. Inspect the destination and receipt
+before deciding how to resolve the proposal; do not blindly retry
+accept. This report is limited to outcomes observed by the current request and
+does not establish an outcome after a crash.
+For a queue write or receipt confirmation failure, `queue_state` is `unchanged`,
+`replaced`, or `unknown`, based on an exact comparison made under the queue
+lock. `queue_receipt_confirmed: false` means durable settlement proof was not
+confirmed; a replaced queue is not proof of a recoverable selected settlement.
+Queue failures without a destination effect, including dismissals, also report
+the observed state when available rather than claiming that nothing was removed.
+If the queue receipt was confirmed but the decision write failed, the affected
+accept instead reports `queue_receipt_confirmed: true` and
+`decision_confirmed: false`, alongside the known destination effect and
+`queue_state: replaced`. The decision write may have landed despite the error;
+inspect before retrying.
+For batch dismissals the affected result likewise includes `queue_settled:
+false`, `queue_receipt_confirmed: true`, and `decision_confirmed: false` when
+the queue removal landed but decision recording is unconfirmed; `dismissed`
+still reports whether that row was actually removed.
+
+`POST /api/proposals/reservations` and `POST /api/proposals/reservations/seal`
+are signed-session, same-origin browser-internal operations. Reserve accepts
+only `{kind, workspace, targets}`: kind is `row_accept`, `row_dismiss`,
+`implement`, `batch_accept`, `batch_dismiss`, `sweep`, or `undo`; workspace
+is registered or empty; targets are bounded opaque identifiers (one ISO date
+for a sweep). Batch scopes additionally require `workspaces`, the sorted,
+unique set of workspaces of the resolved rows; their `workspace` is the
+optional re-home destination. Batch accept resolves every selected row and
+returns `scope.destinations`, an ID-to-workspace map containing exactly its
+re-home rows, including tag-derived destinations. Supply the returned scope
+unchanged when sealing. A sweep reservation returns its server-derived
+sorted `workspaces` snapshot in `scope`, which must be supplied unchanged when
+sealing. An undo reservation resolves the receipt's actual workspace and
+returns it in `scope`; skill implementation verifies the proposal identity and
+workspace before reserving. It returns a random process-epoch-bound id without performing a
+proposal operation. Seal accepts `{id, scope, inspected}` with the same scope
+and an explicit boolean. It returns `{"sealed": true}` for a reserved or
+already sealed entry, or for a finished entry when `inspected` is true. This
+flag records the caller's acknowledgement, not proof of inspection;
+an active, unknown, or mismatched entry returns 409. Seal validates the supplied
+scope structurally and compares it to the original reservation, even if a
+workspace was removed since reservation. New reservations still require current
+registered workspaces. A private SQLite registry under the install runtime holds
+at most 8192 entries, including sealed proofs. Its stable private initialization
+lock is in the runtime parent. First setup builds
+and validates a private staging store before exclusive directory publication;
+abandoned staging directories are retained, and an existing missing or corrupt
+database is never recreated automatically. POSIX syncs the staging database
+and directories; Windows directory sync and power-loss durability are not claimed.
+On capacity pressure it reclaims
+the oldest still-reserved, unadmitted entry atomically with admission and sealing;
+that ID becomes unknown and cannot dispatch. Unknown does not prove no effect.
+Active and finished entries are never reclaimed automatically. Sealed proofs
+expire after 30 days on the system wall clock; a detected clock rollback pauses
+expiry until the clock catches up. A forward clock jump can expire proofs early,
+and a rollback between observations may go undetected. Sealing commits before
+success and an exact retry within the retention window survives an engine restart.
+An active entry left by a crashed process remains unknown/unsealed, not complete.
+When all slots are non-reclaimable, reservation returns 503 and manual recovery
+is needed.
+The PWA defers sealing a partially resolved batch until every unresolved row
+has been inspected; it persists that progress and keeps all batch markers
+blocking until sealing succeeds. An abandoned batch therefore retains a
+finished, unsealed registry entry. Storage or seal uncertainty fails closed.
+Single-row
+accept/dismiss optionally accepts `X-Ciao-Proposal-Reservation`: when present,
+the handler verifies the resolved row's workspace and operation, admits the
+reservation once, and retains the operation if its request is cancelled.
+For a re-home accept, reserve with `destination` (the chosen workspace, or an
+empty string for the server-derived destination); the response supplies the
+validated destination in `scope`, which must match dispatch and seal.
+An opt-in batch request with the same header is admitted against its exact row
+IDs, action, resolved workspace set and each re-home destination; changed or
+unavailable destinations refuse the batch before effects. Its complete
+handler is retained through request cancellation. An opt-in expiry sweep is
+admitted against its cutoff and the workspace snapshot; it retains the handler
+and refuses a changed workspace set or changed resolved vault/queue paths or
+vault directory identity. Paths are derived by the server, are not sent to the
+browser, and the captured queue and receipt vault are used by the worker. The
+workspace registry has no shared lock with this operation: the snapshot is
+rechecked before each queue, but a concurrent configuration change can still
+occur between that check and the write. Requests without the header
+retain their existing behavior. The PWA uses this for single and batch
+accept/dismiss, expiry sweep, skill implementation and receipt undo. Headerless
+requests and other browser profiles remain outside the guard.
+
+Certain pre-write accept refusals carry `no_effect: true` with the matching
+proposal id, including preparation refusals, an invalid re-home target, journal
+preflight failures and a busy claim. A batch journal preflight refusal carries
+`no_effect: true` with the complete requested `ids`; other batch responses
+carry it per affected result. It describes this request's work on that row, not
+the outcome of another concurrent request. A single busy-claim refusal also
+carries `busy: true`, and must not launch a merge writer. After admission, a
+missing row or changed row scope or destination returns the matching `id` and
+`no_effect: true`; a failed batch re-resolution returns the complete reserved
+`ids` with that proof. Generic admission conflicts never carry this proof: the
+reservation may already be active. An unmarked 409 does not prove that nothing
+happened.
+
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).
 

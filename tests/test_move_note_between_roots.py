@@ -18,7 +18,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
+
+import pytest
 
 from ciao.vault_rehome import move_note_between_roots
 
@@ -91,6 +94,157 @@ def _bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+@pytest.mark.parametrize("method", ["tracked", "hardlink", "copy"])
+def test_cooperating_destination_writer_waits_for_publication(tmp_path: Path, monkeypatch, method: str) -> None:
+    import errno
+    from ciao import vault_rehome
+    from ciao.memory_receipts import queue_lock
+
+    root, targets = _install(tmp_path, git=method == "tracked")
+    destination = root / "work/memory-vault/People/Mo.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    acquired = threading.Event()
+    threads: list[threading.Thread] = []
+    saw_early: list[bool] = []
+    def writer():
+        with queue_lock(destination):
+            acquired.set()
+            with destination.open("a", encoding="utf-8") as handle:
+                handle.write("\nForeign writer.\n")
+    def start_writer():
+        thread = threading.Thread(target=writer)
+        threads.append(thread)
+        thread.start()
+        saw_early.append(acquired.wait(0.25))
+    real_git, real_link = vault_rehome.run_git, vault_rehome.os.link
+    def git(root_path, *args):
+        if args and args[0] == "mv":
+            if method == "tracked":
+                start_writer()
+                return real_git(root_path, *args)
+            return 1, "not tracked"
+        return real_git(root_path, *args)
+    def link(src, dst, **kwargs):
+        start_writer()
+        if method == "copy":
+            raise OSError(errno.EXDEV, "cross-device")
+        return real_link(src, dst, **kwargs)
+    monkeypatch.setattr(vault_rehome, "run_git", git)
+    monkeypatch.setattr(vault_rehome.os, "link", link)
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+    assert saw_early == [False]
+    assert result["applied"] and acquired.is_set()
+    assert "Foreign writer." in destination.read_text(encoding="utf-8")
+    assert not (root / "personal/memory-vault/People/Mo.md").exists()
+
+
+def test_destination_created_during_move_is_never_overwritten(tmp_path: Path, monkeypatch) -> None:
+    from ciao import vault_rehome
+
+    root, targets = _install(tmp_path, git=False)
+    source = root / "personal/memory-vault/People/Mo.md"
+    destination = root / "work/memory-vault/People/Mo.md"
+    before = source.read_bytes()
+
+    def concurrent(*args):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"foreign destination\n")
+        return 1, "no git"
+
+    monkeypatch.setattr(vault_rehome, "run_git", concurrent)
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    assert not result["applied"]
+    assert source.read_bytes() == before
+    assert destination.read_bytes() == b"foreign destination\n"
+
+
+def test_concurrent_link_edit_is_not_overwritten(tmp_path: Path, monkeypatch) -> None:
+    from ciao import vault_rehome
+
+    root, targets = _install(tmp_path, git=False)
+    source = root / "personal/memory-vault/People/Mo.md"
+    source_before = source.read_bytes()
+    backlink = root / "personal/memory-vault/People/Alba.md"
+    original = vault_rehome.tempfile.NamedTemporaryFile
+    changed = False
+
+    def race(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            backlink.write_text("foreign edit\n", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vault_rehome.tempfile, "NamedTemporaryFile", race)
+    monkeypatch.setattr(vault_rehome, "run_git", lambda *args: (1, "no git"))
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    assert not result["applied"]
+    assert backlink.read_text(encoding="utf-8") == "foreign edit\n"
+    assert source.read_bytes() == source_before
+
+
+def test_untracked_move_preserves_links_without_replace(tmp_path: Path, monkeypatch) -> None:
+    from ciao import vault_rehome
+
+    root, targets = _install(tmp_path, git=False)
+    monkeypatch.setattr(vault_rehome, "run_git", lambda *args: (1, "untracked"))
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    assert result["applied"], result["refusals"]
+    assert not (root / "personal/memory-vault/People/Mo.md").exists()
+    assert (root / "work/memory-vault/People/Mo.md").is_file()
+    assert not _broken(root)
+
+
+def test_untracked_move_copies_exclusively_when_hardlinks_unavailable(tmp_path: Path, monkeypatch) -> None:
+    import errno
+    from ciao import vault_rehome
+
+    root, targets = _install(tmp_path, git=False)
+    source = root / "personal/memory-vault/People/Mo.md"
+    source.chmod(0o640)
+    source_mode = source.stat().st_mode
+    destination = root / "work/memory-vault/People/Mo.md"
+    monkeypatch.setattr(vault_rehome, "run_git", lambda *args: (1, "untracked"))
+    monkeypatch.setattr(vault_rehome.os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross device")))
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    assert result["applied"], result["refusals"]
+    assert not source.exists()
+    assert destination.is_file()
+    if os.name == "nt":
+        import stat
+        assert destination.stat().st_mode & stat.S_IWRITE == source_mode & stat.S_IWRITE
+    else:
+        assert destination.stat().st_mode & 0o777 == 0o640
+    assert not _broken(root)
+
+
+def test_copy_fallback_refuses_racing_destination(tmp_path: Path, monkeypatch) -> None:
+    import errno
+    from ciao import vault_rehome
+
+    root, targets = _install(tmp_path, git=False)
+    source = root / "personal/memory-vault/People/Mo.md"
+    before = source.read_bytes()
+    dest = root / "work/memory-vault/People/Mo.md"
+    original_open = os.open
+
+    def racing_open(path, flags, *args, **kwargs):
+        if Path(path) == dest:
+            dest.write_bytes(b"foreign\n")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(vault_rehome, "run_git", lambda *args: (1, "untracked"))
+    monkeypatch.setattr(vault_rehome.os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross device")))
+    monkeypatch.setattr(vault_rehome.os, "open", racing_open)
+    result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
+    assert not result["applied"]
+    assert source.read_bytes() == before
+    assert dest.read_bytes() == b"foreign\n"
+
+
 def test_a_late_rewrite_failure_leaves_every_note_untouched(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -137,15 +291,12 @@ def test_a_failed_move_rolls_the_committed_rewrites_back(
 
     from ciao import vault_rehome
 
-    real_replace = os.replace
-
-    def blocked_replace(src, dst, *args, **kwargs):
-        if str(dst) == str(dest):
-            raise OSError("move refused")
-        return real_replace(src, dst, *args, **kwargs)
+    def blocked_link(src, dst, *args, **kwargs):
+        assert Path(dst) == dest
+        raise OSError("move refused")
 
     monkeypatch.setattr(vault_rehome, "run_git", lambda root_, *a: (1, "fatal: nope"))
-    monkeypatch.setattr(vault_rehome.os, "replace", blocked_replace)
+    monkeypatch.setattr(vault_rehome.os, "link", blocked_link)
 
     result = _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
 

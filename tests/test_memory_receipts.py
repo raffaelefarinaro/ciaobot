@@ -29,6 +29,59 @@ from ciao import memory_tool as mt
 from ciao.os_support.private import is_private
 
 
+def test_gate_journal_snapshot_reads_incrementally(tmp_path: Path, monkeypatch) -> None:
+    journal = tmp_path / "Memory-Receipts.jsonl"
+    mr._append(journal, {"id": "one", "kind": "queue_resolve", "status": mr.PREPARED, "proposal_id": "p"})
+    mr._append(journal, {"id": "two", "kind": "other", "status": mr.APPLIED})
+    real_fdopen = os.fdopen
+    reads = []
+    class IncrementalOnly:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+        def read(self, *args):
+            raise AssertionError("journal must not be read whole")
+        def readline(self, *args):
+            reads.append(args)
+            return self.handle.readline(*args)
+    def wrapped(fd, mode, *args, **kwargs):
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        return IncrementalOnly(handle) if mode == "rb" else handle
+    monkeypatch.setattr(mr.os, "fdopen", wrapped)
+    rows = mr.selected_queue_receipts_for_gate(journal)
+    assert [row["id"] for row in rows] == ["one"]
+    assert reads
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows may prevent removing an open file")
+def test_gate_journal_disappearing_during_read_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    journal = tmp_path / "Memory-Receipts.jsonl"
+    mr._append(journal, {"id": "one", "kind": "queue_resolve", "status": mr.PREPARED, "proposal_id": "p"})
+    real_stat = Path.stat
+    def disappear(path, *args, **kwargs):
+        if path == journal:
+            journal.unlink()
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", disappear)
+    with pytest.raises(ValueError, match="disappeared"):
+        mr.selected_queue_receipts_for_gate(journal)
+
+
+def _registered_config(root: Path):
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    return CiaoConfig(
+        pwa_auth_token="test", workspace_root=root, state_path=root / ".runtime/state.json",
+        media_root=root / ".runtime/media", vault_root=root,
+        workspaces={"personal": WorkspaceConfig(name="personal", vault_root=str(root))},
+    )
+
+
 def _guide(tmp_path: Path, memory: list[str] | None = None) -> Path:
     guide = tmp_path / "CLAUDE.md"
     guide.write_text("# Guide\n\n", encoding="utf-8")
@@ -1277,6 +1330,541 @@ def test_multi_bracket_prepares_before_the_rewrite(tmp_path):
     )
     result = mr.recover_pending(journal=mr.journal_path(tmp_path, None))
     assert "mrcpt_batch_crash" in [r["id"] for r in result.reconciled]
+
+
+def test_queue_provenance_requires_exact_duplicate_ordinal(tmp_path):
+    from ciao.proposal_tracking import walk_proposal_queue
+    before = "- [memory] Fact _(from: first)_\n- [memory] Fact _(from: first)_\n"
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    entries = list(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    selected = {"line": entries[1].line, "id": entries[1].proposal_id,
+                "kind": "memory", "text": "Fact", "source": "first"}
+    assert mr._queue_selected_provenance(before, "personal", queue, selected)["proposal_id"] == entries[1].proposal_id
+    with pytest.raises(ValueError):
+        mr._queue_selected_provenance(before, "personal", queue, {**selected, "id": entries[0].proposal_id})
+    with pytest.raises(ValueError):
+        mr._queue_selected_provenance(before, "personal", queue, {**selected, "source": "other"})
+
+
+@pytest.mark.parametrize("other_source", ["second", "first"])
+def test_pending_selected_receipt_does_not_certify_another_removal(tmp_path, monkeypatch, other_source):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    first = "- [memory] Fact _(from: first)_\n"
+    second = f"- [memory] Fact _(from: {other_source})_\n"
+    queue.write_text(first + second, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", first + second))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    def interrupted(*args, **kwargs):
+        raise OSError("interrupted before terminal receipt")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_write_queue_receipt", interrupted)
+        with pytest.raises(OSError):
+            with mr.queue_resolution(queue, removed_text="Fact", kind="memory", promoted=False,
+                                     actor="operator", source="pwa", workspace="personal",
+                                     vault_root=tmp_path, selected=selected):
+                queue.write_text(first, encoding="utf-8")
+                raise OSError("interrupted")
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None), config=_registered_config(tmp_path))
+    assert not memory_proposals.read_decisions(queue)
+
+
+def test_pending_selected_receipt_with_exact_after_is_ambiguous(tmp_path, monkeypatch):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    before = "- [memory] A  spaced fact _(from: first)_\n- [memory] Other _(from: second)_\n"
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    def interrupted(*args, **kwargs):
+        raise OSError("interrupted")
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_write_queue_receipt", interrupted)
+        with pytest.raises(OSError):
+            with mr.queue_resolution(queue, removed_text=entry.bullet.text, kind="memory", promoted=False,
+                                     actor="operator", source="pwa", workspace="personal",
+                                     vault_root=tmp_path, selected=selected):
+                queue.write_text("- [memory] Other _(from: second)_\n", encoding="utf-8")
+                raise OSError("interrupted")
+    journal = mr.journal_path(tmp_path, None)
+    result = mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert any(row["status"] == mr.CONFLICT for row in result.conflicts)
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert not decisions
+
+
+def test_unbound_applied_selected_receipt_does_not_write_decision(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] Fact _(from: first)_\n", encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                     queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "personal", tmp_path, entry.proposal_id)
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None))
+    assert not memory_proposals.read_decisions(queue)
+
+
+def test_busy_selected_replay_does_not_block_later_prepared_receipt(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    before = "- [memory] First fact _(from: first)_\n"
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "personal", tmp_path, entry.proposal_id)
+    guide = _guide(tmp_path)
+    with monkeypatch.context() as patch:
+        original_append = mr._append
+        def interrupted(path, row, *args, **kwargs):
+            if row.get("kind") == "region_apply" and row.get("status") != mr.PREPARED:
+                raise OSError("interrupted terminal receipt")
+            return original_append(path, row, *args, **kwargs)
+        patch.setattr(mr, "_append", interrupted)
+        with pytest.raises(OSError):
+            mr.commit_region_change(guide, "memory", entries=["Second fact"], actor="operator",
+                                    source="pwa", workspace="personal", vault_root=tmp_path)
+    journal = mr.journal_path(tmp_path, None)
+    prepared = next(row for row in mr.read_receipts(journal) if row["status"] == mr.PREPARED)
+    real_lock = mr.queue_lock
+    attempted = []
+    @contextmanager
+    def busy(path, *args, **kwargs):
+        attempted.append(path)
+        if path == queue:
+            raise mr.QueueLockError("busy selected queue")
+        with real_lock(path, *args, **kwargs) as handle:
+            yield handle
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "queue_lock", busy)
+        result = mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert queue in attempted
+    assert any(row["id"] == prepared["id"] and row["status"] == mr.APPLIED for row in result.reconciled)
+    assert not memory_proposals.read_decisions(queue)
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert len(memory_proposals.read_decisions(queue)) == 1
+
+
+def test_unbound_pending_selected_receipt_does_not_write_decision(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    before = "- [memory] Fact _(from: first)_\n"
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    with pytest.raises(OSError):
+        with mr.queue_resolution(queue, removed_text="Fact", kind="memory", promoted=False,
+                                 actor="operator", source="pwa", workspace="personal",
+                                 vault_root=tmp_path, selected=selected):
+            queue.write_text("\n", encoding="utf-8")
+            raise OSError("interrupted")
+    journal = mr.journal_path(tmp_path, None)
+    before_journal = journal.read_bytes()
+    mr.recover_pending(journal=journal)
+    assert journal.read_bytes() == before_journal
+    assert not memory_proposals.read_decisions(queue)
+
+
+def test_copied_applied_queue_journal_cannot_write_foreign_decision(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    owner, other = tmp_path / "owner", tmp_path / "other"
+    queue = owner / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] Fact _(from: first)_\n", encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                     queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "personal", owner, entry.proposal_id)
+    foreign = mr.journal_path(other, None)
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(mr.journal_path(owner, None).read_bytes())
+    mr.recover_pending(journal=foreign, config=_registered_config(other))
+    assert not memory_proposals.read_decisions(queue)
+
+
+def test_copied_pending_queue_journal_cannot_write_foreign_decision(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    owner, other = tmp_path / "owner", tmp_path / "other"
+    queue = owner / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    before = "- [memory] Fact _(from: first)_\n"
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    with pytest.raises(OSError):
+        with mr.queue_resolution(queue, removed_text="Fact", kind="memory", promoted=False,
+                                 actor="operator", source="pwa", workspace="personal",
+                                 vault_root=owner, selected=selected):
+            queue.write_text("\n", encoding="utf-8")
+            raise OSError("interrupted")
+    foreign = mr.journal_path(other, None)
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(mr.journal_path(owner, None).read_bytes())
+    mr.recover_pending(journal=foreign, config=_registered_config(other))
+    assert not memory_proposals.read_decisions(queue)
+    assert not memory_proposals.read_decisions(other / "Workspace" / "Memory-Proposals.md")
+
+
+def test_startup_replay_rejects_unregistered_receipt_workspace(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    _client, config = _receipts_client(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("- [memory] Fact _(from: first)_\n", encoding="utf-8")
+    entry = next(walk_proposal_queue("other", "other/Workspace/Memory-Proposals.md",
+                                     queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "other", vault, entry.proposal_id)
+    mr.recover_memory_journals(config)
+    assert not memory_proposals.read_decisions(queue)
+
+
+@pytest.mark.parametrize("tamper", ["missing_before", "wrong_before", "wrong_after", "wrong_source", "missing_landed"])
+def test_applied_selected_receipt_requires_matching_images(tmp_path, tamper):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] Fact _(from: first)_\n", encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                     queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "personal", tmp_path, entry.proposal_id)
+    journal = mr.journal_path(tmp_path, None)
+    receipt = mr.read_receipts(journal)[-1]
+    if tamper == "missing_before":
+        receipt.pop("before_text", None)
+    elif tamper == "wrong_before":
+        receipt["before_text"] = "- [memory] Other _(from: first)_\n"
+        receipt["before_revision"] = mr.content_revision(receipt["before_text"])
+    elif tamper == "wrong_after":
+        receipt["after_text"] = "- [memory] Something else\n"
+        receipt["after_revision"] = mr.content_revision(receipt["after_text"])
+    elif tamper == "wrong_source":
+        receipt["proposal_source"] = "forged"
+    else:
+        receipt.pop("owner_landed", None)
+    mr._append(journal, receipt)
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert not memory_proposals.read_decisions(queue)
+
+
+def test_selected_recovery_and_normal_decision_are_atomic(tmp_path):
+    import threading
+    from ciao import memory_proposals, proposal_actions
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] A  spaced fact _(from: first)_\n", encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                     queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, False, "personal", tmp_path, entry.proposal_id)
+    journal = mr.journal_path(tmp_path, None)
+    queue_receipt_id = mr.read_receipts(journal)[-1]["id"]
+    barrier = threading.Barrier(3)
+    errors: list[BaseException] = []
+
+    def recover():
+        try:
+            barrier.wait(timeout=10)
+            mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def normal():
+        try:
+            barrier.wait(timeout=10)
+            proposal_actions.record_decision(queue, action="dismiss", text=entry.bullet.text,
+                                             kind=entry.bullet.kind, source=entry.bullet.source,
+                                             via="pwa", proposal_id=entry.proposal_id,
+                                             queue_receipt_id=queue_receipt_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=recover), threading.Thread(target=recover),
+               threading.Thread(target=normal)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    rows = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(rows) == 1
+    assert rows[0]["identity_text"] == "A  spaced fact"
+    assert rows[0]["text"] == "A spaced fact"
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert len(memory_proposals.read_decisions(queue, include_history_only=False)) == 1
+
+
+def test_replay_before_normal_uses_queue_transaction_not_outcome(tmp_path):
+    from ciao import memory_proposals, proposal_actions
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "- [memory] A  fact _(from: first)_\n"
+    queue.write_text(original, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, True, "personal", tmp_path, entry.proposal_id)
+    journal = mr.journal_path(tmp_path, None)
+    first_id = mr.read_receipts(journal)[-1]["id"]
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    proposal_actions.record_decision(queue, action="accept", text=entry.bullet.text,
+                                     kind="memory", source="first", via="pwa",
+                                     proposal_id=entry.proposal_id, outcome="duplicate",
+                                     queue_receipt_id=first_id)
+    assert len(memory_proposals.read_decisions(queue)) == 1
+    queue.write_text(original, encoding="utf-8")
+    assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                   entry.bullet.kind, True, "personal", tmp_path, entry.proposal_id)
+    second_id = mr.read_receipts(journal)[-1]["id"]
+    assert second_id != first_id
+    proposal_actions.record_decision(queue, action="accept", text=entry.bullet.text,
+                                     kind="memory", source="first", via="pwa",
+                                     proposal_id=entry.proposal_id, outcome="duplicate",
+                                     queue_receipt_id=second_id)
+    assert len(memory_proposals.read_decisions(queue)) == 2
+
+
+@pytest.mark.parametrize("tamper", ["other_header", "nonempty_header", "other_bullet"])
+def test_cli_selected_rewrite_rejects_extra_deletions(tmp_path, tamper):
+    from ciao.proposal_tracking import walk_proposal_queue
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    before = ("# Queue\n\n## 2026-11-14T12:00:00Z\n\n- [memory] Selected _(from: A)_\n\n"
+              "## Keep this heading\n\nText to keep\n\n"
+              "## 2026-11-14T13:00:00Z\n\n- [memory] Other _(from: B)_\n")
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", before))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    with mr.queue_resolution(queue, removed_text="Selected", kind="memory", promoted=False,
+                             actor="agent", source="cli", workspace="personal", vault_root=tmp_path,
+                             selected=selected) as resolution:
+        assert mp.remove_proposal_by_substring(queue, "Selected")
+        resolution["owner_landed"] = True
+    receipt = mr.read_receipts(mr.journal_path(tmp_path, None))[-1]
+    after = queue.read_text(encoding="utf-8")
+    assert mr._selected_queue_effect(receipt, after, pending=False)
+    replacements = {"other_header": ("## Keep this heading\n", ""),
+                    "nonempty_header": ("## 2026-11-14T13:00:00Z\n", ""),
+                    "other_bullet": ("- [memory] Other _(from: B)_\n", "")}
+    old, new = replacements[tamper]
+    assert not mr._selected_queue_effect(receipt, after.replace(old, new), pending=False)
+
+
+def test_selected_transaction_id_not_reused_after_journal_trim(tmp_path, monkeypatch):
+    from ciao import memory_proposals, proposal_actions
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "- [memory] Fact _(from: source)_\n"
+    journal = mr.journal_path(tmp_path, None)
+    ids = []
+    for iteration in range(2):
+        queue.write_text(original, encoding="utf-8")
+        entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+        assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                       entry.bullet.kind, False, "personal", tmp_path,
+                                                       entry.proposal_id)
+        receipt = [row for row in mr.read_receipts(journal) if row.get("proposal_id") == entry.proposal_id][-1]
+        ids.append(receipt["id"])
+        proposal_actions.record_decision(queue, action="dismiss", text=entry.bullet.text, kind=entry.bullet.kind,
+                                         source=entry.bullet.source, via="pwa", proposal_id=entry.proposal_id,
+                                         queue_receipt_id=receipt["id"])
+        if iteration == 0:
+            monkeypatch.setattr(mr, "MAX_BYTES", 1)
+            monkeypatch.setattr(mr, "KEEP_LINES", 2)
+            for i in range(4):
+                mr._append(journal, {"id": f"filler-{i}", "status": mr.APPLIED})
+            assert not any(row.get("id") == ids[0] for row in mr.read_receipts(journal))
+    assert ids[0] != ids[1]
+    mr.recover_pending(journal=journal, config=_registered_config(tmp_path))
+    assert len(memory_proposals.read_decisions(queue)) == 2
+
+
+def test_concurrent_selected_queue_transactions_have_distinct_ids(tmp_path):
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "- [memory] Fact _(from: source)_\n"
+    barrier = threading.Barrier(3)
+    errors: list[BaseException] = []
+    def worker():
+        try:
+            barrier.wait()
+            with mr.queue_lock(queue):
+                queue.write_text(original, encoding="utf-8")
+                entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+                assert proposal_service._rewrite_queue_single(queue, entry.line, entry.raw, entry.bullet.text,
+                                                               entry.bullet.kind, False, "personal", tmp_path,
+                                                               entry.proposal_id)
+        except BaseException as exc:
+            errors.append(exc)
+    workers = [threading.Thread(target=worker) for _ in range(2)]
+    for worker_thread in workers:
+        worker_thread.start()
+    barrier.wait()
+    for worker_thread in workers:
+        worker_thread.join(5)
+    assert not errors and not any(worker_thread.is_alive() for worker_thread in workers)
+    receipts = [row for row in mr.read_receipts(mr.journal_path(tmp_path, None)) if row.get("owner_landed")]
+    assert len(receipts) == 2 and len({row["id"] for row in receipts}) == 2
+
+
+def test_real_single_queue_owner_recovers_selected_duplicate(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] Fact _(from: learning-review:abc@def)_\n"
+                     "- [memory] Fact _(from: learning-review:abc@def)_\n", encoding="utf-8")
+    entries = list(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                       queue.read_text(encoding="utf-8")))
+    second = entries[1]
+    assert not proposal_service._rewrite_queue_single(queue, second.line, second.raw, "Fact", "memory",
+                                                       False, "personal", tmp_path, entries[0].proposal_id)
+    assert len(list(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                        queue.read_text(encoding="utf-8")))) == 2
+    assert proposal_service._rewrite_queue_single(queue, second.line, second.raw, "Fact", "memory",
+                                                   False, "personal", tmp_path, second.proposal_id)
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None), config=_registered_config(tmp_path))
+    rows = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(rows) == 1 and rows[0]["proposal_id"] == second.proposal_id
+    assert rows[0]["source"] == "learning-review:abc@def" and rows[0]["ts"]
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None), config=_registered_config(tmp_path))
+    assert len(memory_proposals.read_decisions(queue, include_history_only=False)) == 1
+
+
+def test_real_batch_owner_recovers_selected_sources(tmp_path):
+    from ciao import memory_proposals
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] One _(from: source-one)_\n"
+                     "- [memory] Two _(from: source-two)_\n", encoding="utf-8")
+    entries = list(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md",
+                                       queue.read_text(encoding="utf-8")))
+    rows = [{"id": e.proposal_id, "line": e.line, "raw": e.raw} for e in entries]
+    removals = [{"text": e.bullet.text, "kind": e.bullet.kind, "promoted": False} for e in entries]
+    wrong = [{**row} for row in rows]
+    wrong[0]["id"] = "foreign"
+    assert not proposal_service._rewrite_queue_batch(queue, wrong, set(), removals, "personal", tmp_path)
+    assert len(queue.read_text(encoding="utf-8").splitlines()) == 2
+    assert proposal_service._rewrite_queue_batch(queue, rows, set(), removals, "personal", tmp_path) == {
+        e.proposal_id for e in entries
+    }
+    mr.recover_pending(journal=mr.journal_path(tmp_path, None), config=_registered_config(tmp_path))
+    decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert {(r["proposal_id"], r["source"]) for r in decisions} == {
+        (e.proposal_id, e.bullet.source) for e in entries
+    }
+
+
+def test_single_queue_owner_resolves_moved_requested_identity(tmp_path):
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "- [memory] Selected _(from: original)_\n"
+    selected = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+    queue.write_text("# inserted\n" + original, encoding="utf-8")
+    assert proposal_service._rewrite_queue_single(
+        queue, selected.line, selected.raw, selected.bullet.text, selected.bullet.kind,
+        False, "personal", tmp_path, selected.proposal_id,
+    )
+    assert queue.read_text(encoding="utf-8") == "# inserted\n"
+
+
+def test_batch_queue_owner_resolves_moved_requested_identity(tmp_path):
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "- [memory] Selected _(from: original)_\n"
+    entry = next(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+    queue.write_text("# inserted\n" + original, encoding="utf-8")
+    rows = [{"id": entry.proposal_id, "line": entry.line, "raw": entry.raw}]
+    removals = [{"text": entry.bullet.text, "kind": entry.bullet.kind, "promoted": False}]
+    assert proposal_service._rewrite_queue_batch(queue, rows, set(), removals, "personal", tmp_path) == {entry.proposal_id}
+    assert queue.read_text(encoding="utf-8") == "# inserted\n"
+
+
+@pytest.mark.parametrize("mode", ["single", "all", "partial"])
+def test_refused_queue_owner_preserves_bytes_and_partial_receipt(tmp_path, mode):
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    original = "# metadata\r\n\r\n- [memory] First _(from: a)_\r\n- [memory] Second _(from: b)_\r\n\r\n\r\n"
+    queue.write_bytes(original.encode())
+    entries = list(walk_proposal_queue("personal", "personal/Workspace/Memory-Proposals.md", original))
+    journal = mr.journal_path(tmp_path, None)
+    if mode == "single":
+        entry = entries[0]
+        assert not proposal_service._rewrite_queue_single(
+            queue, entry.line, entry.raw, entry.bullet.text, entry.bullet.kind,
+            False, "personal", tmp_path, entry.proposal_id, before_remove=lambda: False)
+    else:
+        rows = [{"id": e.proposal_id, "line": e.line, "raw": e.raw} for e in entries]
+        removals = [{"text": e.bullet.text, "kind": e.bullet.kind, "promoted": False} for e in entries]
+        removed = proposal_service._rewrite_queue_batch(
+            queue, rows, set(), removals, "personal", tmp_path,
+            before_remove=lambda row: mode == "partial" and row["id"] == entries[0].proposal_id)
+        assert removed == ({entries[0].proposal_id} if mode == "partial" else set())
+    if mode != "partial":
+        assert queue.read_bytes() == original.encode() and not journal.exists()
+        assert not mp.read_decisions(queue)
+    else:
+        assert "First" not in queue.read_text() and "Second" in queue.read_text()
+        receipts = [row for row in mr.read_receipts(journal) if row.get("batch")]
+        assert len(receipts) == 1 and receipts[0]["status"] == mr.APPLIED
+        assert [p["proposal_id"] for p in receipts[0]["selected_proposals"]] == [entries[0].proposal_id]
 
 
 def test_batch_recovery_rolled_back_when_a_bullet_remains(tmp_path):

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from ciao.memory_proposals import read_decisions
+from tests.cap_checkpoint_helpers import checkpoint_config
 
 
 # ── agent path (curation CLI) ─────────────────────────────────────────────
@@ -41,6 +42,75 @@ def test_cli_dismiss_records_an_agent_decision(tmp_path: Path) -> None:
     assert decisions[0]["action"] == "dismissed"
     assert decisions[0]["kind"] == "memory"
     assert decisions[0]["via"] == "agent"
+
+
+def test_cli_dismiss_preserves_queue_identity_and_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import cli
+    from ciao.proposal_tracking import stable_proposal_id
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [memory] durable lesson _(from: learning-review:abc@def)_\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_resolve_workspace_and_vaults", lambda args: (tmp_path, vault, tmp_path, "personal"))
+    assert cli.main(["memory-proposal-dismiss", "--workspace", str(tmp_path),
+                     "--vault-root", str(vault), "durable lesson"]) == 0
+    decision = read_decisions(queue)[0]
+    assert decision["source"] == "learning-review:abc@def" and decision["via"] == "agent"
+    assert decision["proposal_id"] == stable_proposal_id(
+        "personal", "personal/Workspace/Memory-Proposals.md", "memory",
+        "durable lesson", "learning-review:abc@def", 0,
+    )
+
+
+def test_cli_replay_before_normal_preserves_header_sweep_and_reason(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from ciao import cli, memory_receipts as mr, proposal_actions
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.proposal_tracking import stable_proposal_id
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    source = "learning-review:abc@def"
+    queue.write_text("# Queue\n\n## 2026-11-14T12:00:00Z\n\n"
+                     f"- [memory] A  fact _(from: {source})_\n\n", encoding="utf-8")
+    reason = tmp_path / "reason.txt"
+    reason.write_text("already resolved", encoding="utf-8")
+    config = CiaoConfig(pwa_auth_token="test", workspace_root=tmp_path,
+                        state_path=tmp_path / ".runtime/state.json", media_root=tmp_path / ".runtime/media",
+                        vault_root=vault, workspaces={"personal": WorkspaceConfig(name="personal", vault_root=str(vault))})
+    monkeypatch.setattr(cli, "_resolve_workspace_and_vaults", lambda args: (tmp_path, vault, tmp_path, "personal"))
+    real = proposal_actions.record_decision
+    entered = threading.Event()
+    acquired = threading.Event()
+    threads: list[threading.Thread] = []
+    def replay_first(path, **kwargs):
+        def competitor():
+            entered.set()
+            with mr.queue_lock(queue):
+                acquired.set()
+        thread = threading.Thread(target=competitor)
+        threads.append(thread)
+        thread.start()
+        assert entered.wait(2) and not acquired.wait(0.2)
+        mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+        recovered = read_decisions(queue)
+        assert len(recovered) == 1 and recovered[0]["reason"] == "already resolved" and recovered[0]["via"] == "agent"
+        return real(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    assert cli.main(["memory-proposal-dismiss", "--workspace", str(tmp_path), "--vault-root", str(vault),
+                     "--reason-file", str(reason), "A  fact"]) == 0
+    for thread in threads:
+        thread.join(3)
+        assert not thread.is_alive() and acquired.is_set()
+    rows = read_decisions(queue)
+    assert len(rows) == 1
+    assert rows[0]["via"] == "agent" and rows[0]["reason"] == "already resolved"
+    assert rows[0]["source"] == source and rows[0]["identity_text"] == "A  fact"
+    assert rows[0]["proposal_id"] == stable_proposal_id(
+        "personal", "personal/Workspace/Memory-Proposals.md", "memory", "A  fact", source, 0)
+    assert rows[0]["queue_receipt_id"]
+    mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+    assert len(read_decisions(queue)) == 1
 
 
 def test_cli_promote_then_dismiss_records_a_promotion(tmp_path: Path) -> None:
@@ -1447,6 +1517,16 @@ def _accepted_install(tmp_path: Path, bullet: str = _REGION_BULLET) -> tuple[Pat
     return root, vault, queue
 
 
+def test_accept_without_checkpoint_does_not_require_safe_index_location(tmp_path: Path, monkeypatch) -> None:
+    import tempfile
+    root, vault, queue = _accepted_install(tmp_path)
+    system_temp = vault / "system-temp"
+    system_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(system_temp))
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    assert _REGION_NEEDLE not in queue.read_text()
+
+
 def test_accept_writes_the_region_with_a_receipt_and_records_the_decision(
     tmp_path: Path, capsys
 ) -> None:
@@ -1476,6 +1556,1596 @@ def test_accept_writes_the_region_with_a_receipt_and_records_the_decision(
     receipt = memory_receipts.find_receipt(journal, receipt_id)
     assert receipt is not None
     assert memory_receipts.is_undoable(receipt)
+
+
+def test_cap_checkpoint_uses_real_receipt_and_deduplicates_same_event(tmp_path: Path) -> None:
+    import json
+    from tests.cap_checkpoint_helpers import build_checkpoint, validate_checkpoint
+    from ciao import memory_proposals, memory_receipts as mr, proposal_predictions as pp
+    root, vault, queue = _accepted_install(tmp_path)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    line = sidecar.read_bytes()
+    snapshots = {".dismissed.jsonl": line + line, ".dismissed.log": None}
+    receipts = mr.read_receipts(mr.journal_path(vault, None))
+    checkpoint = build_checkpoint(queue, snapshots, receipts)
+    assert len(checkpoint["events"]) == 1
+    assert checkpoint["events"][0]["receipt_id"] == read_decisions(queue)[0]["queue_receipt_id"]
+    assert validate_checkpoint(checkpoint, snapshots)
+    target = next(r for r in receipts if r["id"] == checkpoint["events"][0]["receipt_id"])
+    broken = [{**r, "owner_landed": False} if r is target else r for r in receipts]
+    with pytest.raises(ValueError, match="receipt"):
+        build_checkpoint(queue, snapshots, broken)
+    with pytest.raises(ValueError, match="duplicate receipt identity"):
+        build_checkpoint(queue, snapshots, receipts + [target])
+    legacy_first = {".dismissed.jsonl": None, ".dismissed.log": line}
+    prior = build_checkpoint(queue, legacy_first, receipts)
+    moved_duplicate = {".dismissed.jsonl": line, ".dismissed.log": line}
+    updated = build_checkpoint(queue, moved_duplicate, receipts + [prior], previous_checkpoint=prior)
+    assert updated["events"] == prior["events"]
+    assert validate_checkpoint(updated, moved_duplicate)
+    changed = json.loads(line)
+    changed["promoted_at"] = "2030-01-01T00:00:00Z"
+    snapshots[".dismissed.jsonl"] += (json.dumps(changed) + "\n").encode()
+    with pytest.raises(ValueError, match="duplicate"):
+        build_checkpoint(queue, snapshots, receipts)
+
+
+def test_checkpoint_second_generation_after_real_receipt_compacted(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts as mr, proposal_predictions as pp
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    first = next(row for row in mr.read_receipts(journal) if row.get("kind") == "cap_event_checkpoint")
+    first_id = first["events"][0]["receipt_id"]
+    assert first_id not in {r["id"] for r in mr.read_receipts(journal)}
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+    for i in range(3):
+        mr._append(journal, {"id": f"later-noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    receipts = mr.selected_queue_receipts_for_gate(journal)
+    second_checkpoint = next(row for row in receipts if row.get("kind") == "cap_event_checkpoint")
+    assert len(second_checkpoint["events"]) == 2
+    assert first_id in {event["receipt_id"] for event in second_checkpoint["events"]}
+    assert pp.stream_checkpoint_events(queue, second_checkpoint, receipts, config=checkpoint_config(queue))[0] == second_checkpoint["events"]
+    original = sidecar.read_bytes()
+    sidecar.unlink()
+    with pytest.raises(ValueError, match="checkpoint"):
+        pp.stream_checkpoint_events(queue, second_checkpoint, receipts, config=checkpoint_config(queue))
+    sidecar.write_bytes(original.replace(b"Prefers uv", b"Changed uv", 1))
+    with pytest.raises(ValueError, match="checkpoint"):
+        pp.stream_checkpoint_events(queue, second_checkpoint, receipts, config=checkpoint_config(queue))
+    sidecar.write_bytes(original)
+    assert len(read_decisions(queue)) == 2
+
+
+@pytest.mark.parametrize("case", ["enclosing", "other-workspace"])
+def test_compaction_refuses_configured_backup_overlap(tmp_path: Path, monkeypatch, case: str) -> None:
+    import tempfile
+    from ciao import memory_receipts as mr
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.os_support.users import user_key
+    root, vault, queue, journal, _ = _compaction_fault_fixture(tmp_path, monkeypatch)
+    before = journal.read_bytes()
+    system_temp = tmp_path / "system-temp"
+    system_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(system_temp))
+    configured_vault = tmp_path if case == "enclosing" else vault
+    other = system_temp if case == "other-workspace" else tmp_path / "other"
+    config = CiaoConfig(
+        pwa_auth_token="test", workspace_root=root, state_path=root / ".runtime" / "state.json",
+        media_root=root / ".runtime" / "media", vault_root=configured_vault,
+        workspaces={"work": WorkspaceConfig(name="work", vault_root=str(vault)),
+                    "other": WorkspaceConfig(name="other", vault_root=str(other))},
+    )
+    with pytest.raises(ValueError, match="configured backup root"):
+        mr.compact_cap_checkpoint(queue, vault, config=config)
+    assert journal.read_bytes() == before
+    assert not (system_temp / f"ciao-cap-index-{user_key()}").exists()
+
+
+def test_checkpoint_compaction_allows_later_real_accepts_at_small_limit(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run, memory_proposals, memory_receipts as mr
+    root, vault, queue = _handover_install(tmp_path, "all")
+    monkeypatch.setattr(mr, "MAX_BYTES", 1024)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    base = datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=20)
+    for i in range(10):
+        instant = base + timedelta(seconds=i)
+        class DecisionClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return instant if tz is not None else instant.replace(tzinfo=None)
+        monkeypatch.setattr(memory_proposals, "datetime", DecisionClock)
+        fact = f"Prefers build option number {i} for projects."
+        with queue.open("a", encoding="utf-8") as handle:
+            handle.write(f"- [memory] {fact} _(from: Decisions)_\n")
+        _store_prediction(queue, "accept", text=fact)
+        holder = f"run-{i}"
+        holder = curation_run.begin_run(vault, holder=holder, ttl_s=3600, now=instant).holder
+        assert _run_handover("memory-proposal-accept", root, vault, fact) == 0
+        curation_run.end_run(vault, holder=holder)
+        mr._append(mr.journal_path(vault, None), {"id": f"noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 256})
+    assert len(read_decisions(queue)) == 10
+    assert mr.journal_path(vault, None).stat().st_size < 16 * mr.MAX_BYTES
+    receipts = mr.read_receipts(mr.journal_path(vault, None))
+    assert any(r.get("kind") == "cap_event_checkpoint" for r in receipts)
+    first_id = read_decisions(queue)[0]["queue_receipt_id"]
+    assert first_id not in {r["id"] for r in receipts}
+
+
+def test_compacted_cap_deduplicates_and_handles_lease_change_during_accept(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from datetime import UTC, datetime
+    from ciao import curation_run, memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _handover_install(tmp_path, "all")
+    monkeypatch.setattr(mr, "MAX_BYTES", 1024)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    instant = datetime.now(UTC).replace(microsecond=0)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant if tz is not None else instant.replace(tzinfo=None)
+    monkeypatch.setattr(memory_proposals, "datetime", FixedDatetime)
+    old_holder = curation_run.begin_run(vault, holder="old", ttl_s=3600, now=instant).holder
+    def add_and_predict(i):
+        fact = f"Prefers build option number {i} for projects."
+        with queue.open("a", encoding="utf-8") as handle:
+            handle.write(f"- [memory] {fact} _(from: Decisions)_\n")
+        _store_prediction(queue, "accept", text=fact)
+        return fact
+    for i in range(4):
+        assert _run_handover("memory-proposal-accept", root, vault, add_and_predict(i)) == 0
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    first_line = sidecar.read_bytes().splitlines(keepends=True)[0]
+    with sidecar.open("ab") as handle:
+        handle.write(first_line)
+    real_accept = memory_proposals.accept_region_fact
+    attempted, completed = threading.Event(), threading.Event()
+    def transition():
+        attempted.set()
+        curation_run.end_run(vault, holder=old_holder)
+        curation_run.begin_run(vault, holder="new", ttl_s=3600, now=instant)
+        completed.set()
+    worker = threading.Thread(target=transition)
+    def switch_lease(*args, **kwargs):
+        worker.start()
+        assert attempted.wait(2) and not completed.wait(0.2)
+        return real_accept(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_proposals, "accept_region_fact", switch_lease)
+        assert _run_handover("memory-proposal-accept", root, vault, add_and_predict(4)) == 0
+    worker.join(3)
+    assert completed.is_set()
+    sixth = add_and_predict(5)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, sixth) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def _compaction_fault_fixture(tmp_path: Path, monkeypatch):
+    from ciao import memory_receipts as mr
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    monkeypatch.setattr(mr, "MAX_BYTES", 1024)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    journal = mr.journal_path(vault, None)
+    for i in range(3):
+        mr._append(journal, {"id": f"noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    return root, vault, queue, journal, second
+
+
+def _second_compaction_fault_fixture(tmp_path: Path, monkeypatch):
+    from ciao import memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+    third = "Keeps review notes concise."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {third} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=third)
+    for i in range(3):
+        mr._append(journal, {"id": f"second-noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    return root, vault, queue, journal, third
+
+
+def test_accept_reports_ambiguous_checkpoint_slot_for_manual_inspection(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import proposal_predictions as pp
+    root, vault, queue, _journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    runtime = tmp_path / "runtime-slot"
+    runtime.mkdir(mode=0o700)
+    slot = runtime / pp._CAP_OPERATION_SLOT
+    slot.mkdir(mode=0o700)
+    (slot / "unknown").write_text("preserve")
+    monkeypatch.setattr(pp, "_cap_runtime", lambda queue, config: runtime)
+    capsys.readouterr()
+    for _ in range(2):
+        assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+        error = capsys.readouterr().err
+        assert "runtime slot needs manual inspection" in error and str(slot) in error
+        assert "before retrying" in error
+        assert second in queue.read_text()
+    assert (slot / "unknown").read_text() == "preserve"
+    assert list(runtime.glob("op-*")) == [slot]
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "DEVELOPMENT.md").read_text()
+    assert "lock_exclusive(fd, blocking=False)" in guide
+    assert "preserve anything whose ownership is uncertain" in guide
+    assert "move or rename that exact slot" in guide
+
+
+def test_checkpointed_accept_with_history_past_old_total_limit(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from ciao import memory_proposals, memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert any(row.get("kind") == "cap_event_checkpoint" for row in mr.read_receipts(journal))
+    row = json.dumps({"text": "unrelated " + "x" * 100, "kind": "memory",
+                      "dismissed_at": "2025-01-01T00:00:00Z"}) + "\n"
+    with queue.with_suffix(".dismissed.log").open("a", encoding="utf-8") as handle:
+        handle.write(row * 10)
+    assert queue.with_suffix(".dismissed.log").stat().st_size > 512
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+def test_cli_second_checkpoint_compacts_above_old_history_limit(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from ciao import memory_proposals, memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+    third = "Keeps review notes concise."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {third} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=third)
+    for i in range(3):
+        mr._append(journal, {"id": f"later-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    sidecar = queue.with_suffix(".dismissed.log")
+    with sidecar.open("a", encoding="utf-8") as handle:
+        handle.write((json.dumps({"text": "old " + "x" * 100, "dismissed_at": "2020-01-01T00:00:00Z"}) + "\n") * 10)
+    assert sidecar.stat().st_size > 512
+    assert _run_handover("memory-proposal-accept", root, vault, third) == 0
+    checkpoint = next(row for row in mr.read_receipts(journal) if row.get("kind") == "cap_event_checkpoint")
+    assert checkpoint["sidecars"][".dismissed.log"]["length"] == sidecar.stat().st_size
+
+
+def test_checkpointed_budget_streams_unrelated_history_bounded(tmp_path: Path) -> None:
+    import json
+    import tracemalloc
+    from tests.cap_checkpoint_helpers import build_checkpoint
+    from ciao import cli, memory_receipts as mr, proposal_predictions as pp
+    root, vault, queue = _accepted_install(tmp_path)
+    sidecar = queue.with_suffix(".dismissed.log")
+    line = (json.dumps({"text": "old", "via": "agent", "kind": "memory",
+                        "promoted_at": "2020-01-01T00:00:00Z"}) + "\n").encode()
+    sidecar.write_bytes(line)
+    checkpoint = build_checkpoint(queue, {".dismissed.jsonl": None, ".dismissed.log": line}, [])
+    mr._append(mr.journal_path(vault, None), checkpoint)
+    with sidecar.open("ab") as handle:
+        for _ in range(30000):
+            handle.write(b'{"text":"unrelated"}\n')
+    tracemalloc.start()
+    try:
+        with mr.queue_lock(queue):
+            assert cli._handover_accept_budget(vault, queue, config=checkpoint_config(queue)) == ""
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_checkpointed_accept_checks_old_compacted_receipt_replay(tmp_path: Path, monkeypatch, conflict: bool) -> None:
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    original = memory_proposals.dismissed_log_path(queue).read_bytes().splitlines(keepends=True)[0]
+    rid = read_decisions(queue)[0]["queue_receipt_id"]
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert rid not in {row["id"] for row in mr.read_receipts(journal)}
+    with queue.with_suffix(".dismissed.log").open("ab") as handle:
+        handle.write(original.replace(b"Prefers uv", b"Changed uv") if conflict else original)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == (1 if conflict else 0)
+    if conflict:
+        assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="Windows may prevent replacing an open file")
+def test_checkpoint_rescan_rejects_sidecar_replacement(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts as mr, proposal_predictions as pp
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    rows = mr.selected_queue_receipts_for_gate(journal)
+    checkpoint = next(row for row in rows if row.get("kind") == "cap_event_checkpoint")
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    replacement = sidecar.with_name("replacement")
+    replacement.write_bytes(sidecar.read_bytes())
+    original = memory_proposals.DecisionSidecarStream.__iter__
+    calls = []
+    def replace_during_rescan(stream):
+        if stream.path == sidecar:
+            calls.append(True)
+        for item in original(stream):
+            if stream.path == sidecar and len(calls) == 2 and replacement.exists():
+                replacement.replace(sidecar)
+            yield item
+    monkeypatch.setattr(memory_proposals.DecisionSidecarStream, "__iter__", replace_during_rescan)
+    with pytest.raises(ValueError):
+        pp.stream_checkpoint_events(queue, checkpoint, rows, config=checkpoint_config(queue))
+    assert len(calls) >= 2 and not replacement.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_actual_compaction_detects_sidecar_loss(tmp_path: Path, monkeypatch, damage: str) -> None:
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    first_receipt = read_decisions(queue)[0]["queue_receipt_id"]
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert first_receipt not in {r["id"] for r in mr.read_receipts(journal)}
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    if damage == "missing":
+        sidecar.unlink()
+    else:
+        sidecar.write_bytes(sidecar.read_bytes().replace(b"Prefers uv", b"Changed uv", 1))
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_compaction_streams_preexisting_oversized_journal(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    for i in range(25):
+        mr._append(journal, {"id": f"extra-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    assert 16 * mr.MAX_BYTES < journal.stat().st_size < 64 * mr.MAX_BYTES
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+    assert journal.stat().st_size < 16 * mr.MAX_BYTES
+
+
+def test_refused_handover_does_not_compact_journal(tmp_path: Path, monkeypatch) -> None:
+    import json
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    registry = root / ".runtime" / "workspaces.json"
+    data = json.loads(registry.read_text())
+    data[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(data))
+    before = journal.read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert (journal.read_bytes(), queue.read_bytes()) == before
+
+
+def test_compaction_above_streaming_limit_fails_without_effect(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    with journal.open("ab") as handle:
+        for i in range(150):
+            handle.write((json.dumps({"id": f"bulk-{i}", "kind": "other", "status": mr.APPLIED,
+                                      "padding": "x" * 512}) + "\n").encode())
+    assert journal.stat().st_size > 64 * mr.MAX_BYTES
+    before = journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert (journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_compaction_preserves_unresolved_and_rejects_malformed_evidence(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    mr._append(journal, {"id": "unresolved", "kind": "queue_resolve", "status": mr.CONFLICT,
+                         "proposal_id": "p", "queue": str(queue)})
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert any(r.get("id") == "unresolved" and r.get("status") == mr.CONFLICT for r in mr.read_receipts(journal))
+    with journal.open("ab") as handle:
+        handle.write(b'{"id":"malformed"\n')
+    before = journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert (journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_compaction_does_not_drop_invalid_selected_receipt(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from ciao import memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    rows = [json.loads(line) for line in journal.read_text().splitlines()]
+    selected = next(row for row in rows if row.get("kind") == "queue_resolve" and row.get("status") == mr.APPLIED
+                    and row.get("proposal_id"))
+    selected["after_revision"] = "invalid"
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    before = journal.read_bytes()
+    assert not mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert journal.read_bytes() == before
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+
+
+def test_compaction_keeps_recent_full_undo_receipt(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    receipt = {"id": "recent-note", "kind": "note_apply", "status": mr.APPLIED,
+               "before_text": "before", "after_text": "after", "workspace": "work"}
+    mr._append(journal, receipt)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    kept = next(r for r in mr.read_receipts(journal) if r.get("id") == "recent-note")
+    assert kept["before_text"] == "before" and kept["after_text"] == "after"
+    assert mr.is_undoable(kept)
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+@pytest.mark.parametrize("failure", ["sidecar_fsync", "temp_fsync", "before_replace", "after_replace"])
+def test_compaction_fault_keeps_old_or_new_evidence(tmp_path: Path, monkeypatch, failure: str, generation: int) -> None:
+    import os
+    import stat
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, second = fixture(tmp_path, monkeypatch)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    sidecar_inode = sidecar.stat().st_ino
+    original_sync, original_replace = os.fsync, os.replace
+    before_journal = journal.read_bytes()
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    faults = []
+    def sync(fd):
+        if ((failure == "sidecar_fsync" and os.fstat(fd).st_ino == sidecar_inode)
+                or (failure == "temp_fsync" and stat.S_ISREG(os.fstat(fd).st_mode)
+                    and os.fstat(fd).st_ino != sidecar_inode)):
+            faults.append(True)
+            raise OSError("sidecar fsync failed")
+        return original_sync(fd)
+    def replace(source, target):
+        if Path(source).name.startswith(".cap-checkpoint-"):
+            faults.append(True)
+            if failure == "after_replace":
+                original_replace(source, target)
+            raise OSError("checkpoint replace failed")
+        return original_replace(source, target)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", sync)
+        if failure in ("before_replace", "after_replace"):
+            patch.setattr(os, "replace", replace)
+        assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert faults and (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    if failure != "after_replace":
+        assert journal.read_bytes() == before_journal
+    else:
+        assert journal.read_bytes() != before_journal
+        assert any(r.get("kind") == "cap_event_checkpoint" for r in mr.read_receipts(journal))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX directory fencing")
+@pytest.mark.parametrize("generation", [1, 2])
+def test_compaction_directory_fence_error_after_replace_fails_closed(tmp_path: Path, monkeypatch, generation: int) -> None:
+    import os
+    import stat
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, second = fixture(tmp_path, monkeypatch)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    real_fsync = os.fsync
+    directories = []
+    def fail_second_directory(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directories.append(True)
+            if len(directories) == 2:
+                raise OSError("journal directory fence failed")
+        return real_fsync(fd)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", fail_second_directory)
+        assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert len(directories) == 2
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    assert any(row.get("kind") == "cap_event_checkpoint" for row in mr.read_receipts(journal))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+def test_compaction_keeps_queue_lock_against_concurrent_writer(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from ciao import memory_receipts as mr, proposal_predictions
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    entered, acquired = threading.Event(), threading.Event()
+    workers = []
+    real = proposal_predictions.stream_checkpoint_events
+    def fenced(*args, **kwargs):
+        def competing():
+            entered.set()
+            with mr.queue_lock(queue):
+                acquired.set()
+        thread = threading.Thread(target=competing)
+        workers.append(thread)
+        thread.start()
+        assert entered.wait(2) and not acquired.wait(0.2)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(proposal_predictions, "stream_checkpoint_events", fenced)
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    workers[0].join(3)
+    assert acquired.is_set() and not workers[0].is_alive()
+
+
+def test_compaction_refuses_external_journal_change_before_replace(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+    import stat
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue, journal, second = _compaction_fault_fixture(tmp_path, monkeypatch)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    sidecar_inode = sidecar.stat().st_ino
+    original = os.fsync
+    changed = []
+    def interpose(fd):
+        result = original(fd)
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode) and info.st_ino != sidecar_inode and not changed:
+            with journal.open("ab") as handle:
+                handle.write((json.dumps({"id": "external", "kind": "other", "status": mr.APPLIED}) + "\n").encode())
+            changed.append(True)
+        return result
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", interpose)
+        assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert changed and any(row.get("id") == "external" for row in mr.read_receipts(journal))
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+def test_compaction_refuses_sidecar_change_after_temp_fence(tmp_path: Path, monkeypatch, generation: int) -> None:
+    import os
+    import stat
+    from ciao import memory_proposals
+    from ciao.workspace_guide import guide_path
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, fact = fixture(tmp_path, monkeypatch)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    sidecar_inode = sidecar.stat().st_ino
+    before = journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()
+    real_fsync = os.fsync
+    changed = []
+    def mutate_after_temp(fd):
+        result = real_fsync(fd)
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode) and info.st_ino != sidecar_inode and not changed:
+            with sidecar.open("ab") as handle:
+                handle.write(b'{"text":"concurrent"}\n')
+            changed.append(True)
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", mutate_after_temp)
+        assert _run_handover("memory-proposal-accept", root, vault, fact) == 1
+    assert changed
+    assert (journal.read_bytes(), guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="process-crash test needs fork")
+@pytest.mark.parametrize("generation", [1, 2])
+@pytest.mark.parametrize("after_replace", [False, True])
+def test_compaction_process_crash_keeps_old_or_new_journal(tmp_path: Path, monkeypatch, after_replace: bool, generation: int) -> None:
+    import os
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, second = fixture(tmp_path, monkeypatch)
+    old = journal.read_bytes()
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        real_replace = os.replace
+        def crash_replace(source, target):
+            if Path(source).name.startswith(".cap-checkpoint-"):
+                if after_replace:
+                    real_replace(source, target)
+                os._exit(42)
+            return real_replace(source, target)
+        os.replace = crash_replace
+        _run_handover("memory-proposal-accept", root, vault, second)
+        os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 42
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    if after_replace:
+        assert journal.read_bytes() != old
+        assert any(row.get("kind") == "cap_event_checkpoint" for row in mr.read_receipts(journal))
+    else:
+        assert journal.read_bytes() == old
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+def test_compaction_windows_process_crash_fence_mode(tmp_path: Path, monkeypatch, generation: int) -> None:
+    import os
+    import stat
+    from ciao import memory_proposals, memory_receipts as mr
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, second = fixture(tmp_path, monkeypatch)
+    synced = []
+    class WindowsOS:
+        name = "nt"
+        def __getattr__(self, name):
+            return getattr(os, name)
+        def fsync(self, fd):
+            synced.append(os.fstat(fd).st_mode)
+            return os.fsync(fd)
+    monkeypatch.setattr(mr, "os", WindowsOS())
+    monkeypatch.setattr(memory_proposals, "os", WindowsOS())
+    assert mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    assert len(synced) >= 2 and all(stat.S_ISREG(mode) for mode in synced)
+    assert any(row.get("kind") == "cap_event_checkpoint" for row in mr.read_receipts(journal))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="process-crash simulation needs fork")
+@pytest.mark.parametrize("generation", [1, 2])
+def test_windows_mode_process_crash_after_checkpoint_replace(tmp_path: Path, monkeypatch, generation: int) -> None:
+    import os
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    fixture = _compaction_fault_fixture if generation == 1 else _second_compaction_fault_fixture
+    root, vault, queue, journal, second = fixture(tmp_path, monkeypatch)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        class WindowsOS:
+            name = "nt"
+            def __getattr__(self, name):
+                return getattr(os, name)
+            def replace(self, source, target):
+                if Path(source).name.startswith(".cap-checkpoint-"):
+                    os.replace(source, target)
+                    os._exit(42)
+                return os.replace(source, target)
+        mr.os = WindowsOS()
+        memory_proposals.os = WindowsOS()
+        _run_handover("memory-proposal-accept", root, vault, second)
+        os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 42
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    assert any(row.get("kind") == "cap_event_checkpoint" for row in mr.read_receipts(journal))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+
+
+@pytest.mark.parametrize("damage", ["none", "missing", "changed"])
+def test_accept_gate_checks_persisted_checkpoint_sidecar_binding(tmp_path: Path, capsys, monkeypatch, damage: str) -> None:
+    import json
+    from tests.cap_checkpoint_helpers import build_checkpoint
+    from ciao import memory_proposals, memory_receipts as mr, proposal_predictions as pp
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    row = {"text": "Old fact", "kind": "memory", "via": "agent", "promoted_at": "2020-01-01T00:00:00Z"}
+    raw = (json.dumps(row) + "\n").encode()
+    sidecar.write_bytes(raw)
+    checkpoint = build_checkpoint(queue, {".dismissed.jsonl": raw, ".dismissed.log": None}, [])
+    mr._append(mr.journal_path(vault, None), checkpoint)
+    if damage == "missing":
+        sidecar.unlink()
+    elif damage == "changed":
+        sidecar.write_bytes(raw.replace(b"Old fact", b"Bad fact"))
+    calls = []
+    real = pp.stream_checkpoint_events
+    def observe(*args, **kwargs):
+        calls.append(args[1])
+        return real(*args, **kwargs)
+    monkeypatch.setattr(pp, "stream_checkpoint_events", observe)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    assert calls == [checkpoint]
+    if damage == "none":
+        assert rc == 0
+    else:
+        assert rc == 1 and "checkpoint" in capsys.readouterr().err.lower()
+        assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_checkpoint_cannot_be_trimmed_or_hidden_by_same_id(tmp_path: Path, monkeypatch, capsys) -> None:
+    import json
+    from tests.cap_checkpoint_helpers import build_checkpoint
+    from ciao import memory_proposals, memory_receipts as mr, proposal_predictions as pp
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    raw = (json.dumps({"text": "Old fact"}) + "\n").encode()
+    sidecar.write_bytes(raw)
+    journal = mr.journal_path(vault, None)
+    checkpoint = build_checkpoint(queue, {".dismissed.jsonl": raw, ".dismissed.log": None}, [])
+    mr._append(journal, checkpoint)
+    monkeypatch.setattr(mr, "MAX_BYTES", 128)
+    monkeypatch.setattr(mr, "KEEP_LINES", 1)
+    for i in range(3):
+        mr._append(journal, {"id": f"noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 100})
+    assert checkpoint["id"] in {r["id"] for r in mr.read_receipts(journal)}
+    mr._append(journal, {"id": checkpoint["id"], "kind": "other", "status": mr.APPLIED})
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "receipt journal cannot be verified" in capsys.readouterr().err
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("command", ["accept", "dismiss"])
+@pytest.mark.parametrize("status", ["applied", "prepared"])
+def test_cli_queue_receipt_fault_reports_real_outcome(tmp_path: Path, monkeypatch, capsys, command: str, status: str) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    original = mr._append
+    failures = []
+    def fail(path, payload, *args, **kwargs):
+        if (payload.get("kind") == "queue_resolve" and payload.get("status") == status
+                and (status == "prepared" or payload.get("owner_landed"))):
+            failures.append(True)
+            raise OSError("injected queue receipt failure")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_append", fail)
+        rc = _run_handover(f"memory-proposal-{command}", root, vault, _REGION_NEEDLE)
+    assert rc == 1 and failures
+    output = capsys.readouterr().err.lower()
+    decisions = read_decisions(queue)
+    if status == "applied":
+        assert _REGION_NEEDLE not in queue.read_text()
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == ("accepted" if command == "accept" else "dismissed")
+        assert decisions[0]["via"] == "agent" and decisions[0]["queue_receipt_id"]
+        assert "durable queue receipt confirmation failed" in output
+        if command == "accept":
+            assert decisions[0]["destination"] == "ciao:memory" and decisions[0]["receipt_id"]
+            from datetime import datetime
+            from ciao import curation_run, proposal_predictions
+            lease = curation_run.active_lease(vault)
+            assert lease is not None
+            assert proposal_predictions.count_agent_accepts_since(
+                queue, datetime.fromisoformat(lease["started_at"])
+            ) == 1
+    else:
+        assert _REGION_NEEDLE in queue.read_text() and not decisions
+    if command == "accept" and status == "applied":
+        assert _REGION_NEEDLE in guide_path(root).read_text()
+        assert "destination ciao:memory" in output and "inspect before retrying" in output
+    elif command == "accept":
+        assert _REGION_NEEDLE not in guide_path(root).read_text()
+        assert "before destination write" in output
+    journal = mr.journal_path(vault, None)
+    if status == "applied":
+        assert any(r.get("kind") == "queue_resolve" and r.get("status") == mr.PREPARED
+                   for r in mr.read_receipts(journal))
+
+
+def test_agent_prepare_failure_prevents_destination_effect(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    guide = guide_path(root)
+    before_guide, before_queue = guide.read_bytes(), queue.read_bytes()
+    original = mr._append
+    faults = []
+    def fail_prepare(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == mr.PREPARED:
+            faults.append(True)
+            raise OSError("prepared append failed")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_append", fail_prepare)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert faults and guide.read_bytes() == before_guide and queue.read_bytes() == before_queue
+    assert not read_decisions(queue)
+    assert "written" not in capsys.readouterr().err.lower()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+
+
+def test_agent_prepare_error_after_append_preserves_ambiguous_intent(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    before = guide_path(root).read_bytes()
+    original = mr._append
+    def fail_after_append(path, payload, *args, **kwargs):
+        result = original(path, payload, *args, **kwargs)
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == mr.PREPARED:
+            raise OSError("uncertain preparation")
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_append", fail_after_append)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert guide_path(root).read_bytes() == before and _REGION_NEEDLE in queue.read_text()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    recovered = mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+    assert any(r.get("status") == mr.CONFLICT and r.get("destination_intent") is True for r in recovered.conflicts)
+    assert not read_decisions(queue)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="Windows has no directory fence in this protocol")
+def test_agent_directory_fence_failure_prevents_destination_effect(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import stat
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    before = guide_path(root).read_bytes()
+    fsync = os.fsync
+    def fail_directory(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory fence failed")
+        return fsync(fd)
+    with monkeypatch.context() as patch:
+        patch.setattr(mr.os, "fsync", fail_directory)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert guide_path(root).read_bytes() == before and _REGION_NEEDLE in queue.read_text()
+    assert any(r.get("status") == mr.PREPARED and r.get("destination_intent") is True
+               for r in mr.read_receipts(mr.journal_path(vault, None)))
+
+
+@pytest.mark.parametrize("fault", ["none", "append", "fsync"])
+def test_windows_receipt_order_preserves_accept_and_refuses_failed_prepare(tmp_path: Path, monkeypatch, fault: str) -> None:
+    import os
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    journal = mr.journal_path(vault, None)
+    before = guide_path(root).read_bytes()
+    real_append = mr._append
+    real_accept = memory_proposals.accept_region_fact
+    entered = []
+    class WindowsOS:
+        name = "nt"
+        def __getattr__(self, key):
+            return getattr(os, key)
+        def fsync(self, fd):
+            if fault == "fsync":
+                raise OSError("journal flush failed")
+            return os.fsync(fd)
+    def append(path, payload, *args, **kwargs):
+        if fault == "append" and payload.get("kind") == "queue_resolve" and payload.get("status") == mr.PREPARED:
+            raise OSError("prepared append failed")
+        return real_append(path, payload, *args, **kwargs)
+    def accept(*args, **kwargs):
+        rows = mr.read_receipts(journal)
+        assert any(r.get("status") == mr.PREPARED and r.get("destination_intent") is True
+                   and r.get("proposal_id") for r in rows)
+        entered.append(True)
+        return real_accept(*args, **kwargs)
+    monkeypatch.setattr(mr, "os", WindowsOS())
+    monkeypatch.setattr(mr, "_append", append)
+    monkeypatch.setattr(memory_proposals, "accept_region_fact", accept)
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    if fault != "none":
+        assert rc == 1 and not entered
+        assert guide_path(root).read_bytes() == before and _REGION_NEEDLE in queue.read_text()
+        assert not read_decisions(queue)
+    else:
+        assert rc == 0 and entered
+        assert _REGION_NEEDLE in guide_path(root).read_text() and _REGION_NEEDLE not in queue.read_text()
+        assert len(read_decisions(queue)) == 1
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="process-crash test needs fork")
+def test_process_crash_after_destination_blocks_later_accept(tmp_path: Path) -> None:
+    import os
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    pid = os.fork()
+    if pid == 0:
+        real = memory_proposals.accept_region_fact
+        def exit_after_effect(*args, **kwargs):
+            result = real(*args, **kwargs)
+            os._exit(42)
+            return result
+        memory_proposals.accept_region_fact = exit_after_effect
+        _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+        os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 42
+    assert _REGION_NEEDLE in guide_path(root).read_text()
+    assert _REGION_NEEDLE in queue.read_text() and not read_decisions(queue)
+    assert any(r.get("status") == mr.PREPARED and r.get("destination_intent") is True
+               for r in mr.read_receipts(mr.journal_path(vault, None)))
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert second not in guide_path(root).read_text()
+
+
+@pytest.mark.parametrize("command", ["accept", "dismiss"])
+def test_cli_reports_decision_write_failure_after_receipt_failure(tmp_path: Path, monkeypatch, capsys, command: str) -> None:
+    from ciao import memory_receipts as mr, proposal_actions
+    root, vault, queue = _accepted_install(tmp_path)
+    original = mr._append
+    def fail_receipt(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == mr.APPLIED:
+            raise OSError("queue receipt failed")
+        return original(path, payload, *args, **kwargs)
+    def fail_decision(*args, **kwargs):
+        raise OSError("decision failed")
+    monkeypatch.setattr(mr, "_append", fail_receipt)
+    monkeypatch.setattr(proposal_actions, "record_decision", fail_decision)
+    assert _run_handover(f"memory-proposal-{command}", root, vault, _REGION_NEEDLE) == 1
+    assert _REGION_NEEDLE not in queue.read_text() and not read_decisions(queue)
+    assert "neither the decision nor" in capsys.readouterr().err.lower()
+
+
+def test_dual_fault_blocks_fresh_automatic_accept_even_after_recovery(tmp_path: Path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_receipts as mr, proposal_actions
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    original = mr._append
+    def fail_receipt(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == mr.APPLIED:
+            raise OSError("queue receipt failed")
+        return original(path, payload, *args, **kwargs)
+    def fail_decision(*args, **kwargs):
+        raise OSError("decision failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_append", fail_receipt)
+        patch.setattr(proposal_actions, "record_decision", fail_decision)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert not read_decisions(queue)
+    guide_before = guide_path(root).read_bytes()
+    queue_before = queue.read_bytes()
+    assert _REGION_NEEDLE in guide_before.decode() and second not in guide_before.decode()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert "receipt" in capsys.readouterr().err.lower()
+    assert guide_path(root).read_bytes() == guide_before and queue.read_bytes() == queue_before
+    journal = mr.journal_path(vault, None)
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    recovered = mr.recover_pending(journal=journal, config=config)
+    assert any(r.get("kind") == "queue_resolve" and r.get("status") == mr.CONFLICT for r in recovered.conflicts)
+    assert not read_decisions(queue)
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert guide_path(root).read_bytes() == guide_before and queue.read_bytes() == queue_before
+
+
+def test_applied_without_decision_blocks_until_real_recovery(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_receipts as mr, proposal_actions
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    def fail_decision(*args, **kwargs):
+        raise OSError("decision failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(proposal_actions, "record_decision", fail_decision)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert not read_decisions(queue)
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+    assert len(read_decisions(queue)) == 1
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 0
+    assert len(read_decisions(queue)) == 2
+
+
+def test_unchanged_queue_after_destination_effect_recovers_as_conflict(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    with monkeypatch.context() as patch:
+        def fail_remove(*args, **kwargs):
+            raise OSError("queue write failed")
+        patch.setattr(memory_proposals, "remove_proposal_by_substring", fail_remove)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert _REGION_NEEDLE in guide_path(root).read_text() and not read_decisions(queue)
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    recovered = mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+    assert any(row.get("status") == mr.CONFLICT and row.get("destination_intent") is True
+               for row in recovered.conflicts)
+    before = guide_path(root).read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert guide_path(root).read_bytes() == before
+
+
+def test_missing_queue_recovery_keeps_landed_agent_intent_blocking(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    def fail_remove(*args, **kwargs):
+        raise OSError("queue write failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_proposals, "remove_proposal_by_substring", fail_remove)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert _REGION_NEEDLE in guide_path(root).read_text() and not read_decisions(queue)
+    image = queue.read_bytes()
+    queue.unlink()
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    recovered = mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+    assert any(r.get("status") == mr.CONFLICT and r.get("destination_intent") is True for r in recovered.conflicts)
+    queue.write_bytes(image)
+    before = guide_path(root).read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert guide_path(root).read_bytes() == before and not read_decisions(queue)
+
+
+def test_unchanged_selected_prepare_can_recover_and_legacy_receipts_do_not_block(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_receipts as mr
+    from ciao.proposal_tracking import walk_proposal_queue
+    root, vault, queue = _accepted_install(tmp_path)
+    entry = next(iter(walk_proposal_queue("work", "work/Workspace/Memory-Proposals.md", queue.read_text())))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    with mr.queue_resolution(queue, removed_text=entry.bullet.text, kind=entry.bullet.kind,
+                             promoted=True, actor="agent", source="cli", workspace="work",
+                             vault_root=vault, selected=selected):
+        pass
+    journal = mr.journal_path(vault, None)
+    mr._append(journal, {"id": "legacy", "kind": "queue_resolve", "status": mr.PREPARED,
+                         "queue": str(queue), "fact_text": "old legacy entry"})
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    config = SimpleNamespace(workspace_names=lambda: ["work"], workspace_vault_root=lambda name: vault)
+    recovered = mr.recover_pending(journal=journal, config=config)
+    assert any(r.get("status") == mr.ROLLED_BACK and r.get("proposal_id") == entry.proposal_id
+               for r in recovered.reconciled)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+
+
+@pytest.mark.parametrize("status", ["conflict", "applied"])
+def test_trim_keeps_ambiguous_or_unaccounted_selected_receipts(tmp_path: Path, monkeypatch, status: str) -> None:
+    from ciao import memory_receipts as mr
+    root, vault, queue = _accepted_install(tmp_path)
+    journal = mr.journal_path(vault, None)
+    monkeypatch.setattr(mr, "MAX_BYTES", 400)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    mr._append(journal, {"id": "ambiguous", "kind": "queue_resolve", "status": status,
+                         "proposal_id": "selected", "actor": "agent", "source": "cli",
+                         "promoted": True, "queue": str(queue)})
+    for i in range(5):
+        mr._append(journal, {"id": f"later-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 120})
+    assert any(row["id"] == "ambiguous" for row in mr.read_receipts(journal))
+
+
+def test_corrupt_journal_blocks_automatic_accept_without_effect(tmp_path: Path, capsys) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    journal = mr.journal_path(vault, None)
+    journal.write_text('{"id":"incomplete"', encoding="utf-8")
+    before_queue = queue.read_bytes()
+    before_guide = guide_path(root).read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "receipt journal cannot be verified" in capsys.readouterr().err
+    assert queue.read_bytes() == before_queue and guide_path(root).read_bytes() == before_guide
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_accept_gate_counts_each_valid_legacy_agent_decision(tmp_path: Path, monkeypatch, count: int) -> None:
+    import json
+    from ciao import curation_run, proposal_predictions
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    monkeypatch.setattr(proposal_predictions, "HANDOVER_ACCEPT_CAP", 2)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    legacy = {"promoted_at": lease["started_at"], "via": "agent", "kind": "memory", "text": "Another fact"}
+    queue.with_suffix(".dismissed.log").write_text((json.dumps(legacy) + "\n") * count, encoding="utf-8")
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    assert rc == (0 if count == 1 else 1)
+    if count == 2:
+        assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("suffix", [".dismissed.jsonl", ".dismissed.log"])
+def test_accept_refuses_duplicate_key_decision_rows(tmp_path: Path, suffix: str) -> None:
+    from ciao import curation_run, memory_receipts
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    row = ('{"text":"fact","via":"agent","via":"operator","kind":"memory",'
+           f'"promoted_at":"{lease["started_at"]}"' + "}\n")
+    queue.with_suffix(suffix).write_text(row * 5, encoding="utf-8")
+    before = guide_path(root).read_bytes(), queue.read_bytes(), queue.with_suffix(suffix).read_bytes()
+    journal = memory_receipts.journal_path(vault, None)
+    before_journal = journal.read_bytes() if journal.exists() else None
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes(), queue.with_suffix(suffix).read_bytes()) == before
+    assert (journal.read_bytes() if journal.exists() else None) == before_journal
+
+
+def test_accept_with_history_past_old_total_limit(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from ciao import memory_proposals
+    root, vault, queue = _accepted_install(tmp_path)
+    line = json.dumps({"text": "Unrelated old decision " + "x" * 100, "via": "operator",
+                       "dismissed_at": "2025-01-01T00:00:00+00:00"}) + "\n"
+    sidecar = queue.with_suffix(".dismissed.log")
+    sidecar.write_text(line * 10, encoding="utf-8")
+    assert sidecar.stat().st_size > 512
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+
+
+def test_accept_reports_landed_destination_when_decision_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import proposal_actions
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    def fail(*args, **kwargs):
+        raise OSError("decision disk failure")
+    monkeypatch.setattr(proposal_actions, "record_decision", fail)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    error = capsys.readouterr().err.lower()
+    assert "destination" in error and "written" in error and "inspect" in error
+    assert _REGION_NEEDLE in guide_path(root).read_text()
+    assert _REGION_NEEDLE not in queue.read_text()
+
+
+def test_dismiss_reports_removed_queue_when_decision_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import proposal_actions
+    root, vault, queue = _accepted_install(tmp_path)
+    def fail(*args, **kwargs):
+        raise OSError("decision disk failure")
+    monkeypatch.setattr(proposal_actions, "record_decision", fail)
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE) == 1
+    error = capsys.readouterr().err.lower()
+    assert "removed" in error and "decision" in error and "inspect" in error
+    assert _REGION_NEEDLE not in queue.read_text()
+
+
+def test_accept_settlement_does_not_materialize_decision_history(tmp_path: Path, monkeypatch) -> None:
+    import tracemalloc
+    from ciao import memory_proposals
+    warm_root, warm_vault, _ = _accepted_install(tmp_path / "warm")
+    assert _run_handover("memory-proposal-accept", warm_root, warm_vault, _REGION_NEEDLE) == 0
+    root, vault, queue = _accepted_install(tmp_path)
+    row = b'{"text":"unrelated","dismissed_at":"2020-01-01T00:00:00Z"}\n'
+    with queue.with_suffix(".dismissed.log").open("wb") as handle:
+        for _ in range(30000):
+            handle.write(row)
+    def no_materialization(*args, **kwargs):
+        raise AssertionError("decision history was materialized")
+    monkeypatch.setattr(memory_proposals, "read_decisions", no_materialization)
+    tracemalloc.start()
+    try:
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 2 * 1024 * 1024
+
+
+def test_uncheckpointed_budget_streams_unrelated_history_bounded(tmp_path: Path) -> None:
+    import tracemalloc
+    from ciao import cli, memory_receipts
+    root, vault, queue = _accepted_install(tmp_path)
+    row = b'{"text":"Unrelated","via":"operator","dismissed_at":"2025-01-01T00:00:00Z"}\n'
+    with queue.with_suffix(".dismissed.log").open("wb") as handle:
+        for _ in range(30000):
+            handle.write(row)
+    tracemalloc.start()
+    try:
+        with memory_receipts.queue_lock(queue):
+            assert cli._handover_accept_budget(vault, queue, config=checkpoint_config(queue)) == ""
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
+def test_accept_prediction_freshness_streams_large_history(tmp_path: Path, monkeypatch) -> None:
+    import tracemalloc
+    from ciao import cli, memory_proposals
+    from ciao.proposal_kinds import parse_bullet
+    root, vault, queue = _accepted_install(tmp_path)
+    row = b'{"text":"Unrelated","kind":"memory","dismissed_at":"2025-01-01T00:00:00Z"}\n'
+    with queue.with_suffix(".dismissed.log").open("wb") as handle:
+        for _ in range(30000):
+            handle.write(row)
+    def no_materialization(*args, **kwargs):
+        raise AssertionError("freshness must not materialize decision history")
+    monkeypatch.setattr(memory_proposals, "read_decisions", no_materialization)
+    bullet = parse_bullet(_REGION_BULLET)
+    assert bullet is not None
+    tracemalloc.start()
+    try:
+        assert cli._handover_gate(root, "work", queue, bullet, "accept") == ""
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
+@pytest.mark.parametrize("count, expected", [(1, 0), (5, 1)])
+def test_uncheckpointed_repeated_receipt_rows_keep_existing_cap_count(
+    tmp_path: Path, count: int, expected: int,
+) -> None:
+    import json
+    from ciao import curation_run
+    root, vault, queue = _accepted_install(tmp_path)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    row = {"text": "Other fact", "kind": "memory", "via": "agent",
+           "queue_receipt_id": "same-old-receipt", "promoted_at": lease["started_at"]}
+    queue.with_suffix(".dismissed.log").write_text((json.dumps(row) + "\n") * count, encoding="utf-8")
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == expected
+
+
+@pytest.mark.parametrize("transition_at", ["admission", "decision"])
+def test_earlier_lease_waits_for_accept_settlement_and_obeys_cap(tmp_path: Path, monkeypatch, transition_at: str) -> None:
+    import json
+    import threading
+    from datetime import datetime, timedelta
+    from ciao import cli, curation_run, proposal_actions, proposal_predictions
+
+    root, vault, queue = _accepted_install(tmp_path)
+    old = curation_run.active_lease(vault)
+    assert old is not None
+    started = datetime.fromisoformat(old["started_at"])
+    event_time = started - timedelta(seconds=10)
+    legacy = {"promoted_at": event_time.isoformat(), "via": "agent", "kind": "memory", "text": "Another fact"}
+    queue.with_suffix(".dismissed.log").write_text(
+        (json.dumps(legacy) + "\n") * (proposal_predictions.HANDOVER_ACCEPT_CAP + 1), encoding="utf-8",
+    )
+    real_budget = cli._handover_accept_budget
+    attempted, completed = threading.Event(), threading.Event()
+    new_holders = []
+
+    def transition():
+        attempted.set()
+        curation_run.end_run(vault, holder=old["holder"])
+        new = curation_run.begin_run(vault, holder="earlier", now=started - timedelta(seconds=20), ttl_s=3600)
+        assert datetime.fromisoformat(new.started_at) < event_time < started
+        new_holders.append(new.holder)
+        completed.set()
+
+    worker = threading.Thread(target=transition)
+    def change_after_budget(vault_path, queue_path, *, config):
+        refusal = real_budget(vault_path, queue_path, config=config)
+        assert not refusal
+        worker.start()
+        assert attempted.wait(2) and not completed.wait(0.2)
+        return refusal
+
+    real_decision = proposal_actions.record_decision
+    def change_before_decision(*args, **kwargs):
+        worker.start()
+        assert attempted.wait(2) and not completed.wait(0.2)
+        return real_decision(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if transition_at == "admission":
+            patch.setattr(cli, "_handover_accept_budget", change_after_budget)
+        else:
+            patch.setattr(proposal_actions, "record_decision", change_before_decision)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    worker.join(3)
+    assert completed.is_set()
+    assert curation_run.active_lease(vault)["holder"] == new_holders[0]
+    assert cli._handover_accept_budget(vault, queue, config=checkpoint_config(queue))
+
+
+def test_lease_expiry_after_admission_does_not_interrupt_settlement(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run, memory_proposals
+
+    root, vault, queue = _accepted_install(tmp_path)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    current = datetime.now(UTC)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current if tz is not None else current.replace(tzinfo=None)
+    monkeypatch.setattr(curation_run, "datetime", Clock)
+    real_accept = memory_proposals.accept_region_fact
+    def expire(*args, **kwargs):
+        nonlocal current
+        current = datetime.fromisoformat(lease["expires_at"]) + timedelta(seconds=1)
+        assert curation_run.active_lease(vault) is None
+        return real_accept(*args, **kwargs)
+    monkeypatch.setattr(memory_proposals, "accept_region_fact", expire)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    assert len(read_decisions(queue)) == 1
+
+
+def test_begin_samples_production_clock_after_state_lock(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run
+
+    vault = tmp_path / "vault"
+    current = datetime.now(UTC).replace(microsecond=0)
+    calls = []
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            calls.append(current)
+            return current
+    monkeypatch.setattr(curation_run, "datetime", Clock)
+    attempted = threading.Event()
+    leases = []
+    def begin():
+        leases.append(curation_run.begin_run(vault, holder="waiting"))
+    with curation_run._state_lock(vault):
+        real_lock = curation_run.lock_exclusive
+        def signal_lock(fd, **kwargs):
+            attempted.set()
+            return real_lock(fd, **kwargs)
+        monkeypatch.setattr(curation_run, "lock_exclusive", signal_lock)
+        worker = threading.Thread(target=begin)
+        worker.start()
+        assert attempted.wait(2)
+        assert not calls
+        current += timedelta(seconds=30)
+    worker.join(3)
+    assert not worker.is_alive()
+    assert datetime.fromisoformat(leases[0].started_at) == current
+
+
+def test_future_lease_start_refuses_automatic_accept(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    curation_run.end_run(vault, holder=lease["holder"])
+    curation_run.begin_run(vault, holder="future", now=datetime.now(UTC) + timedelta(minutes=1))
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_clock_rollback_during_accept_blocks_later_accepts_and_compaction(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run, memory_proposals, memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    lease = curation_run.active_lease(vault)
+    assert lease is not None
+    backdated = datetime.fromisoformat(lease["started_at"]) - timedelta(seconds=10)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return backdated if tz is not None else backdated.replace(tzinfo=None)
+    real_accept = memory_proposals.accept_region_fact
+    def rollback(*args, **kwargs):
+        monkeypatch.setattr(memory_proposals, "datetime", Clock)
+        return real_accept(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_proposals, "accept_region_fact", rollback)
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    monkeypatch.setattr(mr, "MAX_BYTES", 1024)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    journal = mr.journal_path(vault, None)
+    for i in range(3):
+        mr._append(journal, {"id": f"noise-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 512})
+    assert not mr.compact_cap_checkpoint(queue, vault, config=checkpoint_config(queue))
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="process-crash test needs fork")
+def test_accept_crash_after_intent_blocks_next_run(tmp_path: Path) -> None:
+    import os
+    from ciao import curation_run, memory_proposals
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        def crash(*args, **kwargs):
+            os._exit(42)
+        memory_proposals.accept_region_fact = crash
+        _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+        os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 42
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    old = curation_run.active_lease(vault)
+    assert old is not None
+    curation_run.end_run(vault, holder=old["holder"])
+    curation_run.begin_run(vault, holder="next", ttl_s=3600)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("content", [
+    b'{"text":"broken"', b'{"text":"valid but incomplete"}', b"\xff\n",
+    b'{"text":"fact","via":"agent","promoted_at":"invalid"}\n',
+])
+def test_accept_gate_rejects_corrupt_or_truncated_sidecar(tmp_path: Path, capsys, content: bytes) -> None:
+    from ciao import memory_proposals
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    memory_proposals.dismissed_log_path(queue).write_bytes(content)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "decision" in capsys.readouterr().err.lower()
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_accept_gate_rejects_unreadable_sidecar(tmp_path: Path, monkeypatch, capsys) -> None:
+    import os
+    from ciao import memory_proposals
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    sidecar.write_text('{"text":"existing"}\n')
+    real_open = os.open
+    def denied(path, flags, *args, **kwargs):
+        if Path(path) == sidecar:
+            raise PermissionError("injected unreadable sidecar")
+        return real_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(memory_proposals.os, "open", denied)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "decision" in capsys.readouterr().err.lower()
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_accept_gate_reads_strict_decisions_under_queue_lock(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts
+    root, vault, queue = _accepted_install(tmp_path)
+    memory_proposals.dismissed_log_path(queue).write_text('{"text":"other"}\n')
+    real = memory_proposals.DecisionSidecarStream.__iter__
+    calls = []
+    def checked(stream):
+        assert memory_receipts._QUEUE_LOCK_DEPTH.depths.get(str(queue.resolve()), 0)
+        calls.append(True)
+        return real(stream)
+    monkeypatch.setattr(memory_proposals.DecisionSidecarStream, "__iter__", checked)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    assert calls
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="Windows may prevent replacing an open file")
+def test_accept_gate_rejects_sidecar_replaced_during_read(tmp_path: Path, monkeypatch, capsys) -> None:
+    import os
+    from ciao import memory_proposals
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    sidecar.write_text('{"text":"original"}\n')
+    replacement = sidecar.with_name("replacement")
+    replacement.write_text('{"text":"replaced"}\n')
+    original_stat = os.fstat
+    inode = sidecar.stat().st_ino
+    swapped = []
+    def replace_after_open(fd):
+        result = original_stat(fd)
+        if result.st_ino == inode and not swapped:
+            os.replace(replacement, sidecar)
+            swapped.append(True)
+        return result
+    monkeypatch.setattr(os, "fstat", replace_after_open)
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert swapped and "decision" in capsys.readouterr().err.lower()
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_accept_gate_decision_row_size_boundary(tmp_path: Path, extra: int) -> None:
+    from ciao import memory_proposals
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    prefix, suffix = b'{"text":"', b'"}'
+    line = prefix + b"x" * (2 * 1024 * 1024 + extra - len(prefix) - len(suffix)) + suffix
+    memory_proposals.dismissed_log_path(queue).write_bytes(line + b"\n")
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    assert rc == (1 if extra else 0)
+    if extra:
+        assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("loss", ["missing", "empty"])
+def test_accept_gate_rejects_missing_sidecar_even_from_earlier_lease(tmp_path: Path, capsys, loss: str) -> None:
+    from datetime import UTC, datetime, timedelta
+    from ciao import curation_run, memory_proposals
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    second = "Keeps a concise changelog."
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] {second} _(from: Decisions)_\n")
+    _store_prediction(queue, "accept", text=second)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    curation_run.end_run(vault, holder=curation_run.active_lease(vault)["holder"])
+    curation_run.begin_run(vault, holder="later", ttl_s=3600, now=datetime.now(UTC) + timedelta(seconds=2))
+    sidecar = memory_proposals.dismissed_log_path(queue)
+    if loss == "missing":
+        sidecar.unlink()
+    else:
+        sidecar.write_bytes(b"")
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, second) == 1
+    assert "decision" in capsys.readouterr().err.lower()
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+def test_append_and_trim_do_not_launder_malformed_journal(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    journal = mr.journal_path(vault, None)
+    journal.write_text('{"id":"broken"\n', encoding="utf-8")
+    monkeypatch.setattr(mr, "MAX_BYTES", 128)
+    monkeypatch.setattr(mr, "KEEP_LINES", 1)
+    for i in range(3):
+        mr._append(journal, {"id": f"later-{i}", "kind": "other", "status": mr.APPLIED, "padding": "x" * 128})
+    assert '{"id":"broken"' in journal.read_text()
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_journal_gate_exact_64mib_boundary(tmp_path: Path, capsys, extra: int) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.workspace_guide import guide_path
+    root, vault, queue = _accepted_install(tmp_path)
+    journal = mr.journal_path(vault, None)
+    limit = 16 * mr.MAX_BYTES
+    prefix = b'{"id":"legacy","kind":"other","status":"applied"}'
+    with journal.open("wb") as handle:
+        handle.write(prefix)
+        remaining = limit + extra - len(prefix) - 1
+        chunk = b" " * (1024 * 1024)
+        for _ in range(remaining // len(chunk)):
+            handle.write(chunk)
+        handle.write(chunk[:remaining % len(chunk)])
+        handle.write(b"\n")
+    assert journal.stat().st_size == limit + extra
+    before = guide_path(root).read_bytes(), queue.read_bytes()
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    if extra:
+        assert rc == 1 and "receipt journal cannot be verified" in capsys.readouterr().err
+        assert (guide_path(root).read_bytes(), queue.read_bytes()) == before
+    else:
+        assert rc == 0
+        assert _REGION_NEEDLE in guide_path(root).read_text() and _REGION_NEEDLE not in queue.read_text()
+
+
+def test_accept_holds_queue_authority_during_region_write(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts, memory_tool
+
+    root, vault, queue = _accepted_install(tmp_path)
+    original = memory_tool.ensure_regions
+
+    def checked(guide):
+        assert getattr(memory_receipts._QUEUE_LOCK_DEPTH, "depths", {}).get(str(queue.resolve()), 0)
+        return original(guide)
+
+    monkeypatch.setattr(memory_tool, "ensure_regions", checked)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
 
 
 def test_accept_receipt_undo_restores_the_region(tmp_path: Path) -> None:
@@ -1683,6 +3353,58 @@ def test_accept_is_capped_per_curation_run(tmp_path: Path, capsys) -> None:
     assert "cap" in capsys.readouterr().err
     assert facts[-1] in queue.read_text(encoding="utf-8")
     assert len(read_decisions(queue)) == HANDOVER_ACCEPT_CAP
+
+
+def test_replayed_cli_accept_preserves_metadata_and_cap(tmp_path: Path, monkeypatch) -> None:
+    from ciao import curation_run, memory_receipts as mr, proposal_actions
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP
+
+    facts = [f"Fact number {i} stays true for installs." for i in range(HANDOVER_ACCEPT_CAP + 1)]
+    root, vault, queue = _handover_install(tmp_path, "all", *[f"- [memory] {f}" for f in facts])
+    config = CiaoConfig(pwa_auth_token="test", workspace_root=root, state_path=root / ".runtime/state.json",
+                        media_root=root / ".runtime/media", vault_root=vault,
+                        workspaces={"work": WorkspaceConfig(name="work", vault_root=str(vault))})
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    for fact in facts:
+        _store_prediction(queue, "accept", fact)
+    original = proposal_actions.record_decision
+    def replay_first(path, **kwargs):
+        mr.recover_pending(journal=mr.journal_path(vault, None), config=config)
+        recovered = read_decisions(queue)[-1]
+        assert recovered["via"] == "agent"
+        assert recovered["destination"] == "ciao:memory"
+        assert recovered["outcome"] == kwargs["outcome"]
+        assert recovered["receipt_id"] == kwargs["receipt_id"] and recovered["receipt_id"]
+        assert recovered["queue_receipt_id"] == kwargs["queue_receipt_id"] and recovered["queue_receipt_id"]
+        return original(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    assert [_run_handover("memory-proposal-accept", root, vault, fact) for fact in facts] == (
+        [0] * HANDOVER_ACCEPT_CAP + [1]
+    )
+    assert len(read_decisions(queue)) == HANDOVER_ACCEPT_CAP
+    assert facts[-1] in queue.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("over", [False, True])
+def test_cli_selected_image_capacity_before_guide_write(tmp_path: Path, over: bool) -> None:
+    from ciao import memory_receipts
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+    initial = queue.read_text(encoding="utf-8")
+    size = memory_receipts.MAX_IMAGE_CHARS + int(over)
+    queue.write_text(initial + "#" + "x" * (size - len(initial) - 2) + "\n", encoding="utf-8")
+    guide = guide_path(root)
+    before_guide, before_queue = guide.read_bytes(), queue.read_bytes()
+    result = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+    if over:
+        assert result == 1 and guide.read_bytes() == before_guide and queue.read_bytes() == before_queue
+    else:
+        assert result == 0 and guide.read_bytes() != before_guide
+        rows = memory_receipts.read_receipts(memory_receipts.journal_path(vault, None))
+        selected = [row for row in rows if row.get("kind") == "queue_resolve" and row.get("proposal_id")]
+        assert selected and selected[-1]["before_text"] is not None and selected[-1]["after_text"] is not None
 
 
 def test_accept_needs_a_live_curation_lease(tmp_path: Path, capsys) -> None:

@@ -1987,6 +1987,13 @@ export interface ProposalActionResult {
   duplicate?: boolean
   written?: string
   error?: string
+  no_effect?: boolean
+  queue_settled?: boolean
+  queue_state?: string
+  queue_receipt_confirmed?: boolean
+  queue_receipt_id?: string
+  decision_confirmed?: boolean
+  destination_effect?: { status: string; destination: string; receipt_id?: string }
   /** The destination moved since this row's preview; nothing was written and
    * the row is still queued. Distinct from a plain failure: reopening the
    * preview is the fix, not giving up on the row. */
@@ -2023,10 +2030,17 @@ export interface ProposalBatchSummary {
 export interface ProposalAcceptRefusal {
   error?: string
   id?: string
+  no_effect?: boolean
   region?: string
   deferred?: boolean
   reason?: string
   competing?: string[]
+  queue_settled?: boolean
+  queue_state?: string
+  queue_receipt_confirmed?: boolean
+  queue_receipt_id?: string
+  decision_confirmed?: boolean
+  destination_effect?: { status: string; destination: string; receipt_id?: string }
 }
 
 export interface ProposalBatchResponse {

@@ -41,6 +41,7 @@ from ciao.web.routes_mcp import (
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.loop_watchdog import EventLoopWatchdog, InFlightRequests, RequestTimingMiddleware
 from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
+from ciao.web.proposal_reservations import DurableReservationRegistry, ReservationRegistry, reserve_proposal_operation, seal_proposal_operation
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -416,7 +417,7 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None, native_bootstrap: "NativeBootstrapContext | None" = None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None, native_bootstrap: "NativeBootstrapContext | None" = None, reservation_registry: DurableReservationRegistry | ReservationRegistry | None = None) -> Starlette:
     import uuid
     if installer_bootstrap and not config.bootstrap_mode:
         raise ValueError("installer bootstrap requires bootstrap-mode config")
@@ -611,6 +612,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/proposals", list_proposals, methods=["GET"]),
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
         Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
+        Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]),
+        Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
         # Before the `{action}` route: Starlette matches in order, and
@@ -906,6 +909,11 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
     app.state.serializer = serializer
     app.state.in_flight_requests = in_flight_requests
     app.state.config = config
+    if reservation_registry is None:
+        runtime = Path(config.state_path).parent
+        runtime.mkdir(parents=True, exist_ok=True)
+        reservation_registry = DurableReservationRegistry(runtime / "proposal-reservations")
+    app.state.proposal_reservations = reservation_registry
     app.state.installer_bootstrap = installer_bootstrap
     app.state.installer_run_id = installer_run_id
     app.state.native_bootstrap = native_bootstrap

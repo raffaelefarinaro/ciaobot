@@ -24,6 +24,119 @@ from ciao import proposal_tracking
 from ciao.learning_records import SECTION_ACTIVE, LearningRecord, parse_learnings
 
 
+def test_decision_sidecar_fence_syncs_writable_descriptor(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "history"
+    contents = b'{"text":"fact"}\n'
+    path.write_bytes(contents)
+    real_fsync = os.fsync
+    synced = []
+
+    def verify_fsync(fd):
+        assert os.write(fd, b"") == 0
+        synced.append(True)
+        real_fsync(fd)
+
+    monkeypatch.setattr(mp.os, "fsync", verify_fsync)
+    stream = mp.DecisionSidecarStream(path, fence=True)
+    assert len(list(stream)) == 1
+    assert synced == [True]
+    assert stream.binding is not None
+    assert path.read_bytes() == contents
+
+
+def test_decision_sidecar_stream_bounded_with_prefix_and_ordinals(tmp_path: Path, monkeypatch) -> None:
+    import hashlib
+    import tracemalloc
+
+    path = tmp_path / "history"
+    row = b'{"text":"same","via":"agent","promoted_at":"2026-01-01T00:00:00Z"}\n'
+    path.write_bytes(row * 30000)
+    assert path.stat().st_size > 128
+    stream = mp.DecisionSidecarStream(path, prefix_length=len(row) * 2)
+    tracemalloc.start()
+    try:
+        count = 0
+        for ordinal, entry, digest in stream:
+            assert ordinal == count and entry["text"] == "same"
+            assert digest == hashlib.sha256(row[:-1]).hexdigest()
+            count += 1
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert count == 30000 and peak < 1024 * 1024
+    assert stream.binding == {"length": len(row) * count, "sha256": hashlib.sha256(row * count).hexdigest()}
+    assert stream.prefix_binding == {"length": len(row) * 2, "sha256": hashlib.sha256(row * 2).hexdigest()}
+    info = path.stat()
+    assert stream.identity == (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"text":"a","text":"b"}\n', b'{"text":"unfinished"}',
+    b'{"text":"a","via":"agent","promoted_at":"invalid"}\n',
+    b'{"text":"a","promoted_at":"2026-01-01T00:00:00Z","dismissed_at":"2026-01-01T00:00:00Z"}\n',
+])
+def test_decision_sidecar_stream_rejects_invalid_rows(tmp_path: Path, raw: bytes) -> None:
+    path = tmp_path / "history"
+    path.write_bytes(raw)
+    stream = mp.DecisionSidecarStream(path)
+    with pytest.raises(ValueError):
+        list(stream)
+    assert stream.binding is None
+
+
+def test_decision_sidecar_stream_rejects_oversized_row_and_bad_prefix(tmp_path: Path, monkeypatch) -> None:
+    from ciao import proposal_predictions
+    path = tmp_path / "history"
+    row = b'{"text":"some fact"}\n'
+    path.write_bytes(row)
+    with pytest.raises(ValueError, match="prefix"):
+        list(mp.DecisionSidecarStream(path, prefix_length=2))
+    monkeypatch.setattr(proposal_predictions, "_CAP_ROW_BYTES", 8)
+    with pytest.raises(ValueError, match="oversized"):
+        list(mp.DecisionSidecarStream(path))
+
+
+def test_decision_sidecar_rescan_requires_same_file_identity(tmp_path: Path) -> None:
+    path = tmp_path / "history"
+    row = b'{"text":"same"}\n'
+    path.write_bytes(row)
+    first = mp.DecisionSidecarStream(path)
+    assert len(list(first)) == 1
+    assert first.identity is not None
+    second = mp.DecisionSidecarStream(path, expected_identity=first.identity)
+    assert len(list(second)) == 1
+    replacement = tmp_path / "other"
+    replacement.write_bytes(row)
+    replacement.replace(path)
+    third = mp.DecisionSidecarStream(path, expected_identity=first.identity)
+    with pytest.raises(ValueError, match="identity"):
+        list(third)
+    assert third.binding is None
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "truncate"])
+def test_decision_sidecar_stream_rejects_changes_and_partial_iteration(tmp_path: Path, change: str) -> None:
+    path = tmp_path / "history"
+    row = b'{"text":"fact"}\n'
+    path.write_bytes(row * 3)
+    stream = mp.DecisionSidecarStream(path)
+    iterator = iter(stream)
+    next(iterator)
+    assert stream.binding is None
+    if change == "append":
+        with path.open("ab") as handle:
+            handle.write(row)
+    elif change == "truncate":
+        path.write_bytes(row)
+    else:
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(row * 3)
+        replacement.replace(path)
+    with pytest.raises(ValueError):
+        list(iterator)
+    assert stream.binding is None
+
+
 def write_guide(
     path: Path,
     memory_entries: list[str] | None = None,
@@ -1422,11 +1535,10 @@ def test_read_decisions_can_exclude_history_only(tmp_path: Path) -> None:
 
 
 def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> None:
-    """Archiving asks "already decided?" once per proposal.
+    """The ordinary history reader caches by stat identity.
 
-    Each call used to re-read and re-parse the whole sidecar, so one archive
-    pass over a long-lived ledger was O(proposals x history). The cache is
-    keyed on stat identity, so its correctness rests on noticing an append.
+    The cache is keyed on stat identity, so its correctness rests on noticing
+    an append. Decision settlement uses the strict streaming reader instead.
     """
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True)
@@ -1443,7 +1555,7 @@ def test_sidecar_reads_are_cached_but_invalidate_on_append(tmp_path: Path) -> No
     with unittest.mock.patch.object(Path, "read_text", counting_read_text):
         # Repeated questions about an unchanged sidecar read it once.
         for _ in range(5):
-            mp._has_decision(queue, key="dismissed_at", text="First.", outcome="")
+            mp._sidecar_entries(mp.dismissed_log_path(queue))
         assert reads.count(sidecar) == 1, reads
 
     # An append must be seen: a stale cache would silently re-file or
@@ -1556,6 +1668,22 @@ def test_a_real_promotion_still_dedupes(tmp_path: Path) -> None:
 
     assert mp.was_promoted(vault, "Operator accepted.") is True
     assert "Operator accepted." in mp._promoted_texts(queue)
+
+
+def test_receipt_decision_replay_streams_and_rejects_later_corruption(tmp_path: Path) -> None:
+    queue = tmp_path / "Memory-Proposals.md"
+    args = dict(text="A fact", kind="memory", via="agent", source="review",
+                proposal_id="proposal-1", queue_receipt_id="receipt-1")
+    assert mp.record_promotion(queue, **args)
+    sidecar = mp.dismissed_log_path(queue)
+    original = sidecar.read_bytes()
+    assert not mp.record_promotion(queue, **args)
+    assert sidecar.read_bytes() == original
+    with sidecar.open("ab") as handle:
+        handle.write(b'{"text":"broken"')
+    with pytest.raises(ValueError):
+        mp.record_promotion(queue, **args)
+    assert sidecar.read_bytes() == original + b'{"text":"broken"'
 
 
 def test_the_learned_date_still_reads_the_most_recent_stamp() -> None:

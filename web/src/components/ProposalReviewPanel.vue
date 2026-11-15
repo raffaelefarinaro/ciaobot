@@ -326,7 +326,7 @@ function previewChanges(preview: ProposalPreview): LineChange[] {
 async function confirmPreview(row: ProposalRow, workspace = '', reconcile = false) {
   // A second press on a button that is already writing would queue the same
   // decision twice.
-  if (store.isBusy(row.id)) return
+  if (store.isBusy(row.id) || store.partialWarnings[row.id]) return
   const preview = store.previews[row.id]
   if (!preview) return
   const edited = preview.text !== row.text ? preview.text : ''
@@ -366,7 +366,7 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
     text: edited || undefined,
     expectedRevision: preview.revision,
     decisionReason: reason || undefined,
-  })
+  }, result.status)
 }
 
 // Proposal → chat link: when an accept fallback or skill implement spawns a
@@ -1191,7 +1191,7 @@ async function retryReconcile(row: ProposalRow) {
     previewId.value = row.id
     return
   }
-  await handleAcceptRefusal(row, result.error || '', result.payload)
+  await handleAcceptRefusal(row, result.error || '', result.payload, undefined, result.status)
 }
 
 /** The deferral behind a 409, or null when the refusal was some other kind.
@@ -1217,26 +1217,12 @@ async function acceptWithFallback(row: ProposalRow, workspace = '') {
   // back to a chat that merges keeps the prompt self-contained and nothing
   // breaks – the row stays queued until the merge lands. Which refusals are
   // expected, and what the merge chat is told, is the kind's descriptor.
-  const { api } = await import('../lib/api')
-  store.setBusy(row.id, true)
-  try {
-    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
-    await api.post(`/api/proposals/${row.id}/accept${query}`)
+  const result = await store.act(row.id, 'accept', workspace)
+  if (result.ok) {
     clearDeferred(row.id)
-    await store.fetch({ force: true })
-    // `store.fetch` deliberately leaves history alone, so this direct post -
-    // the only mutation that does not go through `store.act` - has to say so
-    // itself. Without it the accepted decision and the tab badge stayed stale
-    // until the next mutation or workspace switch.
-    store.invalidateHistory()
     return
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    await handleAcceptRefusal(row, msg, (e as { payload?: ProposalAcceptRefusal })?.payload)
-    return
-  } finally {
-    store.setBusy(row.id, false)
   }
+  await handleAcceptRefusal(row, result.error || '', result.payload, undefined, result.status)
 }
 
 /** What to do with an accept the server refused.
@@ -1256,7 +1242,20 @@ async function handleAcceptRefusal(
   msg: string,
   payload?: unknown,
   pending?: { text?: string; expectedRevision?: string; decisionReason?: string },
+  status?: number,
 ) {
+  if (!store.canAct(row.id) && store.partialWarnings[row.id]) {
+    clearDeferred(row.id)
+    return
+  }
+  if (store.rememberPartial(row.id, payload as ProposalAcceptRefusal)) {
+    clearDeferred(row.id)
+    return
+  }
+  if ((payload as { busy?: boolean } | undefined)?.busy === true) {
+    store.error = msg
+    return
+  }
   const deferral = deferralFrom(payload)
   if (deferral) {
     // Checked before the merge chat, which every region kind falls back to on
@@ -1267,6 +1266,10 @@ async function handleAcceptRefusal(
       ...deferredById.value,
       [row.id]: { ...deferral, ...pending },
     }
+    return
+  }
+  if (status === undefined || status < 400 || status >= 500) {
+    store.error = 'The accept outcome is unknown. Inspect the destination and queue before retrying.'
     return
   }
   const fallback = descriptorFor(row).fallback
@@ -1360,7 +1363,7 @@ async function cancelDismiss() {
  * THIS dismissal, and a retry that lost it would ask for the same sentence
  * again. A success closes the card and clears it. */
 async function confirmDismiss(row: ProposalRow) {
-  if (store.isBusy(row.id)) return
+  if (store.isBusy(row.id) || store.partialWarnings[row.id]) return
   const reason = reasonFor(row.id)
   const result = await store.act(row.id, 'dismiss', '', { reason })
   if (!result.ok) return
@@ -1685,7 +1688,7 @@ watch(
         v-if="selectedAcceptable.length"
         type="button"
         class="btn-small btn-primary"
-        :disabled="store.busy"
+        :disabled="store.busy || selectedVisible.some(row => Boolean(store.partialWarnings[row.id]))"
         @click="batchAccept"
       >Accept {{ selectedAcceptable.length }}</button>
       <!-- One destination for the whole selection. Re-home rows are moves, so
@@ -1695,13 +1698,13 @@ watch(
         :key="`move-${target}`"
         type="button"
         class="btn-small btn-primary"
-        :disabled="store.busy"
+        :disabled="store.busy || selectedVisible.some(row => Boolean(store.partialWarnings[row.id]))"
         @click="batchMove(target)"
       >Move {{ selectedRehomeCount }} to {{ target }}</button>
       <button
         type="button"
         class="btn-small btn-chip"
-        :disabled="store.busy"
+        :disabled="store.busy || selectedVisible.some(row => Boolean(store.partialWarnings[row.id]))"
         @click="batchDismiss"
       >Dismiss {{ selectedVisible.length }}</button>
       <button
@@ -1713,11 +1716,34 @@ watch(
       <button type="button" class="btn-small btn-chip" @click="selected = new Set()">Clear</button>
     </div>
 
+    <div v-if="store.intentLockError" class="hint hint--warn" role="alert">{{ store.intentLockError }}</div>
+    <div v-if="store.intentStorageUnavailable" class="hint hint--warn" role="alert">
+      Proposal safety storage cannot be verified. Decisions are blocked; inspect browser storage before retrying.
+    </div>
+    <div v-for="warning in Object.values(store.partialWarnings)" :key="warning.id" class="hint hint--warn" role="alert">
+      <strong>Queue settlement needs review</strong>
+      <p>Workspace: {{ warning.workspace || 'Install-wide or not reported' }}</p>
+      <p v-if="warning.target">Move target: {{ warning.target }}</p>
+      <p>{{ warning.text }}</p>
+      <p v-if="warning.effect">Destination: {{ warning.effect.destination || 'not reported' }} · {{ warning.effect.status }}</p>
+      <p v-else-if="warning.action === 'accept'">Destination outcome was not reported.</p>
+      <p v-if="warning.effect?.receipt_id">Receipt: {{ warning.effect.receipt_id }}</p>
+      <p v-if="warning.decisionConfirmed === false">Decision recording is not confirmed<span v-if="warning.queueReceiptConfirmed">; the queue receipt is confirmed</span>.</p>
+      <p v-if="warning.queueReceiptId">Queue receipt: {{ warning.queueReceiptId }}</p>
+      <p v-if="warning.reviewed">This row is accounted for. Waiting for the batch reviews and server confirmation.</p>
+      <p v-if="warning.action === 'undo'">Undo outcome is not confirmed. Inspect the receipt and destination; do not retry blindly.</p>
+      <p v-else-if="warning.action === 'dismiss'">Queue state: {{ warning.queueState }}. Settlement is not confirmed. Inspect the queue and receipt; do not retry dismissal blindly.</p>
+      <p v-else>Queue state: {{ warning.queueState }}. Settlement is not confirmed. Inspect the destination and receipt; do not retry accept blindly.</p>
+      <p v-if="store.hasStoredIntent(warning.id)">A local intent marker is kept until settlement is confirmed or you acknowledge inspection. Detailed outcomes are not stored.</p>
+      <p v-else>This warning is kept only until the page reloads. Record these details before leaving.</p>
+      <button type="button" class="btn-small btn-chip" @click="store.acknowledgePartial(warning.id)">I've inspected this</button>
+    </div>
+
     <!-- What the last bulk action did, per destination. Fifty per-row lines
          repeat the queue the operator was just looking at and never answer the
          question a bulk accept raises, which is what changed and where. The
          per-row failures are not averaged away: each group counts them and
-         the rows that failed are still queued below. -->
+         each affected outcome is shown separately above. -->
     <div v-if="store.lastBatchSummary.length" class="pr-summary-block" role="status" aria-live="polite">
       <div class="pr-summary-head">
         <span class="pr-summary-title">Last {{ store.lastBatchSummary[0].action }}</span>
@@ -1727,7 +1753,7 @@ watch(
         <li v-for="group in store.lastBatchSummary" :key="group.destination || 'none'" class="pr-summary-row">
           <span class="pr-summary-dest">{{ group.destination || 'no destination' }}</span>
           <span class="pr-summary-counts">
-            {{ group.ok }} of {{ group.total }} applied<template v-if="group.duplicates">, {{ group.duplicates }} already known</template><template v-if="group.conflicts">, {{ group.conflicts }} changed underneath</template><template v-if="group.failed">, {{ group.failed }} still queued</template>
+            {{ group.ok }} of {{ group.total }} applied<template v-if="group.duplicates">, {{ group.duplicates }} already known</template><template v-if="group.conflicts">, {{ group.conflicts }} changed underneath</template><template v-if="group.failed">, {{ group.failed }} need review</template>
           </span>
           <span v-if="group.errors.length" class="pr-summary-error">{{ group.errors[0] }}</span>
         </li>
@@ -2102,7 +2128,7 @@ watch(
                   v-if="store.previews[row.id].can_accept"
                   type="button"
                   class="btn-small btn-primary"
-                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id) || Boolean(store.partialWarnings[row.id])"
                   @click="confirmPreview(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : confirmLabel(row) }}</button>
                 <!-- The same write with a reconcile in front of it. A chip, not
@@ -2112,12 +2138,12 @@ watch(
                   type="button"
                   class="btn-small btn-chip"
                   title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
-                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+                  :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id) || Boolean(store.partialWarnings[row.id])"
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
                 <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
                 <button v-if="!discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-                <button type="button" class="btn-small btn-chip" data-pr-action="dismiss-card" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+                <button type="button" class="btn-small btn-chip" data-pr-action="dismiss-card" :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])" @click="doDismiss(row)">Dismiss</button>
                 <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
               </div>
             </template>
@@ -2150,7 +2176,7 @@ watch(
               <button
                 type="button"
                 class="btn-small btn-primary"
-                :disabled="store.isBusy(row.id)"
+                :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])"
                 @click="confirmDismiss(row)"
               >{{ store.isBusy(row.id) ? 'working…' : dismissLabel(row) }}</button>
               <button type="button" class="btn-small btn-chip" @click="cancelDismiss">Cancel</button>
@@ -2174,7 +2200,7 @@ watch(
               <button
                 type="button"
                 class="mr-btn"
-                :disabled="store.isBusy(row.id)"
+                :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])"
                 @click="retryReconcile(row)"
               >{{ store.isBusy(row.id) ? 'checking…' : 'Try again' }}</button>
               <button type="button" class="mr-btn mr-btn--quiet" @click="clearDeferred(row.id)">Leave it queued</button>
@@ -2190,11 +2216,11 @@ watch(
               :key="c"
               type="button"
               class="mr-btn pr-row-action"
-              :disabled="store.isBusy(row.id)"
+              :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
             <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])" @click="doDismiss(row)">Dismiss</button>
           </div>
 
           <!-- A skill proposal is a change to a skill that already exists: read
@@ -2214,11 +2240,11 @@ watch(
             <button
               type="button"
               class="mr-btn pr-row-action"
-              :disabled="store.isBusy(row.id)"
+              :disabled="store.isBusy(row.id) || !store.canAct(row.id)"
               @click="implementSkill(row)"
             >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
             <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
           </div>
 
           <!-- Linked: a refused accept spawned a merge chat that is still active,
@@ -2253,7 +2279,7 @@ watch(
               type="button"
               class="mr-btn mr-btn--primary pr-row-accept"
               data-pr-action="accept"
-              :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+              :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id) || Boolean(store.partialWarnings[row.id])"
               @click="reviewAccept(row, 'accept')"
             >{{ store.isBusy(row.id) ? 'working…' : rowChange(row).verb }}</button>
             <button
@@ -2261,7 +2287,7 @@ watch(
               type="button"
               class="mr-btn pr-row-action"
               data-pr-action="review"
-              :disabled="store.isBusy(row.id)"
+              :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])"
               @click="reviewAccept(row, 'review')"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
             <button
@@ -2269,10 +2295,11 @@ watch(
               type="button"
               class="mr-btn pr-edit-first"
               data-pr-action="edit"
+              :disabled="Boolean(store.partialWarnings[row.id])"
               @click="editFirst(row)"
             >Edit first</button>
             <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id) || Boolean(store.partialWarnings[row.id])" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
           </div>
           <p v-if="rowReason(row) || (row.source && !isRehome(row) && !isSkill(row))" class="pr-row-foot">
             <span v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</span>

@@ -530,7 +530,9 @@ def file_draft(
     identity = same_as or draft_id(workspace, target, skill, change)
 
     path = sidecar_path(config, workspace, identity)
-    with queue_lock(path):
+    # Both filing and settlement may touch the proposal queue while holding
+    # the draft lock, so every draft writer takes the queue first.
+    with queue_lock(queue_path(config, workspace)), queue_lock(path):
         existing = read_sidecar(path, workspace)
         incoming = UpstreamDraft(
             id=identity,
@@ -555,9 +557,14 @@ def file_draft(
                     f"same_as names {same_as!r}, which is not a {target} draft for {skill}"
                 )
             folded = _fold_sighting(existing, incoming)
+            queue = queue_path(config, workspace)
+            if queue.exists():
+                draft_bullet_indices(queue.read_text(encoding="utf-8"), existing)
+            if folded.settled:
+                _remove_bullet(config, existing)
             write_queue_atomically(path, render_sidecar(folded))
-            if not folded.settled and not _bullet_present(config, workspace, identity):
-                _append_bullet(config, workspace, folded)
+            if not folded.settled:
+                _sync_draft_bullet(config, workspace, existing, folded)
             logger.info("Folded a sighting into %s draft %s in %s", target, identity, workspace)
             return folded
         decision = (
@@ -608,9 +615,24 @@ def file_draft(
             merged = incoming
         else:
             merged = _merge(existing, incoming)
-        write_queue_atomically(path, render_sidecar(merged))
-        if not merged.settled and not _bullet_present(config, workspace, identity):
-            _append_bullet(config, workspace, merged)
+        old_bytes = path.read_bytes() if existing is not None and not merged.settled else None
+        queue = queue_path(config, workspace)
+        if existing is not None and queue.exists():
+            draft_bullet_indices(queue.read_text(encoding="utf-8"), existing)
+        queue_before = queue.read_bytes() if old_bytes is not None and queue.exists() else None
+        rendered = render_sidecar(merged)
+        if merged.settled:
+            _remove_bullet(config, existing or merged)
+        write_queue_atomically(path, rendered)
+        if not merged.settled:
+            try:
+                _sync_draft_bullet(config, workspace, existing, merged)
+            except (OSError, DraftRefused):
+                current_queue = queue.read_bytes() if queue.exists() else None
+                if (old_bytes is not None and path.read_bytes() == rendered.encode("utf-8")
+                        and current_queue == queue_before):
+                    write_queue_atomically(path, old_bytes.decode("utf-8"))
+                raise
     logger.info("Filed %s draft %s in %s", target, identity, workspace)
     return merged
 
@@ -626,24 +648,55 @@ def _append_bullet(
     The text says which destination it is, because that is the decision a person
     is being asked for and it has to survive in the queue itself.
     """
+    append_proposals([_draft_proposal(draft)], config.workspace_vault_root(workspace))
+
+
+def _draft_proposal(draft: UpstreamDraft) -> MemoryProposal:
     summary = draft.body or draft.change
-    text = f"[{_target_label(draft.target)} {draft.skill}] {summary} — {draft.title}"
-    append_proposals(
-        [
-            MemoryProposal(
-                target=DRAFT_KIND,
-                text=text,
-                # The id appears twice on purpose and the two copies do different
-                # jobs. The bracket payload is the row's address, so a parser and
-                # a human both reach the record by it; the source label is the
-                # decision key, so the settlement matches this row and not some
-                # other row whose text happens to mention the id.
-                source_section=f"skill-draft:{draft.id}",
-                payload=draft.id,
-            )
-        ],
-        config.workspace_vault_root(workspace),
-    )
+    return MemoryProposal(target=DRAFT_KIND, text=f"[{_target_label(draft.target)} {draft.skill}] {summary} — {draft.title}",
+                          source_section=f"skill-draft:{draft.id}", payload=draft.id)
+
+
+def draft_bullet_indices(text: str, draft: UpstreamDraft) -> list[int]:
+    """Identify the canonical row without treating mentions as draft rows."""
+    from ciao.proposal_kinds import parse_bullet
+    expected = parse_bullet(_draft_proposal(draft).as_bullet())
+    found = [(index, bullet) for index, line in enumerate(text.splitlines())
+             if (bullet := parse_bullet(line)) is not None and _is_draft_bullet(bullet, draft.id)]
+    if len(found) > 1 or (found and (expected is None or found[0][1].text != expected.text)):
+        raise DraftRefused("the draft queue row changed or is ambiguous")
+    return [index for index, _ in found]
+
+
+def _is_draft_bullet(bullet: Any, identity: str) -> bool:
+    return bool(bullet.kind == DRAFT_KIND and bullet.target == identity and bullet.source == decision_text(identity))
+
+
+def _sync_draft_bullet(config: CiaoConfig, workspace: str, old: UpstreamDraft | None, new: UpstreamDraft) -> None:
+    from ciao.proposal_kinds import parse_bullet
+
+    path = queue_path(config, workspace)
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        _append_bullet(config, workspace, new)
+        return
+    lines = text.splitlines(keepends=True)
+    matches = [(i, bullet) for i, line in enumerate(lines)
+               if (bullet := parse_bullet(line)) is not None
+               and _is_draft_bullet(bullet, new.id)]
+    if not matches:
+        _append_bullet(config, workspace, new)
+        return
+    expected = parse_bullet(_draft_proposal(old).as_bullet()) if old is not None else None
+    desired = parse_bullet(_draft_proposal(new).as_bullet())
+    if len(matches) != 1 or desired is None or matches[0][1] not in (expected, desired):
+        raise DraftRefused("the draft queue row changed or is ambiguous")
+    index = matches[0][0]
+    if matches[0][1] != desired:
+        ending = "\r\n" if lines[index].endswith("\r\n") else "\n" if lines[index].endswith("\n") else ""
+        lines[index] = _draft_proposal(new).as_bullet() + ending
+        write_queue_atomically(path, "".join(lines))
 
 
 def _target_label(target: str) -> str:
@@ -651,21 +704,6 @@ def _target_label(target: str) -> str:
     if target == NEW_SKILL:
         return "new skill"
     return "upstream issue"
-
-
-def _bullet_present(config: CiaoConfig, workspace: str, identity: str) -> bool:
-    """Whether the queue already holds this draft's bullet."""
-    from ciao.proposal_kinds import parse_bullet
-
-    path = queue_path(config, workspace)
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return False
-    return any(
-        (bullet := parse_bullet(line)) is not None and bullet.target == identity
-        for line in lines
-    )
 
 
 def _fold_sighting(existing: UpstreamDraft, incoming: UpstreamDraft) -> UpstreamDraft:
@@ -793,7 +831,7 @@ def _validated_origins(
 # ── Reading ─────────────────────────────────────────────────────────────────
 
 
-def read_sidecar(path: Path, workspace: str) -> UpstreamDraft | None:
+def read_sidecar(path: Path, workspace: str, *, text: str | None = None) -> UpstreamDraft | None:
     """One record, or ``None`` when there is nothing usable to read.
 
     A file this cannot speak for at all — missing, unreadable, not JSON, an
@@ -803,7 +841,7 @@ def read_sidecar(path: Path, workspace: str) -> UpstreamDraft | None:
     the caller, which is the point.
     """
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8") if text is None else text)
     except (OSError, UnicodeDecodeError, ValueError):
         return None
     if not isinstance(raw, dict):
@@ -1078,6 +1116,19 @@ def _refuse_if_unattended(config: CiaoConfig, workspace: str, action: str) -> No
     )
 
 
+def _verify_pending_draft(config: CiaoConfig, draft: UpstreamDraft) -> None:
+    """Revalidate draft and its unique queue row while both owner locks are held."""
+    stored = read_sidecar(sidecar_path(config, draft.workspace, draft.id), draft.workspace)
+    if stored != draft or stored is None or stored.settled:
+        raise DraftRefused("the draft changed before approval; reload it")
+    try:
+        indices = draft_bullet_indices(queue_path(config, draft.workspace).read_text(encoding="utf-8"), draft)
+    except (OSError, UnicodeError) as exc:
+        raise DraftRefused(f"could not verify the draft queue: {exc}") from exc
+    if len(indices) != 1:
+        raise DraftRefused("the selected draft is absent or ambiguous in the queue")
+
+
 def approve_draft(
     config: CiaoConfig,
     draft_id: str,
@@ -1135,6 +1186,9 @@ def approve_draft(
     draft = find_draft(config, draft_id)
     if draft is None:
         settled = find_record(config, draft_id)
+        if settled is not None and settled.settled:
+            _refuse_if_unattended(config, settled.workspace, "settling a skill draft")
+            _settle(config, settled, settled.lifecycle)
         if settled is not None and settled.lifecycle == DRAFT_REJECTED:
             raise DraftRefused(
                 f"draft {draft_id} was rejected "
@@ -1142,74 +1196,80 @@ def approve_draft(
                 "is not re-filed"
             )
         return None
-    _refuse_if_unattended(
-        config, draft.workspace, "opening or commenting on a public GitHub issue"
-    )
-    if draft.target != UPSTREAM_ISSUE:
-        raise DraftRefused(
-            f"draft {draft_id} proposes a {draft.target}, not an upstream issue: "
-            "use create_new_skill to act on it, so the creation is verified "
-            "before the row is settled"
+    # CLI approval is synchronous: the queue may be blocked for two bounded
+    # gh calls (30 seconds each); no event-loop lock spans an await.
+    queue = queue_path(config, draft.workspace)
+    sidecar = sidecar_path(config, draft.workspace, draft.id)
+    with queue_lock(queue), queue_lock(sidecar):
+        _verify_pending_draft(config, draft)
+        _refuse_if_unattended(
+            config, draft.workspace, "opening or commenting on a public GitHub issue"
         )
-    body = sanitize_lesson(draft.body)
-    if not draft.title.strip():
-        raise DraftRefused(f"draft {draft_id} has no title to file an issue under")
-    title = sanitize_lesson(draft.title, "title")
-    repository = _checked_repository(draft.repository)
-    if not repository:
-        return _hold(
-            config,
-            draft,
-            DRAFT_PENDING,
-            reason=(
-                "owning repository not identified, so nothing was filed: this "
-                "draft names no `owner/name` for the packaged skill and `gh` "
-                "would otherwise open the issue in whatever repository the "
-                "current directory happens to be. Name the repository in an "
-                "attended turn, or file the issue by hand"
-            ),
-        )
+        if draft.target != UPSTREAM_ISSUE:
+            raise DraftRefused(
+                f"draft {draft_id} proposes a {draft.target}, not an upstream issue: "
+                "use create_new_skill to act on it, so the creation is verified "
+                "before the row is settled"
+            )
+        body = sanitize_lesson(draft.body)
+        if not draft.title.strip():
+            raise DraftRefused(f"draft {draft_id} has no title to file an issue under")
+        title = sanitize_lesson(draft.title, "title")
+        repository = _checked_repository(draft.repository)
+        if not repository:
+            return _hold(
+                config,
+                draft,
+                DRAFT_PENDING,
+                reason=(
+                    "owning repository not identified, so nothing was filed: this "
+                    "draft names no `owner/name` for the packaged skill and `gh` "
+                    "would otherwise open the issue in whatever repository the "
+                    "current directory happens to be. Name the repository in an "
+                    "attended turn, or file the issue by hand"
+                ),
+            )
 
-    hits = search(title=title, body=body, repository=repository)
-    if len(hits) > 1:
-        # Ambiguous on purpose. Two issues that both look like this finding means
-        # this code cannot say which one is the match, and picking either would
-        # attach the record to the wrong discussion.
-        return _hold(
-            config,
-            draft,
-            DRAFT_PENDING,
-            reason=(
-                f"{len(hits)} open issues already match this change; link it by "
-                "hand in an attended turn, or close the duplicate first"
-            ),
-        )
-    if hits:
-        return _settle(
-            config,
-            draft,
-            DRAFT_FILED,
-            issue_url=hits[0],
-            reason=reason or "linked to the existing upstream issue",
-        )
-    try:
-        url = create(title=title, body=body, repository=repository)
-    except OSError as exc:
-        return _hold(
-            config,
-            draft,
-            DRAFT_PENDING,
-            reason=f"could not reach GitHub: {exc}. Nothing was filed; retry later",
-        )
-    if not url:
-        return _hold(
-            config,
-            draft,
-            DRAFT_PENDING,
-            reason="GitHub returned no URL for the new issue. Nothing was filed; "
-            "retry, and the retry searches before it creates",
-        )
-    return _settle(config, draft, DRAFT_FILED, issue_url=url, reason=reason)
+        hits = search(title=title, body=body, repository=repository)
+        if len(hits) > 1:
+            # Ambiguous on purpose. Two issues that both look like this finding means
+            # this code cannot say which one is the match, and picking either would
+            # attach the record to the wrong discussion.
+            return _hold(
+                config,
+                draft,
+                DRAFT_PENDING,
+                reason=(
+                    f"{len(hits)} open issues already match this change; link it by "
+                    "hand in an attended turn, or close the duplicate first"
+                ),
+            )
+        if hits:
+            return _settle(
+                config,
+                draft,
+                DRAFT_FILED,
+                issue_url=hits[0],
+                reason=reason or "linked to the existing upstream issue",
+            )
+        try:
+            url = create(title=title, body=body, repository=repository)
+        except OSError as exc:
+            return _hold(
+                config,
+                draft,
+                DRAFT_PENDING,
+                reason=f"could not reach GitHub: {exc}. Nothing was filed; retry later",
+            )
+        if not url:
+            return _hold(
+                config,
+                draft,
+                DRAFT_PENDING,
+                reason="GitHub returned no URL for the new issue. Nothing was filed; "
+                "retry, and the retry searches before it creates",
+            )
+        return _settle(config, draft, DRAFT_FILED, issue_url=url, reason=reason)
 
 
 def reject_draft(
@@ -1229,6 +1289,10 @@ def reject_draft(
     """
     draft = find_draft(config, draft_id)
     if draft is None:
+        settled = find_record(config, draft_id)
+        if settled is not None and settled.settled:
+            _refuse_if_unattended(config, settled.workspace, "settling a skill draft")
+            _settle(config, settled, settled.lifecycle)
         return None
     _refuse_if_unattended(config, draft.workspace, "settling a skill draft")
     return _settle(config, draft, DRAFT_REJECTED, reason=reason, via=via)
@@ -1271,8 +1335,14 @@ def _settle(
             f"{', '.join(DRAFT_LIFECYCLES)}"
         )
     path = sidecar_path(config, draft.workspace, draft.id)
-    with queue_lock(path):
+    with queue_lock(queue_path(config, draft.workspace)), queue_lock(path):
         stored = read_sidecar(path, draft.workspace) or draft
+        queue = queue_path(config, draft.workspace)
+        if queue.exists():
+            draft_bullet_indices(queue.read_text(encoding="utf-8"), stored)
+        if stored.settled:
+            _remove_bullet(config, stored)
+            return stored
         settled = replace(
             stored,
             lifecycle=lifecycle,
@@ -1283,7 +1353,8 @@ def _settle(
         if record_decision:
             _record_decision(config, settled, via=via)
         write_queue_atomically(path, render_sidecar(settled))
-    _remove_bullet(config, settled)
+        if record_decision:
+            _remove_bullet(config, settled)
     logger.info("Draft %s is now %s", settled.id, lifecycle)
     return settled
 
@@ -1334,13 +1405,20 @@ def _remove_bullet(config: CiaoConfig, draft: UpstreamDraft) -> None:
     editing is a bullet those readers disagree about. A bullet that is not there
     — a second settle, or a queue the person already cleared — is not an error.
     """
-    from ciao.memory_proposals import remove_proposal_by_substring
+    from ciao.memory_proposals import _sweep_empty_batches
 
     path = queue_path(config, draft.workspace)
-    try:
-        remove_proposal_by_substring(path, decision_text(draft.id))
-    except OSError:  # pragma: no cover - an unreadable queue stays as it is
-        logger.exception("Could not clear draft %s from %s", draft.id, path)
+    with queue_lock(path):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        indices = draft_bullet_indices(text, draft)
+        if not indices:
+            return
+        lines = text.splitlines()
+        del lines[indices[0]]
+        write_queue_atomically(path, "\n".join(_sweep_empty_batches(lines)).rstrip() + "\n")
 
 
 def decision_row(
@@ -1429,6 +1507,9 @@ def create_new_skill(
     draft = find_draft(config, draft_id)
     if draft is None:
         settled = find_record(config, draft_id)
+        if settled is not None and settled.settled:
+            _refuse_if_unattended(config, settled.workspace, "settling a skill draft")
+            _settle(config, settled, settled.lifecycle)
         if settled is not None and settled.lifecycle == DRAFT_REJECTED:
             raise DraftRefused(
                 f"draft {draft_id} was rejected "
@@ -1436,53 +1517,57 @@ def create_new_skill(
                 "is not re-created"
             )
         return None
-    _refuse_if_unattended(config, draft.workspace, "creating a skill")
-    if draft.target != NEW_SKILL:
-        raise DraftRefused(
-            f"draft {draft_id} proposes an upstream issue, not a new skill: "
-            "approve it to file the issue"
-        )
+    queue = queue_path(config, draft.workspace)
+    sidecar = sidecar_path(config, draft.workspace, draft.id)
+    with queue_lock(queue), queue_lock(sidecar):
+        _verify_pending_draft(config, draft)
+        _refuse_if_unattended(config, draft.workspace, "creating a skill")
+        if draft.target != NEW_SKILL:
+            raise DraftRefused(
+                f"draft {draft_id} proposes an upstream issue, not a new skill: "
+                "approve it to file the issue"
+            )
 
-    resumed = _previous_creation(config, draft.workspace, draft.skill, content)
-    if resumed is None:
-        created = create_owned_skill(config, draft.workspace, draft.skill, content)
-        path = str(created.skill.path)
-        note = f"created skills/{created.skill.name}/SKILL.md"
-    else:
-        path = resumed
-        note = (
-            f"skills/{draft.skill}/SKILL.md already holds exactly the submitted "
-            "content, so the creation was skipped and only the sync re-ran"
-        )
-    # Measured from the submitted bytes rather than from the readback, so a
-    # resume reports the budget exactly as the first attempt did. The byte count
-    # is `content`'s because `create_owned_skill` writes exactly those bytes and
-    # the readback resolves them unchanged.
-    size = len(content.encode("utf-8"))
-    if size > MAX_SKILL_BYTES:
-        note += (
-            f"; it is {size} bytes, over the {MAX_SKILL_BYTES}-byte budget every "
-            "load pays, so it is worth trimming"
-        )
-    if not _sync_after_create(config, draft.workspace, sync):
-        return _hold(
+        resumed = _previous_creation(config, draft.workspace, draft.skill, content)
+        if resumed is None:
+            created = create_owned_skill(config, draft.workspace, draft.skill, content)
+            path = str(created.skill.path)
+            note = f"created skills/{created.skill.name}/SKILL.md"
+        else:
+            path = resumed
+            note = (
+                f"skills/{draft.skill}/SKILL.md already holds exactly the submitted "
+                "content, so the creation was skipped and only the sync re-ran"
+            )
+        # Measured from the submitted bytes rather than from the readback, so a
+        # resume reports the budget exactly as the first attempt did. The byte count
+        # is `content`'s because `create_owned_skill` writes exactly those bytes and
+        # the readback resolves them unchanged.
+        size = len(content.encode("utf-8"))
+        if size > MAX_SKILL_BYTES:
+            note += (
+                f"; it is {size} bytes, over the {MAX_SKILL_BYTES}-byte budget every "
+                "load pays, so it is worth trimming"
+            )
+        if not _sync_after_create(config, draft.workspace, sync):
+            return _hold(
+                config,
+                draft,
+                DRAFT_PENDING,
+                reason=(
+                    f"{note}; the sync did not complete, so a provider may not see it "
+                    "yet. Nothing is lost: re-approve this draft to run the sync "
+                    "again, and it settles only once the sync succeeds"
+                ),
+            )
+        return _settle(
             config,
             draft,
-            DRAFT_PENDING,
-            reason=(
-                f"{note}; the sync did not complete, so a provider may not see it "
-                "yet. Nothing is lost: re-approve this draft to run the sync "
-                "again, and it settles only once the sync succeeds"
-            ),
+            DRAFT_FILED,
+            issue_url=path,
+            reason=note,
+            via="new-skill",
         )
-    return _settle(
-        config,
-        draft,
-        DRAFT_FILED,
-        issue_url=path,
-        reason=note,
-        via="new-skill",
-    )
 
 
 def _previous_creation(

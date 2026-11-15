@@ -35,7 +35,7 @@ const PORT = Number(process.env.CIAO_E2E_PORT)
  * retry to go green it is a broken spec, and it should fail loudly.
  */
 export default defineConfig({
-  testDir: './e2e/specs',
+  testDir: './e2e',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: 0,
@@ -50,7 +50,8 @@ export default defineConfig({
     video: 'off',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'chromium', testMatch: 'specs/**/*.spec.ts', use: { ...devices['Desktop Chrome'] } },
+    { name: 'real-server', testMatch: 'real-server/**/*.spec.ts', use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
     command: 'node e2e/fixture/server.mjs',

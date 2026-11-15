@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from ciao import memory_proposals, memory_receipts as mr, memory_tool, project_doc_update
+from ciao import memory_proposals, memory_receipts as mr, memory_tool
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
 from ciao.web.proposal_service import AcceptOutcome
@@ -51,14 +51,14 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "region_failed": ["error", "ok", "region"],
     "people_no_name": ["error", "ok"],
     "people_written": ["destination", "ok"],
-    "people_folded": ["destination", "ok"],
+    "people_folded": ["destination", "ok", "receipt_id"],
     "people_no_changes": ["error", "ok"],
     "people_fold_raised": ["error", "ok"],
     "learnings_written": ["destination", "ok"],
     "learnings_locked": ["error", "ok"],
     "project_no_target": ["error", "ok"],
     "project_missing_doc": ["error", "ok"],
-    "project_folded": ["destination", "ok"],
+    "project_folded": ["destination", "ok", "receipt_id"],
     "project_no_changes": ["error", "ok"],
     "project_fold_raised": ["error", "ok"],
     "note_edit_no_sidecar": ["error", "ok"],
@@ -121,7 +121,8 @@ def region(monkeypatch, tmp_path):
     )
 
     def promote(**kwargs: Any) -> AcceptOutcome:
-        return asyncio.run(proposal_service._promote_region_row(config, dict(ROW), **kwargs))
+        decision, refusal = asyncio.run(proposal_service._prepare_region_row(config, dict(ROW), **kwargs))
+        return refusal if refusal is not None else proposal_service._commit_region_row(config, dict(ROW), decision)
 
     return promote
 
@@ -251,42 +252,35 @@ def test_failed_keys(region, monkeypatch):
 
 def test_people_keys(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    run = asyncio.run
-    _assert_keys("people_no_name", run(proposal_service._accept_people_row(config, dict(ROW))))
+    def accept(row):
+        plan, refusal = asyncio.run(proposal_service._prepare_proposal_fold(config, row, person=True))
+        return refusal if refusal is not None else proposal_service._commit_proposal_fold(plan)
+    _assert_keys("people_no_name", accept(dict(ROW)))
     row = {**ROW, "kind": "people", "target": "Mo"}
-
-    async def unreachable(**kwargs: Any) -> bool:
+    async def unreachable(*args: Any, **kwargs: Any) -> str:
         raise AssertionError("a new note is created, not folded")
-
-    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", unreachable)
-    payload = _assert_keys("people_written", run(proposal_service._accept_people_row(config, row)))
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unreachable)
+    payload = _assert_keys("people_written", accept(row))
     assert payload["destination"] == "People/Mo.md"
-
-    # The note now exists, so a second accept folds into it instead of refusing.
-    seen: dict[str, Any] = {}
-
-    async def wrote(**kwargs: Any) -> bool:
-        seen.update(kwargs)
-        return True
-
-    async def unchanged(**kwargs: Any) -> bool:
-        return False
-
-    async def failed(**kwargs: Any) -> bool:
-        kwargs["error_out"].append("TimeoutError: slow")
-        return False
-
-    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", wrote)
-    payload = _assert_keys("people_folded", run(proposal_service._accept_people_row(config, row)))
+    (config.workspace_vault_root("personal") / "People/Mo.md").write_text(
+        "# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8"
+    )
+    async def wrote(*args: Any, **kwargs: Any) -> str:
+        return '{"action":"add","section":"Notes","text":"- New fact."}'
+    async def unchanged(*args: Any, **kwargs: Any) -> str:
+        return '{"action":"covered"}'
+    async def failed(*args: Any, **kwargs: Any) -> str:
+        raise TimeoutError("slow")
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", wrote)
+    payload = _assert_keys("people_folded", accept(row))
     assert payload["destination"] == "People/Mo.md"
-    assert seen["note_path"].name == "Mo.md"
-    assert seen["fact"] == row["text"]
-    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", unchanged)
-    payload = _assert_keys("people_no_changes", run(proposal_service._accept_people_row(config, row)))
+    assert payload["receipt_id"]
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unchanged)
+    payload = _assert_keys("people_no_changes", accept(row))
     assert "no changes" in payload["error"]
-    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", failed)
-    payload = _assert_keys("people_fold_raised", run(proposal_service._accept_people_row(config, row)))
-    assert payload["error"] == "fold failed: TimeoutError: slow"
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failed)
+    payload = _assert_keys("people_fold_raised", accept(row))
+    assert payload["error"] == "fold failed: slow"
 
 
 def test_learnings_keys(tmp_path):
@@ -378,38 +372,36 @@ def test_add_category_carries_skipped_notes():
 
 def test_project_keys(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    run = asyncio.run
+    def accept(row):
+        plan, refusal = asyncio.run(proposal_service._prepare_proposal_fold(config, row, person=False))
+        return refusal if refusal is not None else proposal_service._commit_proposal_fold(plan)
     _assert_keys(
         "project_no_target",
-        run(proposal_service._accept_project_row(config, {**ROW, "kind": "project"})),
+        accept({**ROW, "kind": "project"}),
     )
     _assert_keys(
         "project_missing_doc",
-        run(proposal_service._accept_project_row(
-            config, {**ROW, "kind": "project", "target": "nope.md"}
-        )),
+        accept({**ROW, "kind": "project", "target": "nope.md"}),
     )
-    (tmp_path / "doc.md").write_text("# Doc\n", encoding="utf-8")
-    row = {**ROW, "kind": "project", "target": "doc.md"}
+    note = config.workspace_vault_root("personal") / "doc.md"
+    note.write_text("# Doc\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    row = {**ROW, "kind": "project", "target": str(note)}
 
-    async def wrote(**kwargs: Any) -> bool:
-        return True
-
-    async def unchanged(**kwargs: Any) -> bool:
-        return False
-
-    async def boom(**kwargs: Any) -> bool:
+    async def wrote(*args: Any, **kwargs: Any) -> str:
+        return '{"action":"add","section":"Notes","text":"- New fact."}'
+    async def unchanged(*args: Any, **kwargs: Any) -> str:
+        return '{"action":"covered"}'
+    async def boom(*args: Any, **kwargs: Any) -> str:
         raise RuntimeError("fold blew up")
-
-    monkeypatch.setattr(project_doc_update, "update_project_doc", wrote)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", wrote)
     payload = _assert_keys(
-        "project_folded", run(proposal_service._accept_project_row(config, row))
+        "project_folded", accept(row)
     )
-    assert payload["destination"] == "doc.md"
-    monkeypatch.setattr(project_doc_update, "update_project_doc", unchanged)
-    _assert_keys("project_no_changes", run(proposal_service._accept_project_row(config, row)))
-    monkeypatch.setattr(project_doc_update, "update_project_doc", boom)
-    _assert_keys("project_fold_raised", run(proposal_service._accept_project_row(config, row)))
+    assert payload["destination"] == str(note) and payload["receipt_id"]
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unchanged)
+    _assert_keys("project_no_changes", accept(row))
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", boom)
+    _assert_keys("project_fold_raised", accept(row))
 
 
 # ---- note_edit: a whole-note write, and an attended retirement --------------

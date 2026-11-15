@@ -204,17 +204,17 @@ def build_accept_result(
             ),
             conflict=conflict,
         )
-    # Re-home and route_manually: nothing was written into a region or a doc.
-    # A re-home's move is performed by its own handler and reported through the
-    # row's candidate destination, which is what the panel already shows.
+    # Re-home is a move, not a region promotion; report the mover's destination.
     rehome = row.get("rehome") or {}
     return ProposalActionResult(
         id=proposal_id,
         action=accept.action,
         dismissed=dismissed,
         promoted=False,
-        destination=str(rehome.get("destination", "")),
+        destination=str(outcome.get("destination") or rehome.get("destination", "")),
         justified=bool(rehome.get("justified", False)),
+        already_moved=outcome.get("already_moved"),
+        error=str(outcome.get("error") or "could not move the note") if failed else None,
         conflict=conflict,
     )
 
@@ -231,6 +231,7 @@ def record_decision(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    queue_receipt_id: str = "",
     reason: str = "",
 ) -> None:
     """Record one resolved proposal in the decision history.
@@ -276,5 +277,6 @@ def record_decision(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        queue_receipt_id=queue_receipt_id,
         reason=reason,
     )

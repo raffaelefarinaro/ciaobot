@@ -97,8 +97,14 @@ What this refuses to do
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import re
+import secrets
+import stat
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -119,7 +125,8 @@ from ciao.learnings_migrate import (
     _write_locked,
     learnings_file,
 )
-from ciao.memory_receipts import content_revision, queue_lock, write_queue_atomically
+from ciao.memory_receipts import QueueLockError, content_revision, queue_lock, write_queue_atomically
+from ciao.proposal_tracking import stable_proposal_id, walk_proposal_queue
 
 logger = logging.getLogger(__name__)
 
@@ -392,7 +399,7 @@ def suppression_path(vault_root: Path) -> Path:
     return Path(vault_root) / SUPPRESSION_RELATIVE
 
 
-def read_suppressions(vault_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
+def read_suppressions(vault_root: Path, *, strict: bool = False) -> dict[tuple[str, str], dict[str, Any]]:
     """Every ``(learning_id, entry_revision)`` already removed, as a mapping.
 
     Unreadable is not empty. A store that exists and cannot be read is reported
@@ -401,19 +408,41 @@ def read_suppressions(vault_root: Path) -> dict[tuple[str, str], dict[str, Any]]
     there to protect.
     """
     path = suppression_path(vault_root)
-    if not path.is_file():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        info = path.lstat()
+    except FileNotFoundError:
+        return {}
+    except OSError:
         raise _SuppressionUnreadable(path) from None
-    if not isinstance(data, dict) or data.get("schema_version") != SUPPRESSION_SCHEMA:
+    if not stat.S_ISREG(info.st_mode):
+        raise _SuppressionUnreadable(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            opened = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or
+                    (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+                raise _SuppressionUnreadable(path)
+            data = json.load(handle)
+    except (OSError, ValueError, UnicodeError):
+        raise _SuppressionUnreadable(path) from None
+    if (not isinstance(data, dict) or data.get("schema_version") != SUPPRESSION_SCHEMA or
+            (strict and type(data.get("schema_version")) is not int)):
         raise _SuppressionUnreadable(path)
     entries = data.get("removed")
     if not isinstance(entries, list):
         raise _SuppressionUnreadable(path)
     found: dict[tuple[str, str], dict[str, Any]] = {}
     for item in entries:
+        if strict and (
+            not isinstance(item, dict)
+            or not isinstance(item.get("learning_id"), str)
+            or not item["learning_id"].strip()
+            or not isinstance(item.get("entry_revision"), str)
+            or not item["entry_revision"].strip()
+            or any(key in item and not isinstance(item[key], str) for key in ("removed_at", "removed_by"))
+        ):
+            raise _SuppressionUnreadable(path)
         if not isinstance(item, dict):
             continue
         learning_id = str(item.get("learning_id") or "").strip()
@@ -532,7 +561,7 @@ def _load_text(vault_root: Path) -> str:
 
 
 def _upstream_origins(
-    config: Any, workspace: str
+    config: Any, workspace: str, records: tuple[upstream_drafts.UpstreamDraft, ...] | None = None
 ) -> dict[str, list[upstream_drafts.UpstreamDraft]]:
     """Every upstream draft that names a learning, by that learning's id.
 
@@ -542,13 +571,24 @@ def _upstream_origins(
     answer.
     """
     by_learning: dict[str, list[upstream_drafts.UpstreamDraft]] = {}
-    for draft in upstream_drafts.read_records(config, workspace):
+    for draft in upstream_drafts.read_records(config, workspace) if records is None else records:
         for origin in draft.origins:
             learning_id = str(origin.get("learning_id") or "").strip()
             if not learning_id:
                 continue
             by_learning.setdefault(learning_id, []).append(draft)
     return by_learning
+
+
+def _learning_drafts(record: LearningRecord, by_learning: dict[str, list[upstream_drafts.UpstreamDraft]]) -> list[upstream_drafts.UpstreamDraft]:
+    found: list[upstream_drafts.UpstreamDraft] = []
+    seen: set[int] = set()
+    for identity in (record.learning_id, *record.aliases):
+        for draft in by_learning.get(identity, []):
+            if id(draft) not in seen:
+                found.append(draft)
+                seen.add(id(draft))
+    return found
 
 
 def _row_for(
@@ -634,6 +674,7 @@ def plan_cleanup(
     config: Any,
     today: date | None = None,
     max_removals: int | None = None,
+    finding_records: tuple[tuple[skill_proposals.SkillProposal, ...], tuple[upstream_drafts.UpstreamDraft, ...]] | None = None,
 ) -> CleanupPlan:
     """Compute what a reconciliation of one workspace's learnings would do.
 
@@ -692,7 +733,7 @@ def plan_cleanup(
             diagnostics=document.diagnostics,
         )
 
-    drafts_by_learning = _upstream_origins(config, workspace)
+    drafts_by_learning = _upstream_origins(config, workspace, None if finding_records is None else finding_records[1])
     removals: list[CleanupRow] = []
     kept: list[CleanupRow] = []
     conflicts: list[CleanupRow] = []
@@ -765,12 +806,15 @@ def plan_cleanup(
             )
             continue
 
-        report = skill_proposals.learning_cleanup_eligibility(
-            config, workspace, record, current_revision=revision
-        )
+        if finding_records is None:
+            report = skill_proposals.learning_cleanup_eligibility(config, workspace, record, current_revision=revision)
+        else:
+            report = skill_proposals.learning_cleanup_eligibility(
+                config, workspace, record, current_revision=revision, records=finding_records[0]
+            )
         origins = list(report.get("origins") or [])
         reason_text = str(report.get("reason") or "")
-        drafts = drafts_by_learning.get(record.learning_id, [])
+        drafts = _learning_drafts(record, drafts_by_learning)
 
         # Two destinations, two answers, and the decision is the *both* of them.
         # The local half is the fold's; the upstream half is the drafts'
@@ -1523,6 +1567,783 @@ def apply_cleanup(
 REVISION_MOVED = "the learnings document changed while the cleanup was planned"
 
 
+def _validate_update_review_inputs(
+    text: str, *, workspace: str, source_revision: str,
+    verdicts: list[dict[str, Any]], plan: CleanupPlan,
+    suppressed: set[tuple[str, str]],
+    max_payload_bytes: int = 512 * 1024,
+) -> list[CleanupRow]:
+    """Validate the complete model response against the parsed and classified source."""
+    if not isinstance(verdicts, list) or len(verdicts) > 512:
+        raise ValueError("invalid verdict list")
+    try:
+        payload = json.dumps(verdicts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("invalid verdict encoding") from exc
+    if len(payload) > max_payload_bytes:
+        raise ValueError("verdict payload too large")
+    if not isinstance(source_revision, str) or source_revision != content_revision(text):
+        raise ValueError("source revision changed")
+    if plan.workspace != workspace or plan.revision != source_revision or plan.blocked or plan.over_cap or plan.conflicts:
+        raise ValueError("incomplete or stale classification")
+    entries = [e for e in parse_learnings(text, workspace=workspace).entries if e.section == SECTION_ACTIVE]
+    records: dict[str, str] = {}
+    for entry in entries:
+        if entry.record is None:
+            raise ValueError("unreadable learning")
+        record = entry.record
+        if record.learning_id in records:
+            raise ValueError("duplicate learning id")
+        records[record.learning_id] = entry_revision(record)
+    rows = {row.learning_id: row for row in plan.rows}
+    if len(rows) != len(plan.rows) or set(rows) != set(records):
+        raise ValueError("classification coverage mismatch")
+    if any(rows[key].entry_revision != revision for key, revision in records.items()):
+        raise ValueError("classification revision mismatch")
+
+    def line(value: Any) -> bool:
+        return (isinstance(value, str) and bool(value.strip()) and len(value) <= 2048
+                and not any(unicodedata.category(char) in {"Cc", "Zl", "Zp"} for char in value))
+
+    seen: set[str] = set()
+    selected: list[CleanupRow] = []
+    for item in verdicts:
+        if not isinstance(item, dict):
+            raise ValueError("invalid verdict")
+        action = item.get("verdict")
+        fields = {"learning_id", "entry_revision", "verdict", "reason", "evidence"}
+        if action == "DEFER":
+            fields.add("proposal_ref")
+        if set(item) != fields or action not in ("KEEP", "REFRESH", "RETIRE", "DEFER"):
+            raise ValueError("invalid verdict fields")
+        key, revision = item["learning_id"], item["entry_revision"]
+        if not isinstance(key, str) or not isinstance(revision, str) or key in seen or records.get(key) != revision:
+            raise ValueError("unknown, duplicate or stale learning")
+        seen.add(key)
+        evidence = item["evidence"]
+        if not line(item["reason"]) or not isinstance(evidence, list) or not 1 <= len(evidence) <= 16 or not all(line(v) for v in evidence):
+            raise ValueError("invalid review evidence")
+        if action == "DEFER":
+            ref = item["proposal_ref"]
+            if not isinstance(ref, dict) or set(ref) != {"kind", "id"} or ref.get("kind") != "memory" or not isinstance(ref.get("id"), str) or re.fullmatch(r"[0-9a-f]{16}", ref["id"]) is None:
+                raise ValueError("invalid proposal reference")
+        if action == "RETIRE":
+            row = rows[key]
+            if row.reason not in {"settled", "never_proposed"} or (key, revision) in suppressed:
+                raise ValueError("protected learning")
+            selected.append(row)
+    if seen != set(records):
+        raise ValueError("incomplete verdict coverage")
+    pairs = {(row.learning_id, row.entry_revision) for row in selected}
+    if len(pairs) > MAX_SUPPRESSED or len(suppressed | pairs) > MAX_SUPPRESSED:
+        raise ValueError("suppression capacity exceeded")
+    return selected
+
+
+def _validate_automatic_origins(store: str, text: str, workspace: str) -> None:
+    if store == "skill":
+        _, body = skill_proposals._split_frontmatter(text)
+        _, sections = skill_proposals._split_sections(body)
+        for heading, lines in sections:
+            if heading.casefold() != skill_proposals._ORIGINS_HEADING.casefold():
+                continue
+            for line in lines:
+                if not line.strip() or skill_proposals._FENCE_RE.match(line):
+                    continue
+                origin = skill_proposals._origin_from_mapping(json.loads(line), workspace)
+                if not origin.learning_id.strip() or not origin.finding.strip() or origin.workspace != workspace:
+                    raise ValueError("unattributable skill origin")
+    else:
+        payload = json.loads(text)
+        origins = payload.get("origins", []) if isinstance(payload, dict) else None
+        if not isinstance(origins, list):
+            raise ValueError("malformed upstream origins")
+        for origin_data in origins:
+            if (not isinstance(origin_data, dict) or
+                set(origin_data) - upstream_drafts._ORIGIN_FIELDS or
+                any(not isinstance(value, str) for value in origin_data.values()) or
+                not origin_data.get("learning_id", "").strip()):
+                raise ValueError("unattributable upstream origin")
+
+
+def _finding_dependency_capture(
+    config: Any, workspace: str, *, max_file_bytes: int = 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024, max_files: int = 4096,
+) -> tuple[str, tuple[tuple[skill_proposals.SkillProposal, ...], tuple[upstream_drafts.UpstreamDraft, ...]]]:
+    """Fingerprint all owner-parsed findings, refusing unstable or unsafe scans."""
+    rows: list[dict[str, Any]] = []
+    directories: dict[str, tuple[int, int] | None] = {}
+    total = 0
+    count = 0
+    skills: list[skill_proposals.SkillProposal] = []
+    drafts: list[upstream_drafts.UpstreamDraft] = []
+    stores = (
+        ("skill", skill_proposals.queue_dir(config, workspace), ".md", skill_proposals.parse_proposal),
+        ("upstream", upstream_drafts.sidecar_dir(config, workspace), ".json", upstream_drafts.read_sidecar),
+    )
+    def bounded_names(directory: Path, suffix: str, budget: int) -> list[str]:
+        names: list[str] = []
+        for item in directory.iterdir():
+            if item.name.endswith(suffix):
+                if len(names) >= budget:
+                    raise ValueError("too many finding files")
+                names.append(item.name)
+        return sorted(names)
+
+    for store, directory, suffix, parse in stores:
+        directory = Path(directory)
+        try:
+            try:
+                directory_stat = directory.lstat()
+            except FileNotFoundError:
+                directories[store] = None
+                rows.append({"store": store, "state": "absent"})
+                continue
+            if not stat.S_ISDIR(directory_stat.st_mode) or getattr(directory, "is_junction", lambda: False)():
+                raise ValueError("unsafe finding directory")
+            directories[store] = (directory_stat.st_dev, directory_stat.st_ino)
+            names = bounded_names(directory, suffix, max_files - count)
+            count += len(names)
+            for name in names:
+                path = directory / name
+                before = path.lstat()
+                if not stat.S_ISREG(before.st_mode) or getattr(path, "is_junction", lambda: False)():
+                    raise ValueError("unsafe finding file")
+                if before.st_size > max_file_bytes:
+                    raise ValueError("finding file too large")
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                fd = os.open(path, flags)
+                with os.fdopen(fd, "rb") as handle:
+                    opened = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                        raise ValueError("finding changed before reading")
+                    raw = handle.read(max_file_bytes + 1)
+                    finished = os.fstat(handle.fileno())
+                total += len(raw)
+                if len(raw) > max_file_bytes or total > max_total_bytes:
+                    raise ValueError("finding snapshot too large")
+                identity = (before.st_dev, before.st_ino)
+                signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                if signature(before) != signature(opened) or signature(opened) != signature(finished):
+                    raise ValueError("finding changed while reading")
+                captured_text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                _validate_automatic_origins(store, captured_text, workspace)
+                parsed = parse(path, workspace, text=captured_text)
+                if parsed is None:
+                    raise ValueError("malformed finding")
+                if store == "skill":
+                    assert isinstance(parsed, skill_proposals.SkillProposal)
+                    skills.append(parsed)
+                else:
+                    assert isinstance(parsed, upstream_drafts.UpstreamDraft)
+                    drafts.append(parsed)
+                after = path.lstat()
+                if signature(after) != signature(before):
+                    raise ValueError("finding changed while parsing")
+                rows.append({"store": store, "name": name, "sha256": hashlib.sha256(raw).hexdigest(), "identity": list(identity)})
+            if bounded_names(directory, suffix, len(names)) != names or (directory.lstat().st_dev, directory.lstat().st_ino) != (directory_stat.st_dev, directory_stat.st_ino):
+                raise ValueError("finding directory changed")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("cannot read finding snapshot") from exc
+    # Check the whole scan again, including stores visited before the last parser.
+    try:
+        verified_count = 0
+        for store, directory, suffix, _ in stores:
+            directory = Path(directory)
+            store_rows = [row for row in rows if row["store"] == store]
+            if store_rows and store_rows[0].get("state") == "absent":
+                if directory.exists() or directory.is_symlink():
+                    raise ValueError("finding directory appeared")
+                continue
+            current_dir = directory.lstat()
+            if (not stat.S_ISDIR(current_dir.st_mode) or
+                (current_dir.st_dev, current_dir.st_ino) != directories[store] or
+                getattr(directory, "is_junction", lambda: False)()):
+                raise ValueError("unsafe finding directory")
+            current_names = bounded_names(directory, suffix, max_files - verified_count)
+            verified_count += len(current_names)
+            if current_names != [row["name"] for row in store_rows]:
+                raise ValueError("finding directory changed")
+            for row in store_rows:
+                path = directory / row["name"]
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                with os.fdopen(fd, "rb") as handle:
+                    before = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(before.st_mode) or [before.st_dev, before.st_ino] != row["identity"]:
+                        raise ValueError("finding changed before verification")
+                    raw = handle.read(max_file_bytes + 1)
+                    after = os.fstat(handle.fileno())
+                current = path.lstat()
+                if (len(raw) > max_file_bytes or not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(current.st_mode) or
+                    [before.st_dev, before.st_ino] != row["identity"] or
+                    (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                    (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) !=
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                    hashlib.sha256(raw).hexdigest() != row["sha256"]):
+                    raise ValueError("finding changed during snapshot")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("cannot verify finding snapshot") from exc
+    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), (tuple(skills), tuple(drafts))
+
+
+def _finding_dependency_snapshot(
+    config: Any, workspace: str, *, max_file_bytes: int = 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024, max_files: int = 4096,
+) -> str:
+    return _finding_dependency_capture(config, workspace, max_file_bytes=max_file_bytes,
+                                       max_total_bytes=max_total_bytes, max_files=max_files)[0]
+
+
+_UPDATE_ACTOR = "system/update-maintenance"
+_UPDATE_RECEIPT_NAME = re.compile(r"learnings-cleanup-\d{8}-\d{6}\.json\Z")
+
+
+def _update_binding(vault_root: Path, config: Any, workspace: str, task_revision: int, name: str) -> Path:
+    if (type(task_revision) is not int or task_revision != 3 or
+        not isinstance(workspace, str) or workspace not in config.workspaces or
+        not isinstance(name, str) or _UPDATE_RECEIPT_NAME.fullmatch(name) is None):
+        raise ValueError("invalid update review identity")
+    if Path(vault_root).resolve() != Path(config.workspace_vault_root(workspace)).resolve():
+        raise ValueError("workspace vault mismatch")
+    return Path(config.state_path).parent.absolute() / "migration" / name
+
+
+def _update_directory_durability_supported() -> bool:
+    return os.name != "nt" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+
+
+def _update_receipt_dir(path: Path, *, create: bool) -> int:
+    """Open the configured receipt directory without following any path component."""
+    from ciao.os_support.private import is_private_descriptor_strict
+    if not _update_directory_durability_supported():
+        raise OSError("unsupported receipt directory durability")
+    parts = path.absolute().parts
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(parts[0], os.O_RDONLY | directory_flag)
+    try:
+        uid = getattr(os, "getuid", lambda: -1)()
+        def check(opened: int, *, private: bool) -> None:
+            info = os.fstat(opened)
+            writable = bool(info.st_mode & 0o022)
+            sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+            if (info.st_uid not in (0, uid) or (writable and not sticky_root) or
+                (private and not is_private_descriptor_strict(opened))):
+                raise OSError("unsafe receipt directory permissions")
+        check(fd, private=len(parts) == 1)
+        for index, part in enumerate(parts[1:], start=1):
+            try:
+                child = os.open(part, os.O_RDONLY | directory_flag | nofollow, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=fd)
+                os.fsync(fd)
+                child = os.open(part, os.O_RDONLY | directory_flag | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            check(fd, private=index == len(parts) - 1)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _update_write_new(dir_fd: int, name: str, receipt: dict[str, Any]) -> tuple[int, int]:
+    from ciao.os_support.private import is_private_descriptor_strict
+    data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dir_fd)
+    identity = os.fstat(fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if not is_private_descriptor_strict(handle.fileno()):
+                raise OSError("unsafe receipt file permissions")
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.fsync(dir_fd)
+    except BaseException:
+        try:
+            current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                os.unlink(name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    return identity.st_dev, identity.st_ino
+
+
+def _update_check_directory(dir_fd: int, path: Path) -> None:
+    from ciao.os_support.private import is_private_descriptor_strict
+    opened = os.fstat(dir_fd)
+    current = path.lstat()
+    if (not stat.S_ISDIR(current.st_mode) or not is_private_descriptor_strict(dir_fd) or
+        (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+        raise OSError("receipt directory changed")
+
+
+def _update_commit_receipt(dir_fd: int, name: str, identity: tuple[int, int], receipt: dict[str, Any]) -> tuple[int, int]:
+    temp = f".{name}.{secrets.token_hex(16)}.tmp"
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        temporary_identity = _update_write_new(dir_fd, temp, receipt)
+        existing = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(existing.st_mode) or (existing.st_dev, existing.st_ino) != identity:
+            raise OSError("receipt identity changed")
+        new_identity = temporary_identity
+        os.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        temporary_identity = None
+        os.fsync(dir_fd)
+        return new_identity
+    finally:
+        if temporary_identity is not None:
+            try:
+                current = os.stat(temp, dir_fd=dir_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == temporary_identity:
+                    os.unlink(temp, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _update_receipt_read(path: Path) -> dict[str, Any] | None:
+    from ciao.os_support.private import is_private_descriptor_strict
+    try:
+        directory = _update_receipt_dir(path.parent, create=False)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=directory)
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024 or
+                    not is_private_descriptor_strict(handle.fileno())):
+                    return None
+                data = json.load(handle)
+        finally:
+            os.close(directory)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _update_fence_receipt(path: Path, expected: dict[str, Any]) -> bool:
+    """Fence the exact private receipt and directory without changing content."""
+    from ciao.os_support.private import is_private_descriptor_strict
+    directory: int | None = None
+    try:
+        directory = _update_receipt_dir(path.parent, create=False)
+        fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=directory)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024 or
+                not is_private_descriptor_strict(handle.fileno())):
+                return False
+            if json.load(handle) != expected:
+                return False
+            os.fsync(handle.fileno())
+            os.fsync(directory)
+            after = os.fstat(handle.fileno())
+            named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if signature(before) != signature(after) or signature(after) != signature(named):
+                return False
+            _update_check_directory(directory, path.parent)
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    finally:
+        if directory is not None:
+            os.close(directory)
+
+
+def _deferred_references_valid(root: Path, workspace: str, verdicts: list[dict[str, Any]]) -> bool:
+    deferred = [item for item in verdicts if item["verdict"] == "DEFER"]
+    if not deferred:
+        return True
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    try:
+        from ciao.memory_proposals import _one_line, _sidecar_paths
+
+        def evidence(path: Path) -> str:
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                return ""
+            if not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024:
+                raise ValueError("unsafe deferred evidence")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                raw = handle.read(8 * 1024 * 1024 + 1)
+                after = os.fstat(handle.fileno())
+            named = path.lstat()
+            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if (len(raw) > 8 * 1024 * 1024 or not stat.S_ISREG(opened.st_mode) or
+                signature(before) != signature(opened) or signature(opened) != signature(after) or
+                signature(after) != signature(named)):
+                raise ValueError("deferred evidence changed")
+            return raw.decode("utf-8")
+
+        text = evidence(queue)
+        pending = list(walk_proposal_queue(workspace, relative, text))
+        unresolved = []
+        for item in deferred:
+            wanted = item["proposal_ref"]["id"]
+            source = f"learning-review:{item['learning_id']}@{item['entry_revision']}"
+            if any(entry.bullet.kind == "memory" and entry.bullet.source == source and
+                   stable_proposal_id(workspace, relative, entry.bullet.kind, entry.bullet.text,
+                                       entry.bullet.source, 0) == wanted for entry in pending):
+                continue
+            unresolved.append((wanted, source))
+        if not unresolved:
+            for path in _sidecar_paths(queue):
+                try:
+                    mode = path.lstat().st_mode
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise ValueError("unsafe deferred evidence")
+            return True
+        from ciao.proposal_predictions import _cap_invalid_constant, _cap_unique_object
+        matched: set[tuple[str, str]] = set()
+        for path in _sidecar_paths(queue):
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("unsafe deferred evidence")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                while line := handle.readline(2 * 1024 * 1024 + 2):
+                    if len(line) > 2 * 1024 * 1024 + 1 or not line.endswith(b"\n"):
+                        raise ValueError("invalid deferred evidence row")
+                    if not line.strip():
+                        continue
+                    row = json.loads(line.decode("utf-8"), object_pairs_hook=_cap_unique_object,
+                                     parse_constant=_cap_invalid_constant)
+                    if not isinstance(row, dict) or not isinstance(row.get("text"), str) or not row["text"].strip():
+                        raise ValueError("invalid deferred evidence")
+                    ts = row["promoted_at"] if "promoted_at" in row else row.get("dismissed_at")
+                    if ts is not None:
+                        if not isinstance(ts, str):
+                            raise ValueError("invalid decision timestamp")
+                        parsed = datetime.fromisoformat(ts)
+                        if parsed.tzinfo is None or parsed.utcoffset() is None:
+                            raise ValueError("decision timestamp has no timezone")
+                    if row.get("history_only") or ts is None:
+                        continue
+                    identity_text = row.get("identity_text", row["text"])
+                    for wanted, source in unresolved:
+                        identity = row.get("proposal_id")
+                        if (not isinstance(identity, str) or
+                            re.fullmatch(re.escape(wanted) + r"(?::[1-9][0-9]*)?", identity) is None or
+                            row.get("source") != source or row.get("kind") != "memory" or
+                            not isinstance(identity_text, str) or
+                            _one_line(identity_text) != _one_line(row["text"])):
+                            continue
+                        if stable_proposal_id(workspace, relative, row["kind"], identity_text, row["source"], 0) == wanted:
+                            matched.add((wanted, source))
+                after = os.fstat(handle.fileno())
+            named = path.lstat()
+            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if (not stat.S_ISREG(opened.st_mode) or signature(before) != signature(opened) or
+                    signature(opened) != signature(after) or signature(after) != signature(named)):
+                raise ValueError("deferred evidence changed")
+        return all(item in matched for item in unresolved)
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _update_review_evidence(
+    vault_root: Path, *, config: Any, workspace: str, task_revision: int, receipt_name: str,
+    committed: bool, require_suppressions: bool,
+) -> dict[str, Any] | None:
+    """Verify source reconstruction and effects for a committed or pending receipt."""
+    try:
+        root = Path(vault_root)
+        path = _update_binding(root, config, workspace, task_revision, receipt_name)
+        receipt = _update_receipt_read(path)
+        if receipt is None:
+            return None
+        review = receipt.get("automatic_review")
+        if (not isinstance(review, dict) or type(review.get("schema")) is not int or review.get("schema") != 1 or review.get("committed") is not committed or
+            review.get("actor") != _UPDATE_ACTOR or review.get("task_id") != "learnings-cleanup" or
+            type(review.get("task_revision")) is not int or review.get("task_revision") != 3 or
+            review.get("workspace") != workspace or receipt.get("workspace") != workspace or
+            receipt.get("schema_version") != RECEIPT_VERSION or receipt.get("removed_by") != _UPDATE_ACTOR or
+            receipt.get("reviewed") is not False or receipt.get("approvals") != {} or
+            receipt.get("path") != LEARNINGS_RELATIVE or Path(receipt.get("vault_root", "")).resolve() != root.resolve() or
+            not isinstance(review.get("finding_revision"), str) or
+            re.fullmatch(r"[0-9a-f]{64}", review["finding_revision"]) is None):
+            return None
+        current = _load_text(root)
+        if content_revision(current) != receipt.get("revision_after"):
+            return None
+        spans = receipt.get("removals")
+        verdicts = review.get("verdicts")
+        if not isinstance(spans, list) or not isinstance(verdicts, list) or receipt.get("entries_removed") != len(spans):
+            return None
+        if review.get("phase") not in ({"landed"} if committed or spans else {"prepared", "landed"}):
+            return None
+        if any(not isinstance(span, dict) or type(span.get("offset")) is not int or
+               span["offset"] < 0 or span["offset"] > len(current) or
+               not all(isinstance(span.get(k), str) for k in ("from", "before", "after", "learning_id", "entry_revision"))
+               for span in spans):
+            return None
+        restored = current
+        for group in _gap_groups(spans):
+            offset = group[0]["offset"]
+            for span in group:
+                before, after = span["before"], span["after"]
+                if current[max(0, offset - len(before)):offset] != before or current[offset:offset + len(after)] != after:
+                    return None
+            restored = restored[:offset] + "".join(span["from"] for span in group) + restored[offset:]
+        source = content_revision(restored)
+        if source != receipt.get("revision_before") or source != review.get("source_revision"):
+            return None
+        entries = [e for e in parse_learnings(restored, workspace=workspace).entries if e.section == SECTION_ACTIVE]
+        rows: list[CleanupRow] = []
+        for entry in entries:
+            if entry.record is None:
+                return None
+            record = entry.record
+            rows.append(CleanupRow(learning_id=record.learning_id, key=record.key, line=entry.source_text,
+                                   entry_revision=entry_revision(record), action=KEEP, reason="never_proposed",
+                                   start=entry.start, end=entry.end, source_text=entry.source_text))
+        plan = CleanupPlan(workspace=workspace, path=LEARNINGS_RELATIVE, revision=source, kept=tuple(rows))
+        selected = _validate_update_review_inputs(restored, workspace=workspace, source_revision=source,
+                                                  verdicts=verdicts, plan=plan, suppressed=set())
+        fingerprint, finding_records = _finding_dependency_capture(config, workspace)
+        if fingerprint != review["finding_revision"]:
+            return None
+        upstream = _upstream_origins(config, workspace, finding_records[1])
+        selected_ids = {row.learning_id for row in selected}
+        for entry in entries:
+            candidate = entry.record
+            if candidate is None or candidate.learning_id not in selected_ids:
+                continue
+            verdict = _upstream_verdict(_learning_drafts(candidate, upstream), entry_revision(candidate))
+            if verdict.present and (not verdict.decided or verdict.stale):
+                return None
+        if not _deferred_references_valid(root, workspace, verdicts):
+            return None
+        expected_inputs = [{"learning_id": row.learning_id, "entry_revision": row.entry_revision} for row in rows]
+        if review.get("input_entries") != expected_inputs:
+            return None
+        landed, expected_spans = _splice(restored, selected)
+        _with_anchors(expected_spans, landed)
+        if landed != current or spans != expected_spans:
+            return None
+        required = {(row.learning_id, row.entry_revision) for row in selected}
+        suppressions = read_suppressions(root, strict=True)
+        if require_suppressions and not required.issubset(suppressions):
+            return None
+        if committed and (
+            not _update_fence_receipt(path, receipt) or _load_text(root) != current or
+            not required.issubset(read_suppressions(root, strict=True)) or
+            not _deferred_references_valid(root, workspace, verdicts) or
+            _finding_dependency_snapshot(config, workspace) != fingerprint
+        ):
+            return None
+        return {"receipt": receipt_name, "source_revision": source, "revision": content_revision(current),
+                "reviewed": len(rows), "removed": len(selected),
+                "deferred": sum(item["verdict"] == "DEFER" for item in verdicts)}
+    except (ValueError, OSError, TypeError, KeyError, _SuppressionUnreadable):
+        return None
+
+
+def update_review_recorded(
+    vault_root: Path, *, config: Any, workspace: str, task_revision: int, receipt_name: str,
+) -> dict[str, Any] | None:
+    """Verify a committed system receipt against its source, effects and suppressions."""
+    return _update_review_evidence(vault_root, config=config, workspace=workspace, task_revision=task_revision,
+                                   receipt_name=receipt_name, committed=True, require_suppressions=True)
+
+
+def apply_update_review(
+    vault_root: Path, *, config: Any, workspace: str, task_revision: int,
+    source_revision: str, verdicts: list[dict[str, Any]], receipt_path: Path,
+) -> CleanupResult:
+    """Apply a complete system review; this primitive is not an authorization gate."""
+    root = Path(vault_root)
+    receipt_path = Path(receipt_path)
+    expected = _update_binding(root, config, workspace, task_revision, receipt_path.name)
+    if receipt_path.absolute() != expected:
+        raise ValueError("invalid receipt destination")
+    path = learnings_file(root)
+    result: dict[str, Any] = {"workspace": workspace, "path": LEARNINGS_RELATIVE, "applied": False}
+    if not _update_directory_durability_supported():
+        return CleanupResult(**result, failed=("unsupported receipt directory durability",))
+    directory: int | None = None
+    try:
+        with queue_lock(path):
+            text = _load_text(root)
+            try:
+                fingerprint, finding_records = _finding_dependency_capture(config, workspace)
+            except ValueError as exc:
+                raise OSError("finding snapshot unavailable") from exc
+            plan = plan_cleanup(root, workspace=workspace, config=config, finding_records=finding_records)
+            with queue_lock(suppression_path(root)):
+                prior = set(read_suppressions(root, strict=True))
+                selected = _validate_update_review_inputs(text, workspace=workspace, source_revision=source_revision,
+                                                          verdicts=verdicts, plan=plan, suppressed=prior)
+                if not _deferred_references_valid(root, workspace, verdicts):
+                    raise ValueError("DEFER reference is not durable")
+                def finding_snapshot() -> str:
+                    try:
+                        return _finding_dependency_snapshot(config, workspace)
+                    except ValueError as exc:
+                        raise OSError("finding snapshot unavailable") from exc
+
+                if finding_snapshot() != fingerprint:
+                    raise OSError("finding snapshot changed during classification")
+                proposed, spans = _splice(text, selected)
+                _with_anchors(spans, proposed)
+                after = content_revision(proposed)
+                receipt = _build_receipt(plan, spans, vault_root=root.resolve(), before=source_revision, after=after,
+                                         actor=_UPDATE_ACTOR, approvals={}, reviewed=False)
+                entries = [e for e in parse_learnings(text, workspace=workspace).entries if e.section == SECTION_ACTIVE]
+                receipt["automatic_review"] = {
+                    "schema": 1, "actor": _UPDATE_ACTOR, "task_id": "learnings-cleanup",
+                    "task_revision": 3, "workspace": workspace, "source_revision": source_revision,
+                    "input_entries": [{"learning_id": e.record.learning_id, "entry_revision": entry_revision(e.record)}
+                                      for e in entries if e.record is not None],
+                    "verdicts": verdicts, "finding_revision": fingerprint, "committed": False, "phase": "prepared",
+                }
+                result.update(revision_before=source_revision, revision_after=source_revision)
+                directory = _update_receipt_dir(expected.parent, create=True)
+                identity = _update_write_new(directory, expected.name, receipt)
+                result.update(receipt=receipt, receipt_path=str(expected))
+                _update_check_directory(directory, expected.parent)
+                if finding_snapshot() != fingerprint:
+                    raise OSError("finding snapshot changed before write")
+                latest = plan_cleanup(root, workspace=workspace, config=config, finding_records=finding_records)
+                try:
+                    _validate_update_review_inputs(text, workspace=workspace, source_revision=source_revision,
+                                                   verdicts=verdicts, plan=latest, suppressed=set(read_suppressions(root, strict=True)))
+                except ValueError as exc:
+                    raise OSError("classification changed during review") from exc
+                if not _deferred_references_valid(root, workspace, verdicts):
+                    raise OSError("DEFER reference changed")
+                if selected:
+                    _write_locked(path, proposed, expect=source_revision)
+                    result.update(applied=True, revision_after=after, removed=tuple(selected))
+                try:
+                    unchanged = finding_snapshot() == fingerprint
+                except OSError:
+                    unchanged = False
+                if not unchanged:
+                    if selected:
+                        try:
+                            _write_locked(path, text, expect=after)
+                            result.update(applied=False, revision_after=source_revision, removed=())
+                        except (_RevisionMoved, OSError):
+                            pass
+                    raise OSError("finding snapshot changed after write")
+                if not _deferred_references_valid(root, workspace, verdicts):
+                    raise OSError("DEFER reference changed after write")
+                receipt["automatic_review"]["phase"] = "landed"
+                _update_check_directory(directory, expected.parent)
+                identity = _update_commit_receipt(directory, expected.name, identity, receipt)
+                required = {(row.learning_id, row.entry_revision) for row in selected}
+                current = set(read_suppressions(root, strict=True))
+                if len(current | required) > MAX_SUPPRESSED or not prior.issubset(current):
+                    raise OSError("suppression capacity or prior entries changed")
+                if required:
+                    write_suppressions(root, list(required), actor=_UPDATE_ACTOR)
+                if not (prior | required).issubset(read_suppressions(root, strict=True)):
+                    raise OSError("suppression verification failed")
+                committed_receipt = {
+                    **receipt,
+                    "automatic_review": {**receipt["automatic_review"], "committed": True},
+                }
+                _update_check_directory(directory, expected.parent)
+                _update_commit_receipt(directory, expected.name, identity, committed_receipt)
+                if update_review_recorded(root, config=config, workspace=workspace, task_revision=task_revision,
+                                          receipt_name=expected.name) is None:
+                    raise OSError("committed receipt verification failed")
+                result.update(receipt=committed_receipt, suppressed=tuple(sorted(required)))
+    except _RevisionMoved:
+        result["conflicts"] = (REVISION_MOVED,)
+    except (_SuppressionUnreadable, OSError, UnicodeError, QueueLockError) as exc:
+        result["failed"] = (str(exc),)
+    finally:
+        if directory is not None:
+            os.close(directory)
+    return CleanupResult(**result)
+
+
+def recover_update_review(
+    vault_root: Path, *, config: Any, workspace: str, task_revision: int, receipt_name: str,
+) -> CleanupResult:
+    """Explicitly finish an owned pending review after rechecking its evidence."""
+    root = Path(vault_root)
+    receipt_path = _update_binding(root, config, workspace, task_revision, receipt_name)
+    result: dict[str, Any] = {"workspace": workspace, "path": LEARNINGS_RELATIVE, "applied": False}
+    if not _update_directory_durability_supported():
+        return CleanupResult(**result, failed=("unsupported receipt directory durability",))
+    directory: int | None = None
+    try:
+        with queue_lock(learnings_file(root)):
+            with queue_lock(suppression_path(root)):
+                directory = _update_receipt_dir(receipt_path.parent, create=False)
+                info = os.stat(receipt_name, dir_fd=directory, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError("unsafe pending receipt")
+                identity = (info.st_dev, info.st_ino)
+                receipt = _update_receipt_read(receipt_path)
+                if receipt is None or _update_review_evidence(
+                    root, config=config, workspace=workspace, task_revision=task_revision,
+                    receipt_name=receipt_name, committed=False, require_suppressions=False,
+                ) is None:
+                    raise OSError("pending receipt evidence is invalid")
+                review = receipt["automatic_review"]
+                fingerprint, finding_records = _finding_dependency_capture(config, workspace)
+                if fingerprint != review["finding_revision"]:
+                    raise OSError("finding snapshot changed")
+                if not receipt["removals"]:
+                    text = _load_text(root)
+                    plan = plan_cleanup(root, workspace=workspace, config=config, finding_records=finding_records)
+                    _validate_update_review_inputs(
+                        text, workspace=workspace, source_revision=review["source_revision"],
+                        verdicts=review["verdicts"], plan=plan, suppressed=set(read_suppressions(root, strict=True)),
+                    )
+                    if not _deferred_references_valid(root, workspace, review["verdicts"]):
+                        raise OSError("DEFER reference changed")
+                prior = set(read_suppressions(root, strict=True))
+                required = set(_receipt_pairs(receipt))
+                if len(prior | required) > MAX_SUPPRESSED:
+                    raise OSError("suppression capacity exceeded")
+                missing = required - prior
+                if missing:
+                    write_suppressions(root, sorted(missing), actor=_UPDATE_ACTOR)
+                if not (prior | required).issubset(read_suppressions(root, strict=True)):
+                    raise OSError("suppression verification failed")
+                if (_finding_dependency_snapshot(config, workspace) != review["finding_revision"] or
+                    _update_review_evidence(root, config=config, workspace=workspace, task_revision=task_revision,
+                                            receipt_name=receipt_name, committed=False,
+                                            require_suppressions=True) is None or
+                    _update_receipt_read(receipt_path) != receipt):
+                    raise OSError("pending review changed")
+                _update_check_directory(directory, receipt_path.parent)
+                committed = {**receipt, "automatic_review": {**review, "committed": True, "phase": "landed"}}
+                _update_commit_receipt(directory, receipt_name, identity, committed)
+                if update_review_recorded(root, config=config, workspace=workspace,
+                                          task_revision=task_revision, receipt_name=receipt_name) is None:
+                    raise OSError("committed receipt verification failed")
+                result.update(revision_before=receipt["revision_before"], revision_after=receipt["revision_after"],
+                              receipt=committed, receipt_path=str(receipt_path), suppressed=tuple(sorted(required)))
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError, _SuppressionUnreadable, QueueLockError) as exc:
+        result["failed"] = (str(exc),)
+    finally:
+        if directory is not None:
+            os.close(directory)
+    return CleanupResult(**result)
+
+
 def _reapproved(
     row: CleanupRow, approvals: dict[str, dict[str, Any]]
 ) -> bool:
@@ -1714,6 +2535,29 @@ def unmigrate_cleanup(
     apply: bool = False,
     today: date | None = None,
 ) -> dict[str, Any]:
+    if not apply:
+        return _unmigrate_cleanup(vault_root, receipt, apply=False, today=today)
+    try:
+        with queue_lock(learnings_file(Path(vault_root))):
+            with queue_lock(suppression_path(Path(vault_root))):
+                pairs = set(_receipt_pairs(receipt))
+                existing = read_suppressions(Path(vault_root), strict=True)
+                if len(set(existing) | pairs) > MAX_SUPPRESSED:
+                    raise _SuppressionUnreadable("suppression store has insufficient capacity for this undo")
+                return _unmigrate_cleanup(vault_root, receipt, apply=True, today=today)
+    except (QueueLockError, OSError, _SuppressionUnreadable) as exc:
+        return {"vault_root": str(vault_root), "applied": False, "entries_reverted": 0,
+                "reverted": [], "suppressions_kept": [],
+                "failed": [{"path": LEARNINGS_RELATIVE, "error": str(exc)}]}
+
+
+def _unmigrate_cleanup(
+    vault_root: Path,
+    receipt: dict[str, Any],
+    *,
+    apply: bool = False,
+    today: date | None = None,
+) -> dict[str, Any]:
     """Put back every span a cleanup receipt records, exactly.
 
     Exact rather than re-derived: the bytes come from the receipt, so a line the
@@ -1805,8 +2649,23 @@ def unmigrate_cleanup(
     # Restoring the bytes without it would leave a file that has lines back while
     # still dating itself to the day they were taken out, and the shrink is
     # exactly what a reader checking this file is looking for.
-    restored = _restamp(restored, today=today or datetime.now(UTC).date())
+    automatic = receipt.get("automatic_review")
+    system_review = (
+        isinstance(automatic, dict)
+        and automatic.get("schema") == 1
+        and automatic.get("actor") == "system/update-maintenance"
+        and automatic.get("task_id") == "learnings-cleanup"
+        and automatic.get("task_revision") == 3
+        and automatic.get("workspace") == receipt.get("workspace")
+        and receipt.get("removed_by") == "system/update-maintenance"
+        and receipt.get("reviewed") is False
+        and receipt.get("approvals") == {}
+        and content_revision(restored) == receipt.get("revision_before")
+    )
+    if not system_review:
+        restored = _restamp(restored, today=today or datetime.now(UTC).date())
 
+    protected = not apply
     if apply:
         try:
             _write_locked(path, restored, expect=content_revision(text))
@@ -1832,7 +2691,10 @@ def unmigrate_cleanup(
                 _receipt_pairs(receipt),
                 actor=str(receipt.get("removed_by") or "operator"),
             )
-        except (OSError, _SuppressionUnreadable) as exc:
+            protected = set(_receipt_pairs(receipt)) <= set(read_suppressions(root, strict=True))
+            if not protected:
+                raise _SuppressionUnreadable("the suppression store omitted restored entries")
+        except (OSError, _SuppressionUnreadable, QueueLockError) as exc:
             summary["failed"].append(
                 {
                     "path": SUPPRESSION_RELATIVE,
@@ -1843,11 +2705,8 @@ def unmigrate_cleanup(
     summary["reverted"].append(LEARNINGS_RELATIVE)
     summary["suppressions_kept"] = [
         {"learning_id": learning_id, "entry_revision": revision}
-        for learning_id, revision in _receipt_pairs(receipt)
+        for learning_id, revision in (_receipt_pairs(receipt) if protected else [])
     ]
     summary["revision_before"] = content_revision(text)
     summary["revision_after"] = content_revision(restored)
     return summary
-
-
-

@@ -12,10 +12,20 @@ import type { ProposalHistoryRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+const reservationPost = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
-  api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
+  api: { get: apiGet, post: apiPost, postReservation: reservationPost, patch: vi.fn(), del: vi.fn() },
 }))
+
+beforeEach(() => {
+  localStorage.clear()
+  reservationPost.mockReset().mockImplementation(async (url: string, body?: unknown) => {
+    if (url.endsWith('/seal')) return { sealed: true }
+    const scope = body as { workspace?: string }
+    return { id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, scope: { ...scope, workspace: scope.workspace || 'personal' } }
+  })
+})
 
 function historyRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
   return {
@@ -459,10 +469,34 @@ describe('ProposalHistoryList changes and undo', () => {
     expect(apiGet).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1?workspace=personal')
     expect(wrapper.find('.ph-change-line--added').text()).toContain('Remember the thing')
 
-    apiPost.mockResolvedValue({ ok: true } as never)
+    apiPost.mockResolvedValue({ ok: true, id: 'mrcpt_1', workspace: 'personal', receipt: 'mrcpt_1' } as never)
     await wrapper.findAll('.ph-change-actions button').find(b => b.text() === 'undo this change')!.trigger('click')
     await flushPromises()
-    expect(apiPost).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1/undo?workspace=personal')
+    expect(apiPost).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1/undo?workspace=personal', undefined,
+      { headers: { 'X-Ciao-Proposal-Reservation': `${'a'.repeat(32)}.${'b'.repeat(32)}` } })
+    wrapper.unmount()
+  })
+
+  it('shows a reservation failure without sending an undo', async () => {
+    mockHistory(
+      [historyRow({ change: {
+        receipt_id: 'mrcpt_1', kind: 'region_apply', status: 'applied',
+        destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+      } })],
+      {
+        id: 'mrcpt_1', workspace: 'personal', kind: 'region_apply', status: 'applied',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'ciao:memory', fact_text: 'Remember the thing',
+        undoable: true, has_snapshot: true, changed: true, error: '',
+        before: '', after: 'Remember the thing', diff: [{ op: 'added', text: 'Remember the thing' }],
+      },
+    )
+    const wrapper = await openChanges()
+    reservationPost.mockRejectedValueOnce(new Error('offline'))
+    await wrapper.findAll('.ph-change-actions button').find(b => b.text() === 'undo this change')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ph-change-error').text()).toContain('Could not reserve the undo')
+    expect(apiPost).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -544,6 +578,39 @@ describe('ProposalHistoryList changes and undo', () => {
 
     expect(wrapper.find('.ph-change-error').text()).toContain('the destination changed')
     expect(wrapper.find('.ph-change-line--added').text()).toContain('Remember the thing')
+    wrapper.unmount()
+  })
+
+  it('shows an unconfirmed undo and keeps retry blocked when sealing fails', async () => {
+    mockHistory(
+      [historyRow({ change: {
+        receipt_id: 'mrcpt_3', kind: 'region_apply', status: 'applied',
+        destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+      } })],
+      {
+        id: 'mrcpt_3', workspace: 'personal', kind: 'region_apply', status: 'applied',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'ciao:memory', fact_text: 'Remember the thing',
+        undoable: true, has_snapshot: true, changed: true, error: '',
+        before: '- An older fact.', after: '- An older fact.\n- Remember the thing',
+        diff: [{ op: 'added', text: '- Remember the thing' }],
+      },
+    )
+    const wrapper = await openChanges()
+    apiPost.mockRejectedValueOnce(new TypeError('connection lost'))
+    const undo = wrapper.findAll('.ph-change-actions button').find(b => b.text() === 'undo this change')!
+    await undo.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Settlement needs review')
+    expect(wrapper.text()).toContain('mrcpt_3')
+    expect((undo.element as HTMLButtonElement).disabled).toBe(true)
+    await undo.trigger('click')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    reservationPost.mockRejectedValueOnce(new Error('active'))
+    await wrapper.findAll('button').find(b => b.text() === "I've inspected this")!.trigger('click')
+    await flushPromises()
+    expect((undo.element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.text()).toContain('Server completion could not be confirmed')
     wrapper.unmount()
   })
 

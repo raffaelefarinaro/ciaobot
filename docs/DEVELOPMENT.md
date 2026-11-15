@@ -2,6 +2,97 @@
 
 Setup, dev workflow, testing, and change guidelines. For the system design, read `docs/ARCHITECTURE.md` first.
 
+Automatic CLI accepts prepare the selected queue intent before the destination
+write. The journal append flushes and fsyncs its file on Windows and POSIX;
+POSIX also fences the directory entry. The Windows contract is process-crash
+ordering, not a guarantee that a newly created journal name survives power loss.
+An ambiguous intent blocks further automatic accepts; recovery must not infer
+a destination outcome from an unchanged queue.
+
+The accept budget reads both decision sidecars strictly under the queue lock.
+The budget streams them with a 2 MiB per-row limit, including when validating a
+checkpoint. Receipt identities are checked in a private disposable SQLite
+index, with keyed identifiers and encrypted rows; the key exists only in the
+process. It lives in a private per-user system-temp directory outside the
+queue's vault. A stable OS lock serializes creation, use and cleanup; the next
+operation reclaims a fully marked orphan only after validating the recorded file
+identity and private directory contents. Version-2 markers also bind the
+operation directory so cleanup can finish after an index unlink. New work uses
+one reserved slot under the lifetime lock: an unmarked or otherwise ambiguous
+slot is preserved and blocks another index until manually inspected. Old
+unmarked operation directories are also preserved. SQLite journaling is
+disabled and its temporary storage is in
+memory. The lock protects cooperating processes, not a hostile process running
+as the same user. The index uses bounded cache memory and O(N log N) lookups.
+The index owner requires the installed configuration and refuses creation if
+the queue is not registered there or system temp is inside its backup data root
+or any configured vault. The check occurs only when an index is needed.
+
+When the CLI reports an ambiguous checkpoint runtime slot, it prints the local
+absolute slot path. Do not delete it or assume it is disposable: it can contain
+unknown evidence. To inspect it without racing another Ciao process, take the
+existing `guard.lock` in its parent with the same OS lock used by the engine.
+For example, using Ciao's Python on POSIX, replace the argument with the exact
+reported path:
+
+```sh
+python - "/absolute/reported/slot" <<'PY'
+import os, stat, sys
+from pathlib import Path
+from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import is_private_descriptor_strict
+slot = Path(sys.argv[1])
+guard = slot.parent / "guard.lock"
+fd = os.open(guard, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+try:
+    st, named = os.fstat(fd), guard.lstat()
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or
+        (st.st_dev, st.st_ino) != (named.st_dev, named.st_ino) or not is_private_descriptor_strict(fd)):
+        raise RuntimeError("unsafe guard; stop and inspect manually")
+    lock_exclusive(fd, blocking=False)
+    try:
+        input(f"Guard held. Inspect {slot} in another terminal; press Enter when finished. ")
+    finally:
+        unlock(fd)
+finally:
+    os.close(fd)
+PY
+```
+
+If the lock is held, do not proceed: an operation may be active. While holding
+it, inspect the slot and preserve anything whose ownership is uncertain. Only
+after an informed operator has decided to retain the evidence elsewhere may
+they move or rename that exact slot out of the runtime directory; Ciao never
+automatically removes ambiguous contents. Release the guard, then retry. On
+Windows use the same `ciao.os_support.locks` API from the installed Python;
+native Windows recovery has not been verified.
+Compaction fences the same streamed
+sidecars before replacing the journal; it has no total sidecar-size limit. Other
+history readers stay unchanged. It
+counts each valid agent promotion row, including legacy rows and
+history-only rows, whose timezone-aware timestamp is at or after the observed
+lease start. Equal timestamps remain separate events. Once a compaction
+checkpoint is installed, exact repeated receipt identities count once; a receipt
+ID is usable only after matching its selected proposal and decision provenance.
+Legacy events without one use their sidecar suffix, row ordinal and exact row
+digest. Automatic accepts hold the queue lock then the curation state lock from
+lease admission through receipt and decision settlement. A live lease at
+admission permits settlement even if its TTL expires during the write; a new
+lease waits. A crash releases the lock and unresolved intent blocks later
+accepts. Future-dated events count conservatively and a lease whose start is in
+the future refuses admission. A decision timestamp earlier than its recorded
+admission blocks later accepts and cannot be compacted away. Do not prune based
+on one observed lease or collapse equal-time events.
+
+When the journal exceeds its ordinary retention target, the accept gate may
+compact old verified agent receipts under the queue lock then journal lock. It
+fences the exact sidecar files, installs a checkpoint through a private fsynced
+temporary file and atomic replacement, and also fences the directory on POSIX.
+Unresolved or invalid evidence stays; missing or changed sidecars refuse
+automatic accepts. Compaction streams at most 256 MiB of existing journal data
+(64 MiB per row) and refuses larger inputs rather than guessing. Windows uses
+file fences and process-crash ordering, not a directory power-loss guarantee.
+
 Provider-settings regressions cover saved defaults and effort options even when
 catalog refresh fails. Automatic Session insights inherits the source chat model
 for archive memory, titles and schedule attention; an explicit per-provider
@@ -1064,8 +1155,9 @@ while the server is running, because the live schedule store may be writing it.
   `npm run build` and a package smoke test of the built wheel, about 3
   minutes). For a PR into `develop` whose three-dot diff from its base changes
   `web/`, `linux-e2e` runs alongside `linux-web`, after the fast `web-scope`
-  detector: it installs Chromium on Ubuntu
-  and runs `npm run test:e2e` from the PR merge checkout. That command's npm
+  detector: it installs Chromium and the Python package for the isolated
+  real-server proposal test; other browser tests use the synthetic Node fixture.
+  It runs `npm run test:e2e` from the PR merge checkout. That command's npm
   prehook builds both the PWA and terminal harness from the tested checkout.
   PRs without a `web/` change run only the scope-validation step. A detector
   failure fails the stable `linux-e2e` check rather than silently skipping it.
@@ -1740,6 +1832,36 @@ receipt must carry the revision it left, while a fully reviewed no-op removed
 nothing and matches on the revision it read. A receipt persisted before a write
 that never happened names the untouched file on that first side, which is exactly
 why it does not count.
+
+**Dormant system-review prerequisite.** `apply_update_review`,
+`update_review_recorded` and `recover_update_review` are Python primitives only:
+no launcher, catalog task or CLI invokes them. A system receipt is attributed to
+`system/update-maintenance`, not a person, and never satisfies the existing
+attended-review check. Its input covers every readable Active entry; DEFER requires
+the corresponding durable Memory proposal or a real matching decision. The
+content-non-mutating verifier checks the landed document, reconstructed source,
+removals and suppressions; recovery explicitly repairs a validated pending receipt.
+Queue resolution receipts can preserve a caller-selected proposal's exact ID and
+original source after validating them against the locked queue before-image.
+Interrupted outcome recovery uses those fields rather than treating the operator
+route as the proposal source; older receipts without proof are not backfilled.
+
+The system path records and syncs its private pending receipt before changing the
+note, then commits only after its checks. Its finding fingerprint is optimistic:
+it detects changes between observations, not an ABA change and reversal, and it
+does not serialize finding writers. System-receipt undo restores the original
+bytes including frontmatter; legacy cleanup undo still restamps `updated:`.
+The dormant transaction is POSIX-only: native Windows directory durability is
+currently unsupported, so automatic cleanup is not enabled there and the system
+path fails before changing a note. Win32 type checking is not native durability
+proof; native Windows CI must still run the generic, refusal and legacy tests.
+Pending removal receipts distinguish `prepared` from `landed`: a prepared
+receipt cannot be recovered merely because another writer produced the same
+after-image. A crash before the landed phase is durable requires manual inspection
+and retains the undo receipt. The verifier fsyncs the exact private receipt and
+its anchored parent, then rechecks identity and effects. A failed fence refuses
+completion; a later successful fence proves durability then, not that an earlier
+failed apply succeeded.
 
 `Learnings.md` is bookkeeping rather than an entity note here too, so this is
 deliberately *not* a `commit_note_change`; see `ciao/learnings_cleanup.py` for why

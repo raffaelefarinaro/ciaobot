@@ -5469,6 +5469,15 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 return 1
         resolved_text = parsed.text
         resolved_kind = parsed.kind
+        selected = None
+        if name:
+            from ciao.proposal_tracking import walk_proposal_queue
+            relative = Path(name).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+            picked = next((item for item in walk_proposal_queue(name, relative, path.read_text(encoding="utf-8"))
+                           if item.line == next(iter(union))), None)
+            if picked is not None:
+                selected = {"line": picked.line, "id": picked.proposal_id, "kind": picked.bullet.kind,
+                            "text": picked.bullet.text, "source": picked.bullet.source}
         # The removal keeps using the caller's needle (in whichever form
         # matched), not the resolved text: `remove_proposal_by_substring`
         # matches substrings over whole lines, so handing it the row's full
@@ -5483,6 +5492,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         # surface can reverse a dismissal the curator made.
         from ciao.memory_receipts import QueueReceiptUnavailable
 
+        removed = None
+        resolution: dict[str, Any] = {}
         try:
             with queue_resolution(
                 path,
@@ -5491,17 +5502,50 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 promoted=bool(args.promoted),
                 actor="agent",
                 source="cli",
-                workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
+                workspace=name or "",
                 vault_root=vault,
-            ):
+                selected=selected,
+                decision_via="agent",
+                decision_reason=reason,
+            ) as resolution:
                 removed = remove_proposal_by_substring(path, removal_needle)
-        except QueueReceiptUnavailable as exc:
+                if removed is not None:
+                    resolution["owner_landed"] = True
+        except (QueueReceiptUnavailable, OSError) as exc:
+            if removed is not None and resolution.get("owner_landed"):
+                kind, removed_text = removed
+                try:
+                    proposal_actions.record_decision(
+                        path, action="accept" if args.promoted else "dismiss",
+                        text=removed_text, kind=kind, via="agent", source=parsed.source,
+                        proposal_id=str(selected["id"]) if selected else "",
+                        queue_receipt_id=str(resolution.get("id", "")), reason=reason,
+                    )
+                except (OSError, ValueError) as decision_exc:
+                    print("the proposal was removed, but neither the decision nor the queue receipt "
+                          f"could be confirmed; inspect before retrying: {decision_exc}", file=sys.stderr)
+                    return 1
+                print("the proposal was removed and its decision recorded, but durable queue receipt "
+                      f"confirmation failed; inspect before retrying: {exc}", file=sys.stderr)
+                return 1
             print(
-                f"the memory receipt journal is unavailable; "
-                f"the proposal was not removed: {exc}",
+                f"queue removal could not be confirmed; inspect before retrying: {exc}",
                 file=sys.stderr,
             )
             return 1
+        if removed is not None:
+            kind, removed_text = removed
+            try:
+                proposal_actions.record_decision(
+                    path, action="accept" if args.promoted else "dismiss",
+                    text=removed_text, kind=kind, via="agent", source=parsed.source,
+                    proposal_id=str(selected["id"]) if selected else "",
+                    queue_receipt_id=str(resolution.get("id", "")), reason=reason,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"the proposal was removed, but decision recording failed; "
+                      f"inspect the queue and receipt before retrying: {exc}", file=sys.stderr)
+                return 1
     if removed is None:
         print(
             f"No unique memory proposal matched {needle!r} "
@@ -5521,14 +5565,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # the agent filed itself, and hid it from the review page's History tab
     # as an accepted row. The curator files a fact first and dismisses second,
     # so that flow is a promotion; only a bare rejection is a dismissal.
-    proposal_actions.record_decision(
-        path,
-        action="accept" if args.promoted else "dismiss",
-        text=removed_text,
-        kind=kind,
-        via="agent",
-        reason=reason,
-    )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
         # dismissed by a disambiguating fragment (`(from: Alpha)`), and handing
@@ -5684,9 +5720,10 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     if refused is not None:
         return refused
     from ciao import proposal_actions
+    from ciao.curation_run import _state_lock, load_state
     from ciao.fact_candidates import external_anchor
-    from ciao.memory_proposals import accept_region_fact, remove_proposal_by_substring
-    from ciao.memory_receipts import QueueReceiptUnavailable, queue_lock, queue_resolution
+    from ciao.memory_proposals import accept_region_fact, find_proposal_matches, remove_proposal_by_substring
+    from ciao.memory_receipts import QueueReceiptUnavailable, queue_lock, queue_resolution, require_selected_queue_image
     from ciao.memory_tool import ensure_regions
 
     workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
@@ -5698,112 +5735,145 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         f"No unique memory proposal matched {_clip(needle)!r} "
         "(the text may be ambiguous or absent)."
     )
-    with queue_lock(path):
+    with queue_lock(path), _state_lock(vault):
         matched = _match_one_row(path, needle)
         if matched is None:
             print(no_match, file=sys.stderr)
             return 1
         bullet, removal_needle = matched
-        refusal = _handover_gate(workspace, name, path, bullet, "accept")
+        try:
+            from ciao import memory_proposals
+            for sidecar in memory_proposals._sidecar_paths(path):
+                try:
+                    sidecar.lstat()
+                except FileNotFoundError:
+                    continue
+                for _row in memory_proposals.DecisionSidecarStream(sidecar):
+                    pass
+            refusal = _handover_gate(workspace, name, path, bullet, "accept")
+        except (OSError, ValueError, UnicodeError):
+            refusal = "the decision or prediction sidecar cannot be verified"
         if refusal:
             print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
+        try:
+            require_selected_queue_image(path.read_text(encoding="utf-8"))
+        except QueueReceiptUnavailable as exc:
+            print(f"handover refused: {exc}", file=sys.stderr)
             return 1
         # At most HANDOVER_ACCEPT_CAP accepts per curation run, counted from the
         # sidecar's agent decisions since the live lease began. The lease is
         # server-written state, so the count cannot be reset from the argument
         # list; a run with no live lease may not accept at all.
-        refusal = _handover_accept_budget(vault, path)
+        trusted = trusted_registry(name, vault)
+        if trusted is None or name is None:
+            print("handover refused: the installed registry changed underneath", file=sys.stderr)
+            return 1
+        refusal = _handover_accept_budget(vault, path, config=trusted)
         if refusal:
             print(f"handover refused: {refusal}", file=sys.stderr)
             return 1
-    # Not written under the queue lock: the PWA writes the region and then takes
-    # the queue lock, and the region write takes the guide lock. The guide comes
-    # from the installed registry the gate just verified, not from --workspace.
-    trusted = trusted_registry(name, vault)
-    if trusted is None or name is None:
-        print("handover refused: the installed registry changed underneath", file=sys.stderr)
-        return 1
-    guide = guide_path(trusted.agent_root(name))
-    try:
-        ensure_regions(guide)
-    except (OSError, ValueError) as exc:
-        print(f"could not prepare {guide}: {exc}", file=sys.stderr)
-        return 1
-    receipt: dict[str, Any] = {}
-    try:
-        outcome, _written = accept_region_fact(
-            guide_path=guide,
-            target=bullet.kind,
-            text=bullet.text,
-            vault_root=vault,
-            actor="agent",
-            source="cli",
-            workspace=name or "",
-            source_section=external_anchor(bullet.source) or "review",
-            receipt_out=receipt,
-        )
-    except (ValueError, OSError) as exc:
-        print(f"could not write ciao:{bullet.kind}: {exc}", file=sys.stderr)
-        return 1
-    if outcome not in ("written", "duplicate"):
-        messages = {
-            "unshaped": "this reads as an event, not a standing rule; it stays queued",
-            "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
-            "deferred": (
-                f"this fact may supersede an entry already in ciao:{bullet.kind}; "
-                "it stays queued"
-            ),
-        }
-        print(
-            f"handover refused: {messages.get(outcome, f'could not write ciao:{bullet.kind}')}",
-            file=sys.stderr,
-        )
-        return 1
-    with queue_lock(path):
-        again = _match_one_row(path, needle)
-        if (
-            again is None
-            or again[0].kind != bullet.kind
-            or again[0].text != bullet.text
-        ):
-            print(
-                "the fact was written but the queue row moved; it stays queued",
-                file=sys.stderr,
-            )
+        admission = load_state(vault).lease
+        if not isinstance(admission.get("started_at"), str) or not admission["started_at"]:
+            print("handover refused: the admitted lease cannot be verified", file=sys.stderr)
             return 1
+        # Queue authority precedes the guide lock; no await occurs in this path.
+        guide = guide_path(trusted.agent_root(name))
+        from ciao.proposal_tracking import walk_proposal_queue
+        relative = Path(name).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+        matching = find_proposal_matches(path, removal_needle)
+        picked = next((item for item in walk_proposal_queue(name, relative, path.read_text(encoding="utf-8"))
+                       if len(matching) == 1 and item.line == matching[0]), None)
+        if picked is None:
+            print(no_match, file=sys.stderr)
+            return 1
+        selected = {"line": picked.line, "id": picked.proposal_id, "kind": picked.bullet.kind,
+                    "text": picked.bullet.text, "source": picked.bullet.source}
+        receipt: dict[str, Any] = {}
+        resolution: dict[str, Any] = {}
+        removed = None
+        outcome = ""
+        destination_started = False
         try:
             with queue_resolution(
-                path,
-                removed_text=bullet.text,
-                kind=bullet.kind,
-                promoted=True,
-                actor="agent",
-                source="cli",
-                workspace=name or "",
-                vault_root=vault,
-            ):
-                removed = remove_proposal_by_substring(path, again[1])
-        except QueueReceiptUnavailable as exc:
-            print(
-                f"the memory receipt journal is unavailable; "
-                f"the proposal was not removed: {exc}",
-                file=sys.stderr,
-            )
+                path, removed_text=bullet.text, kind=bullet.kind, promoted=True,
+                actor="agent", source="cli", workspace=name, vault_root=vault, selected=selected,
+                decision_via="agent", decision_destination=f"ciao:{bullet.kind}",
+                destination_intent=True,
+                admission_started_at=str(admission["started_at"]),
+            ) as resolution:
+                destination_started = True
+                ensure_regions(guide)
+                outcome, _written = accept_region_fact(
+                    guide_path=guide, target=bullet.kind, text=bullet.text, vault_root=vault,
+                    actor="agent", source="cli", workspace=name,
+                    source_section=external_anchor(bullet.source) or "review", receipt_out=receipt,
+                )
+                if outcome not in ("written", "duplicate"):
+                    resolution["destination_refused"] = True
+                    messages = {
+                        "unshaped": "this reads as an event, not a standing rule; it stays queued",
+                        "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
+                        "deferred": f"this fact may supersede an entry already in ciao:{bullet.kind}; it stays queued",
+                    }
+                    print(f"handover refused: {messages.get(outcome, f'could not write ciao:{bullet.kind}')}",
+                          file=sys.stderr)
+                    return 1
+                resolution["decision_outcome"] = outcome
+                resolution["decision_receipt_id"] = str(receipt.get("id", ""))
+                removed = remove_proposal_by_substring(path, removal_needle)
+                if removed is not None:
+                    resolution["owner_landed"] = True
+        except (QueueReceiptUnavailable, OSError, ValueError) as exc:
+            if removed is not None and resolution.get("owner_landed"):
+                try:
+                    proposal_actions.record_decision(
+                        path, action="accept", text=removed[1], kind=removed[0], via="agent",
+                        source=bullet.source, proposal_id=str(selected["id"]),
+                        destination=f"ciao:{bullet.kind}", outcome=outcome,
+                        receipt_id=str(receipt.get("id", "")),
+                        queue_receipt_id=str(resolution.get("id", "")),
+                    )
+                except (OSError, ValueError) as decision_exc:
+                    print(f"destination ciao:{bullet.kind}: {outcome}; proposal removed, but neither the "
+                          f"decision nor queue receipt could be confirmed. The automatic accept cap may "
+                          f"not count this accept; inspect before retrying: {decision_exc}", file=sys.stderr)
+                    return 1
+                print(f"destination ciao:{bullet.kind}: {outcome}; proposal removed and decision recorded, "
+                      f"but durable queue receipt confirmation failed; inspect before retrying: {exc}",
+                      file=sys.stderr)
+                return 1
+            if destination_started:
+                print(
+                    f"destination ciao:{bullet.kind}: {outcome or 'unconfirmed'}; "
+                    f"inspect the destination and queue before retrying: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"handover refused before destination write: {exc}", file=sys.stderr)
             return 1
-    if removed is None:
-        print(no_match, file=sys.stderr)
-        return 1
-    proposal_actions.record_decision(
-        path,
-        action="accept",
-        text=removed[1],
-        kind=removed[0],
-        via="agent",
-        source=bullet.source,
-        destination=f"ciao:{bullet.kind}",
-        outcome="duplicate" if outcome == "duplicate" else "written",
-        receipt_id=str(receipt.get("id", "")),
-    )
+        if removed is None:
+            print(f"destination ciao:{bullet.kind}: {outcome}; queue removal was not confirmed. "
+                  "Inspect the destination and queue before retrying.", file=sys.stderr)
+            return 1
+        try:
+            proposal_actions.record_decision(
+                path,
+                action="accept",
+                text=removed[1],
+                kind=removed[0],
+                via="agent",
+                source=bullet.source,
+                proposal_id=str(selected["id"]) if selected else "",
+                destination=f"ciao:{bullet.kind}",
+                outcome="duplicate" if outcome == "duplicate" else "written",
+                receipt_id=str(receipt.get("id", "")),
+                queue_receipt_id=str(resolution.get("id", "")),
+            )
+        except (OSError, ValueError) as exc:
+            print(f"destination ciao:{bullet.kind}: {outcome}; proposal removed, but decision recording "
+                  f"failed. Inspect the destination, queue and receipt before retrying: {exc}", file=sys.stderr)
+            return 1
     if args.json:
         _emit_json(
             {
@@ -6184,10 +6254,94 @@ def _proposal_needle(args: argparse.Namespace) -> str | None:
     return needle
 
 
-def _handover_accept_budget(vault: Path, queue: Path) -> str:
+def _stream_uncheckpointed_decisions(
+    queue: Path, receipts: list[dict[str, Any]], started: datetime.datetime, *, expect_current: bool,
+    identities: dict[str, tuple[int, int, int, int, int] | None] | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
+    from ciao import memory_proposals
+
+    wanted: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    ids = {str(row["id"]) for row in receipts}
+    for row in receipts:
+        proofs = row.get("selected_proposals") or [row]
+        if not isinstance(proofs, list):
+            raise ValueError("invalid selected proposals")
+        for proof in proofs:
+            if not isinstance(proof, dict):
+                raise ValueError("invalid selected proposal")
+            via = proof.get("decision_via")
+            if via:
+                action = "accepted" if proof.get("promoted", row.get("promoted")) else "dismissed"
+                key = (str(row["id"]), str(proof.get("proposal_id", "")), str(via), action)
+                wanted.setdefault(key, []).append(proof)
+    # Each journal-backed proof needs at most a matching row and timestamp extrema.
+    representatives: dict[tuple[Any, ...], dict[str, Any]] = {}
+    accepted = 0
+    for index, sidecar in enumerate(memory_proposals._sidecar_paths(queue)):
+        suffix = (".dismissed.jsonl", ".dismissed.log")[index]
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            if identities is not None and identities[suffix] is not None:
+                raise ValueError("decision sidecar disappeared")
+            if index == 0 and expect_current:
+                raise ValueError("expected decision sidecar is missing")
+            continue
+        expected = None if identities is None else identities[suffix]
+        if identities is not None and expected is None:
+            raise ValueError("decision sidecar appeared")
+        for _ordinal, entry, _digest in memory_proposals.DecisionSidecarStream(sidecar, expected_identity=expected):
+            if "promoted_at" in entry:
+                ts, action = str(entry["promoted_at"]), "accepted"
+            elif "dismissed_at" in entry:
+                ts, action = str(entry["dismissed_at"]), "dismissed"
+            else:
+                ts, action = "", "dismissed"
+            via = str(entry.get("via", ""))
+            if via == "agent" and action == "accepted" and datetime.datetime.fromisoformat(ts) >= started:
+                accepted += 1
+            rid = str(entry.get("queue_receipt_id", ""))
+            if rid not in ids or entry.get("history_only"):
+                continue
+            d = {
+                "ts": ts, "action": action, "via": via, "queue_receipt_id": rid,
+                "proposal_id": str(entry.get("proposal_id", "")),
+                "identity_text": entry.get("identity_text", entry.get("text", "")),
+                "source": str(entry.get("source", "")), "kind": str(entry.get("kind", "")),
+            }
+            key = (rid, d["proposal_id"], via, action)
+            if key in wanted:
+                for direction in ("min", "max"):
+                    slot = (key, direction)
+                    old = representatives.get(slot)
+                    if via == "agent" and old is not None:
+                        current_time = datetime.datetime.fromisoformat(ts)
+                        old_time = datetime.datetime.fromisoformat(str(old["ts"]))
+                        earlier = current_time < old_time
+                        later = current_time > old_time
+                    else:
+                        earlier = old is not None and ts < old["ts"]
+                        later = old is not None and ts > old["ts"]
+                    if old is None or (earlier if direction == "min" else later):
+                        representatives[slot] = d
+                for number, proof in enumerate(wanted[key]):
+                    if (d["identity_text"] == proof.get("proposal_text")
+                            and d["source"] == proof.get("proposal_source")
+                            and d["kind"] == proof.get("proposal_kind")):
+                        representatives[(key, "proof", number)] = d
+            if via == "agent" and action == "accepted":
+                accepted_slot = (rid, "accepted")
+                old = representatives.get(accepted_slot)
+                if old is None or datetime.datetime.fromisoformat(ts) > datetime.datetime.fromisoformat(old["ts"]):
+                    representatives[accepted_slot] = d
+    return accepted, list(representatives.values())
+
+
+def _handover_accept_budget(vault: Path, queue: Path, *, config: Any) -> str:
     """``""`` while this curation run may still accept, else why not."""
     from ciao.curation_run import active_lease
-    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
+    from ciao import memory_proposals, memory_receipts
+    from ciao.proposal_predictions import CapSlotNeedsInspection, HANDOVER_ACCEPT_CAP, stream_checkpoint_events
 
     lease = active_lease(vault)
     if lease is None:
@@ -6198,7 +6352,113 @@ def _handover_accept_budget(vault: Path, queue: Path) -> str:
         return "the curation lease has no readable start time"
     if started.tzinfo is None:
         started = started.replace(tzinfo=datetime.UTC)
-    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
+    try:
+        memory_receipts.compact_cap_checkpoint(queue, vault, config=config)
+        gate_rows = memory_receipts.selected_queue_receipts_for_gate(memory_receipts.journal_path(vault, None))
+        checkpoints = [row for row in gate_rows if row.get("kind") == "cap_event_checkpoint"]
+        if len(checkpoints) > 1:
+            return "multiple cap checkpoints need inspection before automatic accepts"
+        receipts = [row for row in gate_rows if row.get("kind") == "queue_resolve"]
+        for row in receipts:
+            status = row.get("status")
+            if (status == memory_receipts.ROLLED_BACK and row.get("destination_intent") is True
+                    and row.get("destination_refused") is not True):
+                return "a rolled-back destination intent is unresolved; inspect it before automatic accepts"
+            if (status == memory_receipts.ROLLED_BACK and row.get("source") == "cli"
+                    and row.get("actor") == "agent" and row.get("promoted")
+                    and row.get("decision_outcome") in ("written", "duplicate")):
+                return "a rolled-back queue receipt has an unresolved destination outcome; inspect it before automatic accepts"
+            if status not in (memory_receipts.APPLIED, memory_receipts.ROLLED_BACK,
+                              memory_receipts.FAILED, memory_receipts.UNDONE):
+                return "an unresolved selected queue receipt needs inspection before automatic accepts"
+            if status == memory_receipts.APPLIED:
+                after = row.get("after_text")
+                if (row.get("owner_landed") is not True or not isinstance(after, str)
+                        or row.get("after_revision") != memory_receipts.content_revision(after)
+                        or not memory_receipts._selected_queue_effect(row, after, pending=False)):
+                    return "a selected queue receipt lacks valid landing proof; inspect it before automatic accepts"
+        expect_current = any(
+            row.get("status") == memory_receipts.APPLIED and row.get("owner_landed") is True
+            and (row.get("decision_via") or
+                 any(isinstance(proof, dict) and proof.get("decision_via")
+                     for proof in (row.get("selected_proposals") or [])))
+            for row in receipts
+        )
+        try:
+            if checkpoints:
+                checkpoint_events, identities = stream_checkpoint_events(queue, checkpoints[0], gate_rows, config=config)
+                streamed_accepted, decisions = _stream_uncheckpointed_decisions(
+                    queue, receipts, started, expect_current=bool(expect_current), identities=identities,
+                )
+            else:
+                streamed_accepted, decisions = _stream_uncheckpointed_decisions(
+                    queue, receipts, started, expect_current=bool(expect_current),
+                )
+                checkpoint_events = None
+        except CapSlotNeedsInspection as exc:
+            return f"{exc}; inspect it before retrying"
+        except (OSError, ValueError, UnicodeError, TypeError):
+            if checkpoints:
+                return "the cap checkpoint cannot be verified; inspect it before automatic accepts"
+            return "the decision sidecar cannot be verified; inspect it before automatic accepts"
+        for row in receipts:
+            if row.get("status") != memory_receipts.APPLIED or row.get("owner_landed") is not True:
+                continue
+            proofs = row.get("selected_proposals") or [row]
+            if not isinstance(proofs, list):
+                return "the decision receipt cannot be verified; inspect it before automatic accepts"
+            for proof in proofs:
+                if not isinstance(proof, dict):
+                    return "the decision receipt cannot be verified; inspect it before automatic accepts"
+                via = proof.get("decision_via")
+                if not via:
+                    continue
+                promoted = proof.get("promoted", row.get("promoted"))
+                action = "accepted" if promoted else "dismissed"
+                if not any(
+                    d.get("queue_receipt_id") == row["id"] and d.get("proposal_id") == proof.get("proposal_id")
+                    and d.get("identity_text") == proof.get("proposal_text")
+                    and d.get("source") == proof.get("proposal_source")
+                    and d.get("kind") == proof.get("proposal_kind")
+                    and d.get("via") == via and d.get("action") == action
+                    for d in decisions
+                ):
+                    return "an expected decision is missing; inspect or recover it before automatic accepts"
+                admission_started_at = row.get("admission_started_at")
+                if admission_started_at and via == "agent":
+                    floor = datetime.datetime.fromisoformat(str(admission_started_at))
+                    matching_times = [
+                        datetime.datetime.fromisoformat(str(d["ts"])) for d in decisions
+                        if d.get("queue_receipt_id") == row["id"] and d.get("proposal_id") == proof.get("proposal_id")
+                        and d.get("via") == "agent" and d.get("action") == action
+                    ]
+                    if floor.tzinfo is None or any(t.tzinfo is None or t < floor for t in matching_times):
+                        return "an automatic decision predates its admission; inspect the system clock"
+        for row in receipts:
+            if (row.get("status") != memory_receipts.APPLIED or row.get("source") != "cli"
+                    or row.get("actor") != "agent" or not row.get("promoted")):
+                continue
+            when = datetime.datetime.fromisoformat(str(row.get("ts", "")))
+            if when.tzinfo is None:
+                raise ValueError("receipt has no timezone")
+            if when < started.replace(microsecond=0):
+                continue
+            matching = [d for d in decisions if d.get("queue_receipt_id") == row["id"]
+                        and d.get("action") == "accepted" and d.get("via") == "agent"]
+            if not any(datetime.datetime.fromisoformat(str(d.get("ts", ""))) >= started for d in matching):
+                return "an automatic accept receipt has no confirmed decision; inspect or recover it first"
+    except CapSlotNeedsInspection as exc:
+        return f"{exc}; inspect it before retrying"
+    except (OSError, ValueError, UnicodeError, TypeError):
+        return "the receipt journal cannot be verified; inspect it before automatic accepts"
+    if started > datetime.datetime.now(datetime.UTC):
+        return "the curation lease starts in the future; inspect the system clock before automatic accepts"
+    if checkpoint_events is not None:
+        accepted = sum(1 for event in checkpoint_events
+                       if datetime.datetime.fromisoformat(str(event["timestamp"])) >= started)
+    else:
+        accepted = streamed_accepted
+    if accepted >= HANDOVER_ACCEPT_CAP:
         return f"this curation run already accepted its cap of {HANDOVER_ACCEPT_CAP} facts"
     return ""
 
@@ -6244,6 +6504,7 @@ def _handover_gate(
     from ciao.proposal_predictions import (
         REGION_KINDS,
         handover_allows,
+        latest_accept_prediction,
         latest_predictions,
         prediction_key,
     )
@@ -6260,7 +6521,8 @@ def _handover_gate(
     handover = registered.memory_handover if registered is not None else "off"
     if not handover_allows(handover, verdict):
         return f"the workspace handover is {handover}, which does not allow {verdict}"
-    predicted = latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text))
+    predicted = (latest_accept_prediction(queue, bullet.kind, bullet.text) if verdict == "accept"
+                 else latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text)))
     if predicted is None or predicted.get("verdict") != verdict:
         return f"no stored {verdict} prediction for this row"
     return ""

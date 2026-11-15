@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The review queue's filter state.
  *
@@ -11,10 +12,29 @@ import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
 import { useProposalsStore } from './proposals'
 import type { ProposalHistoryRow, ProposalPreview, ProposalRow, ProposalsResponse } from '../lib/types'
+const reservationHeaders = { headers: { 'X-Ciao-Proposal-Reservation': `${'a'.repeat(32)}.${'b'.repeat(32)}` } }
 
 vi.mock('../lib/api', () => ({
-  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
+  api: { get: vi.fn(), post: vi.fn(), postReservation: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
+
+beforeEach(() => {
+  localStorage.clear()
+  vi.mocked(api.postReservation).mockReset().mockImplementation(async (url: string, body?: unknown) => {
+    if (url.endsWith('/seal')) return { sealed: true }
+    const scope = body as { kind?: string; workspace?: string; destination?: string; targets?: string[] }
+    return { id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, ...(scope.kind === 'sweep'
+      ? { scope: { ...scope, workspaces: ['personal', 'work'] } }
+      : scope.kind === 'undo' ? { scope: { ...scope, workspace: scope.workspace || 'personal' } }
+      : scope.kind === 'batch_accept'
+        ? { scope: { ...scope, destinations: Object.fromEntries(useProposalsStore().rows
+          .filter(row => scope.targets?.includes(row.id) && row.kind === 'rehome')
+          .map(row => [row.id, scope.workspace || 'work'])) } }
+      : scope.kind === 'batch_dismiss' ? { scope }
+      : scope.kind === 'row_accept' && scope.destination !== undefined
+        ? { scope: { ...scope, destination: scope.destination || 'work' } } : {}) }
+  })
+})
 
 function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
   return {
@@ -28,6 +48,826 @@ function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
     ...overrides,
   }
 }
+
+describe('partial settlement guards', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.get).mockReset()
+  })
+
+  it('defers a batch seal until every unresolved sibling is inspected, including across reload', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'a' }), row({ id: 'b', workspace: 'work' }), row({ id: 'c', workspace: 'work' })]
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, results: [
+      { id: 'a', action: 'accept', dismissed: true },
+      { id: 'b', action: 'accept', dismissed: false, queue_settled: false },
+      { id: 'c', action: 'accept', dismissed: false, queue_settled: false },
+    ] })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    await store.batch(['a', 'b', 'c'], 'accept', 'work')
+    expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations', {
+      kind: 'batch_accept', workspace: 'work', targets: ['a', 'b', 'c'], workspaces: ['personal', 'work'],
+    })
+    expect(api.post).toHaveBeenCalledWith('/api/proposals/batch', expect.anything(), reservationHeaders)
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.a).toBeDefined()
+    expect(store.partialWarnings.b).toBeDefined()
+    expect(store.partialWarnings.c).toBeDefined()
+    await store.acknowledgePartial('b')
+    expect(store.partialWarnings.b).toBeDefined()
+    expect(store.partialWarnings.c).toBeDefined()
+    expect(vi.mocked(api.postReservation).mock.calls.some(([url]) => url.endsWith('/seal'))).toBe(false)
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.b).toBeDefined()
+    await store.acknowledgePartial('c')
+    expect(store.partialWarnings.a).toBeUndefined()
+    expect(store.partialWarnings.b).toBeUndefined()
+    expect(store.partialWarnings.c).toBeUndefined()
+    expect(vi.mocked(api.postReservation).mock.calls.filter(([url]) => url.endsWith('/seal'))).toHaveLength(1)
+  })
+
+  it('retains all batch markers when the shared operation is active or sealing is lost', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'a' }), row({ id: 'b', workspace: 'work' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.batch(['a', 'b'], 'dismiss')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    await store.acknowledgePartial('a')
+    expect(store.partialWarnings.a).toBeDefined()
+    expect(store.partialWarnings.b).toBeDefined()
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new Error('active'))
+    await store.acknowledgePartial('b')
+    expect(store.intentLockError).toContain('could not be confirmed')
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new TypeError('seal response lost'))
+    await store.acknowledgePartial('b')
+    expect(store.partialWarnings.a).toBeDefined()
+    expect(store.partialWarnings.b).toBeDefined()
+    await store.acknowledgePartial('b')
+    expect(store.partialWarnings.a).toBeUndefined()
+    expect(store.partialWarnings.b).toBeUndefined()
+  })
+
+  it('fails closed when a batch inspection cannot be persisted', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'a' }), row({ id: 'b' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.batch(['a', 'b'], 'dismiss')
+    await store.acknowledgePartial('a')
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    await store.acknowledgePartial('b')
+    write.mockRestore()
+    expect(store.intentStorageUnavailable).toBe(true)
+    expect(vi.mocked(api.postReservation).mock.calls.some(([url]) => url.endsWith('/seal'))).toBe(false)
+    store = useProposalsStore(createPinia())
+    expect(store.partialWarnings.a?.reviewed).toBe(true)
+    expect(store.partialWarnings.b?.reviewed).toBeUndefined()
+    expect(store.canAct('a')).toBe(false)
+    expect(store.canAct('b')).toBe(false)
+  })
+
+  it('keeps remaining batch markers blocked if local cleanup fails after sealing', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'a' }), row({ id: 'b' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.batch(['a', 'b'], 'dismiss')
+    await store.acknowledgePartial('a')
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementationOnce(() => { throw new Error('storage') })
+    await store.acknowledgePartial('b')
+    remove.mockRestore()
+    expect(store.intentStorageUnavailable).toBe(true)
+    store = useProposalsStore(createPinia())
+    expect(store.partialWarnings.a?.reviewed).toBe(true)
+    expect(store.canAct('a')).toBe(false)
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new Error('sealed token evicted'))
+    await store.acknowledgePartial('a')
+    expect(store.partialWarnings.a).toBeDefined()
+    expect(store.canAct('a')).toBe(false)
+  })
+
+  it('never dispatches a batch if any row marker fails to persist', async () => {
+    const store = useProposalsStore()
+    store.rows = [row({ id: 'a' }), row({ id: 'b' })]
+    const original = localStorage.setItem.bind(localStorage)
+    const write = vi.spyOn(localStorage, 'setItem')
+      .mockImplementationOnce(original)
+      .mockImplementationOnce(() => { throw new Error('quota') })
+    try {
+      await store.batch(['a', 'b'], 'dismiss')
+      expect(api.post).not.toHaveBeenCalled()
+      expect(store.intentStorageUnavailable).toBe(true)
+      expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations/seal', {
+        id: `${'a'.repeat(32)}.${'b'.repeat(32)}`,
+        scope: { kind: 'batch_dismiss', workspace: '', targets: ['a', 'b'], workspaces: ['personal'] },
+        inspected: false,
+      })
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('reserves, persists and dispatches a scoped single action before sealing it', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    const id = `${'a'.repeat(32)}.${'b'.repeat(32)}`
+    vi.mocked(api.post).mockImplementation(async (url: string, ...args: unknown[]) => {
+      expect(url).toBe('/api/proposals/r1/dismiss')
+      expect(args[1]).toEqual({ headers: { 'X-Ciao-Proposal-Reservation': id } })
+      expect(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).some(key => key?.includes(':v2:'))).toBe(true)
+      return { ok: true, result: { id: 'r1', action: 'dismiss', dismissed: true } }
+    })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('r1', 'dismiss')).ok).toBe(true)
+    expect(localStorage.length).toBe(0)
+  })
+
+  it('retains a v2 warning after a lost response until server sealing succeeds', async () => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    const id = `${'a'.repeat(32)}.${'b'.repeat(32)}`
+    let seal = false
+    vi.mocked(api.postReservation).mockImplementation(async (url: string) => {
+      if (url === '/api/proposals/reservations/seal') {
+        if (!seal) throw new Error('active or unknown')
+        return { sealed: true }
+      }
+      return { id }
+    })
+    vi.mocked(api.post).mockImplementation(async () => {
+      throw new TypeError('response lost')
+    })
+    await store.act('r1', 'dismiss')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.r1).toBeDefined()
+    await store.acknowledgePartial('r1')
+    expect(store.partialWarnings.r1).toBeDefined()
+    expect(store.intentLockError).toContain('could not be confirmed')
+    seal = true
+    await store.acknowledgePartial('r1')
+    expect(store.partialWarnings.r1).toBeUndefined()
+    expect(localStorage.length).toBe(0)
+  })
+
+  it('does not dispatch when reservation or marker persistence fails', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new TypeError('reservation lost'))
+    expect((await store.act('r1', 'dismiss')).ok).toBe(false)
+    expect(api.post).not.toHaveBeenCalled()
+    expect(vi.mocked(api.postReservation).mock.calls.map(call => call[0])).toEqual(['/api/proposals/reservations'])
+  })
+
+  it('never dispatches after reservation if the marker cannot be persisted', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    try {
+      expect((await store.act('r1', 'dismiss')).ok).toBe(false)
+      expect(api.post).not.toHaveBeenCalled()
+      expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations/seal', {
+        id: `${'a'.repeat(32)}.${'b'.repeat(32)}`,
+        scope: { kind: 'row_dismiss', workspace: 'personal', targets: ['r1'] },
+        inspected: false,
+      })
+      expect(store.intentStorageUnavailable).toBe(true)
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('does not dispatch when marker persistence and best-effort seal both fail', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.postReservation).mockImplementation(async url => {
+      if (url.endsWith('/seal')) throw new TypeError('seal lost')
+      return { id: `${'a'.repeat(32)}.${'b'.repeat(32)}` }
+    })
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    try {
+      expect((await store.act('r1', 'dismiss')).ok).toBe(false)
+      expect(api.post).not.toHaveBeenCalled()
+      expect(api.postReservation).toHaveBeenCalledTimes(2)
+      expect(store.intentStorageUnavailable).toBe(true)
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('retains the marker when a successful mutation loses its seal response', async () => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, result: { id: 'r1', action: 'dismiss', dismissed: true } })
+    vi.mocked(api.postReservation).mockImplementation(async (url: string) => {
+      if (url.endsWith('/seal')) throw new TypeError('seal response lost')
+      return { id: `${'a'.repeat(32)}.${'b'.repeat(32)}` }
+    })
+    expect((await store.act('r1', 'dismiss')).ok).toBe(false)
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.r1).toBeDefined()
+    await store.acknowledgePartial('r1')
+    expect(store.partialWarnings.r1).toBeDefined()
+    expect(store.intentLockError).toContain('could not be confirmed')
+  })
+
+  it.each(['single', 'batch', 'skill'])('records install-wide scope for %s', async (kind) => {
+    const store = useProposalsStore()
+    store.rows = [row({ id: 'global', workspace: '', kind: kind === 'skill' ? 'skill' : 'memory' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    if (kind === 'single') await store.act('global', 'dismiss')
+    else if (kind === 'batch') await store.batch(['global'], 'dismiss')
+    else await store.acceptSkill('global')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    setActivePinia(createPinia())
+    expect(useProposalsStore().partialWarnings.global?.workspace).toBe('')
+  })
+
+  it('accepts the flat skill-file dismissal response as settled', async () => {
+    const store = useProposalsStore()
+    store.rows = [row({ id: 'skill', kind: 'skill', workspace: '' })]
+    vi.mocked(api.post).mockResolvedValueOnce({ id: 'skill', action: 'dismiss', dismissed: true })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('skill', 'dismiss')).ok).toBe(true)
+    setActivePinia(createPinia())
+    expect(useProposalsStore().partialWarnings.skill).toBeUndefined()
+  })
+
+  it('clears only a matching explicitly pre-write accept refusal', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('fold refused'), {
+      status: 409, payload: { id: 'r1', no_effect: true, error: 'fold refused' },
+    }))
+    const result = await store.act('r1', 'accept')
+    expect(result.ok).toBe(false)
+    expect(store.partialWarnings.r1).toBeUndefined()
+    expect(store.canAct('r1')).toBe(true)
+  })
+
+  it('clears a late missing-bullet refusal only after matching proof and a confirmed seal', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('already resolved'), {
+      status: 409, payload: { id: 'r1', no_effect: true, error: 'already resolved' },
+    }))
+    await store.act('r1', 'accept')
+    expect(store.partialWarnings.r1).toBeUndefined()
+    expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations/seal', expect.objectContaining({
+      scope: { kind: 'row_accept', workspace: 'personal', targets: ['r1'] }, inspected: true,
+    }))
+    expect(useProposalsStore(createPinia()).partialWarnings.r1).toBeUndefined()
+  })
+
+  it.each([400, 503])('accepts an explicit matching no-effect refusal with status %i', async status => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('refused'), {
+      status, payload: { id: 'r1', no_effect: true },
+    }))
+    await store.act('r1', 'accept')
+    expect(store.partialWarnings.r1).toBeUndefined()
+    expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations/seal', expect.objectContaining({
+      scope: { kind: 'row_accept', workspace: 'personal', targets: ['r1'] }, inspected: true,
+    }))
+  })
+
+  it('clears a batch preflight refusal only for the exact marked ids', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('journal unavailable'), {
+      status: 503, payload: { ids: ['r1'], no_effect: true },
+    }))
+    await store.batch(['r1'], 'accept')
+    expect(store.partialWarnings.r1).toBeUndefined()
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('unknown'), {
+      status: 503, payload: { ids: ['other'], no_effect: true },
+    }))
+    await store.batch(['r1'], 'accept')
+    expect(store.partialWarnings.r1).toBeDefined()
+  })
+
+  it.each([
+    { payload: { id: 'r1', no_effect: true }, clear: true },
+    { payload: { id: 'other', no_effect: true }, clear: false },
+    { payload: { id: 'r1' }, clear: false },
+  ])('single admitted recheck only clears an exact proof: $payload', async ({ payload, clear }) => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('scope changed'), { status: 409, payload }))
+    await store.act('r1', 'accept')
+    expect(Boolean(store.partialWarnings.r1)).toBe(!clear)
+    expect(vi.mocked(api.postReservation).mock.calls.some(([url]) => url.endsWith('/seal'))).toBe(clear)
+    expect(Boolean(useProposalsStore(createPinia()).partialWarnings.r1)).toBe(!clear)
+  })
+
+  it.each([
+    { ids: ['r2', 'r1'], clear: true },
+    { ids: ['r1'], clear: false },
+    { ids: ['r1', 'r1'], clear: false },
+    { ids: ['r1', 'other'], clear: false },
+    { ids: ['r1', 'r2', 'other'], clear: false },
+  ])('batch admitted recheck only clears the exact ID set: $ids', async ({ ids, clear }) => {
+    const store = useProposalsStore()
+    store.rows = [row(), row({ id: 'r2' })]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('scope changed'), {
+      status: 409, payload: { ids, no_effect: true },
+    }))
+    await store.batch(['r1', 'r2'], 'accept')
+    const reloaded = useProposalsStore(createPinia())
+    for (const id of ['r1', 'r2']) {
+      expect(Boolean(store.partialWarnings[id])).toBe(!clear)
+      expect(Boolean(reloaded.partialWarnings[id])).toBe(!clear)
+    }
+    expect(vi.mocked(api.postReservation).mock.calls.some(([url]) => url.endsWith('/seal'))).toBe(clear)
+  })
+
+  it('keeps the sweep marker when its applied receipt is unconfirmed', async () => {
+    const store = useProposalsStore()
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('receipt unavailable'), {
+      status: 503, payload: { queue_settled: false, queue_state: 'replaced', queue_receipt_confirmed: false },
+    }))
+    await store.dismissOlderThan('2026-01-01')
+    expect(store.partialWarnings.__sweep__?.queueState).toBe('replaced')
+    expect(store.partialWarnings.__sweep__?.queueReceiptConfirmed).toBe(false)
+    const reloaded = useProposalsStore(createPinia())
+    expect(reloaded.partialWarnings.__sweep__?.queueReceiptConfirmed).toBe(false)
+  })
+
+  it('rehydrates a lost sweep and refuses acknowledgement until server sealing', async () => {
+    let store = useProposalsStore()
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.dismissOlderThan('2026-01-01')
+    expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations', {
+      kind: 'sweep', workspace: '', targets: ['2026-01-01'],
+    })
+    expect(api.post).toHaveBeenCalledWith('/api/proposals/dismiss-older-than?date=2026-01-01',
+      undefined, reservationHeaders)
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new Error('active or old epoch'))
+    await store.acknowledgePartial('__sweep__')
+    expect(store.partialWarnings.__sweep__).toBeDefined()
+    await store.acknowledgePartial('__sweep__')
+    expect(store.partialWarnings.__sweep__).toBeUndefined()
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`,
+      scope: { kind: 'sweep', workspace: '', targets: ['2026-01-01'], workspaces: ['personal', 'work'] },
+      inspected: true,
+    })
+  })
+
+  it.each(['implement', 'undo'])('retains a lost %s until the server can seal it', async kind => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'skill', kind: 'skill' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    if (kind === 'implement') await store.acceptSkill('skill')
+    else await store.undoReceipt('receipt', 'personal')
+    const id = kind === 'implement' ? 'skill' : '__undo__:receipt'
+    expect(api.post).toHaveBeenCalledWith(
+      kind === 'implement' ? '/api/proposals/skill/implement' : '/api/memory/receipts/receipt/undo?workspace=personal',
+      undefined, reservationHeaders,
+    )
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings[id]).toBeDefined()
+    vi.mocked(api.postReservation).mockRejectedValueOnce(new Error('active'))
+    await store.acknowledgePartial(id)
+    expect(store.partialWarnings[id]).toBeDefined()
+    await store.acknowledgePartial(id)
+    expect(store.partialWarnings[id]).toBeUndefined()
+  })
+
+  it('seals and clears a sweep that confirms nothing was removed', async () => {
+    const store = useProposalsStore()
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, removed: 0 })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    await store.dismissOlderThan('2026-01-01')
+    expect(store.partialWarnings.__sweep__).toBeUndefined()
+    expect(localStorage.length).toBe(0)
+    expect(api.postReservation).toHaveBeenCalledWith('/api/proposals/reservations/seal', expect.anything())
+  })
+
+  it('keeps a sweep warning after earlier removals and a later failure', async () => {
+    const store = useProposalsStore()
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('later queue failed'), {
+      status: 503, payload: { removed: 2, workspace: 'work', queue_settled: false, queue_state: 'unknown' },
+    }))
+    await store.dismissOlderThan('2026-01-01')
+    expect(store.partialWarnings.__sweep__?.queueState).toBe('unknown')
+    setActivePinia(createPinia())
+    expect(useProposalsStore().partialWarnings.__sweep__).toBeDefined()
+  })
+
+  it('does not infer no effect from an unmarked matching 409', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('unknown'), {
+      status: 409, payload: { id: 'r1', conflict: true },
+    }))
+    await store.act('r1', 'accept')
+    expect(store.partialWarnings.r1).toBeDefined()
+  })
+
+  it('clears a batch busy result only with its explicit no-effect contract', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true, action: 'accept', results: [{ id: 'r1', action: 'accept', dismissed: false, error: 'busy', no_effect: true }],
+    })
+    await store.batch(['r1'], 'accept')
+    expect(store.partialWarnings.r1).toBeUndefined()
+  })
+
+  it.each(['single', 'batch'])('retains the chosen rehome target after a lost %s response', async (kind) => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'move', workspace: 'personal', kind: 'rehome' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    if (kind === 'single') await store.act('move', 'accept', 'work')
+    else await store.batch(['move'], 'accept', 'work')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.move?.workspace).toBe('personal')
+    expect(store.partialWarnings.move?.target).toBe('work')
+  })
+
+  it('retains the server-derived rehome destination after a lost response and seals that scope', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'move', workspace: 'personal', kind: 'rehome' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.act('move', 'accept')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.move?.target).toBe('work')
+    await store.acknowledgePartial('move')
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`,
+      scope: { kind: 'row_accept', workspace: 'personal', targets: ['move'], destination: 'work' },
+      inspected: true,
+    })
+  })
+
+  it('retains each server-derived batch destination across a lost response and reload', async () => {
+    let store = useProposalsStore()
+    store.rows = [row({ id: 'move', kind: 'rehome' }), row({ id: 'plain' }),
+      row({ id: 'move2', kind: 'rehome', workspace: 'work' })]
+    const scope = { kind: 'batch_accept', workspace: '', targets: ['move', 'plain', 'move2'],
+      workspaces: ['personal', 'work'], destinations: { move: 'work', move2: 'personal' } }
+    vi.mocked(api.postReservation).mockImplementation(async url => url.endsWith('/seal')
+      ? { sealed: true } : { id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, scope })
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('response lost'))
+    await store.batch(['move', 'plain', 'move2'], 'accept')
+    store = useProposalsStore(createPinia())
+    expect(store.partialWarnings.move?.target).toBe('work')
+    expect(store.partialWarnings.move2?.target).toBe('personal')
+    expect(store.partialWarnings.plain?.target).toBeUndefined()
+    await store.acknowledgePartial('move')
+    expect(vi.mocked(api.postReservation).mock.calls.some(([url]) => url.endsWith('/seal'))).toBe(false)
+    await store.acknowledgePartial('plain')
+    await store.acknowledgePartial('move2')
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, scope, inspected: true,
+    })
+    expect(store.partialWarnings.move2).toBeUndefined()
+  })
+
+  it.each([
+    { move: 'work', other: 'work' }, {}, { move: '' }, { move: 'personal' },
+  ])('refuses an invalid server batch destination map: %o', async destinations => {
+    const store = useProposalsStore()
+    store.rows = [row({ id: 'move', kind: 'rehome' }), row({ id: 'plain' })]
+    vi.mocked(api.postReservation).mockResolvedValueOnce({
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`,
+      scope: { kind: 'batch_accept', workspace: '', targets: ['move', 'plain'], workspaces: ['personal'], destinations },
+    })
+    await store.batch(['move', 'plain'], 'accept')
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('records an accept partial and blocks later decisions and the all-workspace sweep', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('incomplete'), {
+      payload: { queue_settled: false, queue_state: 'unknown' },
+    }))
+    await store.act('r1', 'accept')
+    expect(store.partialWarnings.r1?.workspace).toBe('personal')
+    await store.act('r1', 'accept')
+    await store.batch(['r1', 'other'], 'dismiss')
+    await store.dismissOlderThan('2026-01-01')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    await store.acknowledgePartial('r1')
+    vi.mocked(api.post).mockResolvedValueOnce({ removed: 0 })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    await store.dismissOlderThan('2026-01-01')
+    expect(api.post).toHaveBeenCalledTimes(2)
+    expect(store.partialWarnings.r1).toBeUndefined()
+  })
+
+  it.each(['partial', 'lost'])('rehydrates a v2 %s accept until server seal', async (outcome) => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(outcome === 'partial'
+      ? Object.assign(new Error('incomplete'), { payload: { queue_settled: false, queue_state: 'unknown' } })
+      : new TypeError('connection lost'))
+    await store.act('r1', 'accept')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    const key = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+      .find(item => item?.startsWith('ciao:proposal-intent:v2:personal:r1:'))!
+    expect(localStorage.getItem(key)).not.toContain('Remember the thing')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    store.rows = [row(), row({ id: 'other', workspace: 'work' })]
+    expect(store.partialWarnings.r1?.workspace).toBe('personal')
+    await store.act('r1', 'dismiss')
+    await store.batch(['r1', 'other'], 'accept')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    await store.acknowledgePartial('r1')
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, result: { id: 'r1', action: 'dismiss', dismissed: true } })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('r1', 'dismiss')).ok).toBe(true)
+    expect(api.post).toHaveBeenCalledTimes(2)
+    setActivePinia(createPinia())
+    expect(useProposalsStore().partialWarnings.r1).toBeUndefined()
+  })
+
+  it('refuses before POST when intent storage is full', async () => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    expect((await store.act('r1', 'accept')).ok).toBe(false)
+    expect(api.post).not.toHaveBeenCalled()
+    expect(store.intentStorageUnavailable).toBe(true)
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, inspected: false,
+      scope: { kind: 'row_accept', workspace: 'personal', targets: ['r1'] },
+    })
+    write.mockRestore()
+  })
+
+  it('fails closed on malformed persisted intent', async () => {
+    localStorage.setItem('ciao:proposal-intent:v1:personal:r1', '{')
+    const store = useProposalsStore()
+    store.rows = [row()]
+    expect(store.intentStorageUnavailable).toBe(true)
+    await store.act('r1', 'dismiss')
+    await store.batch(['r1', 'other'], 'accept')
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('keeps the warning scope but blocks other operations without server proof', async () => {
+    let store = useProposalsStore()
+    store.rows = [row(), row({ id: 'other', workspace: 'work' })]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('lost'))
+    await store.act('r1', 'accept')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    store.rows = [row(), row({ id: 'other', workspace: 'work' })]
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, result: { id: 'other', action: 'dismiss', dismissed: true } })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('other', 'dismiss')).ok).toBe(false)
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(store.partialWarnings.r1?.workspace).toBe('personal')
+    expect(store.partialWarnings.other).toBeUndefined()
+  })
+
+  it('retains accounted-for and unsettled batch rows after reload', async () => {
+    let store = useProposalsStore()
+    store.rows = [row(), row({ id: 'other', workspace: 'work' })]
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true,
+      results: [
+        { id: 'r1', action: 'dismiss', dismissed: true },
+        { id: 'other', action: 'dismiss', dismissed: false, queue_settled: false, queue_state: 'replaced',
+          queue_receipt_confirmed: true, queue_receipt_id: 'receipt-42', decision_confirmed: false },
+      ],
+    })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    await store.batch(['r1', 'other'], 'dismiss')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    expect(store.partialWarnings.r1?.reviewed).toBe(true)
+    expect(store.partialWarnings.other?.workspace).toBe('work')
+    expect(store.partialWarnings.other?.queueState).toBe('replaced')
+    expect(store.partialWarnings.other?.queueReceiptId).toBe('receipt-42')
+    expect(store.partialWarnings.other?.decisionConfirmed).toBe(false)
+    store.rows = [row({ id: 'other', workspace: 'work' })]
+    await store.act('other', 'accept')
+    expect(api.post).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the pre-request marker when recording partial details hits quota', async () => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockImplementationOnce(async () => {
+      vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+      throw Object.assign(new Error('incomplete'), { payload: { queue_settled: false, queue_state: 'replaced' } })
+    })
+    await store.act('r1', 'accept')
+    expect(store.intentStorageUnavailable).toBe(true)
+    vi.restoreAllMocks()
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    store.rows = [row()]
+    expect(store.partialWarnings.r1?.queueState).toBe('unknown')
+    await store.act('r1', 'accept')
+    expect(api.post).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a lost sweep blocked until its reservation is sealed', async () => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('lost'))
+    await store.dismissOlderThan('2026-01-01')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    store.rows = [row()]
+    await store.act('r1', 'dismiss')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(store.partialWarnings.__sweep__).toBeDefined()
+    await store.acknowledgePartial('__sweep__')
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, result: { id: 'r1', action: 'dismiss', dismissed: true } })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('r1', 'dismiss')).ok).toBe(true)
+    expect(api.post).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['batch', 'sweep'])('refuses %s before POST when storage is full', async (kind) => {
+    const store = useProposalsStore()
+    store.rows = [row()]
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    if (kind === 'batch') await store.batch(['r1'], 'dismiss')
+    else await store.dismissOlderThan('2026-01-01')
+    expect(api.post).not.toHaveBeenCalled()
+    expect(store.intentStorageUnavailable).toBe(true)
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, inspected: false,
+      scope: kind === 'batch'
+        ? { kind: 'batch_dismiss', workspace: '', targets: ['r1'], workspaces: ['personal'] }
+        : { kind: 'sweep', workspace: '', targets: ['2026-01-01'], workspaces: ['personal', 'work'] },
+    })
+    write.mockRestore()
+  })
+
+  it.each(['skill', 'undo'])('refuses %s before POST when storage is full', async (kind) => {
+    const store = useProposalsStore()
+    store.rows = [row({ id: 'skill', kind: 'skill' })]
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => { throw new Error('quota') })
+    if (kind === 'skill') await store.acceptSkill('skill')
+    else await store.undoReceipt('receipt', 'personal')
+    expect(api.post).not.toHaveBeenCalled()
+    expect(store.intentStorageUnavailable).toBe(true)
+    expect(api.postReservation).toHaveBeenLastCalledWith('/api/proposals/reservations/seal', {
+      id: `${'a'.repeat(32)}.${'b'.repeat(32)}`, inspected: false,
+      scope: kind === 'skill'
+        ? { kind: 'implement', workspace: 'personal', targets: ['skill'] }
+        : { kind: 'undo', workspace: 'personal', targets: ['receipt'] },
+    })
+    write.mockRestore()
+  })
+
+  it('retains an unknown undo across reload and blocks proposal decisions', async () => {
+    let store = useProposalsStore()
+    store.rows = [row()]
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('lost'))
+    await store.undoReceipt('receipt', 'personal')
+    setActivePinia(createPinia())
+    store = useProposalsStore()
+    store.rows = [row()]
+    await store.act('r1', 'accept')
+    expect(api.post).toHaveBeenCalledTimes(1)
+    expect(store.partialWarnings['__undo__:receipt']?.workspace).toBe('personal')
+    await store.acknowledgePartial('__undo__:receipt')
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, result: { id: 'r1', action: 'dismiss', dismissed: true } })
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+    expect((await store.act('r1', 'dismiss')).ok).toBe(true)
+    expect(api.post).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { status: 409, payload: { id: 'receipt', conflict: true } },
+    { status: 400, payload: { id: 'receipt', undoable: false } },
+  ])('clears the undo marker for a proved no-effect refusal: %o', async (failure) => {
+    const store = useProposalsStore()
+    vi.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('refused'), failure))
+    expect((await store.undoReceipt('receipt', 'personal')).ok).toBe(false)
+    expect(store.partialWarnings['__undo__:receipt']).toBeUndefined()
+    setActivePinia(createPinia())
+    expect(useProposalsStore().partialWarnings['__undo__:receipt']).toBeUndefined()
+  })
+})
+
+describe('cross-tab proposal admission', () => {
+  beforeEach(() => {
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.get).mockResolvedValue({ rows: [] })
+  })
+
+  function stores() {
+    const first = useProposalsStore(createPinia())
+    const second = useProposalsStore(createPinia())
+    first.rows = [row({ workspace: '' })]
+    second.rows = [row({ workspace: '' })]
+    return [first, second] as const
+  }
+
+  it('never acknowledges a legacy marker without server completion proof', async () => {
+    const token = 'c'.repeat(32)
+    localStorage.setItem(`ciao:proposal-intent:v1::r1:${token}`,
+      JSON.stringify({ version: 1, workspace: '', id: 'r1', action: 'dismiss', token }))
+    const [, second] = stores()
+    await second.acknowledgePartial('r1')
+    expect(localStorage.length).toBe(1)
+    expect(second.partialWarnings.r1).toBeDefined()
+    expect(second.intentLockError).toContain('cannot verify')
+    second.rows = [row({ id: 'another' })]
+    expect((await second.act('another', 'dismiss')).ok).toBe(false)
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  function heldPost() {
+    let reject!: (reason: Error) => void
+    let started!: () => void
+    const entered = new Promise<void>(resolve => { started = resolve })
+    vi.mocked(api.post).mockImplementationOnce(() => {
+      started()
+      return new Promise((_resolve, fail) => { reject = fail })
+    })
+    return { entered, fail: () => reject(new TypeError('lost response')) }
+  }
+
+  it.each(['row', 'sweep', 'undo', 'batch', 'skill'])(
+    'refuses a concurrent %s operation while a row POST is in flight', async kind => {
+      const [first, second] = stores()
+      const barrier = heldPost()
+      const pending = first.act('r1', 'dismiss')
+      await barrier.entered
+      if (kind === 'row') await second.act('r1', 'dismiss')
+      if (kind === 'sweep') await second.dismissOlderThan('2026-01-01')
+      if (kind === 'undo') await second.undoReceipt('receipt', '')
+      if (kind === 'batch') await second.batch(['r1'], 'dismiss')
+      if (kind === 'skill') await second.acceptSkill('r1')
+      expect(api.post).toHaveBeenCalledTimes(1)
+      expect(second.intentLockError).toContain('in progress')
+      barrier.fail()
+      await pending
+    },
+  )
+
+  it('hydrates another tab, blocks active acknowledgement, then seals after inspection', async () => {
+    const [first, second] = stores()
+    const barrier = heldPost()
+    const pending = first.act('r1', 'dismiss')
+    await barrier.entered
+    const key = localStorage.key(0)!
+    window.dispatchEvent(new StorageEvent('storage', { key, newValue: localStorage.getItem(key) }))
+    expect(second.partialWarnings.r1?.workspace).toBe('')
+    await second.acknowledgePartial('r1')
+    expect(localStorage.getItem(key)).not.toBeNull()
+    expect(second.partialWarnings.r1).toBeDefined()
+    barrier.fail()
+    await pending
+    await second.acknowledgePartial('r1')
+    expect(localStorage.getItem(key)).toBeNull()
+    expect(second.partialWarnings.r1).toBeUndefined()
+  })
+
+  it('refuses a row while a global sweep is in flight', async () => {
+    const [first, second] = stores()
+    const barrier = heldPost()
+    const pending = first.dismissOlderThan('2026-01-01')
+    await barrier.entered
+    expect((await second.act('r1', 'dismiss')).ok).toBe(false)
+    expect(api.post).toHaveBeenCalledTimes(1)
+    barrier.fail()
+    await pending
+  })
+
+  it('persists the server-resolved workspace for an unscoped undo', async () => {
+    const [store] = stores()
+    vi.mocked(api.post).mockRejectedValueOnce(new TypeError('lost response'))
+    await store.undoReceipt('receipt', '')
+    expect(useProposalsStore(createPinia()).partialWarnings['__undo__:receipt'].workspace).toBe('personal')
+  })
+
+  it('fails closed with an explanation when Web Locks are unavailable', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'locks')!
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined })
+    try {
+      const [store] = stores()
+      expect((await store.act('r1', 'dismiss')).ok).toBe(false)
+      await store.acknowledgePartial('r1')
+      expect(api.post).not.toHaveBeenCalled()
+      expect(store.intentLockError).toContain('Web Locks are unavailable')
+    } finally {
+      Object.defineProperty(navigator, 'locks', descriptor)
+    }
+  })
+})
 
 describe('proposals store filters', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -167,9 +1007,10 @@ describe('post-mutation refresh', () => {
     vi.mocked(api.get)
       .mockReturnValueOnce(preMutation as never)
       .mockResolvedValueOnce({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'p1', action: 'edit_region', dismissed: true } } as never)
 
     const store = useProposalsStore()
+    store.rows = [row({ id: 'p1' })]
     const reader = store.fetch()
     const accepting = store.act('p1', 'accept')
 
@@ -191,9 +1032,10 @@ describe('post-mutation refresh', () => {
     vi.mocked(api.get)
       .mockReturnValueOnce(preMutation as never)
       .mockResolvedValueOnce({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'p1', action: 'edit_region', dismissed: true } } as never)
 
     const store = useProposalsStore()
+    store.rows = [row({ id: 'p1' })]
     const reader = store.fetch()
     await store.act('p1', 'accept')
     expect(store.rows).toEqual([])
@@ -271,6 +1113,7 @@ describe('queue load errors', () => {
     vi.mocked(api.get).mockResolvedValue({ rows: [row({ id: 'a' })] } as never)
     vi.mocked(api.post).mockRejectedValueOnce(new Error('accept refused'))
     const store = useProposalsStore()
+    store.rows = [row({ id: 'a' })]
 
     await store.act('a', 'accept')
     expect(store.error).toBe('accept refused')
@@ -365,10 +1208,11 @@ describe('proposal history', () => {
 
   it('does not fetch history after a mutation while nothing is displaying it', async () => {
     vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'p1', action: 'dismiss', dismissed: true } } as never)
 
     const store = useProposalsStore()
     await store.fetch()
+    store.rows = [row({ id: 'p1' })]
     store.historyLoaded = false
 
     await store.act('p1', 'dismiss')
@@ -382,10 +1226,11 @@ describe('proposal history', () => {
     // `historyLoaded` without refetching made the badge vanish on every
     // accept/dismiss and stay gone until the History tab was reopened.
     vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'p1', action: 'dismiss', dismissed: true } } as never)
 
     const store = useProposalsStore()
     await store.fetch()
+    store.rows = [row({ id: 'p1' })]
     store.view = 'queue'
     store.historyLoaded = true
 
@@ -399,10 +1244,11 @@ describe('proposal history', () => {
 
   it('invalidates and re-fetches history after a mutation on the History tab', async () => {
     vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'p2', action: 'dismiss', dismissed: true } } as never)
 
     const store = useProposalsStore()
     await store.fetch()
+    store.rows = [row({ id: 'p2' })]
     store.view = 'history'
     store.historyLoaded = true
 
@@ -535,17 +1381,18 @@ describe('batch conflicts stay guarded', () => {
 
   it('keeps the conflict flag and refreshes the preview so a retry stays guarded', async () => {
     const store = useProposalsStore()
+    store.rows = [row({ id: 'r1' }), row({ id: 'r2' })]
     store.previews = { r1: preview('r1', 'rev-1'), r2: preview('r2', 'rev-2') }
     vi.mocked(api.post).mockResolvedValueOnce({
       ok: true, action: 'accept', summary: [],
       results: [
-        { id: 'r1', action: 'edit_region', dismissed: false, conflict: true },
+        { id: 'r1', action: 'edit_region', dismissed: false, conflict: true, no_effect: true },
         { id: 'r2', action: 'edit_region', dismissed: true, promoted: true },
       ],
     })
     vi.mocked(api.get).mockImplementation(async (url: string) => {
       if (url.includes('/preview')) return { preview: preview('r1', 'rev-1-fresh') }
-      return { rows: [] }
+      return { rows: [row({ id: 'r1' })] }
     })
 
     await store.batch(['r1', 'r2'], 'accept')
@@ -631,12 +1478,13 @@ describe('sibling previews after an accept', () => {
     // revision describe a file that no longer exists; keeping them would show
     // the wrong lines and get `b`'s next accept refused as a conflict.
     const store = useProposalsStore()
+    store.rows = [row({ id: 'a' })]
     store.previews = {
       a: preview('a', 'Workspace/Learnings.md', 'rev-1'),
       b: preview('b', 'Workspace/Learnings.md', 'rev-1'),
       c: preview('c', 'People/Ada.md', 'rev-9'),
     }
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.post).mockResolvedValue({ ok: true, result: { id: 'a', action: 'edit_region', dismissed: true } } as never)
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/proposals') return Promise.resolve({ rows: [row({ id: 'b' }), row({ id: 'c' })] } as never)
       const id = /proposals\/([^/]+)\/preview/.exec(url)![1]
@@ -657,30 +1505,34 @@ describe('decision reasons', () => {
     setActivePinia(createPinia())
     vi.mocked(api.get).mockReset()
     vi.mocked(api.post).mockReset()
-    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
-    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.get).mockResolvedValue({ rows: [row({ id: 'p1' })] } as never)
+    vi.mocked(api.post).mockImplementation(async (url) => ({
+      ok: true, result: { id: 'p1', action: String(url).endsWith('/dismiss') ? 'dismiss' : 'edit_region', dismissed: true },
+    }) as never)
   })
 
   it('act sends reason only when one is given', async () => {
     const store = useProposalsStore()
+    store.rows = [row({ id: 'p1' })]
     await store.act('p1', 'dismiss', '', { reason: 'one-off' })
-    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', { reason: 'one-off' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', { reason: 'one-off' }, reservationHeaders)
 
     await store.act('p1', 'dismiss')
-    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {}, reservationHeaders)
 
     await store.act('p1', 'dismiss', '', { reason: '' })
-    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {}, reservationHeaders)
   })
 
   it('act with text, expectedRevision and reason sends all three', async () => {
     const store = useProposalsStore()
+    store.rows = [row({ id: 'p1' })]
     await store.act('p1', 'accept', '', { expectedRevision: 'rev-1', text: 'Edited.', reason: 'not true' })
     expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/accept', {
       expected_revision: 'rev-1',
       text: 'Edited.',
       reason: 'not true',
-    })
+    }, reservationHeaders)
   })
 })
 
@@ -706,6 +1558,7 @@ describe('accepting a skill proposal into a chat', () => {
 
   it('asks the server, and the server owns which chat', async () => {
     const store = useProposalsStore()
+    store.rows = [skillRow()]
     vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
     vi.mocked(api.post).mockResolvedValue({
       ok: true, chat_id: 'chat-x', project_id: 'p-1', created: true,
@@ -713,7 +1566,7 @@ describe('accepting a skill proposal into a chat', () => {
 
     const result = await store.acceptSkill('p-skill')
 
-    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/proposals/p-skill/implement')
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/proposals/p-skill/implement', undefined, reservationHeaders)
     expect(result).toEqual({ ok: true, chatId: 'chat-x', created: true })
     // It re-read rather than patching the local copy: the row the server
     // returns is the one the panel has to render.
@@ -725,6 +1578,7 @@ describe('accepting a skill proposal into a chat', () => {
     // the live chat back with `created: false`. The panel pushes a "started"
     // toast, and it must not do that for work that was already running.
     const store = useProposalsStore()
+    store.rows = [skillRow()]
     vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
     vi.mocked(api.post).mockResolvedValue({
       ok: true, chat_id: 'chat-x', project_id: 'p-1', created: false,
@@ -747,6 +1601,7 @@ describe('accepting a skill proposal into a chat', () => {
     } as never)
 
     const before = useProposalsStore()
+    before.rows = [skillRow()]
     await before.acceptSkill('p-skill')
 
     setActivePinia(createPinia())
@@ -760,6 +1615,7 @@ describe('accepting a skill proposal into a chat', () => {
 
   it('surfaces a refusal instead of claiming a chat was started', async () => {
     const store = useProposalsStore()
+    store.rows = [skillRow()]
     vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
     vi.mocked(api.post).mockRejectedValue(new Error('no General project to host the chat'))
 

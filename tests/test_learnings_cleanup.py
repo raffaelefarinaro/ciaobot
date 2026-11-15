@@ -23,6 +23,8 @@ reads a real vault, or leaves a lock file in the shared temp root.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
@@ -42,10 +44,16 @@ from ciao.learning_records import (
     parse_learnings,
     render_learning,
 )
-from ciao.memory_receipts import content_revision, write_queue_atomically
+from ciao.memory_receipts import QueueLockError, content_revision, write_queue_atomically
+from ciao import memory_proposals, proposal_actions
+from ciao.proposal_tracking import stable_proposal_id
 
 WORKSPACE = "personal"
 TODAY = date(2026, 9, 30)
+POSIX_UPDATE_RECEIPTS = pytest.mark.skipif(
+    os.name == "nt",
+    reason="dormant automatic-review receipt transaction requires POSIX directory durability",
+)
 RECEIPT = "mrcpt_0123456789abcdef"
 
 RETIRED = "Blocked pages need a fallback."
@@ -117,6 +125,2339 @@ FRONTMATTER = "---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
 #: The same frontmatter with an ``updated:`` the restamp has to *lengthen*, so the
 #: write moves every offset below it.
 _SHORT_STAMP = "---\ntags: [ciao, learnings]\nupdated: 2020-1-1\n---\n"
+
+
+def test_system_update_review_undo_restores_original_frontmatter(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    original = _document(UNLINKED_RECORD, frontmatter=_SHORT_STAMP)
+    path = _write(config, original)
+    plan = lc.plan_cleanup(root, workspace=WORKSPACE, config=config)
+    row = next(row for row in plan.rows if row.learning_id == UNLINKED_RECORD.learning_id)
+    landed, spans = lc._splice(original, [row])
+    lc._with_anchors(spans, landed)
+    receipt = lc._build_receipt(
+        plan, spans, vault_root=root, before=content_revision(original),
+        after=content_revision(landed), actor="system/update-maintenance",
+        approvals={}, reviewed=False,
+    )
+    receipt["automatic_review"] = {
+        "schema": 1, "actor": "system/update-maintenance",
+        "task_id": "learnings-cleanup", "task_revision": 3, "workspace": WORKSPACE,
+    }
+    path.write_text(landed, encoding="utf-8", newline="")
+
+    result = lc.unmigrate_cleanup(root, receipt, apply=True, today=TODAY)
+
+    assert not result["failed"]
+    assert path.read_bytes() == original.encode("utf-8")
+
+
+def test_update_review_input_validation_complete_and_protected(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    plan = lc.plan_cleanup(root, workspace=WORKSPACE, config=config)
+    verdict = {
+        "learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD),
+        "verdict": "RETIRE",
+        "reason": "Obsolete",
+        "evidence": ["Superseded by current practice"],
+    }
+    validate = lambda rows, suppressed=set(): lc._validate_update_review_inputs(
+        text, workspace=WORKSPACE, source_revision=content_revision(text),
+        verdicts=rows, plan=plan, suppressed=suppressed,
+    )
+    assert validate([verdict]) == [plan.rows[0]]
+    for invalid in ([], [verdict, verdict], [{**verdict, "extra": 1}],
+                    [{**verdict, "entry_revision": "stale"}],
+                    [{**verdict, "evidence": ["bad\nline"]}],
+                    [{**verdict, "proposal_ref": {"kind": "memory", "id": "0" * 16}}]):
+        with pytest.raises(ValueError):
+            validate(invalid)
+    with pytest.raises(ValueError):
+        validate([verdict], {(verdict["learning_id"], verdict["entry_revision"])})
+    with pytest.raises(ValueError):
+        validate([verdict], {(str(n), "rev") for n in range(lc.MAX_SUPPRESSED)})
+
+
+def test_update_review_finding_snapshot_detects_bad_and_changed_files(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first = lc._finding_dependency_snapshot(config, WORKSPACE)
+    assert first == lc._finding_dependency_snapshot(config, WORKSPACE)
+    queue = sp.queue_dir(config, WORKSPACE)
+    queue.mkdir(parents=True)
+    (queue / "bad.md").write_text("", encoding="utf-8")
+    with pytest.raises(ValueError):
+        lc._finding_dependency_snapshot(config, WORKSPACE)
+    (queue / "bad.md").unlink()
+    assert first != lc._finding_dependency_snapshot(config, WORKSPACE)
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_recorded_rechecks_findings_after_fence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130001.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    assert not result.failed
+    original = lc._update_fence_receipt
+    def fence(path, expected):
+        ok = original(path, expected)
+        queue = sp.queue_dir(config, WORKSPACE)
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / "bad.md").write_text("", encoding="utf-8")
+        return ok
+    monkeypatch.setattr(lc, "_update_fence_receipt", fence)
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+def test_update_review_validation_bounds_and_defer_schema(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    plan = lc.plan_cleanup(root, workspace=WORKSPACE, config=config)
+    item = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+            "verdict": "DEFER", "reason": "Question", "evidence": ["é"],
+            "proposal_ref": {"kind": "memory", "id": "a" * 16}}
+    kwargs = dict(workspace=WORKSPACE, source_revision=content_revision(text), plan=plan, suppressed=set())
+    assert lc._validate_update_review_inputs(text, verdicts=[item], **kwargs) == []
+    size = len(json.dumps([item], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    assert lc._validate_update_review_inputs(text, verdicts=[item], max_payload_bytes=size, **kwargs) == []
+    with pytest.raises(ValueError):
+        lc._validate_update_review_inputs(text, verdicts=[item], max_payload_bytes=size - 1, **kwargs)
+    for value in ({"kind": "skill", "id": "a" * 16}, {"kind": "memory", "id": "A" * 16},
+                  {"kind": "memory", "id": "a" * 16, "extra": 1}):
+        with pytest.raises(ValueError):
+            lc._validate_update_review_inputs(text, verdicts=[{**item, "proposal_ref": value}], **kwargs)
+    for value in ("", "x" * 2049, "x\tz"):
+        with pytest.raises(ValueError):
+            lc._validate_update_review_inputs(text, verdicts=[{**item, "reason": value}], **kwargs)
+    with pytest.raises(ValueError):
+        lc._validate_update_review_inputs(text, verdicts=[item] * 513, **kwargs)
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+@pytest.mark.parametrize("field", ["reason", "evidence"])
+def test_automatic_review_rejects_unicode_line_separator(tmp_path: Path, separator: str, field: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130001.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    bad = {**verdict, field: ("a" + separator + "b") if field == "reason" else ["a" + separator + "b"]}
+    with pytest.raises(ValueError):
+        lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                               source_revision=content_revision(text), receipt_path=receipt, verdicts=[bad])
+    assert note.read_bytes() == text.encode() and not receipt.exists()
+    lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                           source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    data = json.loads(receipt.read_text(encoding="utf-8"))
+    data["automatic_review"]["verdicts"][0][field] = bad[field]
+    receipt.write_text(json.dumps(data), encoding="utf-8")
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_automatic_receipt_fifo_does_not_block_validator_or_recovery(tmp_path: Path) -> None:
+    import multiprocessing
+
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    _write(config, _document(UNLINKED_RECORD))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130002.json"
+    receipt.parent.mkdir(parents=True, mode=0o700)
+    os.mkfifo(receipt, 0o600)
+    def check() -> None:
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is None
+        assert lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name).failed
+    process = multiprocessing.get_context("fork").Process(target=check)
+    process.start()
+    process.join(3)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("FIFO receipt blocked without a writer")
+    assert process.exitcode == 0
+    assert stat.S_ISFIFO(receipt.lstat().st_mode)
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("bad", [None, [], {}, {"entry_revision": "rev"},
+                                {"learning_id": "id"}, {"learning_id": 7, "entry_revision": "rev"},
+                                {"learning_id": "id", "entry_revision": 7},
+                                {"learning_id": "", "entry_revision": "rev"}])
+def test_automatic_review_rejects_malformed_suppression_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    directory = config.state_path.parent / "migration"
+    committed = directory / "learnings-cleanup-20261114-130003.json"
+    pending = directory / "learnings-cleanup-20261114-130004.json"
+    new = directory / "learnings-cleanup-20261114-130005.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    def apply(path: Path):
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=path, verdicts=[verdict])
+    assert not apply(committed).failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=committed.name) is not None
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("leave pending")
+        patch.setattr(lc, "_update_commit_receipt", fail)
+        assert apply(pending).failed
+    store = lc.suppression_path(root)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"schema_version": lc.SUPPRESSION_SCHEMA, "removed": [
+        {"learning_id": "valid", "entry_revision": "rev"}, bad]}), encoding="utf-8")
+    before = (note.read_bytes(), store.read_bytes(), committed.read_bytes(), pending.read_bytes())
+    assert apply(new).failed and not new.exists()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=committed.name) is None
+    assert lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                    task_revision=3, receipt_name=pending.name).failed
+    assert (note.read_bytes(), store.read_bytes(), committed.read_bytes(), pending.read_bytes()) == before
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("store", ["skill", "skill_blank", "upstream"])
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+def test_automatic_rejects_unattributable_origins(tmp_path: Path, monkeypatch, store: str, operation: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    if store.startswith("skill"):
+        _file_settled(config, _origin(FOURTH_RECORD))
+        finding = sp.proposal_path(config, WORKSPACE, "web-research")
+    else:
+        _draft(config, FOURTH_RECORD, lifecycle=upstream_drafts.DRAFT_PENDING)
+        finding = next(upstream_drafts.sidecar_dir(config, WORKSPACE).glob("*.json"))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130010.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    def apply():
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            def fail(*args, **kwargs):
+                raise OSError("leave pending")
+            patch.setattr(lc, "_update_commit_receipt", fail)
+            assert apply().failed
+    if store.startswith("skill"):
+        original = finding.read_text(encoding="utf-8")
+        if store == "skill_blank":
+            malformed = original.replace(f'"learning_id":"{FOURTH_RECORD.learning_id}"', '"learning_id":"   "')
+        else:
+            malformed = original.replace('"schema":1', '"schema":99')
+        finding.write_text(malformed, encoding="utf-8")
+        assert finding.read_text(encoding="utf-8") != original
+        parsed = sp.parse_proposal(finding, WORKSPACE)
+        assert parsed is not None
+        if store == "skill_blank":
+            assert parsed.origins[0].learning_id == "   "
+    else:
+        data = json.loads(finding.read_text(encoding="utf-8"))
+        data["origins"] = ["unattributable"]
+        finding.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        lc._finding_dependency_capture(config, WORKSPACE)
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            patch.setattr(lc, "_validate_automatic_origins", lambda *args: None)
+            fingerprint = lc._finding_dependency_snapshot(config, WORKSPACE)
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        payload["automatic_review"]["finding_revision"] = fingerprint
+        receipt.write_text(json.dumps(payload), encoding="utf-8")
+    before = (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None)
+    result = (apply() if operation == "apply" else
+              lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                       task_revision=3, receipt_name=receipt.name))
+    assert result.failed
+    assert (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None) == before
+    assert not lc.suppression_path(root).exists()
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            patch.setattr(lc, "_validate_automatic_origins", lambda *args: None)
+            assert not lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                                task_revision=3, receipt_name=receipt.name).failed
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+def test_automatic_retire_rejects_whitespace_finding(tmp_path: Path, monkeypatch, operation: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    _file_settled(config, _origin(FOURTH_RECORD))
+    finding = sp.proposal_path(config, WORKSPACE, "web-research")
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-140030.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    def apply():
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            original_commit = lc._update_commit_receipt
+            calls = 0
+            def fail(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("leave pending")
+                return original_commit(*args, **kwargs)
+            patch.setattr(lc, "_update_commit_receipt", fail)
+            result = apply()
+            assert result.applied and result.failed
+    original = finding.read_text(encoding="utf-8")
+    line = next(line for line in original.splitlines() if line.startswith('{"'))
+    data = json.loads(line)
+    data["finding"] = "   "
+    finding.write_text(original.replace(line, json.dumps(data)), encoding="utf-8")
+    parsed = sp.parse_proposal(finding, WORKSPACE)
+    assert parsed is not None and parsed.origins[0].finding == ""
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            patch.setattr(lc, "_validate_automatic_origins", lambda *args: None)
+            fingerprint = lc._finding_dependency_snapshot(config, WORKSPACE)
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data["automatic_review"]["finding_revision"] = fingerprint
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+    before = (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None,
+              lc.suppression_path(root).read_bytes() if lc.suppression_path(root).exists() else None)
+    with pytest.raises(ValueError):
+        lc._finding_dependency_capture(config, WORKSPACE)
+    result = (apply() if operation == "apply" else
+              lc.recover_update_review(root, config=config, workspace=WORKSPACE, task_revision=3, receipt_name=receipt.name))
+    assert result.failed
+    assert (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None,
+            lc.suppression_path(root).read_bytes() if lc.suppression_path(root).exists() else None) == before
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            patch.setattr(lc, "_validate_automatic_origins", lambda *args: None)
+            assert not lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                                task_revision=3, receipt_name=receipt.name).failed
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("target", ["queue", "sidecar"])
+def test_deferred_evidence_refuses_fifo_without_blocking(tmp_path: Path, target: str) -> None:
+    import threading
+    from ciao.memory_proposals import _sidecar_paths
+
+    root = tmp_path / "vault"
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    path = queue if target == "queue" else _sidecar_paths(queue)[0]
+    os.mkfifo(path)
+    verdict = {"verdict": "DEFER", "learning_id": "x", "entry_revision": "rev",
+               "proposal_ref": {"id": "id"}}
+    result: list[bool] = []
+    thread = threading.Thread(target=lambda: result.append(lc._deferred_references_valid(root, WORKSPACE, [verdict])), daemon=True)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert result == [False]
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("target", ["queue", "sidecar"])
+def test_public_defer_fifo_fails_apply_recover_and_verifier(tmp_path: Path, monkeypatch, target: str) -> None:
+    import threading
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    queue.write_text(f"- [memory] Fact _(from: {source})_\n", encoding="utf-8")
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", "memory", "Fact", source, 0)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Review", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    directory = config.state_path.parent / "migration"
+    committed = directory / "learnings-cleanup-20261114-140001.json"
+    pending = directory / "learnings-cleanup-20261114-140002.json"
+    new = directory / "learnings-cleanup-20261114-140003.json"
+    def apply(path):
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=path, verdicts=[verdict])
+    assert not apply(committed).failed
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("leave pending")
+        patch.setattr(lc, "_update_commit_receipt", fail)
+        assert apply(pending).failed
+    path = queue if target == "queue" else memory_proposals.dismissed_log_path(queue)
+    if path.exists():
+        path.unlink()
+    os.mkfifo(path)
+    before = (note.read_bytes(), committed.read_bytes(), pending.read_bytes())
+    def run(call):
+        values = []
+        def invoke():
+            try:
+                values.append(call())
+            except ValueError as exc:
+                values.append(exc)
+        thread = threading.Thread(target=invoke, daemon=True)
+        thread.start()
+        thread.join(2)
+        assert not thread.is_alive()
+        return values[0]
+    assert isinstance(run(lambda: apply(new)), ValueError)
+    assert run(lambda: lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                                task_revision=3, receipt_name=pending.name)).failed
+    assert run(lambda: lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                                  task_revision=3, receipt_name=committed.name)) is None
+    assert (note.read_bytes(), committed.read_bytes(), pending.read_bytes()) == before
+    assert not new.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("store", ["skill", "upstream"])
+def test_automatic_classification_uses_bounded_owner_records(tmp_path: Path, monkeypatch, store: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    if store == "skill":
+        _file_settled(config, _origin(FOURTH_RECORD))
+        finding = sp.proposal_path(config, WORKSPACE, "web-research")
+    else:
+        _draft(config, FOURTH_RECORD, lifecycle=upstream_drafts.DRAFT_PENDING)
+        finding = next(upstream_drafts.sidecar_dir(config, WORKSPACE).glob("*.json"))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130006.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("automatic classification reopened owner records")
+    monkeypatch.setattr(sp, "read_records", forbidden)
+    monkeypatch.setattr(upstream_drafts, "read_records", forbidden)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    assert not result.failed
+    finding.write_bytes(b"x" * (1024 * 1024 + 1))
+    other = receipt.with_name("learnings-cleanup-20261114-130007.json")
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=other, verdicts=[verdict])
+    assert result.failed and not other.exists() and note.read_bytes() == text.encode()
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("operation", ["apply", "recover"])
+@pytest.mark.parametrize("when", ["open", "classify"])
+def test_automatic_finding_growth_fails_without_effects(tmp_path: Path, monkeypatch, operation: str, when: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    _file_settled(config, _origin(FOURTH_RECORD))
+    finding = sp.proposal_path(config, WORKSPACE, "web-research")
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130008.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    def apply():
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation == "recover":
+        with monkeypatch.context() as patch:
+            def fail_commit(*args, **kwargs):
+                raise OSError("leave pending")
+            patch.setattr(lc, "_update_commit_receipt", fail_commit)
+            assert apply().failed
+    receipt_before = receipt.read_bytes() if receipt.exists() else None
+    original_open, original_plan = lc.os.open, lc.plan_cleanup
+    grown = False
+    def grow() -> None:
+        nonlocal grown
+        if not grown:
+            grown = True
+            with finding.open("ab") as handle:
+                handle.write(b"x" * (1024 * 1024 + 1))
+    if when == "open":
+        def opening(name, flags, *args, **kwargs):
+            if isinstance(name, (str, os.PathLike)) and Path(name) == finding:
+                grow()
+            return original_open(name, flags, *args, **kwargs)
+        monkeypatch.setattr(lc.os, "open", opening)
+    else:
+        def classify(*args, **kwargs):
+            result = original_plan(*args, **kwargs)
+            grow()
+            return result
+        monkeypatch.setattr(lc, "plan_cleanup", classify)
+    result = (apply() if operation == "apply" else
+              lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                       task_revision=3, receipt_name=receipt.name))
+    assert grown and result.failed
+    assert note.read_bytes() == text.encode()
+    assert (receipt.read_bytes() if receipt.exists() else None) == receipt_before
+    assert not lc.suppression_path(root).exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_automatic_recovery_classifies_captured_records(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    _file_settled(config, _origin(FOURTH_RECORD))
+    _draft(config, FOURTH_RECORD, lifecycle=upstream_drafts.DRAFT_PENDING)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130009.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("leave pending")
+        patch.setattr(lc, "_update_commit_receipt", fail)
+        assert lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt,
+                                      verdicts=[verdict]).failed
+    def forbidden(*args, **kwargs):
+        raise AssertionError("recovery reopened owner records")
+    monkeypatch.setattr(sp, "read_records", forbidden)
+    monkeypatch.setattr(upstream_drafts, "read_records", forbidden)
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert not recovered.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_automatic_finding_enumeration_stops_at_first_excess(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    directory = sp.queue_dir(config, WORKSPACE)
+    directory.mkdir(parents=True)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130014.json"
+    real = Path.iterdir
+    seen = 0
+    def iter_directory(path):
+        if path != directory:
+            return real(path)
+        def names():
+            nonlocal seen
+            for i in range(4097):
+                seen += 1
+                yield directory / f"{i:05}.md"
+            raise AssertionError("enumerated beyond first excess")
+        return names()
+    monkeypatch.setattr(Path, "iterdir", iter_directory)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=receipt,
+                                    verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+                                               "entry_revision": entry_revision(UNLINKED_RECORD),
+                                               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}])
+    assert result.failed and seen == 4097
+    assert note.read_bytes() == text.encode() and not receipt.exists()
+
+
+def test_finding_verification_enumeration_stops_at_first_new_file(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    directory = sp.queue_dir(config, WORKSPACE)
+    directory.mkdir(parents=True)
+    real = Path.iterdir
+    scans = 0
+    def iter_directory(path):
+        nonlocal scans
+        if path != directory:
+            return real(path)
+        scans += 1
+        if scans == 1:
+            return iter(())
+        def names():
+            yield directory / "new.md"
+            raise AssertionError("enumerated past first excess")
+        return names()
+    monkeypatch.setattr(Path, "iterdir", iter_directory)
+    with pytest.raises(ValueError):
+        lc._finding_dependency_snapshot(config, WORKSPACE)
+    assert scans == 2
+
+
+def test_update_review_snapshot_parses_every_file_and_enforces_limits(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    queue = sp.queue_dir(config, WORKSPACE)
+    path = next(queue.glob("*.md"))
+    first = lc._finding_dependency_snapshot(config, WORKSPACE)
+    path.write_text(path.read_text(encoding="utf-8") + "\n## Extra\n\nExtra\n", encoding="utf-8")
+    assert lc._finding_dependency_snapshot(config, WORKSPACE) != first
+    for limits in ({"max_files": 0}, {"max_file_bytes": 1}, {"max_total_bytes": 1}):
+        with pytest.raises(ValueError):
+            lc._finding_dependency_snapshot(config, WORKSPACE, **limits)
+    upstream = upstream_drafts.sidecar_dir(config, WORKSPACE)
+    upstream.mkdir(parents=True)
+    (upstream / "malformed.json").write_text("{", encoding="utf-8")
+    with pytest.raises(ValueError):
+        lc._finding_dependency_snapshot(config, WORKSPACE)
+
+
+def test_update_review_snapshot_refuses_symlink(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    queue = sp.queue_dir(config, WORKSPACE)
+    queue.mkdir(parents=True)
+    target = tmp_path / "target"
+    target.write_text("hello", encoding="utf-8")
+    try:
+        (queue / "linked.md").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(ValueError):
+        lc._finding_dependency_snapshot(config, WORKSPACE)
+
+
+def test_update_review_retirement_capacity_500_and_protected_classification() -> None:
+    records = [_record(f"Lesson {n}.", f"lesson-{n}", f"- Lesson {n}.") for n in range(501)]
+    text = _document(*records)
+    rows = tuple(lc.CleanupRow(
+        learning_id=r.learning_id, key=r.key, line="", entry_revision=entry_revision(r),
+        action=lc.KEEP, reason="never_proposed",
+    ) for r in records)
+    plan = lc.CleanupPlan(workspace=WORKSPACE, path=lc.LEARNINGS_RELATIVE,
+                          revision=content_revision(text), kept=rows, active=501)
+    verdicts = [{"learning_id": r.learning_id, "entry_revision": entry_revision(r),
+                 "verdict": "RETIRE" if n < 500 else "KEEP",
+                 "reason": "Obsolete", "evidence": ["Reviewed"]}
+                for n, r in enumerate(records)]
+    kwargs = dict(workspace=WORKSPACE, source_revision=content_revision(text), plan=plan, suppressed=set())
+    assert len(lc._validate_update_review_inputs(text, verdicts=verdicts, **kwargs)) == 500
+    with pytest.raises(ValueError):
+        lc._validate_update_review_inputs(text, verdicts=verdicts[:-1] + [{**verdicts[-1], "verdict": "RETIRE"}], **kwargs)
+    protected = replace(plan, kept=(replace(rows[0], reason="pending"),) + rows[1:])
+    with pytest.raises(ValueError):
+        lc._validate_update_review_inputs(text, verdicts=verdicts, **{**kwargs, "plan": protected})
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("count,existing", [(500, False), (501, False), (500, True)])
+def test_update_review_public_retirement_capacity(tmp_path: Path, count: int, existing: bool) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    records = [_record(f"Lesson {n}.", f"lesson-{n}", f"- Lesson {n}.") for n in range(count)]
+    text = _document(*records)
+    path = _write(config, text)
+    if existing:
+        lc.write_suppressions(root, [("prior", "revision")])
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120028.json"
+    verdicts = [{"learning_id": item.learning_id, "entry_revision": entry_revision(item),
+                 "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]} for item in records]
+    kwargs = dict(config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+                  verdicts=verdicts, receipt_path=receipt)
+    if count == 500 and not existing:
+        result = lc.apply_update_review(root, **kwargs)
+        assert result.applied and not result.failed and len(lc.read_suppressions(root)) == 500
+    else:
+        with pytest.raises(ValueError):
+            lc.apply_update_review(root, **kwargs)
+        assert path.read_bytes() == text.encode() and not receipt.exists()
+        assert set(lc.read_suppressions(root)) == ({("prior", "revision")} if existing else set())
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("state", ["pending", "reopened", "held_back", "upstream", "unreadable", "malformed"])
+def test_update_review_public_mixed_protection_is_atomic(tmp_path: Path, state: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD, RETIRED_RECORD)
+    if state == "unreadable":
+        text = text.replace(f"{render_learning(RETIRED_RECORD)}\n",
+                            f"{render_learning(RETIRED_RECORD)}\n- [broken] [2024-13-45 → nope] (x0) Bad dates.\n")
+    path = _write(config, text)
+    if state == "pending":
+        _file_settled(config, _origin(RETIRED_RECORD, state=sp.ORIGIN_PENDING, verification=""))
+    elif state == "reopened":
+        _file_settled(config, _origin(RETIRED_RECORD))
+        assert any(row.learning_id == RETIRED_RECORD.learning_id for row in
+                   lc.plan_cleanup(root, config=config, workspace=WORKSPACE).removals)
+        _file_settled(config, _origin(RETIRED_RECORD, state=sp.ORIGIN_PENDING, verification=""))
+    elif state == "held_back":
+        _file_settled(config, _origin(RETIRED_RECORD), sp.SkillOrigin(finding="unattributed"))
+    elif state == "upstream":
+        _draft(config, RETIRED_RECORD, lifecycle=upstream_drafts.DRAFT_PENDING)
+    elif state == "malformed":
+        queue = sp.queue_dir(config, WORKSPACE)
+        queue.mkdir(parents=True)
+        (queue / "unlinked.md").write_text("", encoding="utf-8")
+    if state in {"pending", "reopened", "held_back", "upstream"}:
+        plan = lc.plan_cleanup(root, config=config, workspace=WORKSPACE)
+        protected = next(row for row in plan.rows if row.learning_id == RETIRED_RECORD.learning_id)
+        assert protected.reason == {"pending": "pending", "reopened": "pending",
+                                    "held_back": "held_back", "upstream": "stock_waiting_upstream"}[state]
+    finding_before = {p.relative_to(tmp_path).as_posix(): p.read_bytes() for p in tmp_path.rglob("*")
+                      if p.is_file() and p.suffix in {".md", ".json"}}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120029.json"
+    verdicts = [{"learning_id": row.learning_id, "entry_revision": entry_revision(row), "verdict": "RETIRE",
+                 "reason": "Obsolete", "evidence": ["Reviewed"]} for row in (UNLINKED_RECORD, RETIRED_RECORD)]
+    try:
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), verdicts=verdicts, receipt_path=receipt)
+    except ValueError:
+        pass
+    else:
+        assert result.failed or result.conflicts
+    assert path.read_bytes() == text.encode() and not receipt.exists() and not lc.suppression_path(root).exists()
+    assert {p.relative_to(tmp_path).as_posix(): p.read_bytes() for p in tmp_path.rglob("*")
+            if p.is_file() and p.suffix in {".md", ".json"}} == finding_before
+
+
+def test_update_review_snapshot_rechecks_earlier_store_after_later_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    _draft(config, RETIRED_RECORD, lifecycle=upstream_drafts.DRAFT_PENDING)
+    parse = upstream_drafts.read_sidecar
+    skill = next(sp.queue_dir(config, WORKSPACE).glob("*.md"))
+
+    def changed(path: Path, workspace: str, *, text: str | None = None) -> upstream_drafts.UpstreamDraft | None:
+        result = parse(path, workspace, text=text)
+        skill.write_text(skill.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(upstream_drafts, "read_sidecar", changed)
+    with pytest.raises(ValueError):
+        lc._finding_dependency_snapshot(config, WORKSPACE)
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("verdict", ["KEEP", "REFRESH", "RETIRE"])
+@pytest.mark.parametrize("bom,newline", [(False, "\n"), (True, "\r\n")])
+def test_apply_update_review_records_real_effects_and_undo(tmp_path: Path, verdict: str, bom: bool, newline: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = ("\ufeff" if bom else "") + _document(UNLINKED_RECORD, frontmatter=_SHORT_STAMP).replace("\n", newline)
+    path = _write(config, text)
+    receipt_path = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120000.json"
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt_path,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+                   "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": verdict,
+                   "reason": "Reviewed", "evidence": ["Current practice"]}],
+    )
+    assert not result.failed and not result.conflicts
+    assert result.applied is (verdict == "RETIRE")
+    assert receipt_path.exists()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt_path.name) is not None
+    if verdict == "RETIRE":
+        assert lc.unmigrate_cleanup(root, result.receipt, apply=True)["failed"] == []
+    assert path.read_bytes() == text.encode("utf-8")
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_undo_holds_learning_lock_until_suppression_persists(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    first = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130012.json"
+    second = first.with_name("learnings-cleanup-20261114-130013.json")
+    real = lc.write_suppressions
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("interrupted")
+        patch.setattr(lc, "write_suppressions", fail)
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), verdicts=[verdict], receipt_path=first)
+    assert result.applied and result.failed and not lc.suppression_path(root).exists()
+    entered, release, review_done = threading.Event(), threading.Event(), threading.Event()
+    results: dict[str, object] = {}
+    def wait_write(*args, **kwargs):
+        if threading.current_thread().name == "undo":
+            entered.set()
+            assert release.wait(5)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(lc, "write_suppressions", wait_write)
+    def undo():
+        results["undo"] = lc.unmigrate_cleanup(root, result.receipt, apply=True)
+    def review():
+        try:
+            results["review"] = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                                        source_revision=content_revision(text), verdicts=[verdict],
+                                                        receipt_path=second)
+        except ValueError as exc:
+            results["review"] = exc
+        finally:
+            review_done.set()
+    a = threading.Thread(target=undo, name="undo")
+    b = threading.Thread(target=review, name="review")
+    a.start()
+    try:
+        assert entered.wait(5)
+        b.start()
+        assert not review_done.wait(0.3)
+    finally:
+        release.set()
+        a.join(5)
+        if b.ident is not None:
+            b.join(5)
+    assert not a.is_alive() and not b.is_alive()
+    assert not results["undo"]["failed"]
+    assert note.read_bytes() == text.encode()
+    assert (UNLINKED_RECORD.learning_id, entry_revision(UNLINKED_RECORD)) in lc.read_suppressions(root)
+    assert not second.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_undo_reports_restoration_when_suppression_write_lock_fails(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-140020.json"
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("interrupted")
+        patch.setattr(lc, "write_suppressions", fail)
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), verdicts=[verdict], receipt_path=receipt)
+    assert result.applied and result.failed
+    def lock_failure(*args, **kwargs):
+        raise lc.QueueLockError("suppression busy")
+    monkeypatch.setattr(lc, "write_suppressions", lock_failure)
+    undo = lc.unmigrate_cleanup(root, result.receipt, apply=True)
+    assert note.read_bytes() == text.encode()
+    assert undo["applied"] and undo["entries_reverted"] == 1
+    assert undo["reverted"] == [lc.LEARNINGS_RELATIVE]
+    assert undo["failed"] and not undo["suppressions_kept"]
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_undo_detects_suppression_write_that_omits_required_pair(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-140022.json"
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("interrupted")
+        patch.setattr(lc, "write_suppressions", fail)
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), verdicts=[verdict], receipt_path=receipt)
+    assert result.applied and result.failed
+    monkeypatch.setattr(lc, "write_suppressions", lambda *args, **kwargs: {})
+    undo = lc.unmigrate_cleanup(root, result.receipt, apply=True)
+    assert note.read_bytes() == text.encode()
+    assert undo["applied"] and undo["entries_reverted"] == 1 and undo["failed"]
+    assert undo["suppressions_kept"] == []
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_undo_refuses_full_suppression_store_before_restoration(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD, FOURTH_RECORD)
+    note = _write(config, text)
+    verdicts = [{"learning_id": row.learning_id, "entry_revision": entry_revision(row),
+                 "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+                for row in (UNLINKED_RECORD, FOURTH_RECORD)]
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-140021.json"
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("interrupted")
+        patch.setattr(lc, "write_suppressions", fail)
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), verdicts=verdicts, receipt_path=receipt)
+    assert result.applied and result.failed
+    first = (UNLINKED_RECORD.learning_id, entry_revision(UNLINKED_RECORD))
+    lc.write_suppressions(root, [first] + [(f"old-{n}", "revision") for n in range(lc.MAX_SUPPRESSED - 1)])
+    before_note, before_store = note.read_bytes(), lc.suppression_path(root).read_bytes()
+    entered, release, acquired = threading.Event(), threading.Event(), threading.Event()
+    read = lc.read_suppressions
+    def wait_read(*args, **kwargs):
+        value = read(*args, **kwargs)
+        if threading.current_thread().name == "undo":
+            entered.set()
+            assert release.wait(5)
+        return value
+    monkeypatch.setattr(lc, "read_suppressions", wait_read)
+    results = {}
+    undo_thread = threading.Thread(name="undo", target=lambda: results.update(
+        undo=lc.unmigrate_cleanup(root, result.receipt, apply=True)))
+    def compete():
+        with lc.queue_lock(lc.suppression_path(root)):
+            acquired.set()
+    competitor = threading.Thread(target=compete)
+    undo_thread.start()
+    try:
+        assert entered.wait(5)
+        competitor.start()
+        assert not acquired.wait(0.3)
+    finally:
+        release.set()
+        undo_thread.join(5)
+        if competitor.ident is not None:
+            competitor.join(5)
+    assert not undo_thread.is_alive() and not competitor.is_alive() and acquired.is_set()
+    undo = results["undo"]
+    assert undo["failed"] and not undo["applied"] and undo["entries_reverted"] == 0
+    assert not undo["suppressions_kept"]
+    assert note.read_bytes() == before_note and lc.suppression_path(root).read_bytes() == before_store
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_apply_update_review_postcheck_change_restores_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120001.json"
+    snapshot = lc._finding_dependency_snapshot
+    calls = 0
+
+    def changed(config: CiaoConfig, workspace: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "changed" if calls == 3 else snapshot(config, workspace)
+
+    monkeypatch.setattr(lc, "_finding_dependency_snapshot", changed)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied
+    assert path.read_bytes() == text.encode()
+    assert json.loads(receipt.read_text())["automatic_review"]["committed"] is False
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_apply_update_review_suppression_failure_leaves_pending_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120002.json"
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected suppression failure")
+
+    monkeypatch.setattr(lc, "write_suppressions", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.applied and result.failed
+    assert path.read_bytes() != text.encode()
+    assert json.loads(receipt.read_text())["automatic_review"]["committed"] is False
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_apply_update_review_refuses_foreign_receipt_and_defer(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120003.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("foreign", encoding="utf-8")
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Reviewed", "evidence": ["Reviewed"]}
+    kwargs = dict(config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+                  receipt_path=receipt)
+    result = lc.apply_update_review(root, verdicts=[verdict], **kwargs)
+    assert result.failed and receipt.read_text() == "foreign"
+    with pytest.raises(ValueError):
+        lc.apply_update_review(root, verdicts=[{**verdict, "verdict": "DEFER",
+                               "proposal_ref": {"kind": "memory", "id": "a" * 16}}], **kwargs)
+    assert path.read_bytes() == text.encode()
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("tamper", ["committed", "coverage", "span", "suppression", "revision",
+                                    "actor", "workspace", "task_revision", "verdict", "removal"])
+def test_update_review_recorded_rejects_tampered_effects(tmp_path: Path, tamper: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120004.json"
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert not result.failed
+    data = json.loads(receipt.read_text())
+    if tamper == "committed":
+        data["automatic_review"]["committed"] = False
+    elif tamper == "coverage":
+        data["automatic_review"]["input_entries"] = []
+    elif tamper == "span":
+        data["removals"][0]["from"] += "x"
+    elif tamper == "suppression":
+        lc.suppression_path(root).unlink()
+    elif tamper == "actor":
+        data["automatic_review"]["actor"] = "operator"
+    elif tamper == "workspace":
+        data["automatic_review"]["workspace"] = "foreign"
+    elif tamper == "task_revision":
+        data["automatic_review"]["task_revision"] = 4
+    elif tamper == "verdict":
+        data["automatic_review"]["verdicts"] = []
+    elif tamper == "removal":
+        data["automatic_review"]["verdicts"][0]["verdict"] = "KEEP"
+    else:
+        path.write_text(path.read_text() + "edited", encoding="utf-8")
+    if tamper not in {"suppression", "revision"}:
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+def test_update_review_receipt_capability_failure_precedes_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120005.json"
+
+    monkeypatch.setattr(lc, "_update_directory_durability_supported", lambda: False)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied and not receipt.exists()
+    assert path.read_bytes() == text.encode()
+
+
+def test_update_review_unsupported_precedes_queue_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120015.json"
+    monkeypatch.setattr(lc, "_update_directory_durability_supported", lambda: False)
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("queue lock was entered")
+    monkeypatch.setattr(lc, "queue_lock", forbidden)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision="unused", verdicts=[], receipt_path=receipt)
+    recovery = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name)
+    assert result.failed and recovery.failed and not receipt.parent.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_suppression_directory_fails_before_receipt_or_note(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    suppression = lc.suppression_path(root)
+    suppression.mkdir()
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120031.json"
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied
+    assert path.read_bytes() == text.encode() and suppression.is_dir() and not receipt.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_suppression_descriptor_read_failure_refuses_apply(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    lc.write_suppressions(root, [("existing", "revision")])
+    store = lc.suppression_path(root)
+    before = store.read_bytes()
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120038.json"
+    real_open = lc.os.open
+
+    def fail(name, flags, *args, **kwargs):
+        if Path(name) == store and flags & os.O_ACCMODE == os.O_RDONLY:
+            raise PermissionError("injected descriptor failure")
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(lc.os, "open", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied
+    assert path.read_bytes() == text.encode() and store.read_bytes() == before and not receipt.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("invalid", ["directory", "dangling", "symlink", "fifo", "readfault"])
+def test_invalid_suppression_refuses_apply_validator_and_recovery(tmp_path: Path, monkeypatch, invalid: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120039.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    real_write = lc.write_suppressions
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("stop after landing")
+        patch.setattr(lc, "write_suppressions", fail)
+        pending = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                         source_revision=content_revision(text), receipt_path=receipt,
+                                         verdicts=[verdict])
+    assert pending.applied and pending.failed
+    store = lc.suppression_path(root)
+    foreign = tmp_path / "foreign-suppression"
+    foreign.write_text("foreign data", encoding="utf-8")
+    if invalid == "directory":
+        store.mkdir()
+    elif invalid in {"dangling", "symlink"}:
+        try:
+            store.symlink_to(foreign if invalid == "symlink" else tmp_path / "missing-target")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+    elif invalid == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation unavailable")
+        os.mkfifo(store)
+    else:
+        real_write(root, [("existing", "revision")])
+        real_open = lc.os.open
+        def fail_open(name, flags, *args, **kwargs):
+            if isinstance(name, (str, os.PathLike)) and Path(name) == store:
+                raise PermissionError("injected read failure")
+            return real_open(name, flags, *args, **kwargs)
+        monkeypatch.setattr(lc.os, "open", fail_open)
+    note_before, receipt_before = note.read_bytes(), receipt.read_bytes()
+    other_receipt = receipt.with_name("learnings-cleanup-20261114-120040.json")
+    applied = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                     source_revision=content_revision(note_before.decode()),
+                                     receipt_path=other_receipt, verdicts=[])
+    assert applied.failed and not applied.applied and not other_receipt.exists()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert recovered.failed
+    assert note.read_bytes() == note_before and receipt.read_bytes() == receipt_before
+    assert foreign.read_text(encoding="utf-8") == "foreign data"
+    if invalid in {"dangling", "symlink"}:
+        assert store.is_symlink()
+    elif invalid == "fifo":
+        assert stat.S_ISFIFO(store.lstat().st_mode)
+    elif invalid == "directory":
+        assert store.is_dir()
+
+
+def test_update_review_lock_timeout_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120016.json"
+    monkeypatch.setattr(lc, "_update_directory_durability_supported", lambda: True)
+    @contextmanager
+    def timeout(*args: object, **kwargs: object) -> Iterator[None]:
+        raise QueueLockError("timeout")
+        yield
+    monkeypatch.setattr(lc, "queue_lock", timeout)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision="unused", verdicts=[], receipt_path=receipt)
+    recovery = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name)
+    assert result.failed and recovery.failed and not receipt.parent.exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_refuses_untrusted_receipt_directory(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120017.json"
+    receipt.parent.mkdir(parents=True, mode=0o700)
+    receipt.parent.chmod(0o777)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}])
+    assert result.failed and not result.applied and not receipt.exists()
+    assert path.read_bytes() == text.encode()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows durability refusal contract")
+def test_update_review_native_windows_refuses_without_mutating_files(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    lc.write_suppressions(root, [("existing", "revision")])
+    suppression = lc.suppression_path(root)
+    before_suppression = suppression.read_bytes()
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120014.json"
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert not result.applied and result.failed == ("unsupported receipt directory durability",)
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert not recovered.applied and recovered.failed == ("unsupported receipt directory durability",)
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    assert path.read_bytes() == text.encode("utf-8")
+    assert suppression.read_bytes() == before_suppression
+    assert not receipt.parent.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows durability refusal contract")
+def test_update_review_native_windows_fresh_tree_stays_unchanged(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120024.json"
+    before = {p.relative_to(tmp_path).as_posix(): p.read_bytes() if p.is_file() else None
+              for p in tmp_path.rglob("*")}
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision="unused", verdicts=[], receipt_path=receipt)
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert result.failed and recovered.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    assert {p.relative_to(tmp_path).as_posix(): p.read_bytes() if p.is_file() else None
+            for p in tmp_path.rglob("*")} == before
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_defer_real_queue_reference(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.write_text(f"- [memory] Uncertain fact _(from: {source})_\n", encoding="utf-8")
+    proposal_id = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md",
+                                     "memory", "Uncertain fact", source, 0)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120006.json"
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "DEFER", "reason": "Unclear", "evidence": ["Needs review"],
+                   "proposal_ref": {"kind": "memory", "id": proposal_id}}],
+    )
+    assert not result.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name)["deferred"] == 1
+    queue.write_text("", encoding="utf-8")
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("settled", [False, True])
+def test_public_defer_with_large_unrelated_history(tmp_path: Path, settled: bool, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("" if settled else f"- [memory] Uncertain fact _(from: {source})_\n", encoding="utf-8")
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md",
+                                  "memory", "Uncertain fact", source, 0)
+    log = memory_proposals.dismissed_log_path(queue)
+    unrelated = json.dumps({"text": "x" * 1100, "dismissed_at": "2026-11-14T12:00:00+00:00"}) + "\n"
+    with log.open("w", encoding="utf-8") as handle:
+        for _ in range(8000):
+            handle.write(unrelated)
+        if settled:
+            handle.write(json.dumps({"text": "Uncertain fact", "kind": "memory", "source": source,
+                                     "proposal_id": identity, "promoted_at": "2026-11-14T12:00:00+00:00"}) + "\n")
+    assert log.stat().st_size > 8 * 1024 * 1024
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Unclear", "evidence": ["Needs review"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120006.json"
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    assert not result.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+    pending = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120007.json"
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise OSError("leave pending")
+        patch.setattr(lc, "_update_commit_receipt", fail)
+        assert lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=pending,
+                                      verdicts=[verdict]).failed
+    assert not lc.recover_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        receipt_name=pending.name).failed
+    if settled:
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write('{"broken":\n')
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_recover_update_review_repairs_pending_suppression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120007.json"
+    write = lc.write_suppressions
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected crash")
+    monkeypatch.setattr(lc, "write_suppressions", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.applied and result.failed
+    monkeypatch.setattr(lc, "write_suppressions", write)
+    write(root, [(f"old-{n}", "revision") for n in range(lc.MAX_SUPPRESSED)])
+    full = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                    task_revision=3, receipt_name=receipt.name)
+    assert full.failed and len(lc.read_suppressions(root)) == lc.MAX_SUPPRESSED
+    lc.suppression_path(root).unlink()
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert not recovered.failed and not recovered.conflicts
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_recover_update_review_preserves_prior_and_partial_suppressions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD, FOURTH_RECORD)
+    _write(config, text)
+    lc.write_suppressions(root, [("earlier", "revision")])
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120025.json"
+    real_write = lc.write_suppressions
+    def partial(root: Path, pairs: list[tuple[str, str]], *, actor: str = "system") -> object:
+        real_write(root, pairs[:1], actor=actor)
+        raise OSError("injected partial persistence")
+    monkeypatch.setattr(lc, "write_suppressions", partial)
+    verdicts = [{"learning_id": row.learning_id, "entry_revision": entry_revision(row),
+                 "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+                for row in (UNLINKED_RECORD, FOURTH_RECORD)]
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), verdicts=verdicts, receipt_path=receipt)
+    prior = set(lc.read_suppressions(root))
+    assert result.applied and result.failed and len(prior) == 2 and ("earlier", "revision") in prior
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    monkeypatch.setattr(lc, "write_suppressions", real_write)
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert not recovered.failed
+    final = set(lc.read_suppressions(root))
+    assert prior < final and len(final) == 3
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+
+
+def test_update_review_defer_decision_requires_canonical_duplicate_and_timestamp(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("", encoding="utf-8")
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", "memory", "Fact", source, 0)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Question", "evidence": ["Review"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    log = memory_proposals.dismissed_log_path(queue)
+    row = {"kind": "memory", "text": "Fact", "identity_text": "Fact",
+           "source": source, "proposal_id": identity + ":2"}
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    row["dismissed_at"] = "2026-11-14T12:00:00+00:00"
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    row["promoted_at"] = "2026-11-14T12:00:00+00:00"
+    row["dismissed_at"] = ""
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    del row["promoted_at"]
+    row["dismissed_at"] = "2026-11-14T12:00:00+00:00"
+    legacy = {key: value for key, value in row.items() if key != "identity_text"}
+    log.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    assert lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    row["text"] = "Foreign fact"
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    row["text"] = "Fact"
+    row["history_only"] = True
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("operation", ["apply", "recover", "verify"])
+@pytest.mark.parametrize("promoted_at", ["", None])
+def test_defer_conflicting_timestamp_uses_canonical_precedence(tmp_path: Path, monkeypatch, operation: str, promoted_at: str | None) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("", encoding="utf-8")
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", "memory", "Fact", source, 0)
+    row = {"kind": "memory", "text": "Fact", "source": source, "proposal_id": identity,
+           "dismissed_at": "2026-11-14T12:00:00+00:00"}
+    log = memory_proposals.dismissed_log_path(queue)
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Review", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-160001.json"
+    def apply():
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation != "apply":
+        with monkeypatch.context() as patch:
+            if operation == "recover":
+                def fail(*args, **kwargs):
+                    raise OSError("leave pending")
+                patch.setattr(lc, "_update_commit_receipt", fail)
+            result = apply()
+            assert bool(result.failed) is (operation == "recover")
+    row["promoted_at"] = promoted_at
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    canonical = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(canonical) == 1 and canonical[0]["action"] == "accepted" and canonical[0]["ts"] == str(promoted_at)
+    before = (note.read_bytes(), log.read_bytes(), receipt.read_bytes() if receipt.exists() else None)
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    if operation == "apply":
+        with pytest.raises(ValueError, match="DEFER"):
+            apply()
+    elif operation == "recover":
+        assert lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name).failed
+    else:
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is None
+    assert (note.read_bytes(), log.read_bytes(), receipt.read_bytes() if receipt.exists() else None) == before
+    with monkeypatch.context() as patch:
+        patch.setattr(lc, "_deferred_references_valid", lambda *args: True)
+        if operation == "apply":
+            assert not apply().failed
+        elif operation == "recover":
+            assert not lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                                task_revision=3, receipt_name=receipt.name).failed
+        else:
+            assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                             task_revision=3, receipt_name=receipt.name) is not None
+
+
+def test_update_review_defer_rejects_nonmemory_queue_and_history(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", "profile", "Fact", source, 0)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Question", "evidence": ["Review"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    queue.write_text(f"- [profile] Fact _(from: {source})_\n", encoding="utf-8")
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+    queue.write_text("", encoding="utf-8")
+    memory_proposals.record_dismissal(queue, text="Fact", kind="profile", source=source, proposal_id=identity)
+    assert not lc._deferred_references_valid(root, WORKSPACE, [verdict])
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("text", ["Fact", "A  spaced fact"])
+@pytest.mark.parametrize("tamper", ["none", "id", "source", "timestamp", "kind"])
+def test_public_defer_accepts_only_provable_legacy_raw_text(tmp_path: Path, text: str, tamper: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    source_text = _document(UNLINKED_RECORD)
+    note = _write(config, source_text)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("", encoding="utf-8")
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", "memory", text, source, 0)
+    row = {"kind": "memory", "text": text, "source": source, "proposal_id": identity,
+           "dismissed_at": "2026-11-14T12:00:00+00:00"}
+    if tamper == "id": row["proposal_id"] = "0" * 16
+    if tamper == "source": row["source"] = "foreign"
+    if tamper == "timestamp": row["dismissed_at"] = ""
+    if tamper == "kind": row["kind"] = "profile"
+    memory_proposals.dismissed_log_path(queue).write_text(json.dumps(row) + "\n", encoding="utf-8")
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Review", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130010.json"
+    if tamper == "none":
+        assert not lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                          source_revision=content_revision(source_text),
+                                          receipt_path=receipt, verdicts=[verdict]).failed
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is not None
+    else:
+        with pytest.raises(ValueError):
+            lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                   source_revision=content_revision(source_text), receipt_path=receipt, verdicts=[verdict])
+        assert not receipt.exists() and note.read_bytes() == source_text.encode()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_receipt_rejects_unprivate_descriptor_before_write_and_read(tmp_path: Path, monkeypatch) -> None:
+    import os
+    from ciao.os_support import private
+    directory = tmp_path / "receipts"
+    directory.mkdir(mode=0o700)
+    fd = lc._update_receipt_dir(directory, create=False)
+    real = private.is_private_descriptor_strict
+    seen = []
+    def reject_file(descriptor):
+        info = os.fstat(descriptor)
+        if not __import__("stat").S_ISDIR(info.st_mode):
+            seen.append(info.st_size)
+            return False
+        return real(descriptor)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(private, "is_private_descriptor_strict", reject_file)
+            with pytest.raises(OSError, match="unsafe receipt"):
+                lc._update_write_new(fd, "receipt.json", {"secret": "sensitive"})
+        assert seen == [0] and not (directory / "receipt.json").exists()
+        lc._update_write_new(fd, "receipt.json", {"secret": "sensitive"})
+    finally:
+        os.close(fd)
+    with monkeypatch.context() as patch:
+        patch.setattr(private, "is_private_descriptor_strict", reject_file)
+        assert lc._update_receipt_read(directory / "receipt.json") is None
+        assert not lc._update_fence_receipt(directory / "receipt.json", {"secret": "sensitive"})
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_receipt_rejects_unprivate_directory(tmp_path: Path, monkeypatch) -> None:
+    from ciao.os_support import private
+    directory = tmp_path / "receipts"
+    directory.mkdir(mode=0o700)
+    monkeypatch.setattr(private, "is_private_descriptor_strict", lambda fd: False)
+    with pytest.raises(OSError, match="unsafe receipt directory"):
+        lc._update_receipt_dir(directory, create=False)
+
+
+@pytest.mark.skipif(__import__("sys").platform != "darwin", reason="macOS extended ACL")
+@POSIX_UPDATE_RECEIPTS
+def test_update_receipt_rejects_real_macos_acl(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    directory = tmp_path / "receipts"
+    directory.mkdir(mode=0o700)
+    fd = lc._update_receipt_dir(directory, create=False)
+    try:
+        lc._update_write_new(fd, "receipt.json", {"secret": "sensitive"})
+    finally:
+        os.close(fd)
+    path = directory / "receipt.json"
+    subprocess.run(["chmod", "+a", "everyone allow read", str(path)], check=True)
+    assert lc._update_receipt_read(path) is None
+    assert not lc._update_fence_receipt(path, {"secret": "sensitive"})
+
+
+@pytest.mark.skipif(__import__("sys").platform != "darwin", reason="macOS extended ACL")
+@POSIX_UPDATE_RECEIPTS
+def test_update_receipt_rejects_inherited_macos_acl_before_writing(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    directory = tmp_path / "receipts"
+    directory.mkdir(mode=0o700)
+    fd = lc._update_receipt_dir(directory, create=False)
+    try:
+        subprocess.run(["chmod", "+a", "everyone allow read,file_inherit", str(directory)], check=True)
+        with pytest.raises(OSError, match="unsafe receipt directory"):
+            lc._update_receipt_dir(directory, create=False)
+        with pytest.raises(OSError, match="unsafe receipt file"):
+            lc._update_write_new(fd, "receipt.json", {"secret": "sensitive"})
+        assert not (directory / "receipt.json").exists()
+    finally:
+        os.close(fd)
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_real_cli_header_sweep_recovery_satisfies_public_defer(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import cli, memory_receipts as mr
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    queue.write_text(f"# Queue\n\n## 2026-11-14T12:00:00Z\n\n- [memory] A  fact _(from: {source})_\n\n",
+                     encoding="utf-8")
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md",
+                                  "memory", "A  fact", source, 0)
+    reason = tmp_path / "reason.txt"
+    reason.write_text("already reviewed", encoding="utf-8")
+    monkeypatch.setattr(cli, "_resolve_workspace_and_vaults", lambda args: (tmp_path, root, tmp_path, WORKSPACE))
+    with monkeypatch.context() as patch:
+        def interrupted(*args, **kwargs):
+            raise OSError("interrupted before decision")
+        patch.setattr(proposal_actions, "record_decision", interrupted)
+        assert cli.main(["memory-proposal-dismiss", "--workspace", str(tmp_path), "--vault-root", str(root),
+                         "--reason-file", str(reason), "A  fact"]) == 1
+        warning = capsys.readouterr().err.lower()
+        assert "removed" in warning and "decision" in warning and "inspect" in warning
+    journal = mr.journal_path(root, None)
+    mr.recover_pending(journal=journal, config=config)
+    mr.recover_pending(journal=journal, config=config)
+    decisions = memory_proposals.read_decisions(queue)
+    assert len(decisions) == 1 and decisions[0]["proposal_id"] == identity
+    assert decisions[0]["via"] == "agent" and decisions[0]["reason"] == "already reviewed"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Review", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-130011.json"
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    assert not result.failed and lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                                            task_revision=3, receipt_name=receipt.name) is not None
+
+
+def test_update_review_defer_keeps_exact_history_identity_text(tmp_path: Path) -> None:
+    root = Path(_config(tmp_path).workspace_vault_root(WORKSPACE))
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    identity = stable_proposal_id(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md",
+                                  "memory", "A  spaced fact", source, 0)
+    proposal_actions.record_decision(queue, action="dismiss", text="A  spaced fact", kind="memory",
+                                     source=source, via="pwa", proposal_id=identity)
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Unclear", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": identity}}
+    assert lc._deferred_references_valid(root, WORKSPACE, [verdict])
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_wrong_source_recovery_cannot_satisfy_public_defer(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    learning = _document(UNLINKED_RECORD)
+    _write(config, learning)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    first = f"- [memory] Uncertain fact _(from: {source})_\n"
+    second = "- [memory] Uncertain fact _(from: another source)_\n"
+    queue.write_text(first + second, encoding="utf-8")
+    relative = f"{WORKSPACE}/Workspace/Memory-Proposals.md"
+    entry = next(walk_proposal_queue(WORKSPACE, relative, first + second))
+    selected = {"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source}
+    def interrupted(*args, **kwargs):
+        raise OSError("interrupted")
+    with monkeypatch.context() as patch:
+        patch.setattr(mr, "_write_queue_receipt", interrupted)
+        with pytest.raises(OSError):
+            with mr.queue_resolution(queue, removed_text=entry.bullet.text, kind=entry.bullet.kind,
+                                     promoted=False, actor="operator", source="pwa",
+                                     workspace=WORKSPACE, vault_root=root, selected=selected):
+                queue.write_text(first, encoding="utf-8")
+                raise OSError("interrupted")
+    mr.recover_pending(journal=mr.journal_path(root, None), config=config)
+    queue.write_text("", encoding="utf-8")
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Uncertain", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": entry.proposal_id}}
+    with pytest.raises(ValueError):
+        lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                               source_revision=content_revision(learning), verdicts=[verdict],
+                               receipt_path=config.state_path.parent / "migration" / "learnings-cleanup-20261114-120032.json")
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_recovered_spaced_identity_satisfies_public_defer_once(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts as mr
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    learning = _document(UNLINKED_RECORD)
+    _write(config, learning)
+    queue = root / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    before = f"- [memory] A  spaced fact _(from: {source})_\n"
+    queue.write_text(before, encoding="utf-8")
+    entry = next(walk_proposal_queue(WORKSPACE, f"{WORKSPACE}/Workspace/Memory-Proposals.md", before))
+    assert proposal_service._rewrite_queue_single(
+        queue, entry.line, entry.raw, entry.bullet.text, entry.bullet.kind,
+        False, WORKSPACE, root, entry.proposal_id,
+    )
+    journal = mr.journal_path(root, None)
+    mr.recover_pending(journal=journal, config=config)
+    mr.recover_pending(journal=journal, config=config)
+    decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(decisions) == 1 and decisions[0]["identity_text"] == "A  spaced fact"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Uncertain", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": entry.proposal_id}}
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(learning), verdicts=[verdict],
+                                    receipt_path=config.state_path.parent / "migration" / "learnings-cleanup-20261114-120033.json")
+    assert not result.failed
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("tamper", ["source", "proposal_id", "dismissed_at", "history_only", "kind"])
+def test_update_review_real_duplicate_decision_and_tampering(tmp_path: Path, tamper: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    proposal = memory_proposals.MemoryProposal(target="memory", text="Uncertain fact", source_section=source)
+    queue = memory_proposals.append_proposals([proposal], root)
+    assert queue is not None
+    # append_proposals deduplicates, so reproduce a pre-existing duplicate with the
+    # queue owner's atomic writer before recording the non-first decision.
+    write_queue_atomically(queue, queue.read_text(encoding="utf-8") + proposal.as_bullet() + "\n")
+    from ciao.proposal_tracking import walk_proposal_queue
+    relative = f"{WORKSPACE}/Workspace/Memory-Proposals.md"
+    entries = list(walk_proposal_queue(WORKSPACE, relative, queue.read_text(encoding="utf-8")))
+    assert len(entries) == 2 and entries[1].proposal_id == entries[0].proposal_id + ":1"
+    proposal_actions.record_decision(queue, action="dismiss", text=proposal.text, kind="memory",
+                                     via="pwa", source=source, proposal_id=entries[1].proposal_id)
+    recorded = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(recorded) == 1 and recorded[0]["proposal_id"] == entries[1].proposal_id
+    assert recorded[0]["source"] == source and recorded[0]["ts"]
+    write_queue_atomically(queue, "")
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120026.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "DEFER", "reason": "Uncertain", "evidence": ["Reviewed"],
+               "proposal_ref": {"kind": "memory", "id": entries[0].proposal_id}}
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                    source_revision=content_revision(text), verdicts=[verdict], receipt_path=receipt)
+    assert not result.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+    log = memory_proposals.dismissed_log_path(queue)
+    row = json.loads(log.read_text(encoding="utf-8"))
+    row[tamper] = {"source": "foreign", "proposal_id": "a" * 16, "dismissed_at": "",
+                   "history_only": True, "kind": "profile"}[tamper]
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    with pytest.raises(ValueError):
+        lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                               source_revision=content_revision(text), verdicts=[verdict],
+                               receipt_path=receipt.parent / "learnings-cleanup-20261114-120027.json")
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_defer_accepts_recovered_real_duplicate_resolution(tmp_path: Path) -> None:
+    from ciao import memory_receipts
+    from ciao.proposal_tracking import walk_proposal_queue
+    from ciao.web import proposal_service
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    source = f"learning-review:{UNLINKED_RECORD.learning_id}@{entry_revision(UNLINKED_RECORD)}"
+    proposal = memory_proposals.MemoryProposal(target="memory", text="Uncertain fact", source_section=source)
+    queue = memory_proposals.append_proposals([proposal], root)
+    assert queue is not None
+    write_queue_atomically(queue, queue.read_text(encoding="utf-8") + proposal.as_bullet() + "\n")
+    relative = f"{WORKSPACE}/Workspace/Memory-Proposals.md"
+    entries = list(walk_proposal_queue(WORKSPACE, relative, queue.read_text(encoding="utf-8")))
+    second = entries[1]
+    assert proposal_service._rewrite_queue_single(queue, second.line, second.raw, second.bullet.text,
+        second.bullet.kind, False, WORKSPACE, root, second.proposal_id)
+    memory_receipts.recover_pending(journal=memory_receipts.journal_path(root, None), config=config)
+    decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(decisions) == 1 and decisions[0]["proposal_id"] == second.proposal_id
+    assert decisions[0]["source"] == source and decisions[0]["ts"]
+    first = next(walk_proposal_queue(WORKSPACE, relative, queue.read_text(encoding="utf-8")))
+    assert proposal_service._rewrite_queue_single(queue, first.line, first.raw, first.bullet.text,
+        first.bullet.kind, False, WORKSPACE, root, first.proposal_id)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120030.json"
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "DEFER", "reason": "Uncertain", "evidence": ["Reviewed"],
+                   "proposal_ref": {"kind": "memory", "id": entries[0].proposal_id}}])
+    assert not result.failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_late_classification_refusal_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120018.json"
+    plan = lc.plan_cleanup
+    calls = 0
+    def changed(*args: object, **kwargs: object) -> lc.CleanupPlan:
+        nonlocal calls
+        calls += 1
+        result = plan(*args, **kwargs)
+        if calls == 2:
+            return replace(result, kept=(replace(result.kept[0], reason="pending"),))
+        return result
+    monkeypatch.setattr(lc, "plan_cleanup", changed)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}])
+    assert result.failed and not result.applied and path.read_bytes() == text.encode()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_recover_update_review_noop_revalidates_finding_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120008.json"
+    commit = lc._update_commit_receipt
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected commit failure")
+    monkeypatch.setattr(lc, "_update_commit_receipt", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied
+    monkeypatch.setattr(lc, "_update_commit_receipt", commit)
+    queue = sp.queue_dir(config, WORKSPACE)
+    queue.mkdir(parents=True)
+    failed = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                      task_revision=3, receipt_name=receipt.name)
+    assert failed.failed
+    queue.rmdir()
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert not recovered.failed
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_substituted_receipt_is_not_overwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120009.json"
+    commit = lc._update_commit_receipt
+    def substitute(dir_fd: int, name: str, identity: tuple[int, int], data: dict[str, object]) -> None:
+        receipt.unlink()
+        receipt.write_text("foreign", encoding="utf-8")
+        commit(dir_fd, name, identity, data)
+    monkeypatch.setattr(lc, "_update_commit_receipt", substitute)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and receipt.read_text() == "foreign"
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_rollback_conflict_preserves_external_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120010.json"
+    snapshot = lc._finding_dependency_snapshot
+    calls = 0
+    def changed(config: CiaoConfig, workspace: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            path.write_text(path.read_text(encoding="utf-8") + "external edit\n", encoding="utf-8")
+            return "changed"
+        return snapshot(config, workspace)
+    monkeypatch.setattr(lc, "_finding_dependency_snapshot", changed)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "RETIRE",
+        "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.applied and result.failed and path.read_text().endswith("external edit\n")
+    assert json.loads(receipt.read_text())["automatic_review"]["committed"] is False
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_prepared_receipt_cannot_recover_foreign_afterimage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120019.json"
+    write = lc._write_locked
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("interrupted before CAS")
+    monkeypatch.setattr(lc, "_write_locked", fail)
+    result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}])
+    assert result.failed and not result.applied
+    monkeypatch.setattr(lc, "_write_locked", write)
+    row = lc.plan_cleanup(root, config=config, workspace=WORKSPACE).rows[0]
+    foreign_after, _ = lc._splice(text, [row])
+    path.write_text(foreign_after, encoding="utf-8")
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert recovered.failed and not lc.suppression_path(root).exists()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_postreplace_sync_failure_requires_successful_verifier_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120020.json"
+    sync, replace_file = lc.os.fsync, lc.os.replace
+    committed_replaced = False
+    replace_count = 0
+    def replace_observer(*args: object, **kwargs: object) -> None:
+        nonlocal committed_replaced, replace_count
+        replace_file(*args, **kwargs)
+        replace_count += 1
+        if replace_count == 2:
+            committed_replaced = True
+    def fail_directory(fd: int) -> None:
+        if committed_replaced and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected postreplace directory fsync failure")
+        sync(fd)
+    monkeypatch.setattr(lc.os, "replace", replace_observer)
+    monkeypatch.setattr(lc.os, "fsync", fail_directory)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "KEEP",
+        "reason": "Current", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and committed_replaced
+    before_receipt, before_note = receipt.read_bytes(), path.read_bytes()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+    assert receipt.read_bytes() == before_receipt and path.read_bytes() == before_note
+    monkeypatch.setattr(lc.os, "fsync", sync)
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_update_review_prewrite_sync_failure_cleans_owned_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120021.json"
+    receipt.parent.mkdir(parents=True, mode=0o700)
+    sync = lc.os.fsync
+    def fail(fd: int) -> None:
+        mode = os.fstat(fd).st_mode
+        if (failure == "file" and stat.S_ISREG(mode)) or (failure == "directory" and stat.S_ISDIR(mode)):
+            raise OSError("injected fsync failure")
+        sync(fd)
+    monkeypatch.setattr(lc.os, "fsync", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "RETIRE",
+        "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied and not receipt.exists()
+    assert path.read_bytes() == text.encode("utf-8")
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("which", ["final", "temp"])
+def test_receipt_failure_cleanup_preserves_substituted_inode(tmp_path: Path, monkeypatch, which: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120042.json"
+    receipt.parent.mkdir(parents=True, mode=0o700)
+    temp = receipt.parent / f".{receipt.name}.fixed.tmp"
+    target = receipt if which == "final" else temp
+    monkeypatch.setattr(lc.secrets, "token_hex", lambda _: "fixed")
+    original_fsync = lc.os.fsync
+    injected = False
+
+    def fail(fd):
+        nonlocal injected
+        info = os.fstat(fd)
+        if not injected and stat.S_ISREG(info.st_mode) and target.exists():
+            named = target.stat()
+            if (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino):
+                injected = True
+                target.unlink()
+                target.write_text("foreign inode", encoding="utf-8")
+                raise OSError("injected fsync failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(lc.os, "fsync", fail)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}],
+    )
+    assert injected and result.failed and not result.applied
+    assert target.read_text(encoding="utf-8") == "foreign inode"
+    assert note.read_bytes() == text.encode()
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("operation", ["apply", "validator", "recover"])
+@pytest.mark.parametrize("guard", ["owner", "mode", "parent"])
+def test_receipt_trust_guards_each_entrypoint(tmp_path: Path, monkeypatch, operation: str, guard: str) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120043.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    kwargs = dict(config=config, workspace=WORKSPACE, task_revision=3,
+                  source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation == "validator":
+        assert not lc.apply_update_review(root, **kwargs).failed
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is not None
+    elif operation == "recover":
+        with monkeypatch.context() as patch:
+            def fail_commit(*args, **kwargs):
+                raise OSError("leave pending")
+            patch.setattr(lc, "_update_commit_receipt", fail_commit)
+            assert lc.apply_update_review(root, **kwargs).failed
+    else:
+        receipt.parent.mkdir(parents=True, mode=0o700)
+    note_before = note.read_bytes()
+    receipt_before = receipt.read_bytes() if receipt.exists() else None
+    if guard == "mode":
+        receipt.parent.chmod(0o755)
+    elif guard == "parent":
+        receipt.parent.parent.chmod(0o777)
+    else:
+        original_fstat = lc.os.fstat
+        target = receipt.parent.stat()
+        class ForeignOwner:
+            def __init__(self, info):
+                self.info = info
+                self.st_uid = os.getuid() + 1
+            def __getattr__(self, name):
+                return getattr(self.info, name)
+        def foreign(fd):
+            info = original_fstat(fd)
+            if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                return ForeignOwner(info)
+            return info
+        monkeypatch.setattr(lc.os, "fstat", foreign)
+    if operation == "apply":
+        assert lc.apply_update_review(root, **kwargs).failed
+    elif operation == "validator":
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is None
+    else:
+        assert lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name).failed
+    assert note.read_bytes() == note_before
+    assert (receipt.read_bytes() if receipt.exists() else None) == receipt_before
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_receipt_is_synced_before_source_cas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120022.json"
+    receipt.parent.parent.mkdir(parents=True, mode=0o700)
+    assert not receipt.parent.exists()
+    sync, write = lc.os.fsync, lc._write_locked
+    synced: list[tuple[int, int]] = []
+    def observe_sync(fd: int) -> None:
+        info = os.fstat(fd)
+        sync(fd)
+        synced.append((info.st_dev, info.st_ino))
+    def observe_write(path: Path, proposed: str, *, expect: str) -> None:
+        data = json.loads(receipt.read_bytes())
+        assert data["automatic_review"]["phase"] == "prepared"
+        assert data["automatic_review"]["committed"] is False
+        assert data["removals"] and data["revision_before"] == content_revision(text)
+        file_info, dir_info = receipt.stat(), receipt.parent.stat()
+        ancestor_info = receipt.parent.parent.stat()
+        assert (file_info.st_dev, file_info.st_ino) in synced
+        assert (dir_info.st_dev, dir_info.st_ino) in synced
+        assert (ancestor_info.st_dev, ancestor_info.st_ino) in synced
+        assert synced.index((ancestor_info.st_dev, ancestor_info.st_ino)) < synced.index((file_info.st_dev, file_info.st_ino))
+        assert synced.index((file_info.st_dev, file_info.st_ino)) < synced.index((dir_info.st_dev, dir_info.st_ino))
+        write(path, proposed, expect=expect)
+    monkeypatch.setattr(lc.os, "fsync", observe_sync)
+    monkeypatch.setattr(lc, "_write_locked", observe_write)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "RETIRE",
+        "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.applied and not result.failed
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_real_finding_appearing_at_cas_restores_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120023.json"
+    write = lc._write_locked
+    calls = 0
+    def transition(path: Path, proposed: str, *, expect: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _file_settled(config, _origin(UNLINKED_RECORD, state=sp.ORIGIN_PENDING, verification=""))
+        write(path, proposed, expect=expect)
+    monkeypatch.setattr(lc, "_write_locked", transition)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "RETIRE",
+        "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied and calls == 2
+    assert path.read_bytes() == text.encode()
+    assert not lc.suppression_path(root).exists()
+    assert json.loads(receipt.read_text())["automatic_review"]["phase"] == "prepared"
+    parsed = lc.parse_learnings(text, workspace=WORKSPACE)
+    entry = next(e for e in parsed.entries if e.record and e.record.learning_id == UNLINKED_RECORD.learning_id)
+    row = lc.CleanupRow(learning_id=UNLINKED_RECORD.learning_id, key=UNLINKED_RECORD.key,
+                        line=entry.source_text, entry_revision=entry_revision(UNLINKED_RECORD),
+                        action=lc.REMOVE, reason="never_proposed", start=entry.start,
+                        end=entry.end, source_text=entry.source_text)
+    foreign_after, _ = lc._splice(text, [row])
+    path.write_bytes(foreign_after.encode())
+    recovered = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name)
+    assert recovered.failed and path.read_bytes() == foreign_after.encode()
+    assert not lc.suppression_path(root).exists()
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is None
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_rollback_phase_guard_with_restored_finding_fingerprint(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    note = _write(config, text)
+    _file_settled(config, _origin(FOURTH_RECORD))
+    finding = sp.proposal_path(config, WORKSPACE, "web-research")
+    finding_before, inode = finding.read_bytes(), finding.stat().st_ino
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120041.json"
+    original_write = lc._write_locked
+    calls = 0
+
+    def transition(path, proposed, *, expect):
+        nonlocal calls
+        calls += 1
+        original_write(path, proposed, expect=expect)
+        if calls == 1:
+            with finding.open("ab") as handle:
+                handle.write(b"\nexternal change\n")
+
+    monkeypatch.setattr(lc, "_write_locked", transition)
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3,
+        source_revision=content_revision(text), receipt_path=receipt,
+        verdicts=[{"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+                   "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and not result.applied and calls == 2
+    assert note.read_bytes() == text.encode()
+    with finding.open("wb") as handle:
+        handle.write(finding_before)
+    assert finding.stat().st_ino == inode
+    data = json.loads(receipt.read_text(encoding="utf-8"))
+    assert data["automatic_review"]["phase"] == "prepared"
+    assert lc._finding_dependency_snapshot(config, WORKSPACE) == data["automatic_review"]["finding_revision"]
+    row = lc.plan_cleanup(root, config=config, workspace=WORKSPACE).rows[0]
+    after, _ = lc._splice(text, [row])
+    note.write_bytes(after.encode())
+    result = lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                      task_revision=3, receipt_name=receipt.name)
+    assert result.failed and note.read_bytes() == after.encode()
+    assert not lc.suppression_path(root).exists()
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_does_not_overwrite_preexisting_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120011.json"
+    receipt.parent.mkdir(parents=True, mode=0o700)
+    temp = receipt.parent / f".{receipt.name}.fixed.tmp"
+    temp.write_text("foreign", encoding="utf-8")
+    monkeypatch.setattr(lc.secrets, "token_hex", lambda _: "fixed")
+    result = lc.apply_update_review(
+        root, config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+        receipt_path=receipt, verdicts=[{"learning_id": UNLINKED_RECORD.learning_id,
+        "entry_revision": entry_revision(UNLINKED_RECORD), "verdict": "KEEP",
+        "reason": "Current", "evidence": ["Reviewed"]}],
+    )
+    assert result.failed and temp.read_text() == "foreign"
+    assert json.loads(receipt.read_text())["automatic_review"]["committed"] is False
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_competing_same_name_preserves_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-120012.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "KEEP", "reason": "Current", "evidence": ["Reviewed"]}
+    kwargs = dict(config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+                  receipt_path=receipt, verdicts=[verdict])
+    write = lc._update_write_new
+    winner: list[lc.CleanupResult] = []
+    def competing(dir_fd: int, name: str, data: dict[str, object]) -> tuple[int, int]:
+        if not winner and name == receipt.name:
+            monkeypatch.setattr(lc, "_update_write_new", write)
+            winner.append(lc.apply_update_review(root, **kwargs))
+        return write(dir_fd, name, data)
+    monkeypatch.setattr(lc, "_update_write_new", competing)
+    loser = lc.apply_update_review(root, **kwargs)
+    assert len(winner) == 1 and not winner[0].failed
+    assert loser.failed and not loser.applied
+    assert path.read_bytes() == text.encode("utf-8")
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+    assert json.loads(receipt.read_text())["automatic_review"]["committed"] is True
+
+
+@POSIX_UPDATE_RECEIPTS
+def test_update_review_refuses_receipt_directory_link_and_traversal(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    text = _document(UNLINKED_RECORD)
+    path = _write(config, text)
+    runtime = config.state_path.parent
+    runtime.mkdir(parents=True)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    link = runtime / "migration"
+    try:
+        link.symlink_to(foreign, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Native link creation may require privileges; traversal is still checked.
+        pass
+    name = "learnings-cleanup-20261114-120013.json"
+    verdict = {"learning_id": UNLINKED_RECORD.learning_id, "entry_revision": entry_revision(UNLINKED_RECORD),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    kwargs = dict(config=config, workspace=WORKSPACE, task_revision=3, source_revision=content_revision(text),
+                  verdicts=[verdict])
+    with pytest.raises(ValueError):
+        lc.apply_update_review(root, receipt_path=runtime / "other" / ".." / "migration" / name, **kwargs)
+    if link.is_symlink():
+        result = lc.apply_update_review(root, receipt_path=link / name, **kwargs)
+        assert result.failed and not result.applied
+        assert not (foreign / name).exists()
+    assert path.read_bytes() == text.encode("utf-8")
 FORMAT_NOTES = (
     "## Format\n\n"
     "An example, which is not an entry and must survive byte for byte:\n\n"
@@ -992,6 +3333,114 @@ def _draft(
     path = upstream_drafts.sidecar_path(config, WORKSPACE, draft.id)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_queue_atomically(path, upstream_drafts.render_sidecar(draft))
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("lifecycle", [upstream_drafts.DRAFT_PENDING, upstream_drafts.DRAFT_FILED])
+@pytest.mark.parametrize("operation", ["apply", "recover", "verify"])
+def test_automatic_alias_upstream_protects_retirement(tmp_path: Path, monkeypatch, lifecycle: str, operation: str) -> None:
+    from dataclasses import replace
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    record = replace(UNLINKED_RECORD, aliases=("old-learning-id",))
+    text = _document(record)
+    note = _write(config, text)
+    _draft(config, record, lifecycle=lifecycle)
+    sidecar = next(upstream_drafts.sidecar_dir(config, WORKSPACE).glob("*.json"))
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data["origins"][0]["learning_id"] = record.aliases[0]
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-150001.json"
+    verdict = {"learning_id": record.learning_id, "entry_revision": entry_revision(record),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    def apply():
+        return lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                      source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    if operation != "apply":
+        with monkeypatch.context() as patch:
+            patch.setattr(lc, "_upstream_origins", lambda *args, **kwargs: {})
+            if operation == "recover":
+                real = lc._update_commit_receipt
+                count = 0
+                def fail_second(*args, **kwargs):
+                    nonlocal count
+                    count += 1
+                    if count == 2:
+                        raise OSError("leave pending")
+                    return real(*args, **kwargs)
+                patch.setattr(lc, "_update_commit_receipt", fail_second)
+            prior = apply()
+            assert prior.applied and bool(prior.failed) is (operation == "recover")
+    before = (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None,
+              lc.suppression_path(root).read_bytes() if lc.suppression_path(root).exists() else None)
+    if operation == "apply":
+        with pytest.raises(ValueError, match="protected"):
+            apply()
+    elif operation == "recover":
+        assert lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                        task_revision=3, receipt_name=receipt.name).failed
+    else:
+        assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                         task_revision=3, receipt_name=receipt.name) is None
+    assert (note.read_bytes(), receipt.read_bytes() if receipt.exists() else None,
+            lc.suppression_path(root).read_bytes() if lc.suppression_path(root).exists() else None) == before
+
+
+def test_upstream_alias_rejection_and_staleness(tmp_path: Path) -> None:
+    from dataclasses import replace
+    config = _config(tmp_path)
+    record = replace(UNLINKED_RECORD, aliases=("old-learning-id",))
+    _write(config, _document(record))
+    _draft(config, record, lifecycle=upstream_drafts.DRAFT_REJECTED)
+    sidecar = next(upstream_drafts.sidecar_dir(config, WORKSPACE).glob("*.json"))
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data["origins"][0]["learning_id"] = record.aliases[0]
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+    plan = lc.plan_cleanup(Path(config.workspace_vault_root(WORKSPACE)), workspace=WORKSPACE, config=config)
+    assert len(plan.removals) == 1 and plan.removals[0].reason == "settled"
+    data["origins"][0]["source_revision"] = "stale"
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+    plan = lc.plan_cleanup(Path(config.workspace_vault_root(WORKSPACE)), workspace=WORKSPACE, config=config)
+    assert not plan.removals and plan.kept[0].reason == "changed_since"
+
+
+@POSIX_UPDATE_RECEIPTS
+@pytest.mark.parametrize("recover", [False, True])
+def test_automatic_rejected_alias_can_retire_and_certify(tmp_path: Path, monkeypatch, recover: bool) -> None:
+    from dataclasses import replace
+    config = _config(tmp_path)
+    root = Path(config.workspace_vault_root(WORKSPACE))
+    record = replace(UNLINKED_RECORD, aliases=("old-learning-id",))
+    text = _document(record)
+    note = _write(config, text)
+    _draft(config, record, lifecycle=upstream_drafts.DRAFT_REJECTED)
+    sidecar = next(upstream_drafts.sidecar_dir(config, WORKSPACE).glob("*.json"))
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data["origins"][0]["learning_id"] = record.aliases[0]
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+    receipt = config.state_path.parent / "migration" / "learnings-cleanup-20261114-150002.json"
+    verdict = {"learning_id": record.learning_id, "entry_revision": entry_revision(record),
+               "verdict": "RETIRE", "reason": "Obsolete", "evidence": ["Reviewed"]}
+    with monkeypatch.context() as patch:
+        if recover:
+            real = lc._update_commit_receipt
+            calls = 0
+            def fail_second(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("leave pending")
+                return real(*args, **kwargs)
+            patch.setattr(lc, "_update_commit_receipt", fail_second)
+        result = lc.apply_update_review(root, config=config, workspace=WORKSPACE, task_revision=3,
+                                        source_revision=content_revision(text), receipt_path=receipt, verdicts=[verdict])
+    assert result.applied and bool(result.failed) is recover
+    if recover:
+        assert not lc.recover_update_review(root, config=config, workspace=WORKSPACE,
+                                            task_revision=3, receipt_name=receipt.name).failed
+    assert lc.update_review_recorded(root, config=config, workspace=WORKSPACE,
+                                     task_revision=3, receipt_name=receipt.name) is not None
+    assert record.key not in note.read_text(encoding="utf-8")
 
 
 def test_a_lesson_whose_only_destination_is_a_filed_issue_stays(

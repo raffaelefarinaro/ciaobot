@@ -86,6 +86,7 @@ class AcceptOutcome:
     reason: str | None = None
     competing: Sequence[str] | None = None
     destination: str | None = None
+    already_moved: bool | None = None
     skipped: Sequence[str] | None = None
     error: str | None = None
 
@@ -120,6 +121,8 @@ class AcceptOutcome:
             payload["competing"] = list(self.competing)
         if self.destination is not None:
             payload["destination"] = self.destination
+        if self.already_moved is not None:
+            payload["already_moved"] = self.already_moved
         if self.skipped:
             payload["skipped"] = list(self.skipped)
         if self.error is not None:
@@ -132,8 +135,15 @@ def _proposals_file(config, workspace: str) -> Path:
     return Path(config.workspace_vault_root(workspace)).joinpath(*_PROPOSALS_REL)
 
 
+class SweepSettlementIncomplete(Exception):
+    def __init__(self, queue_state: str, removed: int):
+        self.queue_state = queue_state
+        self.removed = removed
+        super().__init__("sweep queue settlement could not be confirmed")
+
+
 def _sweep_queue_file(
-    queue: Path, cutoff, config, workspace: str
+    queue: Path, cutoff, vault_root: Path, workspace: str
 ) -> dict[str, Any]:
     """Expire dated sections in one queue file, under the queue lock.
 
@@ -143,6 +153,7 @@ def _sweep_queue_file(
     when a rewrite landed, the per-fact fields the caller records.
     """
     from ciao.memory_receipts import (
+        QueueReceiptUnavailable,
         queue_lock,
         queue_resolution_multi,
         write_queue_atomically,
@@ -179,32 +190,63 @@ def _sweep_queue_file(
                 continue
             keep.append(raw_line)
         if changed:
-            try:
-                vault_for_receipt = Path(config.workspace_vault_root(workspace))
-            except (AttributeError, ValueError):
-                vault_for_receipt = queue.parent.parent
             queue_after = "\n".join(keep).rstrip() + "\n"
             # One atomic rewrite, one transaction-level prepared/applied
             # receipt pair (undoable as a whole) plus non-undoable per-fact
             # history rows.
-            with queue_resolution_multi(
-                queue,
-                [
-                    {"text": text, "kind": kind, "promoted": False}
-                    for kind, text in zip(swept_kinds, swept_texts)
-                ],
-                actor="operator",
-                source="pwa",
-                workspace=workspace,
-                vault_root=vault_for_receipt,
-            ):
-                write_queue_atomically(queue, queue_after)
+            try:
+                with queue_resolution_multi(
+                    queue,
+                    [
+                        {"text": text, "kind": kind, "promoted": False}
+                        for kind, text in zip(swept_kinds, swept_texts)
+                    ],
+                    actor="operator",
+                    source="pwa",
+                    workspace=workspace,
+                    vault_root=vault_root,
+                ):
+                    write_queue_atomically(queue, queue_after)
+            except (QueueReceiptUnavailable, OSError) as exc:
+                state = _observed_queue_state(queue, queue_before.encode(), queue_after.encode())
+                raise SweepSettlementIncomplete(
+                    state, len(swept_texts) if state == "replaced" else 0
+                ) from exc
     result["changed"] = changed
     result["removed"] = len(swept_texts)
     result["kinds"] = swept_kinds
     result["texts"] = swept_texts
     result["sources"] = swept_sources
     return result
+
+
+class QueueSettlementIncomplete(Exception):
+    """A queue write or its durable confirmation failed after destination work."""
+
+    def __init__(self, queue_state: str):
+        self.queue_state = queue_state
+        super().__init__("queue settlement could not be confirmed")
+
+
+class QueueDecisionIncomplete(Exception):
+    """The queue receipt landed but decision recording did not finish."""
+
+    def __init__(self, removed: set[str], receipt_id: str):
+        self.removed = removed
+        self.receipt_id = receipt_id
+        super().__init__("decision recording could not be confirmed")
+
+
+def _observed_queue_state(queue: Path, before: bytes, after: bytes) -> str:
+    try:
+        current = queue.read_bytes()
+    except OSError:
+        return "unknown"
+    if current == before:
+        return "unchanged"
+    if current == after:
+        return "replaced"
+    return "unknown"
 
 
 def _rewrite_queue_single(
@@ -216,6 +258,11 @@ def _rewrite_queue_single(
     promoted: bool,
     workspace: str,
     vault_root: Path,
+    requested_id: str = "",
+    before_remove: Any = None,
+    after_remove: Any = None,
+    original_image: str | None = None,
+    decision: Any = None,
 ) -> bool:
     """Remove one bullet under the queue lock and record its receipt.
 
@@ -226,26 +273,68 @@ def _rewrite_queue_single(
     from ciao.memory_receipts import (
         queue_lock,
         queue_resolution,
+        require_selected_queue_image,
+        QueueReceiptUnavailable,
         write_queue_atomically,
     )
 
     with queue_lock(queue):
-        lines = queue.read_text(encoding="utf-8").splitlines()
-        removed_ours = _remove_bullet_line(lines, line_index, raw)
+        before_bytes = queue.read_bytes()
+        current = before_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        if requested_id:
+            require_selected_queue_image(current)
+        lines = current.splitlines()
+        from ciao.proposal_tracking import walk_proposal_queue
+        relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+        entries = list(walk_proposal_queue(workspace, relative, "\n".join(lines)))
+        original_slot = next((item for item in entries if item.line == line_index), None)
+        if (requested_id and original_slot is not None and original_slot.raw == raw
+            and original_slot.proposal_id != requested_id):
+            return False
+        entry = next((item for item in entries if item.proposal_id == requested_id), None) if requested_id else None
+        if requested_id and (entry is None or entry.proposal_id != requested_id or entry.raw != raw):
+            return False
+        if requested_id and entry is not None and original_image is not None and not _fold_selection_unambiguous(
+            queue, workspace, original_image,
+            {"kind": entry.bullet.kind, "text": entry.bullet.text, "source": entry.bullet.source},
+        ):
+            return False
+        # Synchronous guarded effects take destination locks inside the queue
+        # lock: region guide, Learnings.md, repo/note receipt, or registry and
+        # note-edit sidecar. Those writers release destination locks before
+        # recording the queue decision; none is held across an await.
+        if before_remove is not None and not before_remove():
+            return False
+        selected = ({"line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                     "text": entry.bullet.text, "source": entry.bullet.source}
+                    if requested_id and entry is not None else None)
+        removed_ours = _remove_bullet_line(lines, entry.line if entry is not None else line_index, raw)
         if not removed_ours:
             return False
-        with queue_resolution(
-            queue,
-            removed_text=removed_text,
-            kind=kind,
-            promoted=promoted,
-            actor="operator",
-            source="pwa",
-            workspace=workspace,
-            vault_root=vault_root,
-        ):
-            queue_after = "\n".join(lines).rstrip() + "\n"
-            write_queue_atomically(queue, queue_after)
+        metadata = decision() if decision is not None else {}
+        queue_after = "\n".join(lines).rstrip() + "\n"
+        try:
+            with queue_resolution(
+                queue,
+                removed_text=removed_text,
+                kind=kind,
+                promoted=promoted,
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_root,
+                selected=selected,
+                **metadata,
+            ) as resolution:
+                write_queue_atomically(queue, queue_after)
+                resolution["owner_landed"] = True
+        except (OSError, QueueReceiptUnavailable) as exc:
+            raise QueueSettlementIncomplete(_observed_queue_state(queue, before_bytes, queue_after.encode("utf-8"))) from exc
+        if after_remove is not None:
+            try:
+                after_remove(str(resolution["id"]))
+            except (OSError, ValueError) as exc:
+                raise QueueDecisionIncomplete({requested_id}, str(resolution["id"])) from exc
     return True
 
 
@@ -256,6 +345,10 @@ def _rewrite_queue_batch(
     removals: list[dict[str, Any]],
     workspace: str,
     vault_root: Path,
+    before_remove: Any = None,
+    after_remove: Any = None,
+    original_image: str | None = None,
+    decision: Any = None,
 ) -> set[str]:
     """Remove batch rows under the queue lock and record the transaction.
 
@@ -266,37 +359,86 @@ def _rewrite_queue_batch(
     from ciao.memory_receipts import (
         queue_lock,
         queue_resolution_multi,
+        require_selected_queue_image,
+        QueueReceiptUnavailable,
         write_queue_atomically,
     )
 
+    ids = [row.get("id") for row in rows if int(row.get("line", -1)) not in keep_lines]
+    if not ids or len(ids) != len(set(ids)):
+        return set()
     with queue_lock(queue):
-        lines = queue.read_text(encoding="utf-8").splitlines()
+        before_bytes = queue.read_bytes()
+        current = before_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        require_selected_queue_image(current)
+        lines = current.splitlines()
+        from ciao.proposal_tracking import walk_proposal_queue
+        relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+        entries = list(walk_proposal_queue(workspace, relative, "\n".join(lines)))
+        indexed = {item.proposal_id: item for item in entries}
+        by_line = {item.line: item for item in entries}
+        selected_by_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if int(row.get("line", -1)) in keep_lines:
+                continue
+            original_slot = by_line.get(int(row.get("line", -1)))
+            if (original_slot is not None and original_slot.raw == row.get("raw") and
+                original_slot.proposal_id != row.get("id")):
+                return set()
+            entry = indexed.get(str(row.get("id", "")))
+            if entry is None or entry.proposal_id != row.get("id") or entry.raw != row.get("raw"):
+                return set()
+            if original_image is not None and not _fold_selection_unambiguous(
+                queue, workspace, original_image,
+                {"kind": entry.bullet.kind, "text": entry.bullet.text, "source": entry.bullet.source},
+            ):
+                return set()
+            selected_by_id[entry.proposal_id] = {
+                "line": entry.line, "id": entry.proposal_id, "kind": entry.bullet.kind,
+                "text": entry.bullet.text, "source": entry.bullet.source,
+            }
+        if before_remove is not None:
+            for row in rows:
+                if int(row.get("line", -1)) not in keep_lines and not before_remove(row):
+                    keep_lines.add(int(row["line"]))
         # Highest index first so the lower ones stay valid, and each removal
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
         removed_here: set[str] = set()
-        for row in sorted(rows, key=lambda r: int(r.get("line", -1)), reverse=True):
+        for row in sorted(rows, key=lambda r: selected_by_id.get(r["id"], {}).get("line", -1), reverse=True):
             if int(row.get("line", -1)) in keep_lines:
                 continue
             if _remove_bullet_line(
-                lines, int(row.get("line", -1)), str(row.get("raw") or "")
+                lines, int(selected_by_id[row["id"]]["line"]), str(row.get("raw") or "")
             ):
                 removed_here.add(row["id"])
+        if not removed_here:
+            return set()
         queue_after = "\n".join(lines).rstrip() + "\n"
         removed_removals = [
-            item
+            {**item, "selected": selected_by_id[row["id"]],
+             "decision": decision(row) if decision is not None else {}}
             for item, row in zip(removals, rows)
             if row["id"] in removed_here
         ]
-        with queue_resolution_multi(
-            queue,
-            removed_removals,
-            actor="operator",
-            source="pwa",
-            workspace=workspace,
-            vault_root=vault_root,
-        ):
-            write_queue_atomically(queue, queue_after)
+        try:
+            with queue_resolution_multi(
+                queue,
+                removed_removals,
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_root,
+            ) as resolution:
+                write_queue_atomically(queue, queue_after)
+                resolution["owner_landed"] = True
+        except (OSError, QueueReceiptUnavailable) as exc:
+            raise QueueSettlementIncomplete(_observed_queue_state(queue, before_bytes, queue_after.encode("utf-8"))) from exc
+        if after_remove is not None:
+            try:
+                after_remove(removed_here, str(resolution.get("id", "")))
+            except (OSError, ValueError) as exc:
+                raise QueueDecisionIncomplete(removed_here, str(resolution.get("id", ""))) from exc
     return removed_here
 
 
@@ -497,7 +639,7 @@ def _leak_warning(config, kind: str, workspace: str) -> bool:
     never leaks.
 
     Per-workspace guides have LANDED, which retires this for a migrated install:
-    ``_promote_region_row`` resolves the guide through ``agent_root``, so a work
+    The region writer resolves the guide through ``agent_root``, so a work
     row is written into work's own ``CLAUDE.md`` and nothing else loads it. The
     condition used to be "not the primary workspace" with the comment "until
     per-workspace guides land", so after the re-rooting it told the operator that
@@ -537,6 +679,7 @@ def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, 
     for the same reason the rebuilds take it.
     """
     from ciao.vault_rehome import move_note_between_roots
+    from ciao.memory_receipts import QueueLockError
 
     note = str((row.get("rehome") or {}).get("note") or "")
     parts = Path(note).parts
@@ -567,9 +710,12 @@ def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, 
             ),
         }
     source = (relative_vault / Path(*parts[1:])).as_posix()
-    result = move_note_between_roots(
-        install_root, source, target, targets=targets, workspaces=names, apply=True
-    )
+    try:
+        result = move_note_between_roots(
+            install_root, source, target, targets=targets, workspaces=names, apply=True
+        )
+    except QueueLockError as exc:
+        return {"ok": False, "conflict": True, "error": f"destination busy; retry: {exc}"}
     if result["refusals"]:
         return {"ok": False, "error": result["refusals"][0], "move": result}
     return {
@@ -981,9 +1127,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
             # The same walk `proposal_tracking.pending_proposal_ids` uses, so
             # the ids the review tab hands out and the ids the archive check
             # looks for can never drift apart.
-            for entry in proposal_tracking.walk_proposal_queue(
-                workspace, rel_path, queue.read_text(encoding="utf-8")
-            ):
+            queue_image = queue.read_bytes().decode("utf-8")
+            for entry in proposal_tracking.walk_proposal_queue(workspace, rel_path, queue_image):
                 line_index, raw, bullet, pid = (
                     entry.line, entry.raw, entry.bullet, entry.proposal_id,
                 )
@@ -1072,6 +1217,7 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "path": str(queue),
                     "line": line_index,
                     "row": row,
+                    "queue_image": queue_image,
                     # The registry travels with the row's context the way the
                     # skill rows carry it, so a handler resolving this row's
                     # sidecar never has to re-derive the vault from the
@@ -1162,6 +1308,21 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                 "config": config,
             }
     return rows, by_id
+
+
+def _fold_selection_unambiguous(queue: Path, workspace: str, original: str, row: dict[str, Any]) -> bool:
+    """A changed queue cannot prove which identical ordinal survived."""
+    current = queue.read_bytes().decode("utf-8")
+    if current == original:
+        return True
+    relative = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
+    def count(image: str) -> int:
+        return sum(
+            1 for entry in proposal_tracking.walk_proposal_queue(workspace, relative, image)
+            if entry.bullet.kind == row["kind"] and entry.bullet.text == row["text"]
+            and entry.bullet.source == row.get("source", "")
+        )
+    return count(original) == count(current) == 1
 
 
 def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -1493,76 +1654,40 @@ def _deferred_response(region: str, deferral: ReconcileDecision) -> AcceptOutcom
     )
 
 
-async def _promote_region_row(
+async def _prepare_region_row(
     config, row: dict[str, Any], *, reconcile: bool = False
+) -> tuple[ReconcileDecision | None, AcceptOutcome | None]:
+    """Plan reconciliation without modifying the guide or queue."""
+    from ciao.memory_tool import resolve_region
+
+    region = resolve_region(row.get("region") or row["kind"])
+    guide = guide_path(config.agent_root(row["workspace"]))
+    decision: ReconcileDecision | None = None
+    if reconcile:
+        decision, deferral = await _plan_accept_reconcile(config, row, region, guide)
+        if deferral is not None:
+            return None, _deferred_response(region, deferral)
+    return decision, None
+
+
+def _commit_region_row(
+    config, row: dict[str, Any], decision: ReconcileDecision | None
 ) -> AcceptOutcome:
-    """Write an accepted memory/profile fact into its workspace's region.
-
-    Accept used to remove the bullet and return a descriptor saying what SHOULD
-    happen, matching the MCP flow where the agent edits and then dismisses. In a
-    UI where a person clicks Accept that meant the fact left the queue and landed
-    nowhere — one click from losing it.
-
-    Order is write-then-dismiss, never the reverse, which is the same rule the
-    curation prompt states: the reverse loses the fact if anything fails between
-    the two steps. So this returns a failure and the caller keeps the bullet.
-
-    Goes through ``accept_region_fact`` rather than ``update_region`` directly,
-    so a click gets the full guarded write: the event-shape guard, the
-    stamp-stripped duplicate check, the learned-at stamp the aging audit
-    reads, and the consolidations undo log. It takes the same guide lock
-    ``update_region`` did.
-
-    The region cap stays ADVISORY, as `update_region` documents: enforcing it
-    made the accept button dead for 67 of 130 queued proposals on a real vault.
-    Usage is reported, never used to refuse.
-
-    The guide is resolved through ``agent_root``, so before the re-rooting this
-    writes the shared guide (and the row's ``leak_warning`` is why the UI asks
-    for confirmation first) and afterwards that workspace's own.
-
-    The row's own ``_(from: …)_`` tail is handed on as the proposal's
-    ``source_section``, which is where an imported conversation's
-    ``provider:session_id:anchor`` lives. Without it an accepted import's receipt
-    carried ``source_anchors: []`` and ``section: "review"``, and the anchor the
-    queue row had been holding for a year reached nothing.
-
-    ``reconcile`` runs one fresh reconcile call against the region's current
-    entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
-    a fact an earlier reconcile deferred can be resolved on a retry instead
-    of being appended beside whatever it supersedes. It is off by
-    default: the plain accept is one synchronous write, and a model call on
-    every click would cost the batch endpoint one timeout per row.
-    """
     from ciao.memory_proposals import accept_region_fact
     from ciao.memory_tool import ensure_regions, memory_status, resolve_region as _resolve
 
     region = _resolve(row.get("region") or row["kind"])
     guide = guide_path(config.agent_root(row["workspace"]))
     try:
-        # A guide with no region markers yet is not a reason to refuse a
-        # promotion — a workspace can be newer than its last skill sync. This is
-        # the same call sync makes, and it is a no-op once the markers are there.
         ensure_regions(guide)
     except (OSError, ValueError) as exc:
         return AcceptOutcome(
             ok=False, error=f"could not prepare {guide}: {exc}", region=region
         )
-
     try:
         vault_root = Path(config.workspace_vault_root(row["workspace"]))
     except (AttributeError, ValueError):
-        # Only the undo log needs it; a promotion must not fail for want of one.
         vault_root = None
-
-    decision: ReconcileDecision | None = None
-    if reconcile:
-        decision, deferral = await _plan_accept_reconcile(config, row, region, guide)
-        if deferral is not None:
-            # The retry is the way out of a deferral, so a retry that cannot
-            # decide either leaves the row exactly where it was — queued, with
-            # the reason and the entries it competes with on the response.
-            return _deferred_response(region, deferral)
 
     # Filled only on a ``deferred`` outcome, with the defer row `_promote_to_region`
     # built for an update it could not safely apply. Without it the response could
@@ -1694,93 +1819,87 @@ def _entity_roots(config, workspace: str) -> tuple[Path, Path]:
     )
 
 
-async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Write an accepted `[people]` fact into its person note.
+@dataclass(frozen=True)
+class PreparedProposalFold:
+    destination: str
+    note: Path
+    fold: Any
+    notes_root: Path | None = None
+    registry_root: Path | None = None
+    name: str = ""
+    text: str = ""
 
-    A missing note is created as a stub, typed and filed through the category
-    registry (``write_entity_note``) rather than against a hardcoded ``People/``,
-    so the accept path and the writer cannot disagree about where the note goes
-    or what it is typed. An existing one is folded by a model call, the same way
-    a `[project]` accept folds its doc: merging into someone's curated note needs
-    judgment about where the fact goes, so it is never a blind append. A fold
-    that changes nothing (already covered) or trips a guard keeps the row queued
-    and says so.
-    """
-    from ciao.memory_proposals import (
-        PERSON_TYPE_ID,
-        entity_note_path,
-        write_entity_note,
-    )
-    from ciao.project_doc_update import fold_fact_into_person_note
 
+async def _prepare_proposal_fold(
+    config, row: dict[str, Any], *, person: bool,
+) -> tuple[PreparedProposalFold | None, AcceptOutcome | None]:
+    from ciao.insights import resolve_insights_model
+    from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path
+    from ciao.project_doc_update import prepare_proposal_fold
+
+    workspace = str(row.get("workspace") or "")
     name = str(row.get("target") or "").strip()
     if not name:
-        return AcceptOutcome(ok=False, error="the bullet names no person")
+        return None, AcceptOutcome(ok=False, error="the bullet names no person" if person else "the bullet names no project doc")
     try:
-        notes_root, registry_root = _entity_roots(config, row["workspace"])
-    except (AttributeError, ValueError) as exc:
-        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-    note = entity_note_path(
-        notes_root, PERSON_TYPE_ID, name, registry_root=registry_root
-    )
-    if note is None:
-        # Three real causes, one unrouteable row: the payload is not a filename,
-        # the vault has no `person` category to file a note in (disabled, or
-        # without a folder), or that folder is not one inside the vault. All are
-        # the operator's to fix, not the row's.
-        return AcceptOutcome(
-            ok=False,
-            error=(
-                "this vault has no person category whose folder is one inside "
-                "the vault, or the bullet's name is not usable as a filename"
-            ),
+        notes_root: Path | None = None
+        registry_root: Path | None = None
+        if person:
+            notes_root, registry_root = _entity_roots(config, workspace)
+            note = entity_note_path(notes_root, PERSON_TYPE_ID, name, registry_root=registry_root)
+            if note is None:
+                return None, AcceptOutcome(ok=False, error="this vault has no person category whose folder is one inside the vault, or the bullet's name is not usable as a filename")
+            destination = note.relative_to(notes_root).as_posix()
+            if not note.exists():
+                return PreparedProposalFold(destination, note, None, notes_root, registry_root, name, str(row["text"])), None
+        else:
+            note = Path(name)
+            if not note.is_absolute():
+                note = Path(config.workspace_root) / note
+            destination = name
+            if not note.is_file():
+                return None, AcceptOutcome(ok=False, error=f"project doc not found: {name}")
+        provider = config.default_provider_for_workspace(workspace or None)
+        plan = await prepare_proposal_fold(
+            note_path=note, fact=str(row["text"]),
+            model=resolve_insights_model(config, workspace or None, provider),
+            provider=provider, cwd=config.agent_root(workspace), workspace=workspace,
+            person=person,
         )
-    # Relative to the notes root the note is written under, so the destination
-    # names the folder the category is filed in rather than a spelling this
-    # function hardcodes.
-    destination = note.relative_to(notes_root).as_posix()
-    if note.exists():
-        from ciao.insights import resolve_insights_model
+        return PreparedProposalFold(destination, note, plan), None
+    except Exception as exc:  # noqa: BLE001 — a failed plan keeps the row
+        return None, AcceptOutcome(ok=False, error=f"fold failed: {exc}")
 
-        errors: list[str] = []
-        workspace = str(row.get("workspace") or "")
-        try:
-            provider = config.default_provider_for_workspace(workspace or None)
-            model = resolve_insights_model(config, workspace or None, provider)
-            cwd = config.agent_root(workspace)
-        except (AttributeError, ValueError) as exc:
-            return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-        wrote = await fold_fact_into_person_note(
-            note_path=note,
-            fact=row["text"],
-            model=model,
-            provider=provider,
-            cwd=cwd,
-            workspace=workspace,
-            error_out=errors,
-        )
-        if errors:
-            return AcceptOutcome(ok=False, error=f"fold failed: {errors[0]}")
-        if not wrote:
-            return AcceptOutcome(
-                ok=False,
-                error=f"the fold reported no changes to {destination}; "
-                "dismiss instead if the note already covers this",
-            )
-        return AcceptOutcome(ok=True, destination=destination)
+
+def _commit_proposal_fold(plan: PreparedProposalFold) -> AcceptOutcome:
+    from ciao import memory_receipts as mr
+    from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path, write_entity_note
+    from ciao.project_doc_update import commit_proposal_fold
+
+    receipt_id = ""
     try:
-        outcome = write_entity_note(
-            notes_root, PERSON_TYPE_ID, name, row["text"], registry_root=registry_root
-        )
-    except OSError as exc:
-        return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
-    if outcome != "written":
-        # Created by someone else between the check and the write.
-        return AcceptOutcome(
-            ok=False,
-            error=f"{destination} appeared while accepting; try again to merge into it",
-        )
-    return AcceptOutcome(ok=True, destination=destination)
+        if plan.fold is None:
+            from ciao import entity_types
+            assert plan.notes_root is not None and plan.registry_root is not None
+            with mr.queue_lock(plan.registry_root / entity_types.VAULT_FILENAME):
+                current = entity_note_path(plan.notes_root, PERSON_TYPE_ID, plan.name, registry_root=plan.registry_root)
+                if current != plan.note:
+                    return AcceptOutcome(ok=False, conflict=True, error="the person category changed; retry")
+                result = write_entity_note(plan.notes_root, PERSON_TYPE_ID, plan.name, plan.text, registry_root=plan.registry_root)
+            if result != "written":
+                return AcceptOutcome(ok=False, conflict=True, error=f"{plan.destination} appeared while accepting; try again to merge into it")
+        else:
+            receipt = commit_proposal_fold(plan.fold)
+            if not receipt.get("changed", True):
+                return AcceptOutcome(ok=False, error="the fold reported no changes; dismiss instead")
+            receipt_id = str(receipt.get("id") or "")
+    except mr.RevisionConflict:
+        return AcceptOutcome(ok=False, conflict=True, error="the destination changed during the fold; nothing was written")
+    except mr.QueueLockError as exc:
+        return AcceptOutcome(ok=False, conflict=True, error=f"destination busy; retry: {exc}")
+    except (mr.MemoryReceiptError, OSError, ValueError) as exc:
+        return AcceptOutcome(ok=False, error=f"fold failed: {exc}")
+    return AcceptOutcome(ok=True, destination=plan.destination, receipt_id=receipt_id or None)
 
 
 def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
@@ -1891,6 +2010,8 @@ def _accept_repo_row(
             conflict=True,
             error="AGENTS.md changed since it was read; nothing was written",
         )
+    except mr.QueueLockError as exc:
+        return AcceptOutcome(ok=False, error=f"repository destination is busy; try again: {exc}")
     except (mr.MemoryReceiptError, OSError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=str(exc))
     return AcceptOutcome(
@@ -2301,6 +2422,36 @@ def _settle_skill_draft(config, row: dict[str, Any], *, reason: str = "") -> str
     return ""
 
 
+def _settle_selected_skill_draft(
+    config, row: dict[str, Any], queue: Path, original: str, *, reason: str = ""
+) -> str:
+    """Validate the selected draft and settle it under queue-before-sidecar locks."""
+    from ciao.memory_receipts import QueueLockError, queue_lock
+    from ciao import upstream_drafts
+
+    workspace = str(row["workspace"])
+    relative = Path(workspace).joinpath(*_PROPOSALS_REL).as_posix()
+    try:
+        with queue_lock(queue):
+            live = list(proposal_tracking.walk_proposal_queue(
+                workspace, relative, queue.read_text(encoding="utf-8")
+            ))
+            selected = next((item for item in live if item.proposal_id == row["id"]), None)
+            draft = upstream_drafts.read_sidecar(
+                upstream_drafts.sidecar_path(config, workspace, str(row.get("target") or "")), workspace
+            )
+            try:
+                matches = upstream_drafts.draft_bullet_indices(queue.read_text(encoding="utf-8"), draft) if draft else []
+            except upstream_drafts.DraftRefused:
+                return "the selected proposal changed before settlement"
+            if (selected is None or selected.raw != row.get("raw") or selected.line not in matches
+                    or not _fold_selection_unambiguous(queue, workspace, original, row)):
+                return "the selected proposal changed before settlement"
+            return _settle_skill_draft(config, row, reason=reason)
+    except QueueLockError:
+        return "the proposal queue is busy; retry"
+
+
 def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Apply one `note_edit` proposal to the note it is about.
 
@@ -2587,49 +2738,6 @@ def decline_category_row(config, row: dict[str, Any]) -> str:
     except OSError as exc:
         return f"could not record the refusal: {exc}"
     return ""
-
-
-async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Fold an accepted `[project]` bullet into its canonical doc.
-
-    Reuses the fold's single-entry writes and per-doc lock with just
-    this bullet as input. ``False`` back means the model judged the
-    doc already covers the fact or its reply was not a single entry
-    edit — ambiguous enough that dropping the row silently would be
-    wrong, so the caller keeps it queued and the operator decides.
-    """
-    from ciao.insights import resolve_insights_model
-    from ciao.project_doc_update import update_project_doc
-
-    doc_raw = str(row.get("target") or "").strip()
-    if not doc_raw:
-        return AcceptOutcome(ok=False, error="the bullet names no project doc")
-    doc = Path(doc_raw)
-    if not doc.is_absolute():
-        # Workspace-root-relative, as the fold has always resolved a bare name.
-        doc = Path(config.workspace_root) / doc
-    if not doc.is_file():
-        return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")
-    insights = f"## Decisions\n- {row['text']}\n"
-    try:
-        workspace = str(row.get("workspace") or "")
-        provider = config.default_provider_for_workspace(workspace or None)
-        wrote = await update_project_doc(
-            doc_path=doc,
-            insights_md=insights,
-            model=resolve_insights_model(config, workspace or None, provider),
-            provider=provider,
-            cwd=config.agent_root(workspace),
-            workspace=workspace,
-        )
-    except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
-        return AcceptOutcome(ok=False, error=f"fold failed: {exc}")
-    if not wrote:
-        return AcceptOutcome(
-            ok=False,
-            error="the fold reported no changes; dismiss instead if the doc already covers this",
-        )
-    return AcceptOutcome(ok=True, destination=doc_raw)
 
 
 def _decision_destination(accept_action: str, row: dict[str, Any], outcome: AcceptOutcome) -> str:

@@ -101,6 +101,527 @@ def _client(config: CiaoConfig, pcm: Any = None) -> TestClient:
     return TestClient(app)
 
 
+def _test_proposal_registry(tmp_path: Path, durable: bool):
+    from ciao.web.proposal_reservations import DurableReservationRegistry, ReservationRegistry
+    return DurableReservationRegistry(tmp_path / "reservation-db") if durable else ReservationRegistry()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_reserved_single_action_survives_request_cancellation(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    import asyncio
+    import httpx
+    from ciao.web.proposal_reservations import ReservationRegistry, seal_proposal_operation, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    raw_scope = {"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]}
+    scope = validate_scope(raw_scope, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    entered, release = threading.Event(), threading.Event()
+    original = proposal_service._commit_region_row
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(proposal_service, "_commit_region_row", held)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as ac:
+        task = asyncio.create_task(ac.post(f"/api/proposals/{row['id']}/accept",
+                                           headers={"X-Ciao-Proposal-Reservation": token}, json={}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            seal = {"id": token, "scope": raw_scope, "inspected": True}
+            assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 409
+            assert (await ac.post(f"/api/proposals/{row['id']}/accept",
+                                  headers={"X-Ciao-Proposal-Reservation": token}, json={})).status_code == 409
+        finally:
+            release.set()
+        await asyncio.gather(*tuple(registry._tasks))
+        await asyncio.sleep(0)
+        assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 200
+    assert row["text"] in _region_entries(config, row["workspace"], "memory")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_reserved_batch_survives_cancellation_and_seals_after_work(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    import asyncio
+    import httpx
+    from ciao.web.proposal_reservations import ReservationRegistry, seal_proposal_operation, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    raw_scope = {"kind": "batch_accept", "workspace": "", "targets": [row["id"]], "workspaces": [row["workspace"]]}
+    scope = validate_scope(raw_scope, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    entered, release = threading.Event(), threading.Event()
+    original = proposal_service._commit_region_row
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(proposal_service, "_commit_region_row", held)
+    body = {"action": "accept", "ids": [row["id"]]}
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as ac:
+        task = asyncio.create_task(ac.post("/api/proposals/batch", headers=headers, json=body))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            seal = {"id": token, "scope": raw_scope, "inspected": True}
+            assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 409
+            assert (await ac.post("/api/proposals/batch", headers=headers, json=body)).status_code == 409
+        finally:
+            release.set()
+        await asyncio.gather(*tuple(registry._tasks))
+        await asyncio.sleep(0)
+        assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 200
+    assert row["text"] in _region_entries(config, row["workspace"], "memory")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_reserved_sweep_survives_cancel_until_worker_finishes(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    import asyncio
+    import httpx
+    from dataclasses import replace
+    from ciao.web.proposal_reservations import ReservationRegistry, capture_sweep_snapshot, seal_proposal_operation, validate_scope
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    client = _client(config)
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    raw_scope = {"kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+                 "workspaces": sorted(config.workspace_names())}
+    scope = replace(validate_scope(raw_scope, set(config.workspace_names())), sweep_snapshot=capture_sweep_snapshot(config))
+    token = registry.reserve(scope)
+    entered, release = threading.Event(), threading.Event()
+    original = proposal_service._sweep_queue_file
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(proposal_service, "_sweep_queue_file", held)
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as ac:
+        task = asyncio.create_task(ac.post("/api/proposals/dismiss-older-than?date=2026-08-01", headers=headers))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            seal = {"id": token, "scope": raw_scope, "inspected": True}
+            assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 409
+            assert (await ac.post("/api/proposals/dismiss-older-than?date=2026-08-01", headers=headers)).status_code == 409
+        finally:
+            release.set()
+        await asyncio.gather(*tuple(registry._tasks))
+        await asyncio.sleep(0)
+        assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 200
+    assert "Old fact." not in _queue_text(config, "personal").read_text()
+
+
+@pytest.mark.parametrize("case", ["cutoff", "workspaces", "sealed"])
+def test_reserved_sweep_refuses_mismatch_or_sealed(tmp_path: Path, case: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+                            "workspaces": ["personal"] if case == "workspaces" else sorted(config.workspace_names())},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    if case == "sealed":
+        assert registry.seal(token, scope)
+    before = _queue_text(config, "personal").read_bytes()
+    date = "2026-09-01" if case == "cutoff" else "2026-08-01"
+    response = client.post(f"/api/proposals/dismiss-older-than?date={date}",
+                           headers={"X-Ciao-Proposal-Reservation": token})
+    assert response.status_code == 409
+    assert _queue_text(config, "personal").read_bytes() == before
+
+
+def test_sealed_sweep_rejects_before_reading_workspace_snapshot(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    names = sorted(config.workspace_names())
+    scope = validate_scope({"kind": "sweep", "workspace": "", "targets": ["2026-08-01"], "workspaces": names}, set(names))
+    token = registry.reserve(scope)
+    assert registry.seal(token, scope)
+    def forbidden(_config):
+        raise AssertionError("sealed request read workspace snapshot")
+    monkeypatch.setattr(type(config), "workspace_names", forbidden)
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01",
+                           headers={"X-Ciao-Proposal-Reservation": token})
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("case", ["mismatch", "sealed", "duplicate"])
+def test_reserved_batch_rejects_mismatch_sealed_and_duplicate(tmp_path: Path, case: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "batch_accept", "workspace": "", "targets": [row["id"]],
+                            "workspaces": ["work" if case == "mismatch" else row["workspace"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    if case == "sealed":
+        assert registry.seal(token, scope)
+    ids = [row["id"], row["id"]] if case == "duplicate" else [row["id"]]
+    response = client.post("/api/proposals/batch", headers={"X-Ciao-Proposal-Reservation": token},
+                           json={"action": "accept", "ids": ids})
+    assert response.status_code == (400 if case == "duplicate" else 409)
+    assert "no_effect" not in response.json()
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+
+
+@pytest.mark.parametrize("case", ["mismatch", "sealed"])
+def test_reserved_single_action_rejects_mismatch_or_sealed(tmp_path: Path, case: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": "work" if case == "mismatch" else row["workspace"],
+                            "targets": [row["id"]]}, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    if case == "sealed":
+        assert registry.seal(token, scope)
+    response = client.post(f"/api/proposals/{row['id']}/accept", headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 409
+    assert "no_effect" not in response.json()
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert row["id"] in {item["id"] for item in client.get("/api/proposals").json()["rows"]}
+
+
+@pytest.mark.parametrize("case", ["missing", "workspace", "destination", "destination_error"])
+def test_admitted_single_reresolution_refusal_is_proven_no_effect(tmp_path: Path, monkeypatch, case: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    import ciao.web.routes_api as routes
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    before = _queue_text(config, row["workspace"]).read_bytes()
+    scan = proposal_service._scan_proposal_rows
+    calls = 0
+    def changed_scan(config):
+        nonlocal calls
+        rows, by_id = scan(config)
+        calls += 1
+        if calls == 2 and case == "missing":
+            by_id.pop(row["id"])
+        elif calls == 2 and case == "workspace":
+            by_id[row["id"]] = {**by_id[row["id"]], "workspace": "work"}
+        return rows, by_id
+    monkeypatch.setattr(proposal_service, "_scan_proposal_rows", changed_scan)
+    original_scope = routes._single_reservation_scope
+    scope_calls = 0
+    def changed_scope(*args):
+        nonlocal scope_calls
+        scope_calls += 1
+        if scope_calls == 2 and case == "destination_error":
+            raise ValueError("destination changed")
+        if scope_calls == 2 and case == "destination":
+            return validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]],
+                                   "destination": "work"}, set(config.workspace_names()))
+        return original_scope(*args)
+    monkeypatch.setattr(routes, "_single_reservation_scope", changed_scope)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == (404 if case == "missing" else 409)
+    assert response.json()["id"] == row["id"] and response.json()["no_effect"] is True
+    assert calls == 2
+    assert _queue_text(config, row["workspace"]).read_bytes() == before
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
+@pytest.mark.parametrize("case", ["missing", "workspace", "invalid"])
+def test_admitted_batch_reresolution_refusal_is_proven_no_effect(tmp_path: Path, monkeypatch, case: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "batch_accept", "workspace": "", "targets": [row["id"]],
+                            "workspaces": [row["workspace"]]}, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    before = _queue_text(config, row["workspace"]).read_bytes()
+    resolve = proposal_service._resolve_batch
+    calls = 0
+    def changed_resolve(config, ids):
+        nonlocal calls
+        calls += 1
+        resolved, error = resolve(config, ids)
+        if calls == 2 and case == "missing":
+            return None, "proposal missing"
+        if calls == 2 and resolved is not None:
+            resolved[0] = {**resolved[0], "workspace": "work"}
+            if case == "workspace":
+                resolved[0]["row"] = {**resolved[0]["row"], "workspace": "work"}
+        return resolved, error
+    monkeypatch.setattr(proposal_service, "_resolve_batch", changed_resolve)
+    response = client.post("/api/proposals/batch", headers={"X-Ciao-Proposal-Reservation": token},
+                           json={"action": "accept", "ids": [row["id"]]})
+    assert response.status_code == (404 if case == "missing" else 409)
+    assert response.json()["ids"] == [row["id"]] and response.json()["no_effect"] is True
+    assert calls == 2
+    assert _queue_text(config, row["workspace"]).read_bytes() == before
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_admitted_row_removed_before_reresolution(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    value = {"kind": "batch_accept" if batch else "row_accept", "workspace": "" if batch else row["workspace"],
+             "targets": [row["id"]]}
+    if batch:
+        value["workspaces"] = [row["workspace"]]
+    scope = validate_scope(value, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    queue = _queue_text(config, row["workspace"])
+    run_admitted = registry._run_admitted
+    async def remove_after_admission(token, operation):
+        async def interleaved():
+            queue.write_text("", encoding="utf-8")
+            return await operation()
+        return await run_admitted(token, interleaved)
+    monkeypatch.setattr(registry, "_run_admitted", remove_after_admission)
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    response = (client.post("/api/proposals/batch", headers=headers, json={"action": "accept", "ids": [row["id"]]})
+                if batch else client.post(f"/api/proposals/{row['id']}/accept", headers=headers, json={}))
+    assert response.status_code == 404
+    assert response.json()["no_effect"] is True
+    assert response.json()["ids" if batch else "id"] == ([row["id"]] if batch else row["id"])
+    assert queue.read_text(encoding="utf-8") == ""
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_admitted_row_removed_after_reresolution_before_queue_check(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    queue = _queue_text(config, row["workspace"])
+    original = proposal_service.bullets_present
+    def remove_before_check(path, bullets):
+        queue.write_text("", encoding="utf-8")
+        return original(path, bullets)
+    monkeypatch.setattr(proposal_service, "bullets_present", remove_before_check)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 409
+    assert response.json()["id"] == row["id"] and response.json()["no_effect"] is True
+    assert queue.read_text(encoding="utf-8") == ""
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+    if durable:
+        from ciao.web.proposal_reservations import DurableReservationRegistry
+        assert DurableReservationRegistry(tmp_path / "reservation-db").seal(token, scope, inspected=True)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_active_reservation_conflict_never_claims_no_effect(tmp_path: Path, batch: bool) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    value = {"kind": "batch_accept" if batch else "row_accept", "workspace": "" if batch else row["workspace"],
+             "targets": [row["id"]]}
+    if batch:
+        value["workspaces"] = [row["workspace"]]
+    scope = validate_scope(value, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    assert registry.admit(token, scope)
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    response = (client.post("/api/proposals/batch", headers=headers, json={"action": "accept", "ids": [row["id"]]})
+                if batch else client.post(f"/api/proposals/{row['id']}/accept", headers=headers, json={}))
+    assert response.status_code == 409 and "no_effect" not in response.json()
+    assert not registry.seal(token, scope, inspected=True)
+    assert registry.finish(token)
+    assert registry.seal(token, scope, inspected=True)
+
+
+def test_expired_reserved_single_action_cannot_dispatch(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    now = [0.0]
+    registry = ReservationRegistry(clock=lambda: now[0])
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    before = _queue_text(config, row["workspace"]).read_bytes()
+    now[0] = 301.0
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 409
+    assert not registry.seal(token, scope, inspected=True)
+    assert _queue_text(config, row["workspace"]).read_bytes() == before
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_durable_completed_route_seal_retries_after_registry_reopen(tmp_path: Path, batch: bool) -> None:
+    from ciao.web.proposal_reservations import DurableReservationRegistry, reserve_proposal_operation, seal_proposal_operation
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    directory = tmp_path / "reservation-db"
+    client.app.state.proposal_reservations = DurableReservationRegistry(directory)
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    raw_scope = ({"kind": "batch_accept", "workspace": "", "targets": [row["id"]], "workspaces": [row["workspace"]]}
+                 if batch else {"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]})
+    reply = client.post("/api/proposals/reservations", json=raw_scope)
+    assert reply.status_code == 200
+    scope = reply.json().get("scope", raw_scope)
+    token = reply.json()["id"]
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    result = (client.post("/api/proposals/batch", headers=headers, json={"action": "accept", "ids": [row["id"]]})
+              if batch else client.post(f"/api/proposals/{row['id']}/accept", headers=headers, json={}))
+    assert result.status_code == 200
+    assert row["text"] in _region_entries(config, row["workspace"], "memory")
+    body = {"id": token, "scope": scope, "inspected": True}
+    assert client.post("/api/proposals/reservations/seal", json=body).status_code == 200
+    client.app.state.proposal_reservations = DurableReservationRegistry(directory)
+    assert client.post("/api/proposals/reservations/seal", json=body).status_code == 200
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_second_revision_check_refuses_before_effect_with_explicit_proof(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    before = _queue_text(config, row["workspace"]).read_bytes()
+    checks = []
+    def revisions(*args, **kwargs):
+        checks.append(True)
+        return "old" if len(checks) == 1 else "new"
+    monkeypatch.setattr(proposal_service, "destination_revision", revisions)
+    if batch:
+        response = client.post("/api/proposals/batch", json={
+            "action": "accept", "ids": [row["id"]], "revisions": {row["id"]: "old"},
+        })
+        result = response.json()["results"][0]
+        assert response.status_code == 200
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept", json={"expected_revision": "old"})
+        result = response.json()
+        assert response.status_code == 409
+    assert len(checks) == 2 and result["id"] == row["id"]
+    assert result["conflict"] is True and result["no_effect"] is True
+    assert _queue_text(config, row["workspace"]).read_bytes() == before
+    assert row["text"] not in _region_entries(config, row["workspace"], "memory")
+
+
+def test_reserved_single_action_preserves_body_and_finishes(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token},
+                           json={"text": "Remember the edited lesson.", "reason": "yes, everywhere"})
+    assert response.status_code == 200
+    assert _history_for(client, row["text"])[0]["reason"] == "yes, everywhere"
+    assert "Remember the edited lesson." in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
+def test_reserved_single_action_preflight_refusal_finishes_without_effect(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _learnings_vault(tmp_path)
+    (config.workspace_vault_root("personal") / "Workspace" / "Memory-Receipts.jsonl").mkdir()
+    client = _client(config)
+    row = _accept_kind_row(client, "learnings")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 503 and response.json()["no_effect"] is True
+    assert _learnings_count(config) == 0
+    assert registry.seal(token, scope, inspected=True)
+
+
+def test_reserved_single_action_rechecks_workspace_before_effect(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": row["workspace"], "targets": [row["id"]]},
+                           set(config.workspace_names()))
+    token = registry.reserve(scope)
+    scan = proposal_service._scan_proposal_rows
+    count = 0
+    def changed(config):
+        nonlocal count
+        rows, by_id = scan(config)
+        count += 1
+        if count == 2:
+            by_id[row["id"]] = {**by_id[row["id"]], "workspace": "work"}
+        return rows, by_id
+    monkeypatch.setattr(proposal_service, "_scan_proposal_rows", changed)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 409
+    assert count == 2 and row["text"] not in _region_entries(config, row["workspace"], "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
 _SIMPLE_QUEUE = """# Memory Proposals
 
 ## 2026-08-19 curation pass (this pass)
@@ -271,6 +792,264 @@ def _rehome_fixture(tmp_path: Path, tags: list[str]) -> tuple[CiaoConfig, TestCl
     return config, client, row
 
 
+def test_reserved_rehome_binds_actual_destination(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation, validate_scope
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    config.workspaces["other"] = WorkspaceConfig(name="other", vault_root="other/memory-vault")
+    config.workspace_vault_root("other").mkdir(parents=True, exist_ok=True)
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    requested = {"kind": "row_accept", "workspace": "personal", "targets": [row["id"]], "destination": "work"}
+    reservation = client.post("/api/proposals/reservations", json=requested)
+    assert reservation.status_code == 200
+    assert reservation.json()["scope"] == requested
+    token = reservation.json()["id"]
+    headers = {"X-Ciao-Proposal-Reservation": token}
+    wrong = client.post(f"/api/proposals/{row['id']}/accept?workspace=other", headers=headers, json={})
+    assert wrong.status_code == 409
+    assert (config.workspace_vault_root("personal") / "People/Mo.md").exists()
+    right = client.post(f"/api/proposals/{row['id']}/accept?workspace=work", headers=headers, json={})
+    assert right.status_code == 200
+    assert (config.workspace_vault_root("work") / "People/Mo.md").exists()
+    assert registry.seal(token, validate_scope(requested, set(config.workspace_names())), inspected=True)
+
+
+def test_rehome_reservation_reports_server_derived_destination(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    _config_here, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    response = client.post("/api/proposals/reservations", json={
+        "kind": "row_accept", "workspace": "personal", "targets": [row["id"]], "destination": "",
+    })
+    assert response.status_code == 200
+    assert response.json()["scope"]["destination"] == "work"
+
+
+@pytest.mark.parametrize("requested", ["", "work"])
+def test_batch_rehome_reservation_binds_actual_destination(tmp_path: Path, requested: str) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    scope = {"kind": "batch_accept", "workspace": requested, "targets": [row["id"]],
+             "workspaces": ["personal"]}
+    reply = client.post("/api/proposals/reservations", json=scope)
+    assert reply.status_code == 200
+    assert reply.json()["scope"] == {**scope, "destinations": {row["id"]: "work"}}
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]], "workspace": requested},
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 200
+    assert (config.workspace_vault_root("work") / "People/Mo.md").exists()
+
+
+def test_batch_rehome_changed_signal_after_reservation_refuses_before_effect(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    queue = _queue_text(config, "personal")
+    with queue.open("a", encoding="utf-8") as stream:
+        stream.write("- [memory] Keep this fact unchanged. _(from: Decisions)_\n")
+    other = next(item for item in client.get("/api/proposals").json()["rows"] if item["kind"] == "memory")
+    ids = [other["id"], row["id"]]
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    scope = {"kind": "batch_accept", "workspace": "", "targets": ids, "workspaces": ["personal"]}
+    reply = client.post("/api/proposals/reservations", json=scope)
+    assert reply.status_code == 200
+    source = config.workspace_vault_root("personal") / "People/Mo.md"
+    source.write_text("---\ntype: person\ntags:\n  - person\n---\n# Mo\n", encoding="utf-8")
+    before = queue.read_bytes()
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": ids},
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 409
+    assert source.exists() and not (config.workspace_vault_root("work") / "People/Mo.md").exists()
+    assert queue.read_bytes() == before
+    assert other["text"] not in _region_entries(config, "personal", "memory")
+
+
+def test_batch_rehome_signal_changes_after_admission(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "batch_accept", "workspace": "", "targets": [row["id"]], "workspaces": ["personal"],
+    })
+    assert reply.status_code == 200
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    queue = _queue_text(config, "personal")
+    before = queue.read_bytes()
+    run_admitted = registry._run_admitted
+    async def change_after_admission(token, operation):
+        async def interleaved():
+            note.write_text("---\ntype: person\ntags:\n  - person\n---\n# Mo\n", encoding="utf-8")
+            return await operation()
+        return await run_admitted(token, interleaved)
+    monkeypatch.setattr(registry, "_run_admitted", change_after_admission)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]},
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 409
+    assert response.json()["ids"] == [row["id"]] and response.json()["no_effect"] is True
+    assert note.exists() and not (config.workspace_vault_root("work") / "People/Mo.md").exists()
+    assert queue.read_bytes() == before
+
+
+def test_reserved_mixed_batch_binds_two_implicit_destinations(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    for ws, name, tag in (("personal", "Mo", "colleague"), ("work", "Ida", "friend")):
+        (config.workspace_vault_root(ws) / f"People/{name}.md").write_text(
+            f"---\ntype: person\ntags:\n  - person\n  - {tag}\n---\n# {name}\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`? _(from: vault-rehome)_\n"
+                 "- [memory] Prefers careful tests. _(from: Decisions)_\n")
+    _write_queue(config, "work", "## pass\n\n"
+                 "- [rehome] Re-home `work/People/Ida.md` to `personal/People/Ida.md`? _(from: vault-rehome)_\n")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    assert len(rows) == 3
+    ids = [row["id"] for row in rows]
+    destinations = {row["id"]: ("work" if row["workspace"] == "personal" else "personal")
+                    for row in rows if row["kind"] == "rehome"}
+    assert len(destinations) == 2
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "batch_accept", "workspace": "", "targets": ids, "workspaces": ["personal", "work"],
+    })
+    assert reply.status_code == 200
+    assert reply.json()["scope"]["destinations"] == destinations
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": ids},
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 200
+    assert all(result["dismissed"] for result in response.json()["results"])
+    assert (config.workspace_vault_root("work") / "People/Mo.md").exists()
+    assert (config.workspace_vault_root("personal") / "People/Ida.md").exists()
+
+
+def test_admitted_rehome_signal_changes_before_reresolution(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "row_accept", "workspace": "personal", "targets": [row["id"]],
+                            "destination": "work"}, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    queue = _queue_text(config, "personal")
+    before = queue.read_bytes()
+    run_admitted = registry._run_admitted
+    async def change_after_admission(token, operation):
+        async def interleaved():
+            note.write_text("---\ntype: person\ntags:\n  - person\n---\n# Mo\n", encoding="utf-8")
+            return await operation()
+        return await run_admitted(token, interleaved)
+    monkeypatch.setattr(registry, "_run_admitted", change_after_admission)
+    response = client.post(f"/api/proposals/{row['id']}/accept",
+                           headers={"X-Ciao-Proposal-Reservation": token}, json={})
+    assert response.status_code == 409
+    assert response.json()["id"] == row["id"] and response.json()["no_effect"] is True
+    assert note.exists() and not (config.workspace_vault_root("work") / "People/Mo.md").exists()
+    assert queue.read_bytes() == before
+    assert registry.seal(token, scope, inspected=True)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_rehome_destination_lock_timeout_is_retryable(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import vault_rehome
+    from ciao.memory_receipts import QueueLockError
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    def fail(*args, **kwargs):
+        raise QueueLockError("destination busy")
+    monkeypatch.setattr(vault_rehome, "move_note_between_roots", fail)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert response.status_code == 200 and not response.json()["results"][0]["dismissed"]
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+        assert response.status_code == 409
+    assert "busy" in str(response.json()) and queue.read_bytes() == before
+
+
+def test_rehome_stale_selection_does_not_move(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import proposal_service
+    from ciao.memory_proposals import read_decisions
+
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    queue = proposal_service._proposals_file(config, "personal")
+    note = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    before = note.read_bytes()
+    real = proposal_service._rewrite_queue_single
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, "_rewrite_queue_single", race)
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert note.read_bytes() == before
+    assert not read_decisions(queue)
+
+
+def test_batch_rehome_stale_selection_does_not_move(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import proposal_service
+    from ciao.memory_proposals import read_decisions
+
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    queue = proposal_service._proposals_file(config, "personal")
+    note = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    before = note.read_bytes()
+    real = proposal_service._rewrite_queue_batch
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, "_rewrite_queue_batch", race)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+    assert not response.json()["results"][0]["dismissed"]
+    assert note.read_bytes() == before
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_batch_rehome_resolves_moved_id_or_refuses_duplicate(tmp_path: Path, monkeypatch, duplicate: bool) -> None:
+    from ciao.web import proposal_service
+
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    queue = proposal_service._proposals_file(config, "personal")
+    note = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    original = queue.read_text(encoding="utf-8")
+    if duplicate:
+        bullet = next(line for line in original.splitlines() if "[rehome]" in line)
+        queue.write_text(original + bullet + "\n", encoding="utf-8")
+        row = _accept_kind_row(client, "rehome")
+    real = proposal_service._rewrite_queue_batch
+
+    def race(*args, **kwargs):
+        current = queue.read_text(encoding="utf-8")
+        if duplicate:
+            lines = current.splitlines(keepends=True)
+            first = next(i for i, line in enumerate(lines) if "[rehome]" in line)
+            del lines[first]
+            queue.write_text("".join(lines), encoding="utf-8")
+        else:
+            queue.write_text("Extra header\n" + current, encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, "_rewrite_queue_batch", race)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+    assert response.json()["results"][0]["dismissed"] is not duplicate
+    assert note.exists() is duplicate
+
+
 def test_an_ambiguous_rehome_accept_asks_instead_of_guessing(tmp_path: Path) -> None:
     """Tags naming two workspaces is a question only the operator can answer, so
     accepting without a choice must not move somebody's note on a guess."""
@@ -279,6 +1058,7 @@ def test_an_ambiguous_rehome_accept_asks_instead_of_guessing(tmp_path: Path) -> 
     resp = client.post(f"/api/proposals/{row['id']}/accept")
 
     assert resp.status_code == 400
+    assert resp.json()["no_effect"] is True and resp.json()["id"] == row["id"]
     assert "pick one explicitly" in resp.json()["error"]
     assert (config.workspace_vault_root("personal") / "People" / "Mo.md").is_file()
 
@@ -457,6 +1237,288 @@ def test_dismiss_older_than_removes_old_sections(tmp_path: Path) -> None:
     assert "A recent fact worth keeping." not in log_text
 
 
+def test_sweep_uses_captured_receipt_vault_when_config_changes_at_worker(tmp_path: Path, monkeypatch) -> None:
+    from ciao.memory_receipts import journal_path
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    original_vault = config.workspace_vault_root("personal")
+    new_vault = tmp_path / "elsewhere"
+    new_vault.mkdir()
+    original = proposal_service._sweep_queue_file
+    seen = []
+    def change_config(queue, cutoff, captured_vault, workspace):
+        if workspace == "personal":
+            config.workspaces["personal"].vault_root = str(new_vault)
+            seen.append(captured_vault)
+        return original(queue, cutoff, captured_vault, workspace)
+    monkeypatch.setattr(proposal_service, "_sweep_queue_file", change_config)
+    response = _client(config).post("/api/proposals/dismiss-older-than?date=2026-08-01")
+    assert response.status_code == 200
+    assert seen == [original_vault]
+    assert journal_path(original_vault, None).exists()
+    assert not journal_path(new_vault, None).exists()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_reserved_sweep_refuses_same_name_changed_vault_before_effect(tmp_path: Path, durable: bool) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    old_queue = _queue_text(config, "personal")
+    before = old_queue.read_bytes()
+    new_root = tmp_path / "new-vault"
+    (new_root / "Workspace").mkdir(parents=True)
+    new_queue = new_root / "Workspace/Memory-Proposals.md"
+    new_queue.write_text("## 2026-07-01 pass\n\n- [memory] Different. _(from: Decisions)_\n")
+    new_before = new_queue.read_bytes()
+    client = _client(config)
+    client.app.state.proposal_reservations = _test_proposal_registry(tmp_path, durable)
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+    })
+    assert reply.status_code == 200
+    config.workspaces["personal"].vault_root = str(new_root)
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01",
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 409
+    assert old_queue.read_bytes() == before and new_queue.read_bytes() == new_before
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_reserved_sweep_stops_when_later_root_changes_mid_sweep(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    from ciao.memory_receipts import journal_path
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _default_vault(tmp_path)
+    for ws in ("personal", "work"):
+        _write_queue(config, ws, f"## 2026-07-01 pass\n\n- [memory] Old {ws}. _(from: Decisions)_\n")
+    personal_vault = config.workspace_vault_root("personal")
+    work_queue = _queue_text(config, "work")
+    before = work_queue.read_bytes()
+    new_root = tmp_path / "new-work"
+    (new_root / "Workspace").mkdir(parents=True)
+    new_queue = new_root / "Workspace/Memory-Proposals.md"
+    new_queue.write_text("## 2026-07-01 pass\n\n- [memory] Other. _(from: Decisions)_\n")
+    new_before = new_queue.read_bytes()
+    client = _client(config)
+    client.app.state.proposal_reservations = _test_proposal_registry(tmp_path, durable)
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+    })
+    assert reply.status_code == 200
+    original = proposal_service._sweep_queue_file
+    def change_after_first(queue, cutoff, vault, workspace):
+        result = original(queue, cutoff, vault, workspace)
+        if workspace == "personal":
+            config.workspaces["work"].vault_root = str(new_root)
+        return result
+    monkeypatch.setattr(proposal_service, "_sweep_queue_file", change_after_first)
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01",
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 503
+    assert response.json()["removed"] == 1 and response.json()["queue_settled"] is False
+    assert journal_path(personal_vault, None).exists()
+    assert not journal_path(new_root, None).exists()
+    assert work_queue.read_bytes() == before and new_queue.read_bytes() == new_before
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_reserved_sweep_with_unchanged_snapshot_succeeds_and_seals(tmp_path: Path, durable: bool) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation, validate_scope
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    client = _client(config)
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+    })
+    assert reply.status_code == 200
+    assert str(tmp_path) not in reply.text
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01",
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 200 and response.json()["removed"] == 1
+    assert "Old fact." not in _queue_text(config, "personal").read_text()
+    assert registry.seal(reply.json()["id"], validate_scope(reply.json()["scope"], set(config.workspace_names())),
+                         inspected=True)
+
+
+def test_reserved_sweep_refuses_replaced_vault_at_same_path(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Original. _(from: Decisions)_\n")
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+    })
+    assert reply.status_code == 200
+    vault.rename(vault.with_name("original-personal"))
+    (vault / "Workspace").mkdir(parents=True)
+    queue = vault / "Workspace/Memory-Proposals.md"
+    queue.write_text("## 2026-07-01 pass\n\n- [memory] Replacement. _(from: Decisions)_\n")
+    before = queue.read_bytes()
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01",
+                           headers={"X-Ciao-Proposal-Reservation": reply.json()["id"]})
+    assert response.status_code == 409
+    assert queue.read_bytes() == before
+
+
+def test_sweep_reservation_refuses_queue_symlink_outside_vault(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("untouched")
+    try:
+        queue.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    client = _client(config)
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    reply = client.post("/api/proposals/reservations", json={
+        "kind": "sweep", "workspace": "", "targets": ["2026-08-01"],
+    })
+    assert reply.status_code == 400
+    assert outside.read_text() == "untouched"
+
+
+def test_sweep_decision_lock_failure_reports_landed_rewrite_off_event_loop(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from ciao import proposal_actions
+    from ciao.memory_receipts import QueueLockError
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    called = []
+    def fail(*args, **kwargs):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        called.append(True)
+        raise QueueLockError("decision lock busy")
+    monkeypatch.setattr(proposal_actions, "record_decision", fail)
+    response = _client(config).post("/api/proposals/dismiss-older-than?date=2026-08-01")
+    assert response.status_code == 503 and called
+    payload = response.json()
+    assert payload["removed"] == 1 and payload["workspace"] == "personal"
+    assert payload["queue_settled"] is False and payload["queue_state"] == "replaced"
+    assert payload["decision_confirmed"] is False and "inspect" in payload["error"]
+    assert "Old fact." not in queue.read_text()
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_sweep_later_queue_failure_retains_prior_removed_count(tmp_path: Path, monkeypatch, reserved: bool) -> None:
+    from ciao.memory_receipts import QueueLockError
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Personal old fact. _(from: Decisions)_\n")
+    _write_queue(config, "work", "## 2026-07-01 pass\n\n- [memory] Work old fact. _(from: Decisions)_\n")
+    work = config.workspace_vault_root("work") / "Workspace" / "Memory-Proposals.md"
+    original = proposal_service._sweep_queue_file
+    def fail_work(queue, *args, **kwargs):
+        if queue == work:
+            raise QueueLockError("queue lock busy")
+        return original(queue, *args, **kwargs)
+    monkeypatch.setattr(proposal_service, "_sweep_queue_file", fail_work)
+    client = _client(config)
+    headers = {}
+    if reserved:
+        from dataclasses import replace
+        from ciao.web.proposal_reservations import ReservationRegistry, capture_sweep_snapshot, validate_scope
+        registry = ReservationRegistry()
+        client.app.state.proposal_reservations = registry
+        names = sorted(config.workspace_names())
+        scope = replace(validate_scope({"kind": "sweep", "workspace": "", "targets": ["2026-08-01"], "workspaces": names},
+                                       set(names)), sweep_snapshot=capture_sweep_snapshot(config))
+        token = registry.reserve(scope)
+        headers = {"X-Ciao-Proposal-Reservation": token}
+    response = client.post("/api/proposals/dismiss-older-than?date=2026-08-01", headers=headers)
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["removed"] == 1 and payload["workspace"] == "work"
+    assert payload["queue_settled"] is False and payload["queue_state"] == "unknown"
+    assert "Personal old fact." not in (config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md").read_text()
+    assert "Work old fact." in work.read_text()
+    if reserved:
+        assert registry.seal(token, scope, inspected=True)
+
+
+def test_sweep_receipt_failure_after_rewrite_reports_current_effect(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import contextmanager
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    @contextmanager
+    def fail_after(*args, **kwargs):
+        yield
+        raise memory_receipts.QueueReceiptUnavailable("receipt failed")
+    monkeypatch.setattr(memory_receipts, "queue_resolution_multi", fail_after)
+    response = _client(config).post("/api/proposals/dismiss-older-than?date=2026-08-01")
+    assert response.status_code == 503
+    assert response.json()["removed"] == 1
+    assert response.json()["queue_state"] == "replaced"
+    assert response.json()["queue_receipt_confirmed"] is False
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert "Old fact." not in queue.read_text()
+
+
+def test_sweep_real_applied_append_failure_reports_unconfirmed_receipt(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    append = memory_receipts._append
+    def fail_applied(journal, receipt):
+        if receipt.get("batch") and receipt.get("status") == memory_receipts.APPLIED:
+            raise OSError("applied receipt unavailable")
+        return append(journal, receipt)
+    monkeypatch.setattr(memory_receipts, "_append", fail_applied)
+    response = _client(config).post("/api/proposals/dismiss-older-than?date=2026-08-01")
+    assert response.status_code == 503
+    assert response.json()["removed"] == 1
+    assert response.json()["queue_state"] == "replaced"
+    assert response.json()["queue_receipt_confirmed"] is False
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert "Old fact." not in queue.read_text()
+
+
+@pytest.mark.asyncio
+async def test_sweep_decision_wait_does_not_block_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import threading
+    from starlette.requests import Request
+    from ciao import proposal_actions
+    from ciao.memory_receipts import QueueLockError
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-07-01 pass\n\n- [memory] Old fact. _(from: Decisions)_\n")
+    entered, release, timed_out = threading.Event(), threading.Event(), threading.Event()
+    def blocked(*args, **kwargs):
+        entered.set()
+        if not release.wait(2):
+            timed_out.set()
+        raise QueueLockError("decision lock busy")
+    monkeypatch.setattr(proposal_actions, "record_decision", blocked)
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [],
+                       "query_string": b"date=2026-08-01", "app": _client(config).app})
+    task = asyncio.create_task(dismiss_older_than(request))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        # This coroutine must run before the blocked worker is released.
+        assert not timed_out.is_set()
+    finally:
+        release.set()
+    response = await task
+    assert response.status_code == 503
+    import json
+    payload = json.loads(response.body)
+    assert payload["removed"] == 1 and payload["queue_state"] == "replaced"
+    assert payload["decision_confirmed"] is False
+
+
 def test_batch_dismiss_records_every_row_in_the_dedupe_history(tmp_path: Path) -> None:
     """Multi-select dismiss persists each rejected row's text, like the single route."""
     config = _default_vault(tmp_path)
@@ -504,6 +1566,8 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals",
         "/api/proposals/history",
         "/api/proposals/handover",
+        "/api/proposals/reservations",
+        "/api/proposals/reservations/seal",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/preview",
@@ -594,6 +1658,528 @@ def test_accepting_a_people_row_writes_a_typed_note(tmp_path: Path) -> None:
     assert re.search(r"^updated: \d{4}-\d{2}-\d{2}$", text, re.MULTILINE), text
     assert row["text"] in text
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_fold_preparation_refusal_explicitly_reports_no_effect(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## 2026-08-19 pass\n\n- [people Mo] Leads the pilot. _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    before = queue.read_bytes()
+    async def refuse(*args, **kwargs):
+        return None, proposal_service.AcceptOutcome(ok=False, error="fold refused")
+    monkeypatch.setattr(proposal_service, "_prepare_proposal_fold", refuse)
+    response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+                if batch else client.post(f"/api/proposals/{row['id']}/accept"))
+    result = response.json()["results"][0] if batch else response.json()
+    assert response.status_code == (200 if batch else 409)
+    assert result["id"] == row["id"] and result["no_effect"] is True
+    assert queue.read_bytes() == before
+    assert not (config.workspace_vault_root("personal") / "People" / "Mo.md").exists()
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_fold_stale_selection_during_model_does_not_write(
+    tmp_path: Path, monkeypatch, kind: str, batch: bool
+) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Leads the pilot.  _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    queue = proposal_service._proposals_file(config, "personal")
+    before = note.read_bytes()
+    queue_before = queue.read_bytes()
+    replacement = queue.read_text(encoding="utf-8").replace("Decisions", "Other source")
+
+    async def race(*args, **kwargs):
+        assert note.read_bytes() == before
+        assert queue.read_bytes() == queue_before
+        queue.write_text(replacement, encoding="utf-8")
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert note.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == replacement
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+def test_fold_commit_checks_destination_revision(
+    tmp_path: Path, monkeypatch, kind: str, batch: bool, changed: bool
+) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Leads the pilot.  _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    queue = proposal_service._proposals_file(config, "personal")
+    queue_before = queue.read_bytes()
+    concurrent = "# Changed by another writer\n"
+
+    async def model(*args, **kwargs):
+        if changed:
+            note.write_text(concurrent, encoding="utf-8")
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        result = response.json()["results"][0]
+        assert result["dismissed"] is not changed
+        if changed:
+            assert result["conflict"]
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+        assert response.status_code == (409 if changed else 200)
+        if changed:
+            assert response.json()["conflict"]
+    if changed:
+        assert note.read_text(encoding="utf-8") == concurrent
+        assert queue.read_bytes() == queue_before
+        assert not read_decisions(queue)
+    else:
+        assert "Leads the pilot." in note.read_text(encoding="utf-8")
+        assert row["id"] not in {item["id"] for item in client.get("/api/proposals").json()["rows"]}
+        assert len(read_decisions(queue)) == 1
+
+
+@pytest.mark.parametrize("kind,existing", [("people", True), ("people", False), ("project", True)])
+def test_batch_folds_same_destination_sequentially(tmp_path: Path, monkeypatch, kind: str, existing: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Alpha detail. _(from: A)_\n"
+                                       f"- [{tag}] Beta detail. _(from: B)_\n")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == kind]
+    calls: list[str] = []
+    async def model(*args, **kwargs):
+        fact = "Alpha detail." if len(calls) == 0 else "Beta detail."
+        calls.append(fact)
+        return json.dumps({"action": "add", "section": "Notes", "text": f"- {fact}"})
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    assert response.status_code == 200
+    assert all(result["dismissed"] for result in response.json()["results"])
+    assert "Alpha detail." in note.read_text() and "Beta detail." in note.read_text()
+    queue = proposal_service._proposals_file(config, "personal")
+    assert {r["proposal_id"] for r in read_decisions(queue)} == {r["id"] for r in rows}
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("replay", [False, True])
+def test_fold_decision_links_destination_receipt(tmp_path: Path, monkeypatch, kind: str, batch: bool, replay: bool) -> None:
+    from ciao import memory_receipts, memory_proposals, proposal_actions
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Leads the pilot. _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    queue = proposal_service._proposals_file(config, "personal")
+    journal = memory_receipts.journal_path(vault, None)
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    original = proposal_actions.record_decision
+    seen = []
+    def check(path, **kwargs):
+        receipts = memory_receipts.read_receipts(journal)
+        notes = [r for r in receipts if r.get("kind") == "note_apply" and r.get("status") == "applied"]
+        assert len(notes) == 1
+        assert kwargs["receipt_id"] == notes[0]["id"] and kwargs["receipt_id"]
+        if replay:
+            memory_receipts.recover_pending(journal=journal, config=config)
+            recovered = memory_proposals.read_decisions(queue)
+            assert len(recovered) == 1 and recovered[0]["receipt_id"] == notes[0]["id"]
+        seen.append(True)
+        return original(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", check)
+    response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                else client.post(f"/api/proposals/{row['id']}/accept"))
+    assert response.status_code == 200 and seen
+    decisions = memory_proposals.read_decisions(queue)
+    assert len(decisions) == 1 and decisions[0]["receipt_id"]
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("operation", ["add", "update"])
+def test_route_fold_preserves_crlf_undo_and_strips_verification(tmp_path: Path, monkeypatch, kind: str, batch: bool, operation: str) -> None:
+    from ciao import memory_proposals, memory_receipts
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    before = b"## Notes\r\n- Lives in Porto [verified: 2024-03-01]\r\n- Likes tea.\r\n"
+    note.write_bytes(before)
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Lives in Lisbon. _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    async def model(*args, **kwargs):
+        if operation == "update":
+            return '{"action":"update","index":1,"text":"- Lives in Lisbon [verified: 2024-03-01]"}'
+        return '{"action":"add","section":"Notes","text":"- Lives in Lisbon [verified: 2024-03-01]"}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                else client.post(f"/api/proposals/{row['id']}/accept"))
+    assert response.status_code == 200
+    after = note.read_bytes()
+    assert b"- Lives in Lisbon\r\n" in after
+    assert b"Lives in Lisbon [verified:" not in after
+    assert b"- Likes tea.\r\n" in after
+    decisions = memory_proposals.read_decisions(proposal_service._proposals_file(config, "personal"))
+    assert len(decisions) == 1 and decisions[0]["receipt_id"]
+    undone = memory_receipts.undo_receipt(decisions[0]["receipt_id"], vault_root=vault)
+    assert undone["status"] == memory_receipts.UNDONE
+    assert note.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("mutant", [False, True])
+def test_route_unchanged_fold_cannot_redate_verified_entry(tmp_path: Path, monkeypatch, kind: str, batch: bool, mutant: bool) -> None:
+    from ciao import project_doc_update
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    before = b"## Notes\r\n- Lives in Porto [verified: 2024-03-01]\r\n- Likes tea.\r\n"
+    note.write_bytes(before)
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] Lives in Porto. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    queue_before = queue.read_bytes()
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    async def model(*args, **kwargs):
+        return '{"action":"update","index":1,"text":"- Lives in Porto [verified: 2026-11-14]"}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    if mutant:
+        monkeypatch.setattr(project_doc_update, "_sanitize_fold_stamp",
+                            lambda text, entry: project_doc_update._strip_opening_claim(text))
+    def verify():
+        response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                    else client.post(f"/api/proposals/{row['id']}/accept"))
+        assert note.read_bytes() == before
+        assert queue.read_bytes() == queue_before
+        if batch:
+            assert response.status_code == 200 and not response.json()["results"][0]["dismissed"]
+        else:
+            assert response.status_code == 409
+    if mutant:
+        with pytest.raises(AssertionError):
+            verify()
+    else:
+        verify()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_fold_destination_lock_timeout_is_retryable(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import project_doc_update
+    from ciao.memory_receipts import QueueLockError
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] Fact. _(from: A)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Fact."}'
+    def fail(*args, **kwargs):
+        raise QueueLockError("destination busy")
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    monkeypatch.setattr(project_doc_update, "commit_proposal_fold", fail)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert response.status_code == 200 and not response.json()["results"][0]["dismissed"]
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+        assert response.status_code == 409
+    assert "busy" in str(response.json()) and queue.read_bytes() == before
+
+
+def test_batch_fold_lock_timeout_preserves_prior_success(tmp_path: Path, monkeypatch) -> None:
+    from ciao import project_doc_update
+    from ciao.memory_receipts import QueueLockError
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] First. _(from: A)_\n"
+                                       "- [people Mo] Second. _(from: B)_\n")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "people"]
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Accepted fact."}'
+    real = project_doc_update.commit_proposal_fold
+    count = 0
+    def commit(plan):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise QueueLockError("destination busy")
+        return real(plan)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    monkeypatch.setattr(project_doc_update, "commit_proposal_fold", commit)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    results = response.json()["results"]
+    assert response.status_code == 200 and sum(bool(row["dismissed"]) for row in results) == 1
+    assert any(not row["dismissed"] and row.get("conflict") and "busy" in row.get("error", "") for row in results)
+    assert "Accepted fact." in note.read_text()
+
+
+@pytest.mark.parametrize("race", ["destination", "queue"])
+def test_sequential_batch_second_fold_refuses_external_change(tmp_path: Path, monkeypatch, race: str) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] First. _(from: A)_\n"
+                                       "- [people Mo] Second. _(from: B)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "people"]
+    calls = 0
+    async def model(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            if race == "destination":
+                note.write_text(note.read_text() + "\nExternal edit.\n", encoding="utf-8")
+            else:
+                queue.write_text(queue.read_text() + "\nExternal queue edit.\n", encoding="utf-8")
+        return json.dumps({"action": "add", "section": "Notes", "text": f"- Landed {calls}."})
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    results = response.json()["results"]
+    assert sum(bool(row["dismissed"]) for row in results) == 1
+    assert "Landed 1." in note.read_text() and "Landed 2." not in note.read_text()
+    assert ("External edit." in note.read_text()) == (race == "destination")
+    assert ("External queue edit." in queue.read_text()) == (race == "queue")
+    assert len(read_decisions(queue)) == 1
+
+
+def test_sequential_batch_resolves_both_duplicate_ordinals(tmp_path: Path, monkeypatch) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    bullet = "- [people Mo] Leads the pilot. _(from: Decisions)_\n"
+    _write_queue(config, "personal", "## pass\n\n" + bullet * 2)
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "people"]
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    assert all(row["dismissed"] for row in response.json()["results"])
+    queue = proposal_service._proposals_file(config, "personal")
+    assert "Leads the pilot." not in queue.read_text()
+    assert {row["proposal_id"] for row in read_decisions(queue)} == {row["id"] for row in rows}
+
+
+@pytest.mark.parametrize("kind,existing", [("people", True), ("people", False), ("project", True)])
+def test_mixed_batch_sequential_folds_and_memory(tmp_path: Path, monkeypatch, kind: str, existing: bool) -> None:
+    from ciao import memory_receipts
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    _write_queue(config, "personal", f"## pass\n\n- [{tag}] First fact. _(from: A)_\n"
+                                       "- [memory] Unique middle fact. _(from: B)_\n"
+                                       f"- [{tag}] Second fact. _(from: C)_\n")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] in {kind, "memory"}]
+    calls = 0
+    async def model(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        fact = "Second fact." if existing and calls == 1 else "First fact."
+        return json.dumps({"action": "add", "section": "Notes", "text": f"- {fact}"})
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    assert all(row["dismissed"] for row in response.json()["results"])
+    assert "First fact." in note.read_text() and "Second fact." in note.read_text()
+    queue = proposal_service._proposals_file(config, "personal")
+    assert {row["proposal_id"] for row in read_decisions(queue)} == {row["id"] for row in rows}
+    receipts = memory_receipts.read_receipts(memory_receipts.journal_path(config.workspace_vault_root("personal"), None))
+    assert {proof["proposal_id"] for receipt in receipts if receipt.get("batch")
+            for proof in receipt.get("selected_proposals", [])} == {row["id"] for row in rows}
+    assert "Unique middle fact." in (config.agent_root("personal") / "AGENTS.md").read_text()
+
+
+@pytest.mark.parametrize("race", ["destination", "queue"])
+def test_mixed_batch_external_change_after_memory_keeps_prior_effects(tmp_path: Path, monkeypatch, race: str) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] First. _(from: A)_\n"
+                                       "- [memory] Middle unique fact. _(from: B)_\n"
+                                       "- [people Mo] Second. _(from: C)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] in {"people", "memory"}]
+    calls = 0
+    async def model(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            if race == "destination":
+                note.write_text(note.read_text() + "\nExternal change.\n", encoding="utf-8")
+            else:
+                queue.write_text(queue.read_text() + "\nExternal queue change.\n", encoding="utf-8")
+        return json.dumps({"action": "add", "section": "Notes", "text": f"- Fold {calls}."})
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"] for row in rows]})
+    assert sum(bool(row["dismissed"]) for row in response.json()["results"]) == 2
+    assert "Fold 1." in note.read_text() and "Fold 2." not in note.read_text()
+    assert "Middle unique fact." in (config.agent_root("personal") / "AGENTS.md").read_text()
+    assert ("External change." in note.read_text()) == (race == "destination")
+    assert ("External queue change." in queue.read_text()) == (race == "queue")
+    assert len(read_decisions(queue)) == 2
+
+
+@pytest.mark.parametrize("kind", ["people", "project"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_fold_rejects_duplicate_ordinal_shift(tmp_path: Path, monkeypatch, kind: str, batch: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / ("People/Mo.md" if kind == "people" else "Projects/Test.md")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    tag = "people Mo" if kind == "people" else f"project {note}"
+    bullet = f"- [{tag}] Leads the pilot.  _(from: Decisions)_\n"
+    _write_queue(config, "personal", "## pass\n\n" + bullet * 2)
+    client = _client(config)
+    row = _accept_kind_row(client, kind)
+    queue = proposal_service._proposals_file(config, "personal")
+    before = note.read_bytes()
+    replacement = "## pass\n\n" + bullet
+
+    async def model(*args, **kwargs):
+        queue.write_text(replacement, encoding="utf-8")
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert note.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == replacement
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("ordinal", [0, 1])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("action", ["accept", "dismiss"])
+def test_unchanged_duplicate_selected_ordinal_resolves(tmp_path: Path, monkeypatch, ordinal: int,
+                                                       batch: bool, action: str) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Note\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    bullet = "- [people Mo] Leads the pilot.  _(from: Decisions)_\n"
+    _write_queue(config, "personal", "## pass\n\n" + bullet * 2)
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "people"]
+    selected = rows[ordinal]
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": action, "ids": [selected["id"]]})
+        assert response.status_code == 200 and response.json()["results"][0]["dismissed"]
+    else:
+        response = client.post(f"/api/proposals/{selected['id']}/{action}")
+        assert response.status_code == 200
+    queue = proposal_service._proposals_file(config, "personal")
+    assert queue.read_text().count(bullet.strip()) == 1
+    assert [row["proposal_id"] for row in read_decisions(queue)] == [selected["id"]]
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_new_person_appearing_before_commit_is_not_overwritten(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] Leads the pilot.  _(from: Decisions)_\n")
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    note = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("# Another writer\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+        assert response.json()["results"][0]["conflict"]
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+        assert response.status_code == 409 and response.json()["conflict"]
+    assert note.read_text(encoding="utf-8") == "# Another writer\n"
+    assert queue.read_bytes() == before
+    assert not read_decisions(queue)
 
 
 def test_accepting_a_people_row_honours_an_edited_category_folder(
@@ -925,6 +2511,64 @@ def test_dismissing_a_skill_row_records_a_decision_and_leaves_the_queue(
     assert record.problem == "Repeated fetch failures."
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True])
+async def test_skill_dismiss_waits_for_real_decision_lock_off_event_loop(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    import asyncio
+    import httpx
+    from ciao.memory_receipts import queue_lock
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    locked, entered, release, timed_out = (threading.Event() for _ in range(4))
+    def hold():
+        with queue_lock(queue):
+            locked.set()
+            if not release.wait(2):
+                timed_out.set()
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert await asyncio.to_thread(locked.wait, 3)
+    record = skill_proposals.record_dismissal
+    def announce(*args, **kwargs):
+        entered.set()
+        return record(*args, **kwargs)
+    monkeypatch.setattr(skill_proposals, "record_dismissal", announce)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://testserver") as ac:
+            request = (ac.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+                       if batch else ac.post(f"/api/proposals/{row['id']}/dismiss"))
+            task = asyncio.create_task(request)
+            assert await asyncio.to_thread(entered.wait, 3)
+            assert not timed_out.is_set()
+            release.set()
+            response = await task
+            assert response.status_code == 200
+    finally:
+        release.set()
+        await asyncio.to_thread(holder.join)
+    assert skill_proposals.parse_proposal(source, "personal").lifecycle == skill_proposals.DISMISSED
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_skill_dismiss_failed_record_rewrite_is_not_reported_settled(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+    def fail(*args, **kwargs):
+        raise OSError("skill record write failed")
+    monkeypatch.setattr(skill_proposals, "write_queue_atomically", fail)
+    response = (client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+                if batch else client.post(f"/api/proposals/{row['id']}/dismiss"))
+    result = response.json()["results"][0] if batch else response.json()
+    assert response.status_code == (200 if batch else 409)
+    assert result.get("dismissed") is not True and "error" in result
+    assert skill_proposals.parse_proposal(source, "personal").lifecycle == skill_proposals.PENDING
+
+
 def test_a_dismissed_skill_proposal_is_a_decision_the_history_shows(
     tmp_path: Path,
 ) -> None:
@@ -1104,6 +2748,65 @@ class _FakePcm:
 
 def _skill_row(client: TestClient) -> dict[str, Any]:
     return next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+
+def test_skill_reservation_requires_actual_skill_and_workspace(tmp_path: Path) -> None:
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config, _FakePcm())
+    row = _skill_row(client)
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    body = {"kind": "implement", "workspace": "personal", "targets": [row["id"]]}
+    assert client.post("/api/proposals/reservations", json={**body, "workspace": "work"}).status_code == 404
+    assert client.post("/api/proposals/reservations", json=body).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_reserved_skill_implementation_survives_cancel_and_rejects_wrong_scope(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    import asyncio
+    import httpx
+    from ciao.web.proposal_reservations import ReservationRegistry, seal_proposal_operation, validate_scope
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = _skill_row(client)
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    raw_scope = {"kind": "implement", "workspace": "personal", "targets": [row["id"]]}
+    scope = validate_scope(raw_scope, set(config.workspace_names()))
+    wrong = registry.reserve(validate_scope({**raw_scope, "workspace": "work"}, set(config.workspace_names())))
+    token = registry.reserve(scope)
+    entered, release = threading.Event(), threading.Event()
+    original = pcm.create_chat
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(pcm, "create_chat", held)
+    path = f"/api/proposals/{row['id']}/implement"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as ac:
+        assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": wrong})).status_code == 409
+        task = asyncio.create_task(ac.post(path, headers={"X-Ciao-Proposal-Reservation": token}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            seal = {"id": token, "scope": raw_scope, "inspected": True}
+            assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 409
+            assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": token})).status_code == 409
+        finally:
+            release.set()
+        await asyncio.gather(*tuple(registry._tasks))
+        await asyncio.sleep(0)
+        assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 200
+        assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": token})).status_code == 409
+    assert len(pcm.prompts) == 1 and len(pcm._chats) == 1
 
 
 def test_accepting_a_skill_row_opens_one_chat_in_its_own_workspace(
@@ -1452,6 +3155,30 @@ def test_an_already_moved_row_clears_instead_of_erroring(tmp_path: Path) -> None
     resp = client.post(f"/api/proposals/{row['id']}/accept?workspace=work")
 
     assert resp.status_code == 200, resp.json()
+    assert resp.json()["result"]["already_moved"] is True
+    assert resp.json()["result"]["destination"] == "work/memory-vault/People/Mo.md"
+    assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
+
+
+@pytest.mark.parametrize("already_moved", [False, True])
+def test_batch_rehome_reports_real_destination_and_success(tmp_path: Path, already_moved: bool) -> None:
+    config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+    source = config.workspace_vault_root("personal") / "People" / "Mo.md"
+    destination = config.workspace_vault_root("work") / "People" / "Mo.md"
+    original = source.read_bytes()
+    if already_moved:
+        source.replace(destination)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]], "workspace": "work"})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["results"]) == 1
+    result = body["results"][0]
+    assert result["dismissed"] is True and result["already_moved"] is already_moved
+    assert result["destination"] == "work/memory-vault/People/Mo.md"
+    assert len(body["summary"]) == 1
+    assert body["summary"][0]["destination"] == result["destination"]
+    assert body["summary"][0]["ok"] == 1 and body["summary"][0]["failed"] == 0
+    assert destination.read_bytes() == original and not source.exists()
     assert not [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
 
 
@@ -1514,6 +3241,8 @@ def test_a_batch_keeps_the_rows_whose_move_failed(tmp_path: Path) -> None:
     results = {r["id"]: r for r in resp.json()["results"]}
     assert sum(1 for r in results.values() if r["dismissed"]) == 1
     assert any("already exists" in str(r.get("error", "")) for r in results.values())
+    assert sum(group["ok"] for group in resp.json()["summary"]) == 1
+    assert sum(group["failed"] for group in resp.json()["summary"]) == 1
     left = [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "rehome"]
     assert len(left) == 1
     assert "Ida" in left[0]["rehome"]["note"]
@@ -1627,7 +3356,7 @@ def test_a_batch_row_removed_by_another_request_is_not_rewritten(
 ) -> None:
     """When a concurrent resolver drops the bullet between this batch's scan
     and its write, ``_remove_bullet_line`` matches nothing; the loser reports
-    success to the client but must not rewrite the queue."""
+    nonremoval and must not rewrite the queue."""
     config = _config(tmp_path)
     queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
     _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")
@@ -1638,7 +3367,7 @@ def test_a_batch_row_removed_by_another_request_is_not_rewritten(
     response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
 
     assert response.status_code == 200
-    assert response.json()["results"][0]["dismissed"] is True  # gone from review either way
+    assert response.json()["results"][0]["dismissed"] is False
     # The loser did not rewrite the queue around the winner's deletion.
     assert "Remember the thing" in queue_path.read_text()
 
@@ -1656,7 +3385,8 @@ def test_an_accept_that_loses_the_bullet_race_leaves_the_queue(tmp_path: Path, m
     monkeypatch.setattr(proposal_service, "_remove_bullet_line", lambda *a, **k: False)
     response = client.post(f"/api/proposals/{row['id']}/dismiss")
 
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert response.json()["conflict"] is True
     # The queue was left as the winner wrote it.
     queue_path = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
     assert "- [memory] Remember the thing" in queue_path.read_text()
@@ -1684,10 +3414,12 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
 
     real = proposal_service._rewrite_queue_single
     worker_threads: list[int] = []
+    requested_ids: list[str] = []
     main_thread = __import__("threading").get_ident()
 
     def spy(*args, **kwargs):
         worker_threads.append(__import__("threading").get_ident())
+        requested_ids.append(args[-1])
         return real(*args, **kwargs)
 
     monkeypatch.setattr(proposal_service, "_rewrite_queue_single", spy)
@@ -1695,6 +3427,19 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
 
     assert response.status_code == 200
     assert worker_threads and worker_threads[0] != main_thread
+    assert requested_ids == [row["id"]]
+
+
+def test_batch_duplicate_requested_id_refused_before_queue_change(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    original = "# Proposals\n\n- [memory] Duplicate\n- [memory] Duplicate\n"
+    _write_queue(config, "personal", original)
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"], row["id"]]})
+    assert response.status_code == 400
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+    assert queue.read_text(encoding="utf-8") == original
 
 
 def test_a_shifted_line_index_does_not_delete_a_bystander():
@@ -2512,6 +4257,64 @@ def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
     assert _CATEGORY_ID in _registry_ids(config)
 
 
+@pytest.mark.parametrize("batch", [False, True])
+def test_category_dismiss_stale_selection_does_not_settle(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao.vocabulary_proposals import category_sidecar_path
+    from ciao.web import proposal_service
+
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+    queue = proposal_service._proposals_file(config, "personal")
+    sidecar = category_sidecar_path(config.workspace_vault_root("personal"), _CATEGORY_ID)
+    before = sidecar.read_bytes()
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 409
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_category_stale_selection_does_not_retype(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+    queue = proposal_service._proposals_file(config, "personal")
+    note = config.workspace_vault_root("personal") / "Journals" / "One.md"
+    before = note.read_bytes()
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+    replacement = "# Memory Proposals\n"
+
+    def race(*args, **kwargs):
+        queue.write_text(replacement, encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert note.read_bytes() == before
+    assert _CATEGORY_ID not in _registry_ids(config)
+    assert queue.read_text(encoding="utf-8") == replacement
+    assert not read_decisions(queue)
+
+
 def test_accepting_a_category_skips_a_note_that_no_longer_exists(
     tmp_path: Path,
 ) -> None:
@@ -2705,6 +4508,62 @@ def _note_edit_vault(
 
 def _note_edit_row(client: TestClient) -> dict:
     return _accept_kind_row(client, "note_edit")
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_note_dismiss_stale_selection_does_not_settle(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import note_edit_proposals
+    from ciao.web import proposal_service
+
+    config, proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+    queue = proposal_service._proposals_file(config, "personal")
+    sidecar = note_edit_proposals.sidecar_path(config, "personal", proposal.id)
+    before = sidecar.read_bytes()
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 409
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_note_edit_stale_selection_does_not_edit(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config, _ = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+    queue = proposal_service._proposals_file(config, "personal")
+    note = config.workspace_vault_root("personal") / _EDIT_NOTE
+    before = note.read_bytes()
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert note.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == "# Memory Proposals\n"
+    assert not read_decisions(queue)
 
 
 def test_a_note_edit_row_names_the_note_it_is_about(tmp_path: Path) -> None:
@@ -3222,6 +5081,102 @@ def _undo_client(config: CiaoConfig) -> TestClient:
     return TestClient(app)
 
 
+def test_undo_reservation_resolves_actual_receipt_workspace(tmp_path: Path) -> None:
+    from ciao import memory_receipts
+    from ciao.web.proposal_reservations import ReservationRegistry, reserve_proposal_operation
+    config = _default_vault(tmp_path)
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "memory")
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    rid = next(item["id"] for item in memory_receipts.read_receipts(journal)
+               if item.get("kind") == "region_apply" and item.get("status") == memory_receipts.APPLIED)
+    client.app.state.proposal_reservations = ReservationRegistry()
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations", reserve_proposal_operation, methods=["POST"]))
+    scope = {"kind": "undo", "workspace": "", "targets": [rid]}
+    result = client.post("/api/proposals/reservations", json=scope)
+    assert result.status_code == 200 and result.json()["scope"]["workspace"] == "personal"
+    assert client.post("/api/proposals/reservations", json={**scope, "workspace": "work"}).status_code == 404
+
+
+@pytest.mark.parametrize("error_name,status,field", [
+    ("RevisionConflict", 409, "conflict"), ("UndoUnsupported", 400, "undoable"),
+])
+def test_reserved_undo_known_refusal_seals_without_effect(tmp_path: Path, monkeypatch, error_name: str, status: int, field: str) -> None:
+    from ciao import memory_receipts
+    from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+    config = _default_vault(tmp_path)
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "memory")
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    rid = next(item["id"] for item in memory_receipts.read_receipts(journal)
+               if item.get("kind") == "region_apply" and item.get("status") == memory_receipts.APPLIED)
+    registry = ReservationRegistry()
+    client.app.state.proposal_reservations = registry
+    scope = validate_scope({"kind": "undo", "workspace": "personal", "targets": [rid]}, set(config.workspace_names()))
+    token = registry.reserve(scope)
+    def refuse(*args, **kwargs):
+        raise getattr(memory_receipts, error_name)("refused before undo")
+    monkeypatch.setattr(memory_receipts, "undo_receipt", refuse)
+    response = client.post(f"/api/memory/receipts/{rid}/undo?workspace=personal",
+                           headers={"X-Ciao-Proposal-Reservation": token})
+    assert response.status_code == status and response.json()["id"] == rid
+    assert response.json()[field] is (field == "conflict")
+    assert row["text"] in _region_entries(config, "personal", "memory")
+    assert registry.seal(token, scope, inspected=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_reserved_receipt_undo_survives_cancel_and_rejects_wrong_scope(tmp_path: Path, monkeypatch, durable: bool) -> None:
+    import asyncio
+    import httpx
+    from ciao import memory_receipts
+    from ciao.web.proposal_reservations import ReservationRegistry, seal_proposal_operation, validate_scope
+    config = _default_vault(tmp_path)
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "memory")
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    receipt = next(item for item in memory_receipts.read_receipts(journal)
+                   if item.get("kind") == "region_apply" and item.get("status") == memory_receipts.APPLIED)
+    rid = receipt["id"]
+    registry = _test_proposal_registry(tmp_path, durable)
+    client.app.state.proposal_reservations = registry
+    client.app.router.routes.insert(0, Route("/api/proposals/reservations/seal", seal_proposal_operation, methods=["POST"]))
+    raw_scope = {"kind": "undo", "workspace": "personal", "targets": [rid]}
+    scope = validate_scope(raw_scope, set(config.workspace_names()))
+    wrong = registry.reserve(validate_scope({**raw_scope, "workspace": "work"}, set(config.workspace_names())))
+    token = registry.reserve(scope)
+    entered, release = threading.Event(), threading.Event()
+    original = memory_receipts.undo_receipt
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(memory_receipts, "undo_receipt", held)
+    path = f"/api/memory/receipts/{rid}/undo?workspace=personal"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://test") as ac:
+        assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": wrong})).status_code == 409
+        task = asyncio.create_task(ac.post(path, headers={"X-Ciao-Proposal-Reservation": token}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            seal = {"id": token, "scope": raw_scope, "inspected": True}
+            assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 409
+            assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": token})).status_code == 409
+        finally:
+            release.set()
+        await asyncio.gather(*tuple(registry._tasks))
+        await asyncio.sleep(0)
+        assert (await ac.post("/api/proposals/reservations/seal", json=seal)).status_code == 200
+        assert (await ac.post(path, headers={"X-Ciao-Proposal-Reservation": token})).status_code == 409
+    assert row["text"] not in _region_entries(config, "personal", "memory")
+
+
 def test_undoing_an_accepted_category_restores_the_yaml_and_every_note(
     tmp_path: Path,
 ) -> None:
@@ -3466,11 +5421,24 @@ def test_batch_accept_does_not_promote_before_the_receipt_can_be_written(
     )
 
     assert resp.status_code == 503, resp.json()
+    assert resp.json()["no_effect"] is True and resp.json()["ids"] == [row["id"]]
     # The fact must NOT have been written: a 503 with the destination already
     # mutated is what turns the operator's retry into a double promotion.
     assert _learnings_count(config) == 0
     # And the row is still queued, so the retry has something to apply.
     assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_single_accept_journal_preflight_explicit_no_effect(tmp_path: Path) -> None:
+    config = _learnings_vault(tmp_path)
+    journal = config.workspace_vault_root("personal") / "Workspace" / "Memory-Receipts.jsonl"
+    journal.mkdir()
+    client = _client(config)
+    row = _accept_kind_row(client, "learnings")
+    response = client.post(f"/api/proposals/{row['id']}/accept")
+    assert response.status_code == 503
+    assert response.json()["id"] == row["id"] and response.json()["no_effect"] is True
+    assert _learnings_count(config) == 0
 
 
 def test_two_concurrent_accepts_promote_the_row_once(
@@ -3574,6 +5542,74 @@ def test_an_accept_revalidates_the_row_another_resolver_took(
     assert _learnings_count(config) == 1, "the fact was promoted a second time"
 
 
+@pytest.mark.parametrize("batch", [False, True])
+def test_learning_accept_does_not_write_after_row_is_replaced(
+    tmp_path: Path, monkeypatch, batch: bool
+) -> None:
+    from ciao.web import proposal_service
+    from ciao.memory_proposals import read_decisions
+
+    config = _learnings_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "learnings")
+    queue = proposal_service._proposals_file(config, "personal")
+    learning = config.workspace_vault_root("personal") / "Workspace" / "Learnings.md"
+    before = learning.read_bytes() if learning.exists() else None
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+    replacement = queue.read_text(encoding="utf-8").replace("Decisions", "Other source")
+
+    def race(*args, **kwargs):
+        queue.write_text(replacement, encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+        assert response.status_code == 409
+    assert (learning.read_bytes() if learning.exists() else None) == before
+    assert queue.read_text(encoding="utf-8") == replacement
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("action", ["accept", "dismiss"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_learning_duplicate_shift_fails_before_effect(tmp_path: Path, monkeypatch, action: str, batch: bool) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config = _learnings_vault(tmp_path)
+    queue = proposal_service._proposals_file(config, "personal")
+    original = queue.read_text(encoding="utf-8")
+    bullet = next(line for line in original.splitlines() if "[learnings]" in line)
+    queue.write_text(original + bullet + "\n", encoding="utf-8")
+    client = _client(config)
+    row = _accept_kind_row(client, "learnings")
+    learning = config.workspace_vault_root("personal") / "Workspace" / "Learnings.md"
+    before = learning.read_bytes() if learning.exists() else None
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        lines = queue.read_text(encoding="utf-8").splitlines(keepends=True)
+        del lines[next(i for i, line in enumerate(lines) if "[learnings]" in line)]
+        queue.write_text("".join(lines), encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": action, "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/{action}").status_code == 409
+    assert (learning.read_bytes() if learning.exists() else None) == before
+    assert queue.read_text(encoding="utf-8").count(bullet) == 1
+    assert not read_decisions(queue)
+
+
 # ---- Retry reconciliation from the review path ----------------------------
 
 
@@ -3628,6 +5664,267 @@ def test_accept_without_reconcile_stays_model_free(tmp_path: Path, monkeypatch) 
     row = _accept_kind_row(client, "memory")
 
     assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+
+def test_region_replay_before_route_duplicate_decision_is_once(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts, memory_tool, proposal_actions
+
+    config = _competing_vault(tmp_path)
+    guide = config.agent_root("personal") / "AGENTS.md"
+    memory_tool.write_region(guide, "memory", ["Office is in Berlin. [2026-01-01]"])
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    queue = proposal_service._proposals_file(config, "personal")
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    real = proposal_actions.record_decision
+    called: list[str] = []
+
+    def replay_first(path, **kwargs):
+        assert kwargs["outcome"] == "duplicate"
+        memory_receipts.recover_pending(journal=journal, config=config)
+        recovered = memory_proposals.read_decisions(queue, include_history_only=False)
+        assert len(recovered) == 1
+        for key in ("via", "source", "destination", "outcome", "proposal_id", "receipt_id", "queue_receipt_id", "reason"):
+            assert recovered[0][key] == kwargs.get(key, "")
+        called.append(kwargs["queue_receipt_id"])
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    response = client.post(f"/api/proposals/{row['id']}/accept", json={"reason": "already known"})
+    assert response.status_code == 200
+    decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+    assert len(decisions) == 1
+    assert decisions[0]["queue_receipt_id"] == called[0]
+
+
+@pytest.mark.parametrize("batch,action", [(False, "dismiss"), (True, "dismiss"), (True, "accept")])
+def test_pwa_replay_preserves_decision_metadata(tmp_path: Path, monkeypatch, batch: bool, action: str) -> None:
+    from ciao import memory_proposals, memory_receipts, proposal_actions
+
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    queue = proposal_service._proposals_file(config, "personal")
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    original = proposal_actions.record_decision
+    seen = []
+    def replay_first(path, **kwargs):
+        memory_receipts.recover_pending(journal=journal, config=config)
+        decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+        assert len(decisions) == 1
+        for key in ("via", "source", "destination", "outcome", "proposal_id", "receipt_id", "queue_receipt_id", "reason"):
+            assert decisions[0][key] == kwargs.get(key, "")
+        seen.append(True)
+        return original(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": action, "ids": [row["id"]]})
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/{action}", json={"reason": "not needed"})
+    assert response.status_code == 200 and seen
+    assert len(memory_proposals.read_decisions(queue, include_history_only=False)) == 1
+
+
+def test_batch_replay_preserves_each_selected_decision(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts, proposal_actions
+
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    selected = [row for row in rows if row["workspace"] == "personal" and row["kind"] in {"memory", "profile"}][:2]
+    assert len(selected) == 2
+    queue = proposal_service._proposals_file(config, "personal")
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    original = proposal_actions.record_decision
+    seen = []
+    def replay_first(path, **kwargs):
+        memory_receipts.recover_pending(journal=journal, config=config)
+        decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+        assert len(decisions) == 2
+        recovered = next(item for item in decisions if item["proposal_id"] == kwargs["proposal_id"])
+        for key in ("via", "source", "destination", "outcome", "proposal_id", "receipt_id", "queue_receipt_id", "reason"):
+            assert recovered[key] == kwargs.get(key, "")
+        seen.append(kwargs["proposal_id"])
+        return original(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"] for row in selected]})
+    assert response.status_code == 200 and len(seen) == 2
+    assert len(memory_proposals.read_decisions(queue, include_history_only=False)) == 2
+
+
+@pytest.mark.parametrize("tamper", ["none", "outcome", "receipt"])
+def test_mixed_batch_replay_preserves_per_row_outcomes(tmp_path: Path, monkeypatch, tamper: str) -> None:
+    from contextlib import contextmanager
+    from ciao import memory_proposals, memory_receipts, memory_tool, proposal_actions
+
+    config = _competing_vault(tmp_path)
+    guide = config.agent_root("personal") / "AGENTS.md"
+    memory_tool.write_region(guide, "memory", ["Office is in Berlin. [2026-01-01]"])
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [memory] Office is in Berlin. _(from: Old source)_\n"
+                 "- [memory] Prefers thorough testing. _(from: New source)_\n")
+    client = _client(config)
+    rows = [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory"]
+    assert len(rows) == 2
+    queue = proposal_service._proposals_file(config, "personal")
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    original_record = proposal_actions.record_decision
+    original_multi = memory_receipts.queue_resolution_multi
+    if tamper != "none":
+        @contextmanager
+        def corrupted(path, removals, **kwargs):
+            for item in removals:
+                if item.get("decision", {}).get("decision_outcome") == "written":
+                    item["decision"]["decision_outcome" if tamper == "outcome" else "decision_receipt_id"] = "corrupt"
+            with original_multi(path, removals, **kwargs) as result:
+                yield result
+        monkeypatch.setattr(memory_receipts, "queue_resolution_multi", corrupted)
+    seen = {}
+    def replay_first(path, **kwargs):
+        memory_receipts.recover_pending(journal=journal, config=config)
+        decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+        assert len(decisions) == 2
+        actual = next(item for item in decisions if item["proposal_id"] == kwargs["proposal_id"])
+        for key in ("via", "source", "destination", "outcome", "proposal_id", "receipt_id", "queue_receipt_id", "reason"):
+            assert actual[key] == kwargs.get(key, "")
+        seen[actual["proposal_id"]] = actual
+        return original_record(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    def request():
+        return client.post("/api/proposals/batch", json={"action": "accept", "ids": [r["id"] for r in rows]})
+    if tamper != "none":
+        with pytest.raises(AssertionError):
+            request()
+        return
+    assert request().status_code == 200
+    assert len(seen) == 2
+    assert {item["outcome"] for item in seen.values()} == {"duplicate", "written"}
+    for row in rows:
+        decision = seen[row["id"]]
+        assert decision["source"] == row["source"] and decision["destination"] == "ciao:memory"
+        assert decision["queue_receipt_id"]
+        if decision["outcome"] == "written":
+            assert decision["receipt_id"]
+    assert len(memory_proposals.read_decisions(queue, include_history_only=False)) == 2
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("over", [False, True])
+def test_selected_queue_image_capacity_before_region_effect(tmp_path: Path, monkeypatch, batch: bool, over: bool) -> None:
+    from ciao import memory_proposals, memory_receipts, proposal_actions
+
+    config = _competing_vault(tmp_path)
+    queue = proposal_service._proposals_file(config, "personal")
+    initial = queue.read_text(encoding="utf-8")
+    desired = memory_receipts.MAX_IMAGE_CHARS + int(over)
+    queue.write_text(initial + "#" + "x" * (desired - len(initial) - 2) + "\n", encoding="utf-8")
+    assert len(queue.read_text(encoding="utf-8")) == desired
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    guide = config.agent_root("personal") / "AGENTS.md"
+    before_guide, before_queue = guide.read_bytes(), queue.read_bytes()
+    replayed = []
+    original = proposal_actions.record_decision
+    def replay_first(path, **kwargs):
+        memory_receipts.recover_pending(
+            journal=memory_receipts.journal_path(config.workspace_vault_root("personal"), None), config=config
+        )
+        decisions = memory_proposals.read_decisions(queue, include_history_only=False)
+        assert len(decisions) == 1 and decisions[0]["queue_receipt_id"] == kwargs["queue_receipt_id"]
+        replayed.append(True)
+        return original(path, **kwargs)
+    monkeypatch.setattr(proposal_actions, "record_decision", replay_first)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+    else:
+        response = client.post(f"/api/proposals/{row['id']}/accept")
+    if over:
+        assert guide.read_bytes() == before_guide
+        assert queue.read_bytes() == before_queue
+        assert "destination_effect" not in str(response.json())
+    else:
+        assert response.status_code == 200
+        assert replayed
+        assert guide.read_bytes() != before_guide
+        journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+        receipts = memory_receipts.read_receipts(journal)
+        selected = [r for r in receipts if r.get("kind") == "queue_resolve" and (r.get("proposal_id") or r.get("selected_proposals"))]
+        assert selected and selected[-1]["before_text"] is not None and selected[-1]["after_text"] is not None
+
+
+def test_region_accept_does_not_write_when_selection_disappears_during_reconcile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.web import proposal_service
+
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    guide = config.agent_root("personal") / "AGENTS.md"
+    before = guide.read_bytes()
+    queue = proposal_service._proposals_file(config, "personal")
+    replacement = "# Memory Proposals\n"
+
+    async def race(*args, **kwargs):
+        queue.write_text(replacement, encoding="utf-8")
+        return None, None
+
+    monkeypatch.setattr(proposal_service, "_plan_accept_reconcile", race)
+    response = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1")
+    assert response.status_code == 409
+    assert guide.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == replacement
+    from ciao.memory_proposals import read_decisions
+    assert not read_decisions(queue)
+
+
+def test_region_preparation_does_not_create_guide(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from ciao.web import proposal_service
+
+    config = _competing_vault(tmp_path)
+    guide = config.agent_root("personal") / "AGENTS.md"
+    guide.unlink()
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    row = _accept_kind_row(_client(config), "memory")
+
+    async def plan(*args, **kwargs):
+        assert not guide.exists()
+        assert queue.read_bytes() == before
+        return None, None
+
+    monkeypatch.setattr(proposal_service, "_plan_accept_reconcile", plan)
+    decision, refusal = asyncio.run(proposal_service._prepare_region_row(
+        config, row, reconcile=True
+    ))
+    assert decision is None and refusal is None
+    assert not guide.exists()
+    assert queue.read_bytes() == before
+
+
+def test_batch_region_stale_before_commit_does_not_write(tmp_path: Path, monkeypatch) -> None:
+    from ciao.web import proposal_service
+
+    config = _competing_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    guide = config.agent_root("personal") / "AGENTS.md"
+    before = guide.read_bytes()
+    queue = proposal_service._proposals_file(config, "personal")
+    real = proposal_service._rewrite_queue_batch
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, "_rewrite_queue_batch", race)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+    assert guide.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == "# Memory Proposals\n"
+    assert not response.json().get("results", [{}])[0].get("dismissed", False)
+    from ciao.memory_proposals import read_decisions
+    assert not read_decisions(queue)
 
 
 def test_reconcile_on_accept_replaces_the_competing_entry(
@@ -3697,6 +5994,7 @@ def test_a_deferral_names_what_it_was_weighed_against(
     body = client.post(f"/api/proposals/{row['id']}/accept?reconcile=1").json()
 
     assert body["deferred"] is True
+    assert body["no_effect"] is True
     assert body["reason"], "a deferral with no reason is an ordinary refusal"
     assert body["competing"] == ["Office is in Zurich. [2026-01-01]"]
 
@@ -4347,6 +6645,68 @@ def test_repo_accept_appends_to_linked_agents_md(tmp_path: Path) -> None:
     assert client.get("/api/proposals").json()["rows"] == []
 
 
+def test_batch_repo_lock_failure_preserves_prior_real_fold(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from ciao import memory_receipts, note_receipts, memory_proposals
+    config, repo = _repo_vault(tmp_path)
+    note = config.workspace_vault_root("work") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    queue = proposal_service._proposals_file(config, "work")
+    queue.write_text(queue.read_text() + "- [people Mo] Leads the pilot. _(from: Decisions)_\n")
+    pcm = SimpleNamespace(list_projects=lambda ws=None: [SimpleNamespace(workspace="work", repo_path=str(repo))])
+    client = _client(config, pcm)
+    rows = client.get("/api/proposals").json()["rows"]
+    person = next(r for r in rows if r["kind"] == "people")
+    repo_row = next(r for r in rows if r["kind"] == "repo")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    def busy(**kwargs):
+        raise memory_receipts.QueueLockError("repository destination busy; retry")
+    monkeypatch.setattr(note_receipts, "append_repo_doc_item", busy)
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [person["id"], repo_row["id"]]})
+    assert response.status_code == 200
+    results = {r["id"]: r for r in response.json()["results"]}
+    assert results[person["id"]]["dismissed"] and results[person["id"]]["promoted"]
+    assert not results[repo_row["id"]]["dismissed"] and "try again" in results[repo_row["id"]]["error"]
+    assert "Leads the pilot." in note.read_text() and "Leads the pilot." not in queue.read_text()
+    assert "Run tests with make test" in queue.read_text()
+    assert "Run tests with make test" not in (repo / "AGENTS.md").read_text()
+    assert len(memory_proposals.read_decisions(queue)) == 1
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_repo_accept_does_not_write_after_selection_changes(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from types import SimpleNamespace
+    from ciao.memory_proposals import read_decisions
+    from ciao.web import proposal_service
+
+    config, repo = _repo_vault(tmp_path)
+    pcm = SimpleNamespace(list_projects=lambda ws=None: [SimpleNamespace(workspace="work", repo_path=str(repo))])
+    client = _client(config, pcm)
+    row = _accept_kind_row(client, "repo")
+    queue = proposal_service._proposals_file(config, "work")
+    doc = repo / "AGENTS.md"
+    before = doc.read_bytes()
+    name = "_rewrite_queue_batch" if batch else "_rewrite_queue_single"
+    real = getattr(proposal_service, name)
+
+    def race(*args, **kwargs):
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_service, name, race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 409
+    assert doc.read_bytes() == before
+    assert queue.read_text(encoding="utf-8") == "# Memory Proposals\n"
+    assert not read_decisions(queue)
+
+
 def test_repo_accept_refuses_unlinked_repo_and_keeps_row(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
@@ -4635,6 +6995,711 @@ def _file_skill_draft(config: CiaoConfig, workspace: str) -> str:
         private_evidence="chat-42 turn 7: the fetch reported no results",
     )
     return draft.id
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_skill_draft_outer_queue_busy_is_retryable_and_batch_preserves_prior(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from contextlib import contextmanager
+    from ciao import memory_proposals, memory_receipts, upstream_drafts
+    config = _default_vault(tmp_path)
+    personal = _queue_text(config, "personal")
+    personal.write_text("# Queue\n\n- [memory] Prior success. _(from: Decisions)_\n", encoding="utf-8")
+    draft_id = _file_skill_draft(config, "work")
+    queue = _queue_text(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft_id)
+    before_queue, before_sidecar = queue.read_bytes(), sidecar.read_bytes()
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    draft = next(row for row in rows if row["kind"] == "review" and row["workspace"] == "work")
+    ordinary = next(row for row in rows if row["kind"] == "memory" and row["workspace"] == "personal")
+    real_lock = memory_receipts.queue_lock
+    calls = []
+    @contextmanager
+    def busy(path, *args, **kwargs):
+        if Path(path) == queue:
+            calls.append(path)
+            raise memory_receipts.QueueLockError("queue lock timed out")
+        with real_lock(path, *args, **kwargs) as handle:
+            yield handle
+    monkeypatch.setattr(memory_receipts, "queue_lock", busy)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [ordinary["id"], draft["id"]]})
+        assert response.status_code == 200
+        results = {item["id"]: item for item in response.json()["results"]}
+        assert results[ordinary["id"]]["dismissed"]
+        assert not results[draft["id"]]["dismissed"] and "retry" in results[draft["id"]]["error"].lower()
+        assert "Prior success." not in personal.read_text(encoding="utf-8")
+        assert len(memory_proposals.read_decisions(personal)) == 1
+    else:
+        response = client.post(f"/api/proposals/{draft['id']}/dismiss")
+        assert response.status_code == 409 and "retry" in response.json()["error"].lower()
+        assert "Prior success." in personal.read_text(encoding="utf-8")
+    assert calls and queue.read_bytes() == before_queue and sidecar.read_bytes() == before_sidecar
+    assert not memory_proposals.read_decisions(queue)
+    monkeypatch.setattr(memory_receipts, "queue_lock", real_lock)
+    retry = client.post(f"/api/proposals/{draft['id']}/dismiss")
+    assert retry.status_code == 200
+    assert upstream_drafts.find_record(config, draft_id).lifecycle == upstream_drafts.DRAFT_REJECTED
+    assert len(memory_proposals.read_decisions(queue)) == 1
+
+
+def test_batch_skill_draft_busy_after_same_queue_success(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import contextmanager
+    from ciao import memory_proposals, memory_receipts, upstream_drafts
+    config = _default_vault(tmp_path)
+    first = _file_skill_draft(config, "personal")
+    second = upstream_drafts.file_draft(
+        config, "personal", target=upstream_drafts.UPSTREAM_ISSUE, skill="another-skill",
+        title="Clarify retries", change="Explain retries.", body="Explain the retry procedure.",
+        repository="example/tools",
+    ).id
+    queue = _queue_text(config, "personal")
+    client = _client(config)
+    rows = [row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "review"]
+    by_target = {row["target"]: row for row in rows}
+    assert set(by_target) == {first, second}
+    real_lock = memory_receipts.queue_lock
+    real_settle = proposal_service._settle_skill_draft
+    completed = []
+    def settle(*args, **kwargs):
+        result = real_settle(*args, **kwargs)
+        if not result:
+            completed.append(True)
+        return result
+    @contextmanager
+    def busy_second(path, *args, **kwargs):
+        if Path(path) == queue and completed:
+            raise memory_receipts.QueueLockError("busy")
+        with real_lock(path, *args, **kwargs) as handle:
+            yield handle
+    monkeypatch.setattr(memory_receipts, "queue_lock", busy_second)
+    monkeypatch.setattr(proposal_service, "_settle_skill_draft", settle)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [by_target[first]["id"], by_target[second]["id"]]})
+    assert response.status_code == 200
+    results = {row["id"]: row for row in response.json()["results"]}
+    assert results[by_target[first]["id"]]["dismissed"]
+    assert not results[by_target[second]["id"]]["dismissed"]
+    assert "retry" in results[by_target[second]["id"]]["error"]
+    assert upstream_drafts.find_record(config, first).lifecycle == upstream_drafts.DRAFT_REJECTED
+    assert upstream_drafts.find_record(config, second).lifecycle == upstream_drafts.DRAFT_PENDING
+    assert first not in queue.read_text(encoding="utf-8") and second in queue.read_text(encoding="utf-8")
+    assert len(memory_proposals.read_decisions(queue)) == 1
+
+
+@pytest.mark.parametrize("kind", ["people", "rehome"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_queue_receipt_failure_reports_landed_destination(tmp_path: Path, monkeypatch, kind: str, batch: bool) -> None:
+    from ciao import memory_receipts, memory_proposals
+    if kind == "rehome":
+        config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+        source = config.workspace_vault_root("personal") / "People/Mo.md"
+        destination = config.workspace_vault_root("work") / "People/Mo.md"
+        before_destination = source.read_bytes()
+    else:
+        config = _default_vault(tmp_path)
+        destination = config.workspace_vault_root("personal") / "People/Mo.md"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+        before_destination = destination.read_bytes()
+        _write_queue(config, "personal", "## pass\n\n- [people Mo] Leads the pilot. _(from: Decisions)_\n")
+        client = _client(config)
+        row = _accept_kind_row(client, "people")
+        async def model(*args, **kwargs):
+            return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+        monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    queue = proposal_service._proposals_file(config, "personal")
+    before_queue = queue.read_bytes()
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    original = memory_receipts._append
+    faults = []
+    def fail_queue_receipt(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED:
+            faults.append(True)
+            raise OSError("injected queue receipt failure")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail_queue_receipt)
+        if batch:
+            response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]], "workspace": "work"})
+            assert response.status_code == 200
+            result = response.json()["results"][0]
+        else:
+            suffix = "?workspace=work" if kind == "rehome" else ""
+            response = client.post(f"/api/proposals/{row['id']}/accept{suffix}")
+            assert response.status_code == 503
+            result = response.json()
+    assert faults and queue.read_bytes() == before_queue
+    effect = result["destination_effect"]
+    assert effect["status"] == "completed"
+    assert effect["destination"] == ("People/Mo.md" if kind == "people" else "work/memory-vault/People/Mo.md")
+    assert "do not retry" in result["error"].lower()
+    assert result["queue_settled"] is False
+    if kind == "people":
+        assert destination.read_bytes() != before_destination and b"Leads the pilot." in destination.read_bytes()
+        note_receipt = next(r for r in memory_receipts.read_receipts(journal) if r.get("kind") == "note_apply" and r.get("status") == memory_receipts.APPLIED)
+        assert effect["receipt_id"] == note_receipt["id"]
+    else:
+        assert not source.exists() and destination.read_bytes() == before_destination
+        assert effect["destination"] == "work/memory-vault/People/Mo.md"
+    assert not memory_proposals.read_decisions(queue)
+    after_effect = destination.read_bytes()
+    if kind == "rehome":
+        # An inspected move can be retried through its existing already-moved path.
+        retry = client.post(f"/api/proposals/{row['id']}/accept?workspace=work")
+        assert retry.status_code == 200 and retry.json()["result"]["already_moved"] is True
+    else:
+        # The operator can instead settle the inspected fold without folding again.
+        dismissed = client.post(f"/api/proposals/{row['id']}/dismiss")
+        assert dismissed.status_code == 200
+    assert destination.read_bytes() == after_effect
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("fault,state", [("applied", "replaced"), ("write_before", "unchanged"), ("write_after", "replaced")])
+def test_queue_landing_failure_reports_observed_state(tmp_path: Path, monkeypatch, batch: bool, fault: str, state: str) -> None:
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n- [people Mo] Leads the pilot. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    append = memory_receipts._append
+    write = memory_receipts.write_queue_atomically
+    attempted = {}
+    def append_fault(path, payload, *args, **kwargs):
+        if (fault == "applied" and payload.get("kind") == "queue_resolve"
+                and payload.get("status") == memory_receipts.APPLIED and payload.get("owner_landed")):
+            raise OSError("applied receipt failed")
+        return append(path, payload, *args, **kwargs)
+    def write_fault(path, text, *args, **kwargs):
+        if Path(path) == queue:
+            attempted["after"] = text.encode("utf-8")
+            if fault.startswith("write_"):
+                if fault == "write_after":
+                    write(path, text, *args, **kwargs)
+                raise OSError("queue replacement error")
+        return write(path, text, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", append_fault)
+        patch.setattr(memory_receipts, "write_queue_atomically", write_fault)
+        response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                    else client.post(f"/api/proposals/{row['id']}/accept"))
+    assert response.status_code == (200 if batch else 503)
+    result = response.json()["results"][0] if batch else response.json()
+    assert result["queue_settled"] is False and result["queue_state"] == state
+    assert result["queue_receipt_confirmed"] is False
+    assert result["destination_effect"]["destination"] == "People/Mo.md"
+    assert result["destination_effect"]["receipt_id"]
+    assert "do not retry" in result["error"].lower()
+    assert "Leads the pilot." in note.read_text()
+    assert queue.read_bytes() == (before if state == "unchanged" else attempted["after"])
+    journal = memory_receipts.journal_path(vault, None)
+    receipts = memory_receipts.read_receipts(journal)
+    assert any(item["id"] == result["destination_effect"]["receipt_id"] and item["kind"] == "note_apply" for item in receipts)
+    queue_receipt = next(item for item in receipts if item.get("kind") == "queue_resolve" and item.get("selected_proposals" if batch else "proposal_id"))
+    assert queue_receipt["status"] == (memory_receipts.ROLLED_BACK if batch and state == "unchanged" else memory_receipts.PREPARED)
+    if state == "replaced":
+        recovered = memory_receipts.recover_pending(journal=journal, config=config)
+        assert any(item.get("kind") == "queue_resolve" and item.get("status") == memory_receipts.CONFLICT for item in recovered.conflicts)
+
+
+@pytest.mark.parametrize("kind", ["people", "rehome"])
+@pytest.mark.parametrize("reserved", [False, True])
+def test_batch_receipt_failure_reports_prior_success_and_partial_effect(tmp_path: Path, monkeypatch, kind: str, reserved: bool) -> None:
+    from ciao import memory_receipts, memory_proposals
+    if kind == "rehome":
+        config, client, row = _rehome_fixture(tmp_path, ["person", "colleague"])
+        destination = config.workspace_vault_root("work") / "People/Mo.md"
+    else:
+        config = _default_vault(tmp_path)
+        destination = config.workspace_vault_root("personal") / "People/Mo.md"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+        _write_queue(config, "personal", "## pass\n\n- [people Mo] Leads the pilot. _(from: Decisions)_\n")
+        client = _client(config)
+        row = _accept_kind_row(client, "people")
+        async def model(*args, **kwargs):
+            return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+        monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    _write_queue(config, "work", "## pass\n\n- [memory] Prefers thorough checks. _(from: Work)_\n")
+    rows = client.get("/api/proposals").json()["rows"]
+    prior = next(item for item in rows if item["workspace"] == "work" and item["kind"] == "memory")
+    headers = {}
+    if reserved:
+        from ciao.web.proposal_reservations import ReservationRegistry, validate_scope
+        registry = ReservationRegistry()
+        client.app.state.proposal_reservations = registry
+        scope = validate_scope({"kind": "batch_accept", "workspace": "work",
+                                "targets": [prior["id"], row["id"]],
+                                "workspaces": ["personal", "work"],
+                                "destinations": {row["id"]: "work"} if kind == "rehome" else {}},
+                               set(config.workspace_names()))
+        token = registry.reserve(scope)
+        headers = {"X-Ciao-Proposal-Reservation": token}
+    queue = proposal_service._proposals_file(config, "personal")
+    before = queue.read_bytes()
+    original = memory_receipts._append
+    def fail_personal(path, payload, *args, **kwargs):
+        if (payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED
+                and payload.get("queue") == str(queue)):
+            raise OSError("injected queue receipt failure")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail_personal)
+        response = client.post("/api/proposals/batch", headers=headers, json={"action": "accept", "ids": [prior["id"], row["id"]], "workspace": "work"})
+    assert response.status_code == 200
+    results = {item["id"]: item for item in response.json()["results"]}
+    assert results[prior["id"]]["dismissed"] and results[prior["id"]]["promoted"]
+    assert not results[row["id"]]["dismissed"] and results[row["id"]]["queue_settled"] is False
+    assert results[row["id"]]["destination_effect"]["status"] == "completed"
+    assert "do not retry" in results[row["id"]]["error"].lower()
+    assert destination.is_file() and queue.read_bytes() == before
+    assert len(memory_proposals.read_decisions(proposal_service._proposals_file(config, "work"))) == 1
+    assert len(response.json()["results"]) == 2
+    if reserved:
+        assert registry.seal(token, scope, inspected=True)
+
+
+def test_sequential_batch_receipt_failure_keeps_prior_queue_success(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts
+    config = _default_vault(tmp_path)
+    note = config.workspace_vault_root("personal") / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [people Mo] Leads the pilot. _(from: Decisions)_\n"
+                 "- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    person = next(row for row in rows if row["kind"] == "people")
+    prior = next(row for row in rows if row["kind"] == "memory" and row["workspace"] == "personal")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    original = memory_receipts._append
+    count = 0
+    def fail_second(path, payload, *args, **kwargs):
+        nonlocal count
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED:
+            count += 1
+            if count == 2:
+                raise OSError("second queue receipt failed")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail_second)
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [person["id"], prior["id"]]})
+    assert response.status_code == 200 and count == 2
+    results = {item["id"]: item for item in response.json()["results"]}
+    assert results[prior["id"]]["dismissed"] and results[prior["id"]]["promoted"]
+    assert not results[person["id"]]["dismissed"] and results[person["id"]]["queue_settled"] is False
+    receipt_id = results[person["id"]]["destination_effect"]["receipt_id"]
+    journal = memory_receipts.journal_path(config.workspace_vault_root("personal"), None)
+    assert any(row["id"] == receipt_id and row["kind"] == "note_apply" for row in memory_receipts.read_receipts(journal))
+    queue = proposal_service._proposals_file(config, "personal")
+    assert "Leads the pilot." in queue.read_text() and "Prefers thorough checks." not in queue.read_text()
+    assert len(memory_proposals.read_decisions(queue)) == 1
+    assert "Leads the pilot." in note.read_text()
+
+
+def test_two_folds_same_note_second_prepare_fails(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals, memory_receipts
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [people Mo] Leads the pilot. _(from: Decisions)_\n"
+                 "- [people Mo] Designs the tests. _(from: Decisions)_\n")
+    client = _client(config)
+    rows = [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "people"]
+    model_calls = []
+    async def model(*args, **kwargs):
+        model_calls.append(True)
+        fact = "Designs the tests." if len(model_calls) == 1 else "Leads the pilot."
+        return '{"action":"add","section":"Notes","text":"- ' + fact + '"}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    original = memory_receipts._append
+    count = 0
+    def fail_second(path, payload, *args, **kwargs):
+        nonlocal count
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED:
+            count += 1
+            if count == 2:
+                raise OSError("second prepared receipt failed")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail_second)
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [r["id"] for r in rows]})
+    assert response.status_code == 200 and count == 2 and len(model_calls) == 2
+    results = {r["id"]: r for r in response.json()["results"]}
+    succeeded = next(r for r in rows if results[r["id"]]["dismissed"])
+    partial = next(r for r in rows if results[r["id"]].get("queue_settled") is False)
+    effect = results[partial["id"]]["destination_effect"]
+    assert effect["destination"] == "People/Mo.md" and effect["status"] == "completed"
+    assert "Leads the pilot." in note.read_text() and "Designs the tests." in note.read_text()
+    queue = proposal_service._proposals_file(config, "personal")
+    assert succeeded["text"] not in queue.read_text() and partial["text"] in queue.read_text()
+    decisions = memory_proposals.read_decisions(queue)
+    assert len(decisions) == 1 and decisions[0]["proposal_id"] == succeeded["id"]
+    receipts = memory_receipts.read_receipts(memory_receipts.journal_path(vault, None))
+    assert sum(r.get("kind") == "note_apply" and r.get("status") == memory_receipts.APPLIED for r in receipts) == 2
+    assert any(r["id"] == effect["receipt_id"] and r.get("kind") == "note_apply" for r in receipts)
+
+
+@pytest.mark.parametrize("fault,state", [("applied", "replaced"), ("write_before", "unchanged"), ("write_after", "replaced")])
+def test_batch_landing_fault_preserves_prior_success(tmp_path: Path, monkeypatch, fault: str, state: str) -> None:
+    from ciao import memory_proposals, memory_receipts
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [people Mo] Leads the pilot. _(from: Decisions)_\n"
+                 "- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    person = next(r for r in rows if r["kind"] == "people")
+    prior = next(r for r in rows if r["kind"] == "memory" and r["workspace"] == "personal")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    append = memory_receipts._append
+    write = memory_receipts.write_queue_atomically
+    count = 0
+    observed = {}
+    def append_fault(path, payload, *args, **kwargs):
+        nonlocal count
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.APPLIED and payload.get("owner_landed"):
+            count += 1
+            if fault == "applied" and count == 2:
+                observed["after"] = queue.read_bytes()
+                raise OSError("second applied receipt failed")
+        return append(path, payload, *args, **kwargs)
+    def write_fault(path, text, *args, **kwargs):
+        if Path(path) == queue and fault.startswith("write_") and count == 1:
+            observed["before"] = queue.read_bytes()
+            observed["expected"] = text.encode("utf-8")
+            if fault == "write_after":
+                write(path, text, *args, **kwargs)
+            raise OSError("second queue write failed")
+        return write(path, text, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", append_fault)
+        patch.setattr(memory_receipts, "write_queue_atomically", write_fault)
+        response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [person["id"], prior["id"]]})
+    assert response.status_code == 200
+    results = {r["id"]: r for r in response.json()["results"]}
+    assert results[prior["id"]]["dismissed"] and results[prior["id"]]["promoted"]
+    partial = results[person["id"]]
+    assert partial["queue_settled"] is False and partial["queue_receipt_confirmed"] is False
+    assert partial["queue_state"] == state and partial["destination_effect"]["destination"] == "People/Mo.md"
+    assert partial["destination_effect"]["receipt_id"]
+    assert "Leads the pilot." in note.read_text()
+    if fault == "write_before":
+        assert queue.read_bytes() == observed["before"]
+    elif fault == "write_after":
+        assert queue.read_bytes() == observed["expected"] != observed["before"]
+    else:
+        assert queue.read_bytes() == observed["after"]
+    assert ("Leads the pilot." in queue.read_text()) is (state == "unchanged")
+    assert "Prefers thorough checks." not in queue.read_text()
+    assert len(memory_proposals.read_decisions(queue)) == 1
+
+
+@pytest.mark.parametrize("fault", ["decision", "receipt"])
+def test_single_dismiss_partial_outcome(tmp_path: Path, monkeypatch, fault: str) -> None:
+    from ciao import memory_receipts, proposal_actions
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    if fault == "decision":
+        def fail(*args, **kwargs):
+            raise OSError("decision unavailable")
+        monkeypatch.setattr(proposal_actions, "record_decision", fail)
+    else:
+        append = memory_receipts._append
+        def fail_applied(path, payload, *args, **kwargs):
+            if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.APPLIED:
+                raise OSError("receipt unavailable")
+            return append(path, payload, *args, **kwargs)
+        monkeypatch.setattr(memory_receipts, "_append", fail_applied)
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+    assert response.status_code == 503
+    result = response.json()
+    assert result["queue_settled"] is False and result["queue_state"] == "replaced"
+    assert "Prefers thorough checks." not in queue.read_text()
+    if fault == "decision":
+        assert result["queue_receipt_confirmed"] is True and result["queue_receipt_id"]
+        assert result["decision_confirmed"] is False
+        assert "dismissal" in result["error"] and "accept blindly" not in result["error"]
+    else:
+        assert result["queue_receipt_confirmed"] is False
+
+
+def test_batch_dismiss_applied_receipt_failure_marks_each_partial(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    append = memory_receipts._append
+    def fail_applied(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.APPLIED:
+            raise OSError("receipt unavailable")
+        return append(path, payload, *args, **kwargs)
+    monkeypatch.setattr(memory_receipts, "_append", fail_applied)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["id"] == row["id"]
+    assert result["queue_settled"] is False and result["queue_state"] == "replaced"
+    assert result["queue_receipt_confirmed"] is False
+    assert "Prefers thorough checks." not in queue.read_text()
+
+
+def test_batch_dismiss_prior_success_and_later_receipt_failure(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [memory] Personal fact. _(from: Decisions)_\n")
+    _write_queue(config, "work", "## pass\n\n- [memory] Work fact. _(from: Decisions)_\n")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    personal = next(row for row in rows if row["text"] == "Personal fact.")
+    work = next(row for row in rows if row["text"] == "Work fact.")
+    work_journal = memory_receipts.journal_path(config.workspace_vault_root("work"), None)
+    append = memory_receipts._append
+    def fail_work(path, payload, *args, **kwargs):
+        if (path == work_journal and payload.get("kind") == "queue_resolve"
+                and payload.get("status") == memory_receipts.APPLIED):
+            raise OSError("work receipt unavailable")
+        return append(path, payload, *args, **kwargs)
+    monkeypatch.setattr(memory_receipts, "_append", fail_work)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [personal["id"], work["id"]]})
+    assert response.status_code == 200
+    results = {result["id"]: result for result in response.json()["results"]}
+    assert results[personal["id"]]["dismissed"] is True
+    assert results[work["id"]]["queue_settled"] is False
+    assert results[work["id"]]["queue_state"] == "replaced"
+    assert results[work["id"]]["queue_receipt_confirmed"] is False
+    assert "Work fact." not in proposal_service._proposals_file(config, "work").read_text()
+
+
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_batch_dismiss_decision_failure_reports_removed_but_unconfirmed(tmp_path: Path, monkeypatch, error_type) -> None:
+    from ciao import proposal_actions
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    def fail(*args, **kwargs):
+        raise error_type("decision unavailable")
+    monkeypatch.setattr(proposal_actions, "record_decision", fail)
+    response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["dismissed"] is True and result["queue_state"] == "replaced"
+    assert result["queue_settled"] is False and result["decision_confirmed"] is False
+    assert result["queue_receipt_confirmed"] is True and result["queue_receipt_id"]
+    assert "Prefers thorough checks." not in queue.read_text()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_decision_write_failure_reports_real_landed_fold(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import memory_proposals, memory_receipts, proposal_actions
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    note = vault / "People/Mo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Mo\n\n## Notes\n- Existing.\n", encoding="utf-8")
+    _write_queue(config, "personal", "## pass\n\n"
+                 "- [people Mo] Leads the pilot. _(from: Decisions)_\n"
+                 "- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    person = next(r for r in rows if r["kind"] == "people")
+    prior = next(r for r in rows if r["kind"] == "memory" and r["workspace"] == "personal")
+    async def model(*args, **kwargs):
+        return '{"action":"add","section":"Notes","text":"- Leads the pilot."}'
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", model)
+    original = proposal_actions.record_decision
+    def fail_person(queue_path, **kwargs):
+        if kwargs.get("kind") == "people":
+            raise OSError("decision sidecar unavailable")
+        return original(queue_path, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(proposal_actions, "record_decision", fail_person)
+        response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [person["id"], prior["id"]]})
+                    if batch else client.post(f"/api/proposals/{person['id']}/accept"))
+    assert response.status_code == (200 if batch else 503)
+    if batch:
+        results = {r["id"]: r for r in response.json()["results"]}
+        assert results[prior["id"]]["dismissed"] and results[prior["id"]]["promoted"]
+        result = results[person["id"]]
+    else:
+        result = response.json()
+    assert result["queue_settled"] is False and result["queue_state"] == "replaced"
+    assert result["queue_receipt_confirmed"] is True and result["decision_confirmed"] is False
+    assert result["queue_receipt_id"]
+    assert result["destination_effect"]["destination"] == "People/Mo.md"
+    receipt_id = result["destination_effect"]["receipt_id"]
+    assert "inspect" in result["error"].lower()
+    assert "Leads the pilot." in note.read_text() and "Leads the pilot." not in queue.read_text()
+    receipts = memory_receipts.read_receipts(memory_receipts.journal_path(vault, None))
+    assert any(r.get("id") == receipt_id and r.get("kind") == "note_apply" and r.get("status") == memory_receipts.APPLIED for r in receipts)
+    assert any(r.get("id") == result["queue_receipt_id"] and r.get("kind") == "queue_resolve" and r.get("status") == memory_receipts.APPLIED
+               and (r.get("decision_receipt_id") == receipt_id or
+                    any(p.get("decision_receipt_id") == receipt_id for p in r.get("selected_proposals", [])))
+               for r in receipts)
+    assert len(memory_proposals.read_decisions(queue)) == (1 if batch else 0)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_dismiss_write_error_after_replacement_is_not_reported_as_unchanged(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import memory_receipts
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "## pass\n\n- [memory] Prefers thorough checks. _(from: Decisions)_\n")
+    queue = proposal_service._proposals_file(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    original = memory_receipts.write_queue_atomically
+    def fail_after(path, text, *args, **kwargs):
+        original(path, text, *args, **kwargs)
+        raise OSError("after replacement")
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "write_queue_atomically", fail_after)
+        response = (client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]}) if batch
+                    else client.post(f"/api/proposals/{row['id']}/dismiss"))
+    assert response.status_code == (200 if batch else 503)
+    result = response.json()["results"][0] if batch else response.json()
+    assert result["queue_state"] == "replaced" and result["queue_settled"] is False
+    assert result["queue_receipt_confirmed"] is False
+    assert "not removed" not in result["error"]
+    assert "inspect" in result["error"].lower()
+    assert "Prefers thorough checks." not in queue.read_text()
+
+
+def test_batch_receipt_failure_keeps_prior_skill_draft_settlement(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts, upstream_drafts
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text("# Queue\n\n- [memory] Remains queued. _(from: Decisions)_\n", encoding="utf-8")
+    draft_id = _file_skill_draft(config, "personal")
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    draft = next(row for row in rows if row["kind"] == "review")
+    ordinary = next(row for row in rows if row["kind"] == "memory" and row["workspace"] == "personal")
+    original = memory_receipts._append
+    def fail(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED:
+            raise OSError("queue receipt failed")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail)
+        response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [draft["id"], ordinary["id"]]})
+    assert response.status_code == 200
+    results = {item["id"]: item for item in response.json()["results"]}
+    assert results[draft["id"]]["dismissed"] and not results[ordinary["id"]]["dismissed"]
+    assert upstream_drafts.find_record(config, draft_id).lifecycle == upstream_drafts.DRAFT_REJECTED
+    assert draft_id not in queue.read_text() and "Remains queued." in queue.read_text()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_queue_receipt_failure_reports_duplicate_as_already_present(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import memory_receipts, memory_tool
+    config = _competing_vault(tmp_path)
+    guide = config.agent_root("personal") / "AGENTS.md"
+    memory_tool.write_region(guide, "memory", ["Office is in Berlin. [2026-01-01]"])
+    before = guide.read_bytes()
+    client = _client(config)
+    row = _accept_kind_row(client, "memory")
+    original = memory_receipts._append
+    def fail(path, payload, *args, **kwargs):
+        if payload.get("kind") == "queue_resolve" and payload.get("status") == memory_receipts.PREPARED:
+            raise OSError("queue receipt failed")
+        return original(path, payload, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_receipts, "_append", fail)
+        response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                    else client.post(f"/api/proposals/{row['id']}/accept"))
+    result = response.json()["results"][0] if batch else response.json()
+    assert result["destination_effect"]["status"] == "already_present"
+    assert "receipt_id" not in result["destination_effect"]
+    assert result["queue_settled"] is False and guide.read_bytes() == before
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_skill_draft_stale_selection_does_not_settle(tmp_path: Path, monkeypatch, batch: bool) -> None:
+    from ciao import upstream_drafts
+    from ciao.memory_proposals import read_decisions
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    draft_id = _file_skill_draft(config, "personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "review")
+    sidecar = upstream_drafts.sidecar_path(config, "personal", draft_id)
+    before = sidecar.read_bytes()
+    real = proposal_service._is_skill_draft_row
+
+    def race(cfg, selected):
+        found = real(cfg, selected)
+        if found:
+            queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return found
+
+    monkeypatch.setattr(proposal_service, "_is_skill_draft_row", race)
+    if batch:
+        response = client.post("/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]})
+        assert not response.json()["results"][0]["dismissed"]
+    else:
+        assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 409
+    assert sidecar.read_bytes() == before
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_draft_dismiss_ignores_unrelated_mentions_but_refuses_duplicate(tmp_path: Path, duplicate: bool) -> None:
+    from ciao import upstream_drafts
+    from ciao.memory_proposals import read_decisions
+    config = _default_vault(tmp_path)
+    draft_id = _file_skill_draft(config, "personal")
+    queue = _queue_text(config, "personal")
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    draft_line = next(line for line in lines if f"[review {draft_id}]" in line)
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n- [memory] Mention skill-draft:{draft_id} _(from: unrelated)_\n")
+        if duplicate:
+            handle.write(draft_line + "\n")
+    before = queue.read_bytes()
+    sidecar = upstream_drafts.sidecar_path(config, "personal", draft_id)
+    sidecar_before = sidecar.read_bytes()
+    client = _client(config)
+    row = _accept_kind_row(client, "review")
+    response = client.post(f"/api/proposals/{row['id']}/dismiss")
+    if duplicate:
+        assert response.status_code == 409
+        assert queue.read_bytes() == before and sidecar.read_bytes() == sidecar_before
+        assert not read_decisions(queue)
+    else:
+        assert response.status_code == 200
+        assert f"Mention skill-draft:{draft_id}" in queue.read_text()
+        assert upstream_drafts.find_record(config, draft_id).lifecycle == upstream_drafts.DRAFT_REJECTED
 
 
 def test_dismissing_a_skill_draft_row_rejects_the_draft(tmp_path: Path) -> None:

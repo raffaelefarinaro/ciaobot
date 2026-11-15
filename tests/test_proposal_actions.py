@@ -229,8 +229,29 @@ def test_failed_destination_accept_gets_the_destination_default() -> None:
     assert payload["error"] == "could not write the destination"
 
 
-def test_rehome_accept_reports_the_rows_candidate_not_the_move() -> None:
-    """The note is moved by its own handler; the row reports the candidate."""
+def test_queue_receipt_scopes_decision_idempotence(tmp_path: Path) -> None:
+    from ciao import memory_proposals
+
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    args = dict(text="A  fact", kind="memory", source="first", via="pwa", proposal_id="p")
+    proposal_actions.record_decision(queue, action="accept", outcome="written",
+                                     queue_receipt_id="transaction-1", **args)
+    proposal_actions.record_decision(queue, action="accept", outcome="duplicate",
+                                     queue_receipt_id="transaction-1", **args)
+    proposal_actions.record_decision(queue, action="accept", outcome="duplicate",
+                                     queue_receipt_id="transaction-2", **args)
+    rows = memory_proposals.read_decisions(queue)
+    assert len(rows) == 2
+    assert [row["queue_receipt_id"] for row in rows] == ["transaction-1", "transaction-2"]
+    proposal_actions.record_decision(
+        queue, action="accept", text="A  fact", kind="memory", source="first", via="pwa",
+        proposal_id="p:1", outcome="written", queue_receipt_id="transaction-1",
+    )
+    assert len(memory_proposals.read_decisions(queue)) == 3
+
+
+def test_rehome_accept_reports_the_movers_destination() -> None:
+    """The mover's actual destination takes precedence over the candidate."""
     payload = proposal_actions.build_accept_result(
         "abc",
         proposal_kinds.accept_for("rehome"),
@@ -244,7 +265,7 @@ def test_rehome_accept_reports_the_rows_candidate_not_the_move() -> None:
         "action": "move_file",
         "dismissed": True,
         "promoted": False,
-        "destination": "work",
+        "destination": "work/memory-vault/People/Mo.md",
         "justified": True,
     }
 

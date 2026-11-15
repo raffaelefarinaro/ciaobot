@@ -775,6 +775,12 @@ def test_develop_web_prs_run_linux_e2e() -> None:
     assert "needs: web-scope" in e2e
     assert "needs.web-scope.outputs.web_changed == 'true'" in e2e
     assert "runs-on: ubuntu-24.04" in e2e
+    assert "actions/setup-python@v7" in e2e
+    assert e2e.index("python -m pip install -e .") < e2e.index("npm run test:e2e")
+    playwright = (Path(__file__).parents[1] / "web" / "playwright.config.ts").read_text(encoding="utf-8")
+    assert "testDir: './e2e'" in playwright
+    assert playwright.count("testMatch: 'real-server/**/*.spec.ts'") == 1
+    assert "testMatch: 'specs/**/*.spec.ts'" in playwright
     commands = ["npm ci", "npx playwright install --with-deps chromium", "npm run test:e2e"]
     assert [e2e.index(command) for command in commands] == sorted(e2e.index(command) for command in commands)
     assert "working-directory: web" in e2e

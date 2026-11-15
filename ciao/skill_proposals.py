@@ -451,7 +451,7 @@ def decision_text(skill: str) -> str:
     return f"{_DECISION_PREFIX}{skill}"
 
 
-def parse_proposal(path: Path, workspace: str) -> SkillProposal | None:
+def parse_proposal(path: Path, workspace: str, *, text: str | None = None) -> SkillProposal | None:
     """Read one queue file into a record, or ``None`` when there is none to read.
 
     The file's name is what says which skill the record is about, so a
@@ -463,7 +463,7 @@ def parse_proposal(path: Path, workspace: str) -> SkillProposal | None:
     ``None`` rather than raising: a queue you cannot show is worse than one row
     short, and the writer that finds this will write a fresh record.
     """
-    read = _read_record(path)
+    read = _read_record(path) if text is None else (_split_frontmatter(text) if text.strip() else None)
     if read is None:
         return None
     front, body = read
@@ -1032,7 +1032,8 @@ class LearningSettlement:
 
 
 def learning_settlement(
-    config: CiaoConfig, workspace: str, learning: LearningRecord
+    config: CiaoConfig, workspace: str, learning: LearningRecord, *,
+    records: Sequence[SkillProposal] | None = None,
 ) -> LearningSettlement:
     """Fold every origin that names ``learning`` into one answer.
 
@@ -1051,7 +1052,7 @@ def learning_settlement(
     wanted = {learning.learning_id, *learning.aliases}
     links: list[LearningOriginLink] = []
     unlinked = 0
-    for record in read_records(config, workspace):
+    for record in read_records(config, workspace) if records is None else records:
         if not any(
             origin.linked and origin.learning_id in wanted
             and origin.workspace in ("", record.workspace)
@@ -1148,6 +1149,7 @@ def learning_cleanup_eligibility(
     learning: LearningRecord,
     *,
     current_revision: str = "",
+    records: Sequence[SkillProposal] | None = None,
 ) -> dict[str, Any]:
     """Whether one learning may be cleaned up, and why not when it may not.
 
@@ -1189,7 +1191,7 @@ def learning_cleanup_eligibility(
     recorded revision to match the present file would assert that the file was
     unchanged since filing when nothing established that.
     """
-    settlement = learning_settlement(config, workspace, learning)
+    settlement = learning_settlement(config, workspace, learning, records=records)
     origins = [link.to_dict() for link in settlement.origins]
     report: dict[str, Any] = {
         "learning_id": learning.learning_id,

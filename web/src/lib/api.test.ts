@@ -38,6 +38,17 @@ describe('same-origin request containment', () => {
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ cache: 'no-store' })
   })
 
+  it('sends the reservation header on the same-origin action request', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }))
+    await api.post('/api/proposals/row/dismiss', { reason: 'reviewed' },
+      { headers: { 'X-Ciao-Proposal-Reservation': 'reservation-id' } })
+    expect(fetchMock).toHaveBeenCalledWith('/api/proposals/row/dismiss', expect.objectContaining({
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Ciao-Proposal-Reservation': 'reservation-id' },
+      body: JSON.stringify({ reason: 'reviewed' }),
+    }))
+  })
+
   it('keeps encoded path segments byte-for-byte', async () => {
     fetchMock.mockResolvedValue(jsonResponse({}))
     await api.get('/api/workspaces/my%20ws/files/a%2Fb')

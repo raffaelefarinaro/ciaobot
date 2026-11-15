@@ -91,6 +91,126 @@ def _stock_draft(**overrides: str) -> dict[str, str]:
     return payload
 
 
+def test_draft_sidecar_writers_hold_queue_before_sidecar(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_receipts
+
+    config = _config(tmp_path, "work")
+    queue = upstream_drafts.queue_path(config, "work")
+    real = upstream_drafts.write_queue_atomically
+    witnessed = []
+
+    def checked(path, text):
+        if path != queue:
+            depths = getattr(memory_receipts._QUEUE_LOCK_DEPTH, "depths", {})
+            assert depths.get(str(queue.resolve()), 0)
+            witnessed.append(path)
+        return real(path, text)
+
+    monkeypatch.setattr(upstream_drafts, "write_queue_atomically", checked)
+    draft = file_draft(config, "work", **_stock_draft())
+    reject_draft(config, draft.id)
+    assert len(witnessed) == 2
+
+
+@pytest.mark.parametrize("first", ["file", "reject"])
+def test_filing_and_settlement_interleave_without_lost_updates(
+    tmp_path: Path, monkeypatch, first: str
+) -> None:
+    import threading
+    from contextlib import contextmanager
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    entered = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    second_waiting = threading.Event()
+    original = upstream_drafts.write_queue_atomically
+    original_lock = upstream_drafts.queue_lock
+    failures: list[BaseException] = []
+
+    def hold(path, text):
+        if path == sidecar and threading.current_thread().name == "first":
+            entered.set()
+            assert release.wait(10)
+        return original(path, text)
+
+    def run(which):
+        try:
+            if threading.current_thread().name == "second":
+                second_started.set()
+            if which == "file":
+                file_draft(config, "work", **_stock_draft(private_evidence="new sighting"), same_as=draft.id)
+            else:
+                reject_draft(config, draft.id)
+        except BaseException as exc:
+            failures.append(exc)
+
+    @contextmanager
+    def observed_lock(path, **kwargs):
+        if path == queue and threading.current_thread().name == "second":
+            second_waiting.set()
+        with original_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(upstream_drafts, "write_queue_atomically", hold)
+    monkeypatch.setattr(upstream_drafts, "queue_lock", observed_lock)
+    a = threading.Thread(target=run, args=(first,), name="first")
+    b = threading.Thread(target=run, args=("reject" if first == "file" else "file",), name="second")
+    a.start()
+    try:
+        assert entered.wait(10)
+        b.start()
+        assert second_started.wait(10)
+        assert second_waiting.wait(10)
+    finally:
+        release.set()
+        a.join(10)
+        b.join(10)
+    assert not a.is_alive() and not b.is_alive()
+    assert not failures
+    stored = upstream_drafts.find_record(config, draft.id)
+    assert stored is not None and stored.lifecycle == DRAFT_REJECTED
+    assert "new sighting" in stored.private_evidence
+    assert len([item for item in read_decisions(queue) if item["proposal_id"] == draft.id]) == 1
+
+
+def test_concurrent_draft_rejections_record_one_decision(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    original = upstream_drafts.find_draft
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def synchronized(cfg, identity):
+        found = original(cfg, identity)
+        barrier.wait(timeout=10)
+        return found
+
+    def reject():
+        try:
+            reject_draft(config, draft.id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(upstream_drafts, "find_draft", synchronized)
+    workers = [threading.Thread(target=reject) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+    assert not any(worker.is_alive() for worker in workers)
+    assert not errors
+    decisions = read_decisions(upstream_drafts.queue_path(config, "work"))
+    assert len([item for item in decisions if item["proposal_id"] == draft.id]) == 1
+
+
 class _Github:
     """A recording double for the two `gh` seams.
 
@@ -757,6 +877,110 @@ def test_a_released_lease_makes_the_decision_attended_again(tmp_path: Path) -> N
     assert stored is not None and stored.lifecycle == DRAFT_FILED
 
 
+@pytest.mark.parametrize("change", ["missing", "source", "duplicate", "draft"])
+def test_approval_refuses_changed_selection_before_remote_calls(
+    tmp_path: Path, monkeypatch, change: str
+) -> None:
+    from dataclasses import replace
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    real = upstream_drafts.find_draft
+    github = _Github()
+    sidecar_before = sidecar.read_bytes()
+
+    def race(cfg, identity):
+        found = real(cfg, identity)
+        text = queue.read_text(encoding="utf-8")
+        if change == "missing":
+            queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        elif change == "source":
+            queue.write_text(text.replace(f"skill-draft:{draft.id}", "different-source"), encoding="utf-8")
+        elif change == "duplicate":
+            line = next(line for line in text.splitlines() if f"skill-draft:{draft.id}" in line)
+            queue.write_text(text + line + "\n", encoding="utf-8")
+        else:
+            sidecar.write_text(upstream_drafts.render_sidecar(replace(draft, lifecycle=DRAFT_REJECTED)), encoding="utf-8")
+        return found
+
+    monkeypatch.setattr(upstream_drafts, "find_draft", race)
+    with pytest.raises(DraftRefused):
+        approve_draft(config, draft.id, search=github.search, create=github.create)
+    assert not github.searches and not github.created
+    assert not read_decisions(queue)
+    if change != "draft":
+        assert sidecar.read_bytes() == sidecar_before
+
+
+def test_approval_remote_calls_hold_verified_queue_and_sidecar(tmp_path: Path) -> None:
+    from ciao import memory_receipts
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    calls: list[str] = []
+
+    def check(stage):
+        depths = getattr(memory_receipts._QUEUE_LOCK_DEPTH, "depths", {})
+        assert depths.get(str(queue.resolve()), 0)
+        assert depths.get(str(sidecar.resolve()), 0)
+        upstream_drafts._verify_pending_draft(config, draft)
+        calls.append(stage)
+
+    def search(**kwargs):
+        check("search")
+        return []
+
+    def create(**kwargs):
+        check("create")
+        return "https://example.invalid/issue/1"
+
+    result = approve_draft(config, draft.id, search=search, create=create)
+    assert result is not None and result.lifecycle == DRAFT_FILED
+    assert calls == ["search", "create"]
+
+
+def test_concurrent_approval_creates_at_most_one_issue(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    barrier = threading.Barrier(2)
+    real = upstream_drafts.find_draft
+    github = _Github()
+    failures: list[BaseException] = []
+
+    def both_read(cfg, identity):
+        found = real(cfg, identity)
+        barrier.wait(timeout=10)
+        return found
+
+    def run():
+        try:
+            approve_draft(config, draft.id, search=github.search, create=github.create)
+        except DraftRefused:
+            pass  # The other request settled the exact same draft.
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(upstream_drafts, "find_draft", both_read)
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not failures
+    assert len(github.created) == 1
+    decisions = read_decisions(upstream_drafts.queue_path(config, "work"))
+    assert len([item for item in decisions if item["proposal_id"] == draft.id]) == 1
+
+
 def test_approval_searches_before_it_creates(tmp_path: Path) -> None:
     """One matching open issue is linked, not duplicated."""
     config = _config(tmp_path, "work")
@@ -908,6 +1132,10 @@ def test_a_failed_github_call_leaves_the_draft_pending_and_retryable(tmp_path: P
     assert "could not reach GitHub" in held.reason
     assert "retry" in held.reason.lower()
     assert [d.id for d in read_queue(config, "work")] == [draft.id]
+    from ciao.memory_proposals import read_decisions
+    queue = upstream_drafts.queue_path(config, "work")
+    assert f"skill-draft:{draft.id}" in queue.read_text(encoding="utf-8")
+    assert not read_decisions(queue)
 
     # The retry reaches GitHub and finds what the first attempt created.
     retry = _Github(hits=["https://github.com/example/tools/issues/7"])
@@ -1029,6 +1257,152 @@ def test_the_decision_reaches_the_decisions_sidecar(tmp_path: Path) -> None:
     assert "timeout read as empty" in sidecar
 
 
+def test_reject_retry_clears_failed_bullet_without_duplicate_decision(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    queue = upstream_drafts.queue_path(config, "work")
+    real = upstream_drafts.write_queue_atomically
+    with monkeypatch.context() as patch:
+        def fail(path, *args, **kwargs):
+            if path == queue:
+                raise OSError("injected queue failure")
+            return real(path, *args, **kwargs)
+        patch.setattr(upstream_drafts, "write_queue_atomically", fail)
+        with pytest.raises(OSError):
+            reject_draft(config, draft.id, reason="not needed")
+        with pytest.raises(OSError):
+            reject_draft(config, draft.id, reason="different")
+    assert draft.id in queue.read_text(encoding="utf-8")
+    before = memory_proposals.read_decisions(queue)
+    assert len(before) == 1
+    assert upstream_drafts.find_record(config, draft.id).reason == "not needed"
+    reject_draft(config, draft.id, reason="different")
+    assert draft.id not in queue.read_text(encoding="utf-8")
+    assert memory_proposals.read_decisions(queue) == before
+    assert upstream_drafts.find_record(config, draft.id).reason == "not needed"
+
+
+def test_changed_refile_after_failed_settled_queue_removal_is_retryable(tmp_path: Path, monkeypatch) -> None:
+    from ciao import memory_proposals
+    config = _config(tmp_path, "work")
+    payload = _stock_draft()
+    draft = file_draft(config, "work", **payload)
+    queue = upstream_drafts.queue_path(config, "work")
+    real = upstream_drafts.write_queue_atomically
+    with monkeypatch.context() as patch:
+        def fail(path, *args, **kwargs):
+            if path == queue:
+                raise OSError("queue removal failed")
+            return real(path, *args, **kwargs)
+        patch.setattr(upstream_drafts, "write_queue_atomically", fail)
+        with pytest.raises(OSError):
+            reject_draft(config, draft.id, reason="not needed")
+    before = memory_proposals.read_decisions(queue)
+    revised = {**payload, "title": "Revised title", "body": "A revised public finding."}
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    old_sidecar, old_queue = sidecar.read_bytes(), queue.read_bytes()
+    with monkeypatch.context() as patch:
+        def fail_refile(path, *args, **kwargs):
+            if path == queue:
+                raise OSError("queue removal failed again")
+            return real(path, *args, **kwargs)
+        patch.setattr(upstream_drafts, "write_queue_atomically", fail_refile)
+        with pytest.raises(OSError):
+            file_draft(config, "work", **revised)
+    assert sidecar.read_bytes() == old_sidecar and queue.read_bytes() == old_queue
+    result = file_draft(config, "work", **revised)
+    assert result.lifecycle == upstream_drafts.DRAFT_REJECTED and result.title == revised["title"]
+    assert draft.id not in queue.read_text(encoding="utf-8")
+    assert memory_proposals.read_decisions(queue) == before
+    assert reject_draft(config, draft.id, reason="retry") is None
+    assert file_draft(config, "work", **revised).id == draft.id
+    assert memory_proposals.read_decisions(queue) == before
+
+
+@pytest.mark.parametrize("target,retry", [("issue", "approve"), ("issue", "refile"),
+                                          ("skill", "create"), ("skill", "refile")])
+def test_settled_cleanup_retry_does_not_repeat_effects(tmp_path: Path, monkeypatch, target: str, retry: str) -> None:
+    from ciao import memory_proposals
+    config = _config(tmp_path, "work")
+    payload = _stock_draft() if target == "issue" else _new_skill_payload(tmp_path)
+    draft = file_draft(config, "work", **payload)
+    queue = upstream_drafts.queue_path(config, "work")
+    github = _Github()
+    syncs: list[str] = []
+    def act():
+        if target == "issue":
+            return approve_draft(config, draft.id, search=github.search, create=github.create)
+        return create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: syncs.append("sync"))
+    def retry_action():
+        return file_draft(config, "work", **payload) if retry == "refile" else act()
+    real = upstream_drafts.write_queue_atomically
+    with monkeypatch.context() as patch:
+        def fail(path, *args, **kwargs):
+            if path == queue:
+                raise OSError("queue removal failed")
+            return real(path, *args, **kwargs)
+        patch.setattr(upstream_drafts, "write_queue_atomically", fail)
+        with pytest.raises(OSError):
+            act()
+        with pytest.raises(OSError):
+            retry_action()
+    before = memory_proposals.read_decisions(queue)
+    settled = upstream_drafts.find_record(config, draft.id)
+    assert settled is not None and settled.lifecycle == DRAFT_FILED and len(before) == 1
+    assert draft.id in queue.read_text(encoding="utf-8")
+    retry_action()
+    after = upstream_drafts.find_record(config, draft.id)
+    assert after is not None and (after.lifecycle, after.reason, after.issue_url) == (
+        settled.lifecycle, settled.reason, settled.issue_url)
+    assert memory_proposals.read_decisions(queue) == before
+    assert draft.id not in queue.read_text(encoding="utf-8")
+    assert len(github.created) == (1 if target == "issue" else 0)
+    assert len(syncs) == (1 if target == "skill" else 0)
+
+
+@pytest.mark.parametrize("retry", ["reject", "approve", "create", "refile"])
+def test_settled_retry_does_not_remove_unrelated_id_mention(tmp_path: Path, retry: str) -> None:
+    config = _config(tmp_path, "work")
+    payload = _new_skill_payload(tmp_path) if retry == "create" else _stock_draft()
+    draft = file_draft(config, "work", **payload)
+    if retry == "create":
+        assert create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: None)
+    elif retry == "approve":
+        github = _Github()
+        assert approve_draft(config, draft.id, search=github.search, create=github.create)
+    else:
+        assert reject_draft(config, draft.id, reason="already decided")
+    queue = upstream_drafts.queue_path(config, "work")
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write(f"- [memory] Mention skill-draft:{draft.id} _(from: unrelated)_\n")
+    before = queue.read_bytes()
+    if retry == "reject":
+        reject_draft(config, draft.id)
+    elif retry == "approve":
+        approve_draft(config, draft.id, search=_Github().search, create=_Github().create)
+    elif retry == "create":
+        create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: None)
+    else:
+        file_draft(config, "work", **payload)
+    assert queue.read_bytes() == before
+
+
+def test_upstream_settlement_records_every_origin_decision(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft(origins=[
+        {"learning_id": "first", "finding": "finding one"},
+        {"learning_id": "second", "finding": "finding two"},
+    ]))
+    assert reject_draft(config, draft.id, reason="not needed") is not None
+    rows = [row for row in read_decisions(upstream_drafts.queue_path(config, "work"))
+            if row["proposal_id"] == draft.id]
+    assert {(row["learning_id"], row["finding"]) for row in rows} == {
+        ("first", "finding one"), ("second", "finding two")}
+    assert len(rows) == 2
+
+
 def test_an_unknown_draft_id_is_none_not_an_error(tmp_path: Path) -> None:
     config = _config(tmp_path, "work")
     assert find_draft(config, "nope") is None
@@ -1061,6 +1435,144 @@ def _skill_text(name: str) -> str:
         f"---\nname: {name}\ndescription: Reconcile an invoice against a ledger\n"
         "---\n\n# Invoice reconciliation\n\nMatch the invoice number first.\n"
     )
+
+
+def test_new_skill_refuses_if_queue_row_disappears_after_lookup(tmp_path: Path, monkeypatch) -> None:
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    before = sidecar.read_bytes()
+    real = upstream_drafts.find_draft
+    calls: list[str] = []
+
+    def race(cfg, identity):
+        found = real(cfg, identity)
+        queue.write_text("# Memory Proposals\n", encoding="utf-8")
+        return found
+
+    monkeypatch.setattr(upstream_drafts, "find_draft", race)
+    with pytest.raises(DraftRefused):
+        create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: calls.append("sync"))
+    assert not (config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md").exists()
+    assert not calls
+    assert sidecar.read_bytes() == before
+    assert not read_decisions(queue)
+
+
+def test_new_skill_refuses_if_draft_changes_after_lookup(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+    from ciao.memory_proposals import read_decisions
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
+    queue = upstream_drafts.queue_path(config, "work")
+    queue_before = queue.read_bytes()
+    sidecar = upstream_drafts.sidecar_path(config, "work", draft.id)
+    changed = upstream_drafts.render_sidecar(replace(draft, lifecycle=DRAFT_REJECTED))
+    real = upstream_drafts.find_draft
+    calls: list[str] = []
+
+    def race(cfg, identity):
+        found = real(cfg, identity)
+        sidecar.write_text(changed, encoding="utf-8")
+        return found
+
+    monkeypatch.setattr(upstream_drafts, "find_draft", race)
+    with pytest.raises(DraftRefused):
+        create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: calls.append("sync"))
+    assert not (config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md").exists()
+    assert not calls
+    assert sidecar.read_text(encoding="utf-8") == changed
+    assert queue.read_bytes() == queue_before
+    assert not read_decisions(queue)
+
+
+@pytest.mark.parametrize("target", ["issue", "skill"])
+def test_multiline_draft_filing_uses_canonical_bullet_on_approval(tmp_path: Path, target: str) -> None:
+    config = _config(tmp_path, "work")
+    payload = _stock_draft() if target == "issue" else _new_skill_payload(tmp_path)
+    payload["title"] = "A  useful\n title"
+    payload["body"] = "First  line\nSecond line"
+    draft = file_draft(config, "work", **payload)
+    if target == "issue":
+        result = approve_draft(config, draft.id, search=_Github().search, create=_Github().create)
+    else:
+        result = create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: None)
+    assert result is not None and result.lifecycle == DRAFT_FILED
+
+
+@pytest.mark.parametrize("target", ["issue", "skill"])
+def test_refiling_updated_draft_synchronizes_bullet_and_can_settle(tmp_path: Path, target: str) -> None:
+    config = _config(tmp_path, "work")
+    payload = _stock_draft() if target == "issue" else _new_skill_payload(tmp_path)
+    first = file_draft(config, "work", **payload)
+    queue = upstream_drafts.queue_path(config, "work")
+    with queue.open("a", encoding="utf-8") as handle:
+        handle.write("- [memory] Unrelated _(from: another)_\n")
+    payload["title"] = "Updated  public title"
+    payload["body"] = "Updated  public\nbody"
+    updated = file_draft(config, "work", **payload)
+    assert updated.id == first.id and "Updated public body" in queue.read_text(encoding="utf-8")
+    if target == "issue":
+        settled = approve_draft(config, updated.id, search=_Github().search, create=_Github().create)
+    else:
+        settled = create_new_skill(config, updated.id, content=_skill_text("invoice-recon"), sync=lambda: None)
+    assert settled is not None and settled.lifecycle == DRAFT_FILED
+    assert "Unrelated" in queue.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("target", ["issue", "skill"])
+def test_refile_queue_write_failure_restores_sidecar_and_retry(tmp_path: Path, monkeypatch, target: str) -> None:
+    config = _config(tmp_path, "work")
+    payload = _stock_draft() if target == "issue" else _new_skill_payload(tmp_path)
+    first = file_draft(config, "work", **payload)
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", first.id)
+    before = sidecar.read_bytes()
+    payload["title"] = "New title"
+    payload["body"] = "New body"
+    real_write = upstream_drafts.write_queue_atomically
+    with monkeypatch.context() as patch:
+        def fail(path, text, *args, **kwargs):
+            if path == queue:
+                raise OSError("queue write failed")
+            return real_write(path, text, *args, **kwargs)
+        patch.setattr(upstream_drafts, "write_queue_atomically", fail)
+        with pytest.raises(OSError):
+            file_draft(config, "work", **payload)
+    assert sidecar.read_bytes() == before
+    draft = file_draft(config, "work", **payload)
+    assert draft.id == first.id and "New body" in queue.read_text()
+    if target == "issue":
+        settled = approve_draft(config, draft.id, search=_Github().search, create=_Github().create)
+    else:
+        settled = create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: None)
+    assert settled is not None and settled.lifecycle == DRAFT_FILED
+
+
+@pytest.mark.parametrize("changed", ["sidecar", "queue"])
+def test_refile_failure_does_not_restore_over_foreign_change(tmp_path: Path, monkeypatch, changed: str) -> None:
+    config = _config(tmp_path, "work")
+    payload = _stock_draft()
+    first = file_draft(config, "work", **payload)
+    queue = upstream_drafts.queue_path(config, "work")
+    sidecar = upstream_drafts.sidecar_path(config, "work", first.id)
+    before = sidecar.read_bytes()
+    payload["body"] = "New body"
+    real_write = upstream_drafts.write_queue_atomically
+    def fail(path, text, *args, **kwargs):
+        if path == queue:
+            (sidecar if changed == "sidecar" else queue).write_text("foreign change\n", encoding="utf-8")
+            raise OSError("queue write failed")
+        return real_write(path, text, *args, **kwargs)
+    monkeypatch.setattr(upstream_drafts, "write_queue_atomically", fail)
+    with pytest.raises(OSError):
+        file_draft(config, "work", **payload)
+    assert (sidecar if changed == "sidecar" else queue).read_text() == "foreign change\n"
+    assert sidecar.read_bytes() != before
 
 
 def test_a_new_skill_draft_creates_syncs_and_then_settles(tmp_path: Path) -> None:

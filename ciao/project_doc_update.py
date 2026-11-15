@@ -106,6 +106,74 @@ class _FoldDecision:
     index: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedFold:
+    vault_root: Path
+    relative_path: str
+    workspace: str
+    revision: str
+    action: str
+    section: str
+    text: str
+    identity: str = ""
+    fingerprint: str = ""
+
+
+async def prepare_proposal_fold(
+    *, note_path: Path, fact: str, model: str, provider: str,
+    cwd: Path, workspace: str, person: bool,
+) -> PreparedFold:
+    """Read and plan one proposal fold without writing any files."""
+    from ciao import memory_receipts as mr
+    from ciao.providers.oneshot import run_oneshot
+
+    current = _read_exact_text(note_path)
+    vault = _vault_for_note(note_path)
+    relative = note_path.relative_to(vault).as_posix()
+    numbered, entries = _numbered_entries(current, note_path=relative, workspace=workspace)
+    if person:
+        prompt = ("Current person note as numbered entries (reply with JSON, never with the note):\n\n"
+                  f"{numbered}\n\n---\n\nApproved fact to merge:\n\n{fact.strip()}")
+        system = _PERSON_FOLD_SYSTEM_PROMPT
+    else:
+        prompt = ("Current canonical doc as numbered entries (reply with JSON, never with the file):\n\n"
+                  f"{numbered}\n\n---\n\nDecisions to fold in (the accepted facts addressed to this doc):\n\n"
+                  f"## Decisions\n- {fact}\n")
+        system = _DOC_UPDATE_SYSTEM_PROMPT
+    output = await run_oneshot(prompt, system_prompt=system, model=model,
+                               timeout_s=300.0, provider=provider, cwd=cwd)
+    decision = _parse_fold_reply(output, entries, note_path=relative, workspace=workspace)
+    if decision.action == "covered":
+        raise _FoldRefused("the fold reported no changes; dismiss instead")
+    entry = entries[decision.index - 1] if decision.action == "update" else None
+    return PreparedFold(
+        vault, relative, workspace, mr.content_revision(current), decision.action,
+        decision.section, _sanitize_fold_stamp(decision.text, entry),
+        str(entry.identity) if entry is not None else "",
+        str(entry.fingerprint) if entry is not None else "",
+    )
+
+
+def commit_proposal_fold(plan: PreparedFold) -> dict[str, Any]:
+    """Apply a prepared proposal through the note owner's revision-checked writer."""
+    from ciao import note_receipts as nr
+
+    if plan.action == "add":
+        receipt = nr.append_list_item(
+            vault_root=plan.vault_root, relative_path=plan.relative_path,
+            expected_revision=plan.revision, actor="proposal-accept",
+            source="fold", workspace=plan.workspace, section=plan.section, item=plan.text,
+        )
+    else:
+        receipt = nr.apply_entry_edit(
+            vault_root=plan.vault_root, relative_path=plan.relative_path,
+            expected_revision=plan.revision, actor="proposal-accept",
+            source="fold", workspace=plan.workspace, identity=plan.identity,
+            fingerprint=plan.fingerprint, replacement=plan.text,
+        )
+    return receipt
+
+
 class _FoldRefused(Exception):
     """The fold reply was not a single entry edit, so nothing may be written."""
 

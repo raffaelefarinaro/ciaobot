@@ -1412,6 +1412,18 @@ def _decided(
     return record
 
 
+def test_skill_settlement_records_every_origin_decision(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+    config = _config(tmp_path)
+    stored = _linked(config, _origin("first", "finding one"), _origin("second", "finding two"))
+    assert sp.settle_proposal(config, stored.id, sp.DISMISSED) is not None
+    queue = Path(config.workspace_vault_root("personal")) / "Workspace" / "Memory-Proposals.md"
+    rows = [row for row in read_decisions(queue) if row["proposal_id"] == stored.id]
+    assert {(row["learning_id"], row["finding"]) for row in rows} == {
+        ("first", "finding one"), ("second", "finding two")}
+    assert len(rows) == 2
+
+
 def test_origins_round_trip_through_render_and_parse(tmp_path: Path) -> None:
     """The link is the whole point, so the file has to hold it in a shape that
     reads back identically: the no-op merge compares rendered bytes with the

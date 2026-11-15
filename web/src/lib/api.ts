@@ -95,14 +95,14 @@ async function requestForm<T>(method: string, path: string, form: FormData): Pro
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
   // The barrier sits here, next to the sink: resolve the caller's path against this page's origin and refuse anything
   // that would land on another host or scheme before a request can exist.
   const target = new URL(path, window.location.origin)
   if (!/^https?:$/.test(target.protocol) || target.origin !== window.location.origin) {
     throw new ApiError(`Blocked non-same-origin API path: ${path}`)
   }
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders }
   const opts: RequestInit = {
     method,
     headers,
@@ -179,7 +179,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  post: <T>(path: string, body?: unknown, options?: { headers?: Record<string, string> }) => request<T>('POST', path, body, options?.headers),
+  postReservation: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   // A body is optional because most DELETEs carry none, but `/api/tasks/{id}`
   // refuses a delete that does not present the `expected_revision` it read in the

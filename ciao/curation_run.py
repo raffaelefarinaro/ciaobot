@@ -1849,7 +1849,7 @@ def begin_run(
     """Take this vault's curation lease, or raise :class:`CurationBusy`."""
     holder = holder or f"{socket.gethostname()}:{os.getpid()}"
     with _state_lock(vault_root):
-        now = (now or datetime.now(UTC)).astimezone(UTC)
+        now = (now if now is not None else datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is not None:
@@ -1881,7 +1881,7 @@ def renew_run(
 ) -> bool:
     """Extend the lease held by ``holder``. False when it is no longer theirs."""
     with _state_lock(vault_root):
-        now = (now or datetime.now(UTC)).astimezone(UTC)
+        now = (now if now is not None else datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is None or held.get("holder") != holder:
@@ -1977,7 +1977,7 @@ def end_run(
     :func:`advance_full_pass` does.
     """
     with _state_lock(vault_root):
-        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        effective_now = (now if now is not None else datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, effective_now)
         if holder and (held is None or held.get("holder") != holder):

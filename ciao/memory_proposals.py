@@ -40,14 +40,17 @@ disappears — nothing is dropped silently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Iterator, Literal, NotRequired, TypedDict
 
 from ciao.learning_records import (
     LEARNINGS_RELATIVE,
@@ -1056,7 +1059,11 @@ def write_entity_note(
     if path.exists():
         return "exists"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_entity_note(type_id, name, text), encoding="utf-8", newline="")
+    try:
+        with path.open("x", encoding="utf-8", newline="") as handle:
+            handle.write(render_entity_note(type_id, name, text))
+    except FileExistsError:
+        return "exists"
     return "written"
 
 
@@ -1813,6 +1820,7 @@ def record_dismissal(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    queue_receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
     reason: str = "",
@@ -1856,6 +1864,7 @@ def record_dismissal(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        queue_receipt_id=queue_receipt_id,
         learning_id=learning_id,
         finding=finding,
         reason=reason,
@@ -1874,6 +1883,7 @@ def record_promotion(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    queue_receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
     reason: str = "",
@@ -1900,6 +1910,7 @@ def record_promotion(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        queue_receipt_id=queue_receipt_id,
         learning_id=learning_id,
         finding=finding,
         reason=reason,
@@ -1908,7 +1919,30 @@ def record_promotion(
     )
 
 
-def _record_decision(
+def _record_decision(proposals_path: Path, **kwargs: Any) -> bool:
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(proposals_path):
+        identity = kwargs.get("proposal_id")
+        if identity and kwargs.get("queue_receipt_id") and not kwargs.get("history_only"):
+            action = "accepted" if kwargs.get("key") == "promoted_at" else "dismissed"
+            found = False
+            for row in _strict_decision_entries(proposals_path):
+                timestamp = row.get("promoted_at") if "promoted_at" in row else row.get("dismissed_at")
+                row_action = "accepted" if "promoted_at" in row else "dismissed"
+                if (not row.get("history_only") and str(row.get("proposal_id", "")) == identity
+                        and str(row.get("source", "")) == kwargs.get("source", "")
+                        and str(row.get("kind", "")) == kwargs.get("kind", "")
+                        and row.get("identity_text", row["text"]) == kwargs.get("text", "")
+                        and row_action == action and timestamp
+                        and str(row.get("queue_receipt_id", "")) == kwargs["queue_receipt_id"]):
+                    found = True
+            if found:
+                return False
+        return _record_decision_unlocked(proposals_path, **kwargs)
+
+
+def _record_decision_unlocked(
     proposals_path: Path,
     *,
     text: str,
@@ -1920,6 +1954,7 @@ def _record_decision(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    queue_receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
     reason: str = "",
@@ -1956,6 +1991,7 @@ def _record_decision(
         entry["outcome"] = outcome
     if proposal_id:
         entry["proposal_id"] = proposal_id
+        entry["identity_text"] = text
     if receipt_id:
         # The memory receipt (see :mod:`ciao.memory_receipts`) that performed
         # this decision's write. ``text`` above stays the ORIGINAL bullet,
@@ -1966,6 +2002,8 @@ def _record_decision(
         # offer an undo. Rows written before this existed carry no id and are
         # joined heuristically instead.
         entry["receipt_id"] = receipt_id
+    if queue_receipt_id:
+        entry["queue_receipt_id"] = queue_receipt_id
     if learning_id:
         # Which learning a derived finding was filed against, for the writers
         # that settle one finding at a time. Empty for every decision that is
@@ -2041,6 +2079,16 @@ def _sidecar_paths(proposals_path: Path) -> tuple[Path, ...]:
     )
 
 
+def _strict_decision_entries(proposals_path: Path) -> Iterator[dict[str, Any]]:
+    for path in _sidecar_paths(proposals_path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        for _ordinal, entry, _digest in DecisionSidecarStream(path):
+            yield entry
+
+
 def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) -> bool:
     """Whether this exact decision (action, text, outcome) is already recorded.
 
@@ -2048,15 +2096,12 @@ def _has_decision(proposals_path: Path, *, key: str, text: str, outcome: str) ->
     later real promotion of a fact recordable after an earlier "skipped,
     already known" row for the same text.
     """
-    for path in _sidecar_paths(proposals_path):
-        for entry in _sidecar_entries(path):
-            if key not in entry:
-                continue
-            if str(entry.get("text", "")).strip() != text:
-                continue
-            if str(entry.get("outcome", "")) == outcome:
-                return True
-    return False
+    found = False
+    for entry in _strict_decision_entries(proposals_path):
+        if (key in entry and str(entry.get("text", "")).strip() == text
+                and str(entry.get("outcome", "")) == outcome):
+            found = True
+    return found
 
 
 def _dismissed_texts(proposals_path: Path) -> set[str]:
@@ -2120,7 +2165,7 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
 
 
 def read_decisions(
-    proposals_path: Path, *, include_history_only: bool = True
+    proposals_path: Path, *, include_history_only: bool = True,
 ) -> list[dict[str, Any]]:
     """Every recorded decision for one workspace's proposal queue, newest last.
 
@@ -2149,7 +2194,8 @@ def read_decisions(
     rows: list[dict[str, Any]] = []
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         seq = 0
-        for entry in _sidecar_entries(proposals_path.with_suffix(suffix)):
+        entries = _sidecar_entries(proposals_path.with_suffix(suffix))
+        for entry in entries:
             text = _one_line(str(entry.get("text", "")))
             if not text:
                 continue
@@ -2173,11 +2219,14 @@ def read_decisions(
                     "via": str(entry.get("via", "")),
                     "kind": str(entry.get("kind", "")),
                     "text": text,
+                    "identity_text": (entry.get("identity_text", entry.get("text", ""))
+                                      if isinstance(entry.get("identity_text", entry.get("text", "")), str) else ""),
                     "source": str(entry.get("source", "")),
                     "destination": str(entry.get("destination", "")),
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
                     "receipt_id": str(entry.get("receipt_id", "")),
+                    "queue_receipt_id": str(entry.get("queue_receipt_id", "")),
                     "learning_id": str(entry.get("learning_id", "")),
                     "finding": str(entry.get("finding", "")),
                     "reason": str(entry.get("reason", "")),
@@ -2186,6 +2235,96 @@ def read_decisions(
                 }
             )
     return rows
+
+
+class DecisionSidecarStream:
+    """One strict scan; bindings are available only after complete verification."""
+
+    def __init__(self, path: Path, *, prefix_length: int | None = None,
+                 expected_identity: tuple[int, int, int, int, int] | None = None,
+                 fence: bool = False) -> None:
+        if prefix_length is not None and (type(prefix_length) is not int or prefix_length < 0):
+            raise ValueError("invalid sidecar prefix length")
+        self.path = path
+        self.prefix_length = prefix_length
+        self.expected_identity = expected_identity
+        self.fence = fence
+        self.binding: dict[str, Any] | None = None
+        self.prefix_binding: dict[str, Any] | None = None
+        self.identity: tuple[int, int, int, int, int] | None = None
+        self.offset = 0
+        self.raw_line = b""
+        self._started = False
+
+    def __iter__(self) -> Iterator[tuple[int, dict[str, Any], str]]:
+        from ciao.proposal_predictions import _CAP_ROW_BYTES, _cap_invalid_constant, _cap_unique_object
+
+        if self._started:
+            raise ValueError("sidecar stream already consumed")
+        self._started = True
+        before = self.path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("decision sidecar is not a regular file")
+        flags = ((os.O_RDWR if self.fence else os.O_RDONLY) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(self.path, flags)
+        digest, prefix_digest = hashlib.sha256(), hashlib.sha256()
+        size = 0
+        ordinal = 0
+        prefix_boundary = self.prefix_length in (None, 0)
+        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        if self.expected_identity is not None and signature(before) != self.expected_identity:
+            os.close(fd)
+            raise ValueError("decision sidecar identity changed between scans")
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or signature(before) != signature(opened):
+                raise ValueError("decision sidecar changed before reading")
+            while line := handle.readline(_CAP_ROW_BYTES + 2):
+                if len(line) > _CAP_ROW_BYTES + 1 or not line.endswith(b"\n"):
+                    raise ValueError("decision sidecar row is oversized or truncated")
+                if self.prefix_length is not None and size < self.prefix_length:
+                    prefix_digest.update(line[:self.prefix_length - size])
+                size += len(line)
+                digest.update(line)
+                if self.prefix_length == size:
+                    prefix_boundary = True
+                if not line.strip():
+                    continue
+                row = json.loads(line.decode("utf-8"), object_pairs_hook=_cap_unique_object,
+                                 parse_constant=_cap_invalid_constant)
+                if not isinstance(row, dict) or not isinstance(row.get("text"), str) or not row["text"].strip():
+                    raise ValueError("invalid decision sidecar row")
+                if any(key in row and not isinstance(row[key], str)
+                       for key in ("via", "kind", "source", "proposal_id", "queue_receipt_id",
+                                   "identity_text", "receipt_id", "outcome")):
+                    raise ValueError("invalid decision sidecar identity")
+                if "promoted_at" in row and "dismissed_at" in row:
+                    raise ValueError("ambiguous decision sidecar row")
+                if row.get("via") == "agent" and "promoted_at" in row:
+                    stamp = row["promoted_at"]
+                    if not isinstance(stamp, str):
+                        raise ValueError("invalid decision timestamp")
+                    parsed = datetime.fromisoformat(stamp)
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError("decision timestamp has no timezone")
+                self.offset = size
+                self.raw_line = line[:-1]
+                yield ordinal, row, hashlib.sha256(line[:-1]).hexdigest()
+                ordinal += 1
+            if self.fence:
+                os.fsync(handle.fileno())
+            after = os.fstat(handle.fileno())
+            named = self.path.lstat()
+            if (signature(opened) != signature(after) or signature(after) != signature(named)
+                    or size != opened.st_size):
+                raise ValueError("decision sidecar changed while reading")
+            if not prefix_boundary:
+                raise ValueError("sidecar prefix is missing or not row-aligned")
+        self.binding = {"length": size, "sha256": digest.hexdigest()}
+        self.identity = signature(opened)
+        if self.prefix_length is not None:
+            self.prefix_binding = {"length": self.prefix_length, "sha256": prefix_digest.hexdigest()}
 
 
 _STUB_HEADER = (

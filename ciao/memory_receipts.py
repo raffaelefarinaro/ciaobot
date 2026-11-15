@@ -49,6 +49,7 @@ view-only; it is never resolved by appending a competing fact.
 from __future__ import annotations
 
 import hashlib
+import secrets
 import json
 import logging
 import os
@@ -72,6 +73,7 @@ logger = logging.getLogger(__name__)
 RECEIPT_VERSION = 1
 
 RECEIPTS_NAME = "Memory-Receipts.jsonl"
+CAP_CHECKPOINT_ID = "cap_event_checkpoint_v1"
 
 PREPARED = "prepared"
 APPLIED = "applied"
@@ -185,6 +187,11 @@ def _next_generation(journal: Path, base: str) -> str:
         generation += 1
         candidate = f"{base}.{generation}"
     return candidate
+
+
+def _new_queue_resolution_id(basis: str, journal: Path) -> str:
+    """Each selected queue settlement is a new operator transaction."""
+    return f"mrcpt_{secrets.token_hex(16)}"
 
 
 def _now() -> str:
@@ -468,6 +475,14 @@ def _trim_if_large(journal: Path) -> None:
             for line in journal.read_text(encoding="utf-8", errors="replace").split("\n")
             if line.strip()
         ]
+        # The accept gate rejects malformed rows; trimming must not erase the
+        # evidence that made the gate fail closed.
+        if any(not isinstance((row := _safe_row(line)), dict)
+               or not isinstance(row.get("id"), str) or not row["id"] for line in lines):
+            return
+        if any((row.get("id") == CAP_CHECKPOINT_ID) != (row.get("kind") == "cap_event_checkpoint")
+               for row in (_safe_row(line) or {} for line in lines)):
+            return
         # Keep the newest rows, but never drop a non-terminal receipt: an
         # interrupted operation must stay recoverable until it settles.
         #
@@ -480,6 +495,7 @@ def _trim_if_large(journal: Path) -> None:
         kept = lines[-KEEP_LINES:]
         dropped_lines = lines[:-KEEP_LINES]
         last_status: dict[str, object] = {}
+        last_rows: dict[str, dict[str, Any]] = {}
         for line in lines:
             row = _safe_row(line)
             if row is None:
@@ -487,9 +503,38 @@ def _trim_if_large(journal: Path) -> None:
             rid = str(row.get("id", ""))
             if rid:
                 last_status[rid] = row.get("status")
+                last_rows[rid] = row
         pending_ids = {
             rid for rid, status in last_status.items() if status not in _TERMINAL
         }
+        pending_ids.update(rid for rid, row in last_rows.items() if row.get("kind") == "cap_event_checkpoint")
+        # Selected conflicts retain ambiguous ownership, so the accept cap
+        # must still see them after journal trimming.
+        pending_ids.update(
+            rid for rid, row in last_rows.items()
+            if row.get("kind") == "queue_resolve" and row.get("status") == CONFLICT
+            and (row.get("proposal_id") or row.get("selected_proposals"))
+        )
+        # A visible sidecar append is not fsync proof. Keep automatic accept
+        # receipts rather than discarding the only durable evidence of a count.
+        pending_ids.update(
+            rid for rid, row in last_rows.items()
+            if row.get("kind") == "queue_resolve" and row.get("status") == APPLIED
+            and row.get("actor") == "agent" and row.get("source") == "cli"
+            and row.get("promoted") and row.get("proposal_id")
+        )
+        pending_ids.update(
+            rid for rid, row in last_rows.items()
+            if row.get("kind") == "queue_resolve" and row.get("status") == ROLLED_BACK
+            and row.get("actor") == "agent" and row.get("source") == "cli"
+            and row.get("promoted") and row.get("proposal_id")
+            and row.get("decision_outcome") in ("written", "duplicate")
+        )
+        pending_ids.update(
+            rid for rid, row in last_rows.items()
+            if row.get("kind") == "queue_resolve" and row.get("status") == ROLLED_BACK
+            and row.get("destination_intent") is True and row.get("destination_refused") is not True
+        )
         dropped_ids = {
             str(row.get("id", ""))
             for row in (_safe_row(line) for line in dropped_lines)
@@ -570,13 +615,26 @@ def _serialize_rows(lines: list[str]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _receipt_unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate receipt key")
+        result[key] = value
+    return result
+
+
+def _receipt_invalid_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
 def _safe_row(line: str) -> dict[str, Any] | None:
     """Parse one journal line into a row, or None when it is unusable."""
     if not line.strip():
         return None
     try:
-        row = json.loads(line)
-    except ValueError:
+        row = json.loads(line, object_pairs_hook=_receipt_unique_object, parse_constant=_receipt_invalid_constant)
+    except (ValueError, RecursionError):
         return None
     return row if isinstance(row, dict) else None
 
@@ -618,6 +676,222 @@ def read_receipts(journal: Path) -> list[dict[str, Any]]:
     return [folded[rid] for rid in order]
 
 
+def selected_queue_receipts_for_gate(journal: Path) -> list[dict[str, Any]]:
+    """Strict bounded journal read for automatic acceptance, not UI history."""
+    fd = _open_private(journal.with_name(journal.name + ".lock"), flags=os.O_RDWR | os.O_APPEND)
+    with os.fdopen(fd, "a+", encoding="utf-8", newline="") as lock:
+        lock_exclusive(lock.fileno())
+        try:
+            try:
+                flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0))
+                journal_fd = os.open(journal, flags)
+                with os.fdopen(journal_fd, "rb") as handle:
+                    before = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ValueError("receipt journal is not a regular file")
+                    total_limit = 16 * MAX_BYTES
+                    row_limit = total_limit
+                    total = 0
+                    folded: dict[str, dict[str, Any]] = {}
+                    seen_checkpoint = False
+                    while line := handle.readline(min(row_limit + 1, total_limit - total + 1)):
+                        total += len(line)
+                        if total > total_limit or len(line) > row_limit:
+                            raise ValueError("receipt journal exceeds safety limit")
+                        if not line.strip():
+                            continue
+                        row = _safe_row(line.decode("utf-8"))
+                        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+                            raise ValueError("invalid receipt journal row")
+                        if (row["id"] == CAP_CHECKPOINT_ID) != (row.get("kind") == "cap_event_checkpoint"):
+                            raise ValueError("invalid cap checkpoint identity")
+                        if row["id"] == CAP_CHECKPOINT_ID:
+                            if seen_checkpoint:
+                                raise ValueError("multiple cap checkpoint rows")
+                            seen_checkpoint = True
+                        folded[row["id"]] = row
+                    after = os.fstat(handle.fileno())
+                    try:
+                        current = journal.stat()
+                    except FileNotFoundError as exc:
+                        raise ValueError("receipt journal disappeared while reading") from exc
+                    if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                            != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)):
+                        raise ValueError("receipt journal changed while reading")
+            except FileNotFoundError:
+                return []
+            return [
+                row for row in folded.values()
+                if (row.get("kind") == "queue_resolve"
+                    and (row.get("proposal_id") or row.get("selected_proposals")))
+                or row.get("kind") == "cap_event_checkpoint"
+            ]
+        finally:
+            unlock(lock.fileno())
+
+
+def compact_cap_checkpoint(queue: Path, vault_root: Path, *, config: Any) -> bool:
+    """Compact old proved agent receipts under queue → journal lock ordering."""
+    from ciao import proposal_predictions
+    from ciao.os_support.private import carry_mode, is_private, mkstemp_private
+
+    journal = journal_path(vault_root, None)
+    with queue_lock(queue):
+        try:
+            if journal.stat().st_size < MAX_BYTES:
+                return False
+        except FileNotFoundError:
+            return False
+        lock_fd = _open_private(journal.with_name(journal.name + ".lock"), flags=os.O_RDWR | os.O_APPEND)
+        with os.fdopen(lock_fd, "a+", encoding="utf-8", newline="") as lock:
+            lock_exclusive(lock.fileno())
+            try:
+                lines: list[str] = []
+                folded: dict[str, dict[str, Any]] = {}
+                total = 0
+                row_limit, total_limit = 16 * MAX_BYTES, 64 * MAX_BYTES
+                flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0))
+                journal_fd = os.open(journal, flags)
+                with os.fdopen(journal_fd, "rb") as handle:
+                    before = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ValueError("receipt journal is not a regular file")
+                    seen_checkpoint = False
+                    while raw_line := handle.readline(min(row_limit + 1, total_limit - total + 1)):
+                        total += len(raw_line)
+                        if total > total_limit or len(raw_line) > row_limit:
+                            raise ValueError("receipt journal exceeds compaction limit")
+                        text = raw_line.decode("utf-8")
+                        if not text.strip():
+                            continue
+                        row = _safe_row(text)
+                        if not row or not isinstance(row.get("id"), str) or not row["id"]:
+                            raise ValueError("invalid receipt journal row")
+                        if (row["id"] == CAP_CHECKPOINT_ID) != (row.get("kind") == "cap_event_checkpoint"):
+                            raise ValueError("invalid cap checkpoint identity")
+                        if row["id"] == CAP_CHECKPOINT_ID:
+                            if seen_checkpoint:
+                                raise ValueError("multiple cap checkpoint rows")
+                            seen_checkpoint = True
+                        lines.append(text.rstrip("\n"))
+                        folded[row["id"]] = row
+                    after = os.fstat(handle.fileno())
+                    current = journal.stat()
+                    identity = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+                    if identity(before) != identity(after) or identity(after) != identity(current):
+                        raise ValueError("receipt journal changed during compaction")
+                receipts = list(folded.values())
+                prior = folded.get(CAP_CHECKPOINT_ID)
+                candidates = {
+                    rid for rid, row in folded.items()
+                    if row.get("kind") == "queue_resolve" and row.get("status") == APPLIED
+                    and row.get("actor") == "agent" and row.get("source") == "cli"
+                    and row.get("promoted") is True and row.get("proposal_id")
+                }
+                if not candidates:
+                    return False
+                if prior is None:
+                    prior = {"v": RECEIPT_VERSION, "id": CAP_CHECKPOINT_ID, "kind": "cap_event_checkpoint",
+                             "status": APPLIED, "schema": 1, "queue": str(queue),
+                             "sidecars": {".dismissed.jsonl": None, ".dismissed.log": None}, "events": []}
+                captured: dict[str, Any] = {}
+                try:
+                    events, sidecar_ids = proposal_predictions.stream_checkpoint_events(
+                        queue, prior, receipts, config=config, capture=captured,
+                    )
+                except proposal_predictions.UnprovenCapReceipt:
+                    return False
+                if sidecar_ids[".dismissed.jsonl"] is None:
+                    raise ValueError("expected decision sidecar is missing")
+                candidates &= captured["matched"]
+                if not candidates:
+                    return False
+                checkpoint = {**prior, "sidecars": captured["bindings"], "events": events}
+                # Match ordinary trim's tail, with its byte budget, before
+                # deciding which full receipt/undo rows are old enough to drop.
+                normal = [
+                    (index, len(line.encode("utf-8")) + 1)
+                    for index, line in enumerate(lines)
+                    if (_safe_row(line) or {}).get("id") != CAP_CHECKPOINT_ID
+                ]
+                tail = normal[-KEEP_LINES:]
+                remaining = sum(size for _, size in tail)
+                start = 0
+                while start < len(tail) - 1 and remaining > MAX_BYTES:
+                    remaining -= tail[start][1]
+                    start += 1
+                tail_indices = {index for index, _size in tail[start:]}
+                protected = {
+                    rid for rid, row in folded.items()
+                    if row.get("status") not in _TERMINAL
+                    or (row.get("kind") == "queue_resolve" and row.get("status") == CONFLICT
+                        and (row.get("proposal_id") or row.get("selected_proposals")))
+                    or (row.get("kind") == "queue_resolve" and row.get("status") == ROLLED_BACK
+                        and row.get("destination_intent") is True and row.get("destination_refused") is not True)
+                    or (row.get("kind") == "queue_resolve" and row.get("status") == ROLLED_BACK
+                        and row.get("actor") == "agent" and row.get("source") == "cli"
+                        and row.get("promoted") and row.get("proposal_id")
+                        and row.get("decision_outcome") in ("written", "duplicate"))
+                    or (row.get("kind") == "queue_resolve" and row.get("status") == APPLIED
+                        and (row.get("proposal_id") or row.get("selected_proposals")) and rid not in candidates)
+                }
+                retained: list[str] = []
+                removed: set[str] = set()
+                for index, line in enumerate(lines):
+                    row = _safe_row(line)
+                    assert row is not None
+                    rid = str(row["id"])
+                    if rid == CAP_CHECKPOINT_ID:
+                        continue
+                    if index in tail_indices or rid in protected:
+                        retained.append(line)
+                    elif rid in candidates:
+                        removed.add(rid)
+                if not removed:
+                    return False
+                if not is_private(journal):
+                    raise ValueError("receipt journal is not private")
+                retained.append(json.dumps(checkpoint, ensure_ascii=False))
+                fd, tmp_name = mkstemp_private(dir=journal.parent, prefix=".cap-checkpoint-", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                        carry_mode(handle.fileno(), stat.S_IMODE(before.st_mode), temp=tmp_name, original=journal)
+                        handle.write(_serialize_rows(retained))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    if identity(before) != identity(journal.stat()):
+                        raise ValueError("receipt journal changed before replacement")
+                    for suffix, expected in sidecar_ids.items():
+                        path = queue.with_suffix(suffix)
+                        try:
+                            info = path.lstat()
+                        except FileNotFoundError:
+                            if expected is not None:
+                                raise ValueError("decision sidecar disappeared before replacement")
+                        else:
+                            if expected != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+                                raise ValueError("decision sidecar changed before replacement")
+                    os.replace(tmp_name, journal)
+                    if os.name != "nt":
+                        directory = os.open(journal.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                finally:
+                    try:
+                        Path(tmp_name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return True
+            finally:
+                unlock(lock.fileno())
+
+
 def find_receipt(journal: Path, receipt_id: str) -> dict[str, Any] | None:
     for receipt in read_receipts(journal):
         if receipt.get("id") == receipt_id:
@@ -653,6 +927,11 @@ def is_undoable(receipt: dict[str, Any]) -> bool:
 
 def _image(text: str) -> str | None:
     return text if len(text) <= MAX_IMAGE_CHARS else None
+
+
+def require_selected_queue_image(text: str) -> None:
+    if len(text) > MAX_IMAGE_CHARS:
+        raise QueueReceiptUnavailable("the selected queue is too large for recovery proof")
 
 
 def commit_region_change(
@@ -874,6 +1153,27 @@ def record_queue_resolution(
         return {}
 
 
+def _queue_selected_provenance(
+    before: str, workspace: str, queue: Path, selected: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate an explicitly selected row against the locked queue snapshot."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    if not workspace or queue.name != "Memory-Proposals.md" or queue.parent.name != "Workspace":
+        raise ValueError("invalid proposal queue identity")
+    line = selected.get("line")
+    if type(line) is not int:
+        raise ValueError("missing selected proposal line")
+    relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    entry = next((item for item in walk_proposal_queue(workspace, relative, before) if item.line == line), None)
+    if (entry is None or entry.proposal_id != selected.get("id") or
+        entry.bullet.kind != selected.get("kind") or entry.bullet.text != selected.get("text") or
+        entry.bullet.source != selected.get("source")):
+        raise ValueError("selected proposal does not match queue snapshot")
+    return {"proposal_id": entry.proposal_id, "proposal_source": entry.bullet.source,
+            "proposal_kind": entry.bullet.kind, "proposal_text": entry.bullet.text}
+
+
 @contextmanager
 def queue_resolution(
     proposals_path: Path,
@@ -885,6 +1185,14 @@ def queue_resolution(
     source: str,
     workspace: str = "",
     vault_root: Path | None = None,
+    selected: dict[str, Any] | None = None,
+    decision_via: str = "",
+    decision_reason: str = "",
+    decision_destination: str = "",
+    decision_outcome: str = "",
+    decision_receipt_id: str = "",
+    destination_intent: bool = False,
+    admission_started_at: str = "",
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
 
@@ -903,8 +1211,21 @@ def queue_resolution(
             before = proposals_path.read_text(encoding="utf-8")
         except OSError:
             before = ""
+        provenance = _queue_selected_provenance(before, workspace, proposals_path, selected) if selected is not None else {}
+        if destination_intent and not provenance:
+            raise QueueReceiptUnavailable("a selected proposal is required before the destination write")
+        if provenance:
+            require_selected_queue_image(before)
+        if provenance and decision_via:
+            provenance["decision_via"] = decision_via
+            provenance["decision_reason"] = decision_reason
+            provenance["decision_destination"] = decision_destination
+            provenance["decision_outcome"] = decision_outcome
+            provenance["decision_receipt_id"] = decision_receipt_id
+        if provenance and (provenance["proposal_kind"] != kind or provenance["proposal_text"] != removed_text):
+            raise ValueError("selected proposal does not match removal")
         journal = journal_path(vault_root, proposals_path.parent)
-        rid = new_receipt_id(
+        rid = (_new_queue_resolution_id if provenance else new_receipt_id)(
             f"{proposals_path}|queue_resolve|{removed_text}|{content_revision(before)}",
             journal,
         )
@@ -929,13 +1250,26 @@ def queue_resolution(
             # after image/revision from disk, and `is_undoable` needs both.
             "before_revision": content_revision(before),
             "before_text": _image(before),
+            **provenance,
         }
+        if destination_intent:
+            base["destination_intent"] = True
+            base["admission_started_at"] = admission_started_at
         # The prepared row is the crash-safety boundary for this rewrite: if it
         # cannot be persisted, a crash after the queue replacement would remove
         # the proposals with nothing for recovery or History to find. Abort
         # instead of proceeding without durable evidence.
         try:
             _append(journal, {**base, "status": PREPARED})
+            # _append flushes and fsyncs the file on all platforms. POSIX can
+            # additionally fence the directory entry; Windows promises only
+            # the existing receipt protocol's process-crash ordering here.
+            if destination_intent and os.name != "nt":
+                directory = os.open(journal.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         except Exception as exc:  # noqa: BLE001 — no evidence, no mutation
             logger.error(
                 "memory receipts: could not prepare queue receipt for %s: %s",
@@ -945,24 +1279,37 @@ def queue_resolution(
             raise QueueReceiptUnavailable(
                 "the receipt journal could not record a prepared row"
             ) from exc
+        completed = False
         try:
             yield base
+            completed = True
         finally:
-            _write_queue_receipt(
-                proposals_path,
-                removed_text=removed_text,
-                kind=kind,
-                promoted=promoted,
-                actor=actor,
-                source=source,
-                workspace=workspace,
-                vault_root=vault_root,
-                before_text=before,
-                after_text=None,
-                status=APPLIED,
-                receipt_id=rid,
-                prepared=True,
-            )
+            if destination_intent and completed and base.get("destination_refused"):
+                try:
+                    _append(journal, {**base, "status": ROLLED_BACK})
+                except Exception as exc:  # noqa: BLE001
+                    raise QueueReceiptUnavailable("the refused destination intent could not be closed") from exc
+            elif not provenance or base.get("owner_landed"):
+                if destination_intent:
+                    provenance.update({key: base[key] for key in
+                                       ("decision_outcome", "decision_receipt_id", "admission_started_at") if key in base})
+                _write_queue_receipt(
+                    proposals_path,
+                    removed_text=removed_text,
+                    kind=kind,
+                    promoted=promoted,
+                    actor=actor,
+                    source=source,
+                    workspace=workspace,
+                    vault_root=vault_root,
+                    before_text=before,
+                    after_text=None,
+                    status=APPLIED,
+                    receipt_id=rid,
+                    prepared=True,
+                    provenance=provenance,
+                    owner_landed=bool(base.get("owner_landed")),
+                )
 
 
 def _write_queue_receipt(
@@ -981,6 +1328,8 @@ def _write_queue_receipt(
     receipt_id: str | None = None,
     prepared: bool = False,
     undoable: bool = True,
+    provenance: dict[str, Any] | None = None,
+    owner_landed: bool = False,
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -1019,7 +1368,10 @@ def _write_queue_receipt(
         "before_text": _image(before),
         "after_text": _image(after),
         "status": status,
+        **(provenance or {}),
     }
+    if owner_landed:
+        receipt["owner_landed"] = True
     if not undoable:
         # A per-fact history row for a batch that already records its
         # transaction-level before image on one row. It must not offer an undo:
@@ -1134,8 +1486,21 @@ def queue_resolution_multi(
             before = ""
         texts = [str(r.get("text") or "") for r in removals]
         removal_kinds = [str(r.get("kind") or "") for r in removals]
+        selected_proposals = []
+        for removal in removals:
+            selected = removal.get("selected")
+            if selected is not None:
+                if not isinstance(selected, dict):
+                    raise ValueError("invalid selected proposal")
+                proof = _queue_selected_provenance(before, workspace, proposals_path, selected)
+                if proof["proposal_kind"] != removal.get("kind") or proof["proposal_text"] != removal.get("text"):
+                    raise ValueError("selected proposal does not match removal")
+                selected_proposals.append({**proof, "promoted": bool(removal.get("promoted")),
+                                           **removal.get("decision", {})})
+        if selected_proposals:
+            require_selected_queue_image(before)
         journal = journal_path(vault_root, proposals_path.parent)
-        rid = new_receipt_id(
+        rid = (_new_queue_resolution_id if selected_proposals else new_receipt_id)(
             f"{proposals_path}|queue_resolve_batch|"
             f"{'|'.join(texts)}|{content_revision(before)}",
             journal,
@@ -1160,6 +1525,7 @@ def queue_resolution_multi(
             # batch receipt is still undoable.
             "before_revision": content_revision(before),
             "before_text": _image(before),
+            "selected_proposals": selected_proposals,
         }
         # Abort before the rewrite when the crash-safety boundary cannot be
         # persisted; see `queue_resolution`.
@@ -1191,7 +1557,7 @@ def queue_resolution_multi(
                     for i, text in enumerate(texts)
                 ],
             )
-            if completed and all_gone:
+            if completed and all_gone and (not selected_proposals or base.get("owner_landed")):
                 # Only a completed, content-verified rewrite earns applied
                 # rows. The body raising (disk full, permission error) leaves
                 # the prepared row for startup recovery instead of falsely
@@ -1223,11 +1589,13 @@ def queue_resolution_multi(
                     "removed_texts": texts,
                     "removed_text": texts[0] if texts else "",
                     "status": APPLIED,
+                    **({"owner_landed": True} if selected_proposals else {}),
                 }
                 try:
                     _append(journal, settled)
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     logger.debug("memory receipts: batch settle failed", exc_info=True)
+                    raise QueueReceiptUnavailable("the queue receipt could not confirm settlement") from exc
             elif content_revision(after) == content_revision(before):
                 # A completed rewrite that removed nothing left the queue at its
                 # exact before-image, so there is nothing to recover: settle it
@@ -1267,12 +1635,101 @@ class RecoveryResult:
     scanned: int = 0
 
 
+def _selected_queue_effect(
+    receipt: dict[str, Any], after: str, *, pending: bool
+) -> bool:
+    """Prove selected identities and the exact queue rewrite from its before image."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    before = receipt.get("before_text")
+    workspace = receipt.get("workspace")
+    if (not isinstance(before, str) or not isinstance(workspace, str) or not workspace
+            or receipt.get("before_revision") != content_revision(before)):
+        return False
+    relative = Path(workspace).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    entries = list(walk_proposal_queue(workspace, relative, before))
+    proofs = receipt.get("selected_proposals")
+    if not isinstance(proofs, list) or not proofs:
+        proofs = [receipt] if receipt.get("proposal_id") else []
+    if not proofs or not all(isinstance(proof, dict) for proof in proofs):
+        return False
+    if receipt.get("batch"):
+        texts = receipt.get("removed_texts")
+        kinds = receipt.get("removed_kinds")
+        if (not isinstance(texts, list) or not isinstance(kinds, list) or len(texts) != len(kinds)
+                or not all(isinstance(value, str) for value in [*texts, *kinds])
+                or not all(isinstance(proof.get("proposal_text"), str)
+                           and isinstance(proof.get("proposal_kind"), str) for proof in proofs)):
+            return False
+        if sorted(zip(texts, kinds)) != sorted(
+            (proof.get("proposal_text"), proof.get("proposal_kind")) for proof in proofs
+        ):
+            return False
+    elif (len(proofs) != 1 or proofs[0].get("proposal_text") != receipt.get("removed_text")
+          or proofs[0].get("proposal_kind") != receipt.get("proposal_kind")):
+        return False
+    selected_lines: set[int] = set()
+    for proof in proofs:
+        matches = [entry for entry in entries if entry.proposal_id == proof.get("proposal_id")]
+        if len(matches) != 1:
+            return False
+        entry = matches[0]
+        if (entry.line in selected_lines or entry.bullet.kind != proof.get("proposal_kind")
+                or entry.bullet.text != proof.get("proposal_text")
+                or entry.bullet.source != proof.get("proposal_source")):
+            return False
+        twins = [item for item in entries if item.bullet.kind == entry.bullet.kind
+                 and item.bullet.text == entry.bullet.text and item.bullet.source == entry.bullet.source]
+        if pending and len(twins) != 1:
+            return False
+        selected_lines.add(entry.line)
+    lines = [line for index, line in enumerate(before.splitlines()) if index not in selected_lines]
+    if receipt.get("source") == "cli" and not receipt.get("batch"):
+        from ciao.memory_proposals import _sweep_empty_batches
+        lines = _sweep_empty_batches(lines)
+    expected = "\n".join(lines).rstrip() + "\n"
+    return expected == after
+
+
+def _queue_receipt_bound(receipt: dict[str, Any], journal: Path) -> bool:
+    """A queue receipt may only affect the queue beside the journal read."""
+    raw = receipt.get("queue")
+    if not isinstance(raw, str) or not raw or journal.name != RECEIPTS_NAME or journal.parent.name != "Workspace":
+        return False
+    try:
+        return Path(raw).resolve() == (journal.parent / "Memory-Proposals.md").resolve()
+    except OSError:
+        return False
+
+
+def _registered_queue_receipt(receipt: dict[str, Any], journal: Path, config: Any) -> bool:
+    if config is None or not _queue_receipt_bound(receipt, journal):
+        return False
+    workspace = receipt.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        return False
+    try:
+        names = list(config.workspace_names())
+        if workspace not in names:
+            return False
+        root = Path(config.workspace_vault_root(workspace)).resolve()
+        if journal.resolve() != journal_path(root, None).resolve():
+            return False
+        return sum(
+            Path(config.workspace_vault_root(name)).resolve() == root for name in names
+        ) == 1
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def recover_pending(
     guide: Path | None = None,
     *,
     vault_root: Path | None = None,
     journal: Path | None = None,
     proposals_path: Path | None = None,
+    expected_workspace: str | None = None,
+    config: Any = None,
 ) -> RecoveryResult:
     """Reconcile every interrupted receipt against the files on disk.
 
@@ -1306,7 +1763,29 @@ def recover_pending(
     receipts = read_receipts(journal)
     result.scanned = len(receipts)
     for receipt in receipts:
+        selected_receipt = (
+            str(receipt.get("kind", "")) == "queue_resolve"
+            and bool(receipt.get("proposal_id") or receipt.get("selected_proposals"))
+        )
+        if selected_receipt and not _registered_queue_receipt(receipt, journal, config):
+            continue
+        if (str(receipt.get("kind", "")) == "queue_resolve"
+                and (receipt.get("proposal_id") or receipt.get("selected_proposals"))
+                and expected_workspace is not None
+                and receipt.get("workspace") != expected_workspace):
+            continue
         if str(receipt.get("status", "")) in _TERMINAL:
+            if (receipt.get("status") == APPLIED and
+                (receipt.get("proposal_id") or receipt.get("selected_proposals"))):
+                after = receipt.get("after_text")
+                if (receipt.get("owner_landed") is True and isinstance(after, str)
+                        and receipt.get("after_revision") == content_revision(after)
+                        and _selected_queue_effect(receipt, after, pending=False)):
+                    try:
+                        with queue_lock(Path(str(receipt["queue"]))):
+                            _complete_outcome(receipt)
+                    except QueueLockError:
+                        logger.warning("memory receipts: queue busy while replaying %s; retry later", receipt.get("id"))
             continue
         try:
             settled = _reconcile(receipt, journal, proposals_path=proposals_path)
@@ -1479,7 +1958,11 @@ def _reconcile_queue(
     *,
     proposals_path: Path | None,
 ) -> dict[str, Any] | None:
+    if not _queue_receipt_bound(receipt, journal):
+        return None
     path = proposals_path or Path(str(receipt.get("queue", "")))
+    if path.resolve() != Path(str(receipt["queue"])).resolve():
+        return None
     if not path.name:
         return None
     # A batch prepared row lists every removed bullet; the removal landed only
@@ -1499,13 +1982,28 @@ def _reconcile_queue(
         needles = [(single, single_kind)] if single else []
     if not needles:
         return None
+    with queue_lock(path):
+        return _reconcile_queue_locked(receipt, journal, path, needles)
+
+
+def _reconcile_queue_locked(
+    receipt: dict[str, Any], journal: Path, path: Path, needles: list[tuple[str, str]]
+) -> dict[str, Any] | None:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
+        if receipt.get("destination_intent") is True:
+            return _settle(journal, receipt, CONFLICT, "queue unreadable; destination outcome is unconfirmed")
         return _settle(journal, receipt, ROLLED_BACK, "queue missing")
     still_present: list[str]
     before_text = receipt.get("before_text")
-    if isinstance(before_text, str):
+    if receipt.get("proposal_id") or receipt.get("selected_proposals"):
+        if receipt.get("destination_intent") is True:
+            return _settle(journal, receipt, CONFLICT, "destination outcome is not durably confirmed")
+        if isinstance(before_text, str) and text == before_text:
+            return _settle(journal, receipt, ROLLED_BACK, "queue unchanged")
+        return _settle(journal, receipt, CONFLICT, "selected removal has no durable owner landing proof")
+    elif isinstance(before_text, str):
         # The prepared row carries the pre-rewrite file: settle by count, so
         # a surviving twin does not make a successful one-of-two removal look
         # unlanded and roll back a landed batch (see _removal_landed).
@@ -1599,6 +2097,27 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
             if queue is None:
                 # Nothing to write to, so there is no outstanding obligation: a
                 # later pass would have the same answer. Treat as complete.
+                return True
+            proofs = receipt.get("selected_proposals")
+            if not isinstance(proofs, list) or not proofs:
+                proofs = [receipt] if receipt.get("proposal_id") else []
+            if proofs:
+                for proof in proofs:
+                    identity = proof.get("proposal_id")
+                    source = proof.get("proposal_source")
+                    text = proof.get("proposal_text")
+                    kind = proof.get("proposal_kind")
+                    promoted_proof = bool(proof.get("promoted", receipt.get("promoted")))
+                    if not isinstance(source, str) or not all(isinstance(value, str) and value for value in (identity, text, kind)):
+                        return False
+                    recorder = record_promotion if promoted_proof else record_dismissal
+                    recorder(queue, text=text, kind=kind, via=str(proof.get("decision_via") or receipt.get("decision_via") or receipt.get("source", "")),
+                             source=source, proposal_id=identity,
+                             destination=str(proof.get("decision_destination", receipt.get("decision_destination", ""))),
+                             outcome=str(proof.get("decision_outcome", receipt.get("decision_outcome", "written" if promoted_proof else ""))),
+                             receipt_id=str(proof.get("decision_receipt_id", receipt.get("decision_receipt_id", ""))),
+                             queue_receipt_id=str(receipt.get("id") or ""),
+                             reason=str(proof.get("decision_reason", receipt.get("decision_reason", ""))))
                 return True
             texts = receipt.get("removed_texts")
             facts = (
@@ -2048,12 +2567,24 @@ def recover_memory_journals(config: Any) -> dict[str, list[dict[str, Any]]]:
     """
     reconciled: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
+    registered: dict[Path, list[str]] = {}
+    try:
+        workspace_names = list(config.workspace_names())
+    except (AttributeError, TypeError, ValueError):
+        workspace_names = []
+    for workspace in workspace_names:
+        try:
+            path = journal_path(Path(config.workspace_vault_root(workspace)), None).resolve()
+        except (AttributeError, OSError, ValueError):
+            continue
+        registered.setdefault(path, []).append(workspace)
     for journal in receipt_journal_candidates(config):
         try:
             # Each receipt names its own queue, so recovery needs only the
             # journal: a region write reconciles against its guide, a queue
             # receipt against the queue it recorded.
-            result = recover_pending(journal=journal)
+            names = registered.get(journal.resolve(), [])
+            result = recover_pending(journal=journal, expected_workspace=names[0] if len(names) == 1 else "", config=config)
             reconciled.extend(result.reconciled)
             conflicts.extend(result.conflicts)
         except Exception:  # noqa: BLE001 — recovery must never fail startup

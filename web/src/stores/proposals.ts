@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import { api } from '../lib/api'
 import type {
   ProposalsResponse,
   ProposalRow,
   ProposalBatchResponse,
   ProposalBatchSummary,
+  ProposalActionResult,
+  ProposalAcceptRefusal,
   ProposalDismissOlderResponse,
   ProposalHistoryResponse,
   ProposalHistoryRow,
@@ -14,6 +16,97 @@ import type {
   ProposalSkillAcceptResponse,
   MemoryReceiptDetail,
 } from '../lib/types'
+
+const INTENT_FAMILY = 'ciao:proposal-intent:'
+const MUTATION_LOCK = 'ciao:proposal-mutation'
+type BatchScope = { targets: string[]; workspaces: string[]; workspace: string; destinations?: Record<string, string> }
+type SweepScope = { cutoff: string; workspaces: string[] }
+type ProposalIntent = {
+  version: 1 | 2; workspace: string; id: string; token: string; action: 'accept' | 'dismiss' | 'undo'
+  queueState?: 'unknown' | 'unchanged' | 'replaced'
+  queueReceiptId?: string
+  queueReceiptConfirmed?: boolean
+  decisionConfirmed?: boolean
+  target?: string
+  batch?: BatchScope
+  sweep?: SweepScope
+  operation?: 'implement' | 'undo'
+  reviewed?: boolean
+}
+
+function intentKey(intent: ProposalIntent): string {
+  return INTENT_FAMILY + `v${intent.version}:` + encodeURIComponent(intent.workspace) + ':' + encodeURIComponent(intent.id) + ':' + intent.token
+}
+
+function readIntents(): ProposalIntent[] {
+  const intents: ProposalIntent[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (!key?.startsWith(INTENT_FAMILY)) continue
+    if (!key.startsWith(INTENT_FAMILY + 'v1:') && !key.startsWith(INTENT_FAMILY + 'v2:')) throw new Error('unsupported intent version')
+    const raw = localStorage.getItem(key)
+    if (raw === null || raw.length > 65536 || intents.length >= 512) throw new Error('invalid intent')
+    const value: unknown = JSON.parse(raw)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid intent')
+    const item = value as Record<string, unknown>
+    const allowed = ['version', 'workspace', 'id', 'token', 'action', 'queueState', 'queueReceiptId', 'queueReceiptConfirmed', 'decisionConfirmed', 'target', 'batch', 'sweep', 'operation', 'reviewed']
+    if (Object.keys(item).some(key => !allowed.includes(key))
+      || (item.version !== 1 && item.version !== 2) || typeof item.id !== 'string' || !item.id || item.id.length > 256
+      || typeof item.workspace !== 'string' || item.workspace.length > 256
+      || typeof item.token !== 'string' || !(item.version === 1 ? /^[0-9a-f]{32}$/ : /^[0-9a-f]{32}\.[0-9a-f]{32}$/).test(item.token)
+      || (item.action !== 'accept' && item.action !== 'dismiss' && item.action !== 'undo')
+      || (item.queueState !== undefined && !['unknown', 'unchanged', 'replaced'].includes(String(item.queueState)))
+      || (item.queueReceiptId !== undefined && (typeof item.queueReceiptId !== 'string' || item.queueReceiptId.length > 256))
+      || (item.queueReceiptConfirmed !== undefined && typeof item.queueReceiptConfirmed !== 'boolean')
+      || (item.decisionConfirmed !== undefined && typeof item.decisionConfirmed !== 'boolean')) throw new Error('invalid intent')
+    if (item.operation !== undefined && (item.version !== 2 || item.batch !== undefined || item.sweep !== undefined
+      || (item.operation === 'undo' ? item.action !== 'undo' || !item.id.startsWith('__undo__:') || item.id.length <= 9
+        : item.operation !== 'implement' || item.action !== 'accept'))) throw new Error('invalid intent operation')
+    if (item.version === 2 && item.action === 'undo' && item.operation !== 'undo') throw new Error('invalid intent action')
+    if (item.reviewed !== undefined && (item.reviewed !== true || !item.batch)) throw new Error('invalid review state')
+    if (item.target !== undefined && (typeof item.target !== 'string' || !item.target || item.target.length > 256)) throw new Error('invalid intent target')
+    if (item.batch !== undefined) {
+      const batch = item.batch as Record<string, unknown>
+      if (item.version !== 2 || !batch || typeof batch !== 'object' || Array.isArray(batch)
+        || !['targets,workspace,workspaces', 'destinations,targets,workspace,workspaces'].includes(Object.keys(batch).sort().join(','))
+        || typeof batch.workspace !== 'string' || batch.workspace.length > 256
+        || !Array.isArray(batch.targets) || batch.targets.length < 1 || batch.targets.length > 200
+        || batch.targets.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_:-]{1,256}$/.test(id))
+        || new Set(batch.targets).size !== batch.targets.length || !batch.targets.includes(item.id)
+        || !Array.isArray(batch.workspaces) || batch.workspaces.length < 1 || batch.workspaces.length > 200
+        || batch.workspaces.some(ws => typeof ws !== 'string' || ws.length > 256)
+        || [...new Set(batch.workspaces)].sort().join('\0') !== batch.workspaces.join('\0')
+        || !batch.workspaces.includes(item.workspace)) throw new Error('invalid batch intent')
+      if (batch.destinations !== undefined) {
+        const destinations = batch.destinations
+        if (item.action !== 'accept' || !destinations || typeof destinations !== 'object' || Array.isArray(destinations)
+          || Object.entries(destinations).some(([id, target]) => !(batch.targets as string[]).includes(id)
+            || typeof target !== 'string' || !target || target.length > 256)
+          || (destinations as Record<string, string>)[item.id as string] !== item.target) throw new Error('invalid batch destinations')
+      }
+    }
+    if (item.sweep !== undefined) {
+      const sweep = item.sweep as Record<string, unknown>
+      if (item.version !== 2 || item.id !== '__sweep__' || item.workspace !== '' || item.action !== 'dismiss'
+        || item.batch !== undefined || !sweep || typeof sweep !== 'object' || Array.isArray(sweep)
+        || Object.keys(sweep).sort().join(',') !== 'cutoff,workspaces'
+        || typeof sweep.cutoff !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(sweep.cutoff)
+        || !Array.isArray(sweep.workspaces) || sweep.workspaces.length > 200
+        || sweep.workspaces.some(ws => typeof ws !== 'string' || ws.length > 256)
+        || [...new Set(sweep.workspaces)].sort().join('\0') !== sweep.workspaces.join('\0')) throw new Error('invalid sweep intent')
+    }
+    if (item.version === 2 && item.id === '__sweep__' && item.sweep === undefined) throw new Error('invalid sweep intent')
+    const intent = item as ProposalIntent
+    if (intentKey(intent) !== key) throw new Error('invalid intent key')
+    intents.push(intent)
+  }
+  for (const intent of intents) {
+    const siblings = intents.filter(other => other.token === intent.token && other !== intent)
+    if (siblings.some(other => !intent.batch || !other.batch || intent.action !== other.action
+      || JSON.stringify(intent.batch) !== JSON.stringify(other.batch))) throw new Error('inconsistent batch intents')
+  }
+  return intents
+}
 
 /** A row the operator has to settle: marked `you`, carrying no decider, or a skill row. */
 export function needsYou(row: ProposalRow): boolean {
@@ -83,6 +176,236 @@ export const useProposalsStore = defineStore('proposals', () => {
   const conflictIds = ref<Set<string>>(new Set())
   /** Per-destination roll-up of the last batch, for the panel's summary line. */
   const lastBatchSummary = ref<ProposalBatchSummary[]>([])
+  const lastBatchResults = ref<ProposalActionResult[]>([])
+  const partialWarnings = ref<Record<string, { id: string; text: string; workspace: string; action: string; target?: string; effect?: ProposalAcceptRefusal['destination_effect']; queueState: string; decisionConfirmed?: boolean; queueReceiptConfirmed?: boolean; queueReceiptId?: string; reviewed?: boolean }>>({})
+  const intentStorageUnavailable = ref(false)
+  const intentLockError = ref(typeof navigator === 'undefined' || !navigator.locks?.request
+    ? 'Web Locks are unavailable in this browser. Proposal decisions and acknowledgements are blocked.' : '')
+  const intents = new Map<string, ProposalIntent>()
+  function refreshIntents() {
+    try {
+      const found = readIntents()
+      const next = new Map<string, ProposalIntent>()
+      const warnings: typeof partialWarnings.value = Object.fromEntries(
+        Object.entries(partialWarnings.value).filter(([id]) => !intents.has(id)),
+      )
+      for (const intent of found) {
+        if (next.has(intent.id)) throw new Error('duplicate proposal intent')
+        next.set(intent.id, intent)
+        warnings[intent.id] = {
+          ...partialWarnings.value[intent.id],
+          id: intent.id, text: intent.id === '__sweep__' ? 'Expiry sweep across all workspaces' : intent.id,
+          workspace: intent.workspace, action: intent.action, queueState: intent.queueState || 'unknown',
+          target: intent.target,
+          queueReceiptId: intent.queueReceiptId, queueReceiptConfirmed: intent.queueReceiptConfirmed,
+          decisionConfirmed: intent.decisionConfirmed,
+          reviewed: intent.reviewed,
+        }
+      }
+      intents.clear()
+      for (const [id, intent] of next) intents.set(id, intent)
+      partialWarnings.value = warnings
+    } catch {
+      intentStorageUnavailable.value = true
+    }
+  }
+  refreshIntents()
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key.startsWith(INTENT_FAMILY)) refreshIntents()
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', onStorage)
+    onScopeDispose(() => window.removeEventListener('storage', onStorage))
+  }
+
+  async function withMutationLock<T>(run: () => Promise<T> | T, refused: T, acknowledgement = false): Promise<T> {
+    if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+      intentLockError.value = 'Web Locks are unavailable in this browser. Proposal decisions and acknowledgements are blocked.'
+      return refused
+    }
+    try {
+      return await navigator.locks.request(MUTATION_LOCK, { ifAvailable: true }, async lock => {
+        if (!lock) {
+          intentLockError.value = 'A proposal operation is in progress in another tab. Try again when it finishes.'
+          return refused
+        }
+        intentLockError.value = ''
+        refreshIntents()
+        if (intentStorageUnavailable.value) return refused
+        if (!acknowledgement && intents.size > 0) {
+          intentLockError.value = 'An unresolved proposal operation needs inspection and server confirmation before retrying.'
+          return refused
+        }
+        return await run()
+      })
+    } catch {
+      intentLockError.value = 'The browser could not verify the proposal safety lock. Decisions are blocked.'
+      return refused
+    }
+  }
+
+  function beginIntent(id: string, action: 'accept' | 'dismiss' | 'undo', scope?: string, target?: string, reservation?: string, batch?: BatchScope, sweep?: SweepScope, operation?: 'implement' | 'undo'): boolean {
+    const workspace = scope ?? rows.value.find(row => row.id === id)?.workspace
+    if (workspace === undefined || workspace.length > 256 || !id || id.length > 256
+        || (target !== undefined && (!target || target.length > 256)) || intentStorageUnavailable.value) return false
+    try {
+      const existing = readIntents()
+      const globalIntent = (item: string) => item === '__sweep__' || item.startsWith('__undo__:')
+      if (existing.length >= 512 || existing.some(item => item.id === id || globalIntent(item.id))
+          || (globalIntent(id) && existing.length > 0)) return false
+      const token = reservation ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
+      const intent: ProposalIntent = { version: reservation ? 2 : 1, workspace, id, action, token, ...(target ? { target } : {}), ...(batch ? { batch } : {}), ...(sweep ? { sweep } : {}), ...(operation ? { operation } : {}) }
+      const key = intentKey(intent)
+      const serialized = JSON.stringify(intent)
+      localStorage.setItem(key, serialized)
+      if (localStorage.getItem(key) !== serialized) throw new Error('intent write failed')
+      intents.set(id, intent)
+      return true
+    } catch {
+      intentStorageUnavailable.value = true
+      return false
+    }
+  }
+
+  function clearIntent(id: string): boolean {
+    const intent = intents.get(id)
+    if (!intent) return true
+    try {
+      const key = intentKey(intent)
+      localStorage.removeItem(key)
+      if (localStorage.getItem(key) !== null) throw new Error('intent removal failed')
+      intents.delete(id)
+      return true
+    } catch {
+      intentStorageUnavailable.value = true
+      return false
+    }
+  }
+
+  function rememberPartial(id: string, payload: ProposalAcceptRefusal, action = 'accept'): boolean {
+    if (payload?.queue_settled !== false) return false
+    const row = rows.value.find(row => row.id === id)
+    const text = row?.text || (id === '__sweep__' ? 'Expiry sweep across all workspaces'
+      : id.startsWith('__undo__:') ? `Receipt undo: ${id.slice(9)}` : id)
+    partialWarnings.value = { ...partialWarnings.value, [id]: {
+      id, text, workspace: row?.workspace ?? intents.get(id)?.workspace ?? '', action,
+      target: intents.get(id)?.target, effect: payload.destination_effect, queueState: payload.queue_state || 'unknown',
+      decisionConfirmed: payload.decision_confirmed, queueReceiptConfirmed: payload.queue_receipt_confirmed,
+      queueReceiptId: payload.queue_receipt_id,
+    } }
+    const intent = intents.get(id)
+    if (intent) {
+      const state = payload.queue_state
+      const updated: ProposalIntent = {
+        ...intent,
+        ...(state === 'unchanged' || state === 'replaced' || state === 'unknown' ? { queueState: state } : {}),
+        ...(payload.queue_receipt_id && payload.queue_receipt_id.length <= 256 ? { queueReceiptId: payload.queue_receipt_id } : {}),
+        ...(typeof payload.queue_receipt_confirmed === 'boolean' ? { queueReceiptConfirmed: payload.queue_receipt_confirmed } : {}),
+        ...(typeof payload.decision_confirmed === 'boolean' ? { decisionConfirmed: payload.decision_confirmed } : {}),
+      }
+      try {
+        const key = intentKey(updated)
+        const serialized = JSON.stringify(updated)
+        localStorage.setItem(key, serialized)
+        if (localStorage.getItem(key) !== serialized) throw new Error('intent update failed')
+        intents.set(id, updated)
+      } catch {
+        intentStorageUnavailable.value = true
+      }
+    }
+    return true
+  }
+
+  async function sealReservation(intent: ProposalIntent | undefined): Promise<boolean> {
+    if (!intent || intent.version !== 2) return false
+    try {
+      const reply = await api.postReservation<{ sealed?: boolean }>('/api/proposals/reservations/seal', {
+        id: intent.token,
+        scope: intent.operation
+          ? { kind: intent.operation, workspace: intent.workspace, targets: [intent.operation === 'undo' ? intent.id.slice(9) : intent.id] }
+          : intent.sweep
+          ? { kind: 'sweep', workspace: '', targets: [intent.sweep.cutoff], workspaces: intent.sweep.workspaces }
+          : intent.batch
+          ? { kind: `batch_${intent.action}`, ...intent.batch }
+          : { kind: `row_${intent.action}`, workspace: intent.workspace, targets: [intent.id],
+            ...(intent.target ? { destination: intent.target } : {}) },
+        inspected: true,
+      })
+      if (reply?.sealed !== true) throw new Error('invalid seal response')
+      return true
+    } catch {
+      intentLockError.value = 'Server completion could not be confirmed. Do not retry; inspect the destination, queue and receipts.'
+      return false
+    }
+  }
+
+  async function sealIntent(id: string): Promise<boolean> {
+    return await sealReservation(intents.get(id)) && clearIntent(id)
+  }
+
+  function reviewBatchIntent(id: string): boolean {
+    const intent = intents.get(id)
+    if (!intent?.batch) return false
+    try {
+      const updated: ProposalIntent = { ...intent, reviewed: true }
+      const key = intentKey(updated)
+      const serialized = JSON.stringify(updated)
+      localStorage.setItem(key, serialized)
+      if (localStorage.getItem(key) !== serialized) throw new Error('review write failed')
+      intents.set(id, updated)
+      if (partialWarnings.value[id]) partialWarnings.value[id].reviewed = true
+      return true
+    } catch {
+      intentStorageUnavailable.value = true
+      return false
+    }
+  }
+
+  async function finishReviewedBatch(intent: ProposalIntent): Promise<void> {
+    const siblings = [...intents.values()].filter(item => item.token === intent.token)
+    if (!siblings.length || siblings.some(item => !item.reviewed)) return
+    if (!await sealReservation(intent)) return
+    let cleared = true
+    for (const sibling of siblings) if (!clearIntent(sibling.id)) cleared = false
+    if (!cleared) return
+    const next = { ...partialWarnings.value }
+    for (const sibling of siblings) delete next[sibling.id]
+    partialWarnings.value = next
+  }
+
+  async function abandonReservation(id: string, scope: object): Promise<void> {
+    try {
+      await api.postReservation('/api/proposals/reservations/seal', { id, scope, inspected: false })
+    } catch {
+      // Nothing was dispatched; an unsealed reservation expires server-side.
+    }
+  }
+
+  async function acknowledgePartialOwned(id: string) {
+    const intent = intents.get(id)
+    if (intent?.version === 1) {
+      intentLockError.value = 'This legacy warning cannot verify whether server work has finished. Do not retry; stop the engine and inspect the destination, queue and receipts before resolving browser storage manually.'
+      return
+    }
+    if (intent?.batch) {
+      if (reviewBatchIntent(id)) await finishReviewedBatch(intent)
+      return
+    }
+    if (intent && !await sealIntent(id)) return
+    const next = { ...partialWarnings.value }
+    delete next[id]
+    partialWarnings.value = next
+  }
+
+  function canAct(id: string): boolean {
+    return !intentStorageUnavailable.value && !partialWarnings.value[id] && !intents.has(id)
+      && !partialWarnings.value.__sweep__ && !intents.has('__sweep__')
+      && ![...intents.keys()].some(key => key.startsWith('__undo__:'))
+  }
+
+  function hasStoredIntent(id: string): boolean {
+    return intents.has(id)
+  }
 
   function isPreviewLoading(id: string): boolean {
     return previewLoading.value.has(id)
@@ -269,14 +592,43 @@ export const useProposalsStore = defineStore('proposals', () => {
    * unrelated later fact; that refusal is surfaced verbatim rather than
    * retried. */
   async function undoReceipt(id: string, workspace = ''): Promise<{ ok: boolean; error?: string }> {
+    const intentId = `__undo__:${id}`
+    if (Object.keys(partialWarnings.value).length || !canAct(intentId)) {
+      return { ok: false, error: 'Inspect settlement warnings and browser storage before retrying.' }
+    }
+    let reservation: string
+    let actualWorkspace: string
+    try {
+      const reply = await api.postReservation<{ id?: unknown; scope?: unknown }>('/api/proposals/reservations', {
+        kind: 'undo', workspace, targets: [id],
+      })
+      const scope = reply?.scope as { kind?: unknown; workspace?: unknown; targets?: unknown } | undefined
+      if (typeof reply?.id !== 'string' || !/^[0-9a-f]{32}\.[0-9a-f]{32}$/.test(reply.id)
+        || !scope || scope.kind !== 'undo' || typeof scope.workspace !== 'string' || !scope.workspace
+        || scope.workspace.length > 256 || (workspace && scope.workspace !== workspace)
+        || !Array.isArray(scope.targets) || scope.targets.length !== 1 || scope.targets[0] !== id) throw new Error('invalid undo reservation')
+      reservation = reply.id
+      actualWorkspace = scope.workspace
+    } catch {
+      return { ok: false, error: 'Could not reserve the undo; nothing was sent.' }
+    }
+    if (!beginIntent(intentId, 'undo', actualWorkspace, undefined, reservation, undefined, undefined, 'undo')) {
+      await abandonReservation(reservation, { kind: 'undo', workspace: actualWorkspace, targets: [id] })
+      return { ok: false, error: 'Cannot safely save the undo intent; inspect browser storage.' }
+    }
     setBusy(id, true)
     const key = receiptKey(id, workspace)
     const next = { ...receiptErrors.value }
     delete next[key]
     receiptErrors.value = next
     try {
-      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
-      await api.post(`/api/memory/receipts/${id}/undo${query}`)
+      const query = `?workspace=${encodeURIComponent(actualWorkspace)}`
+      const reply = await api.post<{ ok?: boolean; id?: string }>(`/api/memory/receipts/${id}/undo${query}`,
+        undefined, { headers: { 'X-Ciao-Proposal-Reservation': reservation } })
+      if (reply?.ok !== true || reply.id !== id || !await sealIntent(intentId)) {
+        rememberPartial(intentId, { queue_settled: false }, 'undo')
+        return { ok: false, error: 'The undo outcome is unconfirmed; inspect before retrying.' }
+      }
       // The change is reversed, so the cached image describes an operation that
       // no longer holds; History refetches and the row re-reads it.
       const without = { ...receipts.value }
@@ -286,6 +638,11 @@ export const useProposalsStore = defineStore('proposals', () => {
       await fetch({ force: true })
       return { ok: true }
     } catch (e) {
+      const failure = e as { status?: number; payload?: { id?: string; conflict?: boolean; undoable?: boolean } }
+      const noEffect = failure?.payload?.id === id &&
+        ((failure.status === 409 && failure.payload.conflict === true) ||
+         (failure.status === 400 && failure.payload.undoable === false))
+      if (!noEffect || !await sealIntent(intentId)) rememberPartial(intentId, { queue_settled: false }, 'undo')
       const msg = e instanceof Error ? e.message : 'Undo failed'
       receiptErrors.value = { ...receiptErrors.value, [key]: msg }
       return { ok: false, error: msg }
@@ -498,7 +855,40 @@ export const useProposalsStore = defineStore('proposals', () => {
     action: 'accept' | 'dismiss',
     workspace = '',
     opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
-  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
+  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown; status?: number }> {
+    if (!canAct(id)) {
+      error.value = 'Inspect and acknowledge the settlement warning before acting again.'
+      return { ok: false, error: error.value }
+    }
+    const row = rows.value.find(row => row.id === id)
+    let target = action === 'accept' && row?.kind === 'rehome' && workspace ? workspace : undefined
+    if (!row) return { ok: false, error: 'Proposal is unavailable.' }
+    let reservation: string
+    try {
+      const rehome = action === 'accept' && row.kind === 'rehome'
+      const reply = await api.postReservation<{ id?: unknown; scope?: unknown }>('/api/proposals/reservations', {
+        kind: `row_${action}`, workspace: row.workspace, targets: [id], ...(rehome ? { destination: workspace } : {}),
+      })
+      if (typeof reply?.id !== 'string' || !/^[0-9a-f]{32}\.[0-9a-f]{32}$/.test(reply.id)) throw new Error('invalid reservation')
+      if (rehome) {
+        const scope = reply.scope as { kind?: unknown; workspace?: unknown; targets?: unknown; destination?: unknown } | undefined
+        if (!scope || scope.kind !== 'row_accept' || scope.workspace !== row.workspace
+          || !Array.isArray(scope.targets) || scope.targets.length !== 1 || scope.targets[0] !== id
+          || typeof scope.destination !== 'string' || !scope.destination || scope.destination.length > 256
+          || (workspace && scope.destination !== workspace)) throw new Error('invalid re-home reservation')
+        target = scope.destination
+      }
+      reservation = reply.id
+    } catch {
+      error.value = 'Could not reserve this proposal operation; nothing was sent.'
+      return { ok: false, error: error.value }
+    }
+    if (!beginIntent(id, action, row.workspace, target, reservation)) {
+      await abandonReservation(reservation, { kind: `row_${action}`, workspace: row.workspace, targets: [id],
+        ...(target ? { destination: target } : {}) })
+      error.value = 'Cannot safely save the proposal intent; inspect browser storage before retrying.'
+      return { ok: false, error: error.value }
+    }
     setBusy(id, true)
     error.value = ''
     try {
@@ -518,7 +908,21 @@ export const useProposalsStore = defineStore('proposals', () => {
       if (opts?.text) body.text = opts.text
       // Single-row decisions only: the batch bar never sends one.
       if (opts?.reason) body.reason = opts.reason
-      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
+      const reply = await api.post<{ ok?: boolean; result?: ProposalActionResult } & Partial<ProposalActionResult>>(`/api/proposals/${id}/${action}${query}`, body, { headers: { 'X-Ciao-Proposal-Reservation': reservation } })
+      const flatSkillDismissal = action === 'dismiss' && rows.value.some(row => row.id === id && row.kind === 'skill')
+        && reply?.id === id && reply.action === 'dismiss' && reply.dismissed === true && !reply.error
+      const settled = reply?.ok === true && reply.result?.id === id
+        && (action !== 'dismiss' || reply.result.action === 'dismiss')
+        && reply.result.dismissed === true && !reply.result.error
+        && (reply.result.queue_settled === undefined || reply.result.queue_settled === true)
+      if (!settled && !flatSkillDismissal) {
+        rememberPartial(id, { queue_settled: false }, action)
+        return { ok: false, error: 'The proposal outcome is unconfirmed; inspect before retrying.' }
+      }
+      if (!await sealIntent(id)) {
+        rememberPartial(id, { queue_settled: false }, action)
+        return { ok: false, error: 'The proposal settled but its local marker could not be cleared.' }
+      }
       const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })
       refetchPreviews(stale)
@@ -527,7 +931,17 @@ export const useProposalsStore = defineStore('proposals', () => {
     } catch (e) {
       const conflict = adoptConflict(id, e)
       const payload = (e as { payload?: unknown } | null)?.payload
+      if (payload && rememberPartial(id, payload as ProposalAcceptRefusal, action)) {
+        return { ok: false, payload }
+      }
       const deferred = Boolean((payload as { deferred?: boolean } | undefined)?.deferred)
+      const status = (e as { status?: number } | null)?.status
+      if ((payload as ProposalAcceptRefusal | undefined)?.id === id
+          && (payload as ProposalAcceptRefusal | undefined)?.no_effect === true) {
+        if (!await sealIntent(id)) rememberPartial(id, { queue_settled: false }, action)
+      } else {
+        rememberPartial(id, { queue_settled: false }, action)
+      }
       const msg = e instanceof Error ? e.message : 'Action failed'
       // A conflict is not an action failure: the card is already re-rendering
       // with the refreshed preview, and a toast on top of it would say the
@@ -535,7 +949,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       // it on the row, with the entries it was weighed against and a retry, and
       // a toast would take all three away the moment they became relevant.
       if (!conflict && !deferred) error.value = msg
-      return { ok: false, error: msg, conflict, payload }
+      return { ok: false, error: msg, conflict, payload, status }
     } finally {
       setBusy(id, false)
     }
@@ -575,12 +989,39 @@ export const useProposalsStore = defineStore('proposals', () => {
   async function acceptSkill(
     id: string,
   ): Promise<{ ok: boolean; chatId?: string; created?: boolean; error?: string }> {
+    if (!canAct(id)) {
+      error.value = 'Inspect settlement warnings and browser storage before retrying.'
+      return { ok: false, error: error.value }
+    }
+    const row = rows.value.find(item => item.id === id && item.kind === 'skill')
+    if (!row) return { ok: false, error: 'Skill proposal is unavailable.' }
+    let reservation: string
+    try {
+      const reply = await api.postReservation<{ id?: unknown }>('/api/proposals/reservations', {
+        kind: 'implement', workspace: row.workspace, targets: [id],
+      })
+      if (typeof reply?.id !== 'string' || !/^[0-9a-f]{32}\.[0-9a-f]{32}$/.test(reply.id)) throw new Error('invalid reservation')
+      reservation = reply.id
+    } catch {
+      error.value = 'Could not reserve the skill implementation; nothing was sent.'
+      return { ok: false, error: error.value }
+    }
+    if (!beginIntent(id, 'accept', row.workspace, undefined, reservation, undefined, undefined, 'implement')) {
+      await abandonReservation(reservation, { kind: 'implement', workspace: row.workspace, targets: [id] })
+      error.value = 'Cannot safely save the skill intent; inspect browser storage.'
+      return { ok: false, error: error.value }
+    }
     setBusy(id, true)
     error.value = ''
     try {
       const reply = await api.post<ProposalSkillAcceptResponse>(
         `/api/proposals/${id}/implement`,
+        undefined, { headers: { 'X-Ciao-Proposal-Reservation': reservation } },
       )
+      if (reply?.ok !== true || !reply.chat_id || !await sealIntent(id)) {
+        rememberPartial(id, { queue_settled: false }, 'accept')
+        return { ok: false, error: 'The improvement outcome is unconfirmed; inspect before retrying.' }
+      }
       // The server row is the source of truth, so re-read rather than patching
       // the local copy: the lifecycle, the chat id and the evidence all come
       // from it, and a reload must not change the answer.
@@ -588,6 +1029,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       invalidateHistory()
       return { ok: true, chatId: reply?.chat_id ?? '', created: reply?.created !== false }
     } catch (e) {
+      rememberPartial(id, { queue_settled: false }, 'accept')
       const msg = e instanceof Error ? e.message : 'Could not start the improvement chat'
       error.value = msg
       return { ok: false, error: msg }
@@ -598,7 +1040,80 @@ export const useProposalsStore = defineStore('proposals', () => {
 
   /** `workspace` names the destination for re-home rows in the selection. */
   async function batch(ids: string[], action: 'accept' | 'dismiss', workspace = '') {
-    if (!ids.length) return
+    if (!ids.length || ids.length > 200 || new Set(ids).size !== ids.length) {
+      error.value = 'Select between one and 200 distinct proposals.'
+      return
+    }
+    if (ids.some(id => !canAct(id))) {
+      error.value = 'Inspect and acknowledge each settlement warning before acting again.'
+      return
+    }
+    const selected = ids.map(id => rows.value.find(row => row.id === id))
+    if (selected.some(row => !row)) {
+      error.value = 'A selected proposal is unavailable; refresh before retrying.'
+      return
+    }
+    let batchScope: BatchScope = {
+      targets: [...ids], workspace,
+      workspaces: [...new Set(selected.map(row => row!.workspace))].sort(),
+    }
+    let reservation: string
+    try {
+      const reply = await api.postReservation<{ id?: unknown; scope?: unknown }>('/api/proposals/reservations', {
+        kind: `batch_${action}`, ...batchScope,
+      })
+      if (typeof reply?.id !== 'string' || !/^[0-9a-f]{32}\.[0-9a-f]{32}$/.test(reply.id)) throw new Error('invalid reservation')
+      const scope = reply.scope as Record<string, unknown> | undefined
+      if (!scope || scope.kind !== `batch_${action}` || scope.workspace !== workspace
+        || JSON.stringify(scope.targets) !== JSON.stringify(batchScope.targets)
+        || JSON.stringify(scope.workspaces) !== JSON.stringify(batchScope.workspaces)
+        || Object.keys(scope).sort().join(',') !== (action === 'accept'
+          ? 'destinations,kind,targets,workspace,workspaces' : 'kind,targets,workspace,workspaces')) throw new Error('invalid batch reservation')
+      if (action === 'accept') {
+        const destinations = scope.destinations
+        const rehomes = selected.filter(row => row!.kind === 'rehome').map(row => row!.id)
+        if (!destinations || typeof destinations !== 'object' || Array.isArray(destinations)
+          || Object.keys(destinations).length !== rehomes.length
+          || Object.entries(destinations).some(([id, target]) => !rehomes.includes(id) || typeof target !== 'string'
+            || !target || target.length > 256 || (workspace && target !== workspace)
+            || target === selected.find(row => row!.id === id)!.workspace)) throw new Error('invalid batch destinations')
+        batchScope = { ...batchScope, destinations: destinations as Record<string, string> }
+      }
+      reservation = reply.id
+    } catch {
+      error.value = 'Could not reserve this batch; nothing was sent.'
+      return
+    }
+    const started: string[] = []
+    for (const id of ids) {
+      const target = batchScope.destinations?.[id]
+      if (!beginIntent(id, action, undefined, target, reservation, batchScope)) {
+        await abandonReservation(reservation, { kind: `batch_${action}`, ...batchScope })
+        for (const prior of started) clearIntent(prior)
+        error.value = 'Cannot safely save batch intents; inspect browser storage before retrying.'
+        return
+      }
+      started.push(id)
+    }
+    async function settle(results: ProposalActionResult[], confirmed: boolean) {
+      const known: string[] = []
+      for (const id of ids) {
+        const matches = results.filter(row => row.id === id)
+        const result = matches.length === 1 ? matches[0] : undefined
+        if (confirmed && result && (result.queue_settled === undefined || result.queue_settled === true)
+            && ((result.dismissed === true && !result.error) || result.no_effect === true)) {
+          known.push(id)
+          rememberPartial(id, { queue_settled: false }, action)
+          reviewBatchIntent(id)
+        } else {
+          rememberPartial(id, result?.queue_settled === false ? result : { queue_settled: false }, action)
+        }
+      }
+      if (known.length) {
+        const intent = intents.get(known[0])
+        if (intent) await finishReviewedBatch(intent)
+      }
+    }
     setBusyMany(ids, true)
     error.value = ''
     lastBatchSummary.value = []
@@ -615,8 +1130,10 @@ export const useProposalsStore = defineStore('proposals', () => {
       const reply = await api.post<ProposalBatchResponse>('/api/proposals/batch', {
         action, ids, ...(workspace ? { workspace } : {}),
         ...(Object.keys(revisions).length ? { revisions } : {}),
-      })
+      }, { headers: { 'X-Ciao-Proposal-Reservation': reservation } })
       lastBatchSummary.value = reply?.summary ?? []
+      lastBatchResults.value = reply?.results ?? []
+      await settle(lastBatchResults.value, reply?.ok === true)
       const conflicted = (reply?.results ?? []).filter(r => r.conflict).map(r => r.id)
       if (conflicted.length) conflictIds.value = new Set([...conflictIds.value, ...conflicted])
       // Previews of rows that are gone would otherwise be handed to the next
@@ -633,6 +1150,20 @@ export const useProposalsStore = defineStore('proposals', () => {
       for (const id of conflicted) await loadPreview(id)
       invalidateHistory()
     } catch (e) {
+      const payload = (e as { payload?: ProposalBatchResponse & ProposalAcceptRefusal } | null)?.payload
+      const idsRefused = (payload as { ids?: unknown } | undefined)?.ids
+      if (payload?.no_effect === true && Array.isArray(idsRefused)
+          && idsRefused.length === ids.length && ids.every(id => idsRefused.filter(item => item === id).length === 1)) {
+        const sealed = await sealReservation(intents.get(ids[0]))
+        for (const id of ids) if (!sealed || !clearIntent(id)) rememberPartial(id, { queue_settled: false }, action)
+      } else if (payload?.results) {
+        lastBatchResults.value = payload.results
+        await settle(payload.results, false)
+      } else if (payload?.queue_settled === false) {
+        for (const id of ids) rememberPartial(id, payload, action)
+      } else {
+        for (const id of ids) rememberPartial(id, { queue_settled: false }, action)
+      }
       error.value = e instanceof Error ? e.message : 'Batch action failed'
     } finally {
       setBusyMany(ids, false)
@@ -640,16 +1171,53 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   async function dismissOlderThan(date: string) {
+    // The server sweep traverses every workspace, not just the visible one.
+    if (intentStorageUnavailable.value || Object.keys(partialWarnings.value).length) {
+      error.value = 'Inspect and acknowledge settlement warnings before dismissing older proposals.'
+      return
+    }
+    let reservation: string
+    let sweep: SweepScope
+    try {
+      const reply = await api.postReservation<{ id?: unknown; scope?: unknown }>('/api/proposals/reservations', {
+        kind: 'sweep', workspace: '', targets: [date],
+      })
+      const scope = reply?.scope as { kind?: unknown; workspace?: unknown; targets?: unknown; workspaces?: unknown } | undefined
+      if (typeof reply?.id !== 'string' || !/^[0-9a-f]{32}\.[0-9a-f]{32}$/.test(reply.id)
+        || !scope || scope.kind !== 'sweep' || scope.workspace !== ''
+        || !Array.isArray(scope.targets) || scope.targets.length !== 1 || scope.targets[0] !== date
+        || !Array.isArray(scope.workspaces) || scope.workspaces.length > 200
+        || scope.workspaces.some(ws => typeof ws !== 'string' || ws.length > 256)
+        || [...new Set(scope.workspaces)].sort().join('\0') !== scope.workspaces.join('\0')) throw new Error('invalid sweep reservation')
+      reservation = reply.id
+      sweep = { cutoff: date, workspaces: scope.workspaces }
+    } catch {
+      error.value = 'Could not reserve the sweep; nothing was sent.'
+      return
+    }
+    if (!beginIntent('__sweep__', 'dismiss', '', undefined, reservation, undefined, sweep)) {
+      await abandonReservation(reservation, { kind: 'sweep', workspace: '', targets: [date], workspaces: sweep.workspaces })
+      error.value = 'Cannot safely save the sweep intent; inspect browser storage before retrying.'
+      return
+    }
     const key = '__dismissOlderThan__'
     setBusy(key, true)
     error.value = ''
     try {
-      await api.post<ProposalDismissOlderResponse>(
+      const reply = await api.post<ProposalDismissOlderResponse>(
         `/api/proposals/dismiss-older-than?date=${encodeURIComponent(date)}`,
+        undefined, { headers: { 'X-Ciao-Proposal-Reservation': reservation } },
       )
+      if (reply?.ok !== true || typeof reply.removed !== 'number' || !await sealIntent('__sweep__')) {
+        rememberPartial('__sweep__', { queue_settled: false }, 'dismiss')
+        error.value = 'The sweep outcome is unconfirmed; inspect all workspaces before retrying.'
+        return
+      }
       await fetch({ force: true })
       invalidateHistory()
     } catch (e) {
+      const payload = (e as { payload?: ProposalAcceptRefusal } | null)?.payload
+      rememberPartial('__sweep__', payload?.queue_settled === false ? payload : { queue_settled: false }, 'dismiss')
       error.value = e instanceof Error ? e.message : 'Dismiss failed'
     } finally {
       setBusy(key, false)
@@ -776,9 +1344,15 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
-    previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
-    receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
+    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded,
+    act: (...args: Parameters<typeof act>) => withMutationLock(() => act(...args), { ok: false, error: 'Proposal safety lock unavailable or busy.' }),
+    acceptSkill: (...args: Parameters<typeof acceptSkill>) => withMutationLock(() => acceptSkill(...args), { ok: false, error: 'Proposal safety lock unavailable or busy.' }),
+    batch: (...args: Parameters<typeof batch>) => withMutationLock(() => batch(...args), undefined),
+    dismissOlderThan: (...args: Parameters<typeof dismissOlderThan>) => withMutationLock(() => dismissOlderThan(...args), undefined),
+    previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary, lastBatchResults, partialWarnings, rememberPartial,
+    acknowledgePartial: (id: string) => withMutationLock(() => acknowledgePartialOwned(id), undefined, true), canAct, hasStoredIntent, intentStorageUnavailable, intentLockError,
+    receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt,
+    undoReceipt: (...args: Parameters<typeof undoReceipt>) => withMutationLock(() => undoReceipt(...args), { ok: false, error: 'Proposal safety lock unavailable or busy.' }),
     kindFilter, decideFilter, search, selected, revealedRowId, revealRow,
     scopedRows, visibleRows, kindCounts, needsYouCount, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,

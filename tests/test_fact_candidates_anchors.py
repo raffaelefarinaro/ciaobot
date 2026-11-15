@@ -26,7 +26,7 @@ What is pinned here:
 
 from __future__ import annotations
 
-import asyncio
+import pytest
 import json
 from datetime import date
 from pathlib import Path
@@ -296,21 +296,25 @@ def test_an_accepted_import_stamps_the_anchor_on_its_receipt(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.parametrize("batch", [False, True])
 def test_the_accept_route_hands_the_queue_tags_anchor_to_the_receipt(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: Any, batch: bool
 ) -> None:
     """The call site, not just the function: a real queue row reaches the receipt.
 
     ``accept_region_fact`` doing the right thing with a tag it was handed is half
     the promise; the other half is the PWA handing it over. This drives
-    ``proposal_service._promote_region_row`` — the helper behind the accept
-    button — with the row ``list_proposals`` returns for an imported bullet, and
+    the actual single and batch routes with an imported bullet, and
     reads the committed receipt. Dropping the ``source_section=`` argument at
     that call site is what made the field dead where it mattered, and only this
     test fails when it happens again.
     """
     from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
-    from ciao.web import proposal_service
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from ciao.web.routes_api import list_proposals, proposal_action, proposals_batch
+    from ciao import memory_receipts
 
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
@@ -326,6 +330,11 @@ def test_the_accept_route_hands_the_queue_tags_anchor_to_the_receipt(
     )
     vault = config.workspace_vault_root("personal")
     (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    app = Starlette(routes=[Route("/api/proposals", list_proposals, methods=["GET"]),
+                            Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
+                            Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"])])
+    app.state.config = config
+    client = TestClient(app)
 
     for bullet, expect in (
         (
@@ -337,14 +346,12 @@ def test_the_accept_route_hands_the_queue_tags_anchor_to_the_receipt(
     ):
         queue = vault / QUEUE
         queue.write_text(bullet + "\n", encoding="utf-8")
-        row = dict(mp.list_proposals(queue)[0])
-        row["workspace"] = "personal"
-
-        outcome = asyncio.run(proposal_service._promote_region_row(config, row))
-
-        assert outcome.ok, outcome.as_dict()
+        row = next(item for item in client.get("/api/proposals").json()["rows"] if item["kind"] == "memory")
+        response = (client.post("/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}) if batch
+                    else client.post(f"/api/proposals/{row['id']}/accept"))
+        assert response.status_code == 200, response.json()
         journal = vault / "Workspace" / "Memory-Receipts.jsonl"
-        committed = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+        committed = [item for item in memory_receipts.read_receipts(journal) if item.get("kind") == "region_apply"][-1]
         assert committed["provenance"]["source_anchors"] == expect, bullet
 
 

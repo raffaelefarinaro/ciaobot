@@ -96,7 +96,13 @@ function receiptError(row: ProposalHistoryRow): string {
  * because restoring the before image would delete an unrelated later fact. */
 async function undoChange(row: ProposalHistoryRow) {
   if (!row.change?.undoable) return
-  await store.undoReceipt(row.change.receipt_id, row.workspace)
+  const result = await store.undoReceipt(row.change.receipt_id, row.workspace)
+  if (!result.ok && result.error) {
+    store.receiptErrors = {
+      ...store.receiptErrors,
+      [store.receiptKey(row.change.receipt_id, row.workspace)]: result.error,
+    }
+  }
 }
 
 /** Open the archive this fact came from. Only linked when the server could
@@ -252,6 +258,18 @@ const filtersHideEverything = computed(
 
 <template>
   <div class="ph-list">
+    <div v-if="store.intentLockError" class="hint hint--warn" role="alert">{{ store.intentLockError }}</div>
+    <div v-if="store.intentStorageUnavailable" class="hint hint--warn" role="alert">
+      Proposal safety storage cannot be verified. Undo is blocked; inspect browser storage before retrying.
+    </div>
+    <div v-for="warning in Object.values(store.partialWarnings)" :key="warning.id" class="hint hint--warn" role="alert">
+      <strong>Settlement needs review</strong>
+      <p>Workspace: {{ warning.workspace || 'Install-wide or not reported' }} · {{ warning.text }}</p>
+      <p v-if="warning.target">Move target: {{ warning.target }}</p>
+      <p v-if="warning.queueReceiptId">Receipt: {{ warning.queueReceiptId }}</p>
+      <p>Inspect the receipt, queue and destination before retrying.</p>
+      <button type="button" class="btn-small btn-chip" @click="store.acknowledgePartial(warning.id)">I've inspected this</button>
+    </div>
     <p class="ph-hint">
       Decisions already made: what you accepted or dismissed, what the nightly
       agent filed, and what archiving added — or recognized as already known —
@@ -493,7 +511,7 @@ const filtersHideEverything = computed(
                       v-if="receiptFor(row)!.undoable"
                       type="button"
                       class="btn-small btn-chip"
-                      :disabled="store.isBusy(row.change.receipt_id)"
+                      :disabled="store.isBusy(row.change.receipt_id) || Object.keys(store.partialWarnings).length > 0 || !store.canAct(`__undo__:${row.change.receipt_id}`)"
                       @click="undoChange(row)"
                     >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'undo this change' }}</button>
                     <span v-else-if="receiptFor(row)!.reason" class="ph-change-none">{{ receiptFor(row)!.reason }}.</span>

@@ -9974,6 +9974,32 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
 
 
 async def memory_receipt_undo(request: Request) -> JSONResponse:
+    """Optionally retain a receipt undo against its resolved workspace."""
+    token = request.headers.get("X-Ciao-Proposal-Reservation")
+    if token is None:
+        return await _memory_receipt_undo(request)
+    from ciao.web.proposal_reservations import ReservationAdmissionError, resolve_receipt_workspace, validate_scope
+    rid = request.path_params["id"]
+    requested = request.query_params.get("workspace", "").strip()
+    actual = await asyncio.to_thread(resolve_receipt_workspace, request.app.state.config, rid, requested)
+    if actual is None:
+        return JSONResponse({"error": "receipt unavailable"}, status_code=404)
+    try:
+        scope = validate_scope({"kind": "undo", "workspace": actual, "targets": [rid]},
+                               set(request.app.state.config.workspace_names()))
+    except ValueError:
+        return JSONResponse({"error": "invalid receipt scope"}, status_code=409)
+    registry = getattr(request.app.state, "proposal_reservations", None)
+    if registry is None:
+        return JSONResponse({"error": "reservation registry unavailable"}, status_code=503)
+    try:
+        result: JSONResponse = await registry.run(token, scope, lambda: _memory_receipt_undo(request, scope))
+        return result
+    except ReservationAdmissionError:
+        return JSONResponse({"error": "reservation unavailable or scope mismatch"}, status_code=409)
+
+
+async def _memory_receipt_undo(request: Request, reserved_scope: Any = None) -> JSONResponse:
     """Reverse one applied, conflict-free receipt.
 
     Refuses (409) when the destination changed since the operation — undo would
@@ -9992,6 +10018,12 @@ async def memory_receipt_undo(request: Request) -> JSONResponse:
     config = request.app.state.config
     rid = request.path_params["id"]
     workspace = request.query_params.get("workspace", "").strip()
+    if reserved_scope is not None:
+        from ciao.web.proposal_reservations import resolve_receipt_workspace
+        actual = await asyncio.to_thread(resolve_receipt_workspace, config, rid, workspace)
+        if actual is None or actual != reserved_scope.workspace or reserved_scope.kind != "undo" or reserved_scope.targets != (rid,):
+            return JSONResponse({"error": "receipt scope changed before undo"}, status_code=409)
+        workspace = actual
     try:
         vault = Path(config.workspace_vault_root(workspace)) if workspace else None
     except (AttributeError, ValueError):
@@ -10029,6 +10061,27 @@ async def memory_receipt_undo(request: Request) -> JSONResponse:
 
 
 async def dismiss_older_than(request: Request) -> JSONResponse:
+    """Optionally reserve a sweep over the server's current workspace snapshot."""
+    token = request.headers.get("X-Ciao-Proposal-Reservation")
+    if token is None:
+        return await _dismiss_older_than(request)
+    from ciao.web.proposal_reservations import ReservationAdmissionError, capture_sweep_snapshot
+
+    raw = request.query_params.get("date", "")
+    registry = getattr(request.app.state, "proposal_reservations", None)
+    if registry is None:
+        return JSONResponse({"error": "reservation registry unavailable"}, status_code=503)
+    try:
+        result: JSONResponse = await registry.run_sweep(
+            token, raw, lambda scope: _dismiss_older_than(request, scope),
+            lambda: capture_sweep_snapshot(request.app.state.config),
+        )
+        return result
+    except (ReservationAdmissionError, OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return JSONResponse({"error": "reservation unavailable or scope mismatch"}, status_code=409)
+
+
+async def _dismiss_older_than(request: Request, reserved_scope: Any = None) -> JSONResponse:
     """Atomically drop every queued row dated before a cutoff.
 
     A July proposal about a forgotten chat is not worth promoting; this clears
@@ -10043,8 +10096,23 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
     removed = 0
-    for workspace in config.workspace_names():
-        queue = proposal_service._proposals_file(config, workspace)
+    if reserved_scope is not None:
+        from ciao.web.proposal_reservations import capture_sweep_snapshot
+        targets = reserved_scope.sweep_snapshot
+    else:
+        targets = tuple((ws, str(Path(config.workspace_vault_root(ws)).resolve()), "", 0, 0)
+                        for ws in config.workspace_names())
+    for workspace, vault_path, queue_path, _device, _inode in targets:
+        if reserved_scope is not None:
+            try:
+                unchanged = await asyncio.to_thread(capture_sweep_snapshot, config) == targets
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                unchanged = False
+            if not unchanged:
+                return JSONResponse({"error": "sweep workspace scope changed", "removed": removed,
+                                     "queue_settled": False}, status_code=409 if not removed else 503)
+        vault = Path(vault_path)
+        queue = Path(queue_path) if reserved_scope is not None else vault.joinpath(*proposal_service._PROPOSALS_REL)
         if not queue.is_file():
             continue
         # Read, classify and rewrite under the queue lock, off the event loop:
@@ -10053,14 +10121,24 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
         # WebSocket for the wait.
         try:
             result = await asyncio.to_thread(
-                proposal_service._sweep_queue_file, queue, cutoff, config, workspace
+                proposal_service._sweep_queue_file, queue, cutoff, vault, workspace
             )
-        except QueueReceiptUnavailable as exc:
+        except proposal_service.SweepSettlementIncomplete as exc:
             return JSONResponse(
                 {
-                    "error": "the memory receipt journal is unavailable; "
-                    "no proposals were removed",
-                    "detail": str(exc),
+                    "error": "The sweep queue settlement could not be confirmed; inspect before retrying.",
+                    "removed": removed + exc.removed, "workspace": workspace,
+                    "queue_settled": False, "queue_state": exc.queue_state,
+                    "queue_receipt_confirmed": False,
+                },
+                status_code=503,
+            )
+        except (QueueReceiptUnavailable, QueueLockError, OSError) as exc:
+            return JSONResponse(
+                {
+                    "error": "The sweep could not be confirmed; inspect affected queues and receipts before retrying.",
+                    "detail": str(exc), "removed": removed, "workspace": workspace,
+                    "queue_settled": False, "queue_state": "unknown",
                 },
                 status_code=503,
             )
@@ -10073,19 +10151,82 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                 # history, a curator pass that re-reads the same transcript
                 # re-files the fact the operator just let expire. Same handler
                 # as an explicit dismiss, so both land in both ledgers.
-                proposal_actions.record_decision(
-                    queue,
-                    action="dismiss",
-                    text=swept_text,
-                    kind=swept_kind,
-                    via="pwa",
-                    source=swept_source,
-                    outcome="swept",
-                )
+                try:
+                    await asyncio.to_thread(
+                        proposal_actions.record_decision,
+                        queue,
+                        action="dismiss",
+                        text=swept_text,
+                        kind=swept_kind,
+                        via="pwa",
+                        source=swept_source,
+                        outcome="swept",
+                    )
+                except (OSError, ValueError, QueueLockError) as exc:
+                    return JSONResponse(
+                        {"error": "A queue was rewritten, but decision recording could not be confirmed; "
+                                  "inspect before retrying the sweep.",
+                         "detail": str(exc), "removed": removed, "workspace": workspace,
+                         "queue_settled": False, "queue_state": "replaced", "decision_confirmed": False},
+                        status_code=503,
+                    )
     return JSONResponse({"ok": True, "removed": removed})
 
 
 async def proposals_batch(request: Request) -> JSONResponse:
+    """Optionally admit a bounded batch reservation before any batch effects."""
+    token = request.headers.get("X-Ciao-Proposal-Reservation")
+    if token is None:
+        return await _proposals_batch(request)
+    from ciao.web.proposal_reservations import ReservationAdmissionError
+
+    await request.body()
+    try:
+        body = await request.json()
+        action = body.get("action") if isinstance(body, dict) else None
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if action not in {"accept", "dismiss"} or not isinstance(ids, list) or not ids:
+            raise ValueError("invalid batch")
+        if len(ids) > 200 or any(not isinstance(pid, str) or not pid or pid.strip() != pid for pid in ids):
+            raise ValueError("invalid batch ids")
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate batch ids")
+        resolved, error = await asyncio.to_thread(proposal_service._resolve_batch, request.app.state.config, ids)
+        if error or resolved is None:
+            return JSONResponse({"error": "batch proposal not available"}, status_code=404)
+    except (ValueError, TypeError, KeyError):
+        return JSONResponse({"error": "invalid batch reservation scope"}, status_code=400)
+    try:
+        scope = _batch_reservation_scope(request, body, resolved)
+    except (ValueError, TypeError, KeyError):
+        return JSONResponse({"error": "batch scope unavailable or changed"}, status_code=409)
+    registry = getattr(request.app.state, "proposal_reservations", None)
+    if registry is None:
+        return JSONResponse({"error": "reservation registry unavailable"}, status_code=503)
+    try:
+        result: JSONResponse = await registry.run(token, scope, lambda: _proposals_batch(request, scope))
+        return result
+    except ReservationAdmissionError:
+        return JSONResponse({"error": "reservation unavailable or scope mismatch"}, status_code=409)
+
+
+def _batch_reservation_scope(request: Request, body: dict[str, Any], resolved: list[dict[str, Any]]) -> Any:
+    from ciao.web.proposal_reservations import batch_destinations, validate_scope
+    workspace = body.get("workspace", "")
+    if not isinstance(workspace, str) or workspace.strip() != workspace:
+        raise ValueError("invalid target workspace")
+    for ctx in resolved:
+        if ctx.get("workspace") != ctx.get("row", {}).get("workspace"):
+            raise ValueError("inconsistent workspace")
+    workspaces = set(request.app.state.config.workspace_names())
+    return validate_scope({
+        "kind": f"batch_{body['action']}", "workspace": workspace, "targets": body["ids"],
+        "workspaces": sorted({ctx["workspace"] for ctx in resolved}),
+        **({"destinations": batch_destinations(resolved, workspace, workspaces)} if body["action"] == "accept" else {}),
+    }, workspaces)
+
+
+async def _proposals_batch(request: Request, reserved_scope: Any = None) -> JSONResponse:
     """Accept or dismiss a set of proposals atomically.
 
     Body: ``{"action": "accept"|"dismiss", "ids": [...]}``. Every id must
@@ -10105,6 +10246,8 @@ async def proposals_batch(request: Request) -> JSONResponse:
     if action not in {"accept", "dismiss"} or not isinstance(raw_ids, list) or not raw_ids:
         return JSONResponse({"error": "action must be accept|dismiss and ids[] is required"}, status_code=400)
     ids = [str(pid).strip() for pid in raw_ids]
+    if len(ids) != len(set(ids)):
+        return JSONResponse({"error": "ids must be unique"}, status_code=400)
     requested_workspace = str(body.get("workspace", "") or "").strip()
     # Per-row revisions from the review cards the operator actually read, the
     # same contract the single-row accept uses. A row whose destination moved
@@ -10121,7 +10264,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
         }
     resolved, error = proposal_service._resolve_batch(config, ids)
     if error or resolved is None:
-        return JSONResponse({"error": error}, status_code=404)
+        return JSONResponse({"error": error, **({"ids": list(reserved_scope.targets), "no_effect": True}
+                                               if reserved_scope is not None else {})}, status_code=404)
+    if reserved_scope is not None:
+        try:
+            if _batch_reservation_scope(request, body, resolved) != reserved_scope:
+                return JSONResponse({"error": "batch scope changed before mutation",
+                                     "ids": list(reserved_scope.targets), "no_effect": True}, status_code=409)
+        except (ValueError, TypeError, KeyError):
+            return JSONResponse({"error": "batch scope changed before mutation",
+                                 "ids": list(reserved_scope.targets), "no_effect": True}, status_code=409)
 
     # An accept mutates every destination first - region writes, project-doc
     # folds, people notes, learnings counts - and only then rewrites the queue,
@@ -10168,64 +10320,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     {
                         "error": "the memory receipt journal is unavailable; "
                         "no proposals were accepted",
+                        "no_effect": True,
+                        "ids": ids,
                     },
                     status_code=503,
                 )
 
-        # Re-home rows are MOVES, so they are handled before the queue-file grouping
-        # too, and one at a time: each move rewrites references across both vaults, so
-        # the second move has to see what the first one wrote. Off the event loop for
-        # the same reason as the single-row path — a sweep per row is real work, and a
-        # cancelled handler leaves notes moved with their rows still queued.
-        move_rows = [
-            ctx for ctx in resolved
-            if action == "accept" and ctx["row"].get("kind") == "rehome"
-        ]
-        results_moves: list[dict[str, Any]] = []
-        moved_ids: set[str] = set()
-        moved_destinations: dict[str, str] = {}
-        for ctx in move_rows:
-            row = ctx["row"]
-            target, target_error = proposal_service._rehome_target(row, requested_workspace)
-            if target_error:
-                results_moves.append(proposal_actions.ProposalActionResult(
-                    id=row["id"], action="move_file", dismissed=False,
-                    error=target_error,
-                ).as_dict())
-                continue
-            outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
-            if not outcome.get("ok"):
-                results_moves.append(proposal_actions.ProposalActionResult(
-                    id=row["id"], action="move_file", dismissed=False,
-                    error=outcome["error"],
-                ).as_dict())
-                continue
-            moved_ids.add(row["id"])
-            moved_destinations[row["id"]] = str(outcome.get("destination", ""))
-            results_moves.append(proposal_actions.ProposalActionResult(
-                id=row["id"], action="move_file", dismissed=True,
-                destination=str(outcome.get("destination", "")),
-                already_moved=bool(outcome.get("already_moved", False)),
-            ).as_dict())
-        # Only the rows whose move landed may have their bullet dropped; a failed move
-        # keeps its row so the note is not left somewhere nobody asked for with
-        # nothing recording it.
-        resolved = [
-            ctx for ctx in resolved
-            if ctx not in move_rows or ctx["row"]["id"] in moved_ids
-        ]
-
         # Skill proposals are whole files, so they are handled before the grouping:
         # the grouping below rewrites a queue file by dropping bullet lines, and a
         # skill row has no line in any queue.
-        results = list(results_moves)
+        results: list[dict[str, Any]] = []
         for contested_id in contested:
-            results.append(proposal_actions.ProposalActionResult(
+            contested_result = proposal_actions.ProposalActionResult(
                 id=contested_id,
                 action=action,
                 dismissed=False,
                 error="this proposal is already being resolved",
-            ).as_dict())
+            ).as_dict()
+            contested_result["no_effect"] = True
+            results.append(contested_result)
         file_rows = [ctx for ctx in resolved if ctx.get("file")]
         resolved = [ctx for ctx in resolved if not ctx.get("file")]
         for ctx in file_rows:
@@ -10240,7 +10353,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     error="a skill proposal is a file; there is nothing to promote",
                 ).as_dict())
                 continue
-            outcome = proposal_service._dismiss_skill_proposal(ctx)
+            outcome = await asyncio.to_thread(proposal_service._dismiss_skill_proposal, ctx)
             # The settlement records the decision itself, in the sidecar under
             # the proposal's own `skill:<name>` key. A second write here, keyed
             # by the bare skill name, is what used to file a skill decision as if
@@ -10255,6 +10368,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
 
         # Group by file so each affected file is rewritten exactly once.
         by_file: dict[str, dict[str, Any]] = {}
+        fold_images = {ctx["row"]["id"]: ctx.get("queue_image", "") for ctx in resolved}
         for ctx in resolved:
             entry = by_file.setdefault(ctx["path"], {"workspace": ctx["workspace"], "lines": set(), "rows": []})
             entry["lines"].add(ctx["line"])
@@ -10267,12 +10381,39 @@ async def proposals_batch(request: Request) -> JSONResponse:
         self_request_removed: set[str] = set()
         recorded: set[str] = set()
 
-        for path, entry in by_file.items():
+        work: list[tuple[str, dict[str, Any]]] = []
+        expected_images: dict[str, str] = {}
+        for path, group in by_file.items():
+            sequential = action == "accept" and any(
+                proposal_kinds.accept_for(row["kind"]).action in {"fold_doc", "write_people_note"}
+                for row in group["rows"]
+            )
+            if sequential:
+                expected_images[path] = fold_images[group["rows"][0]["id"]]
+                for selected_row in sorted(group["rows"], key=lambda item: int(item["line"]), reverse=True):
+                    work.append((path, {"workspace": group["workspace"], "rows": [selected_row]}))
+            else:
+                work.append((path, group))
+
+        for path, entry in work:
             queue = Path(path)
+            if path in expected_images:
+                for selected_row in entry["rows"]:
+                    fold_images[selected_row["id"]] = expected_images[path]
             # Write every promotion BEFORE dropping any bullet, and only drop the
             # ones that landed. A batch that removed the lines first would lose every
             # fact whose region was over cap, silently and in bulk.
             promoted: dict[str, proposal_service.AcceptOutcome] = {}
+            completed_effects: dict[str, dict[str, Any]] = {}
+            queue_failure_state = "unknown"
+            queue_failure = False
+            decisions_written: set[str] = set()
+            decisions_unconfirmed: set[str] = set()
+            decision_queue_receipt = ""
+            linked_by_id: dict[str, Any] = {}
+            fold_plans: dict[str, Any] = {}
+            move_targets: dict[str, str] = {}
+            no_effect: set[str] = set()
             keep_lines: set[int] = set()
             if action == "dismiss":
                 # Same rule as the single-row route, and for the same reason: the
@@ -10285,32 +10426,13 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # bullet itself, so its line is kept out of the rewrite below.
                         keep_lines.add(int(row["line"]))
                         refusal = await asyncio.to_thread(
-                            proposal_service._settle_skill_draft, config, row
-                        )
-                    elif row.get("kind") not in {"category", "note_edit"}:
-                        continue
-                    elif row["kind"] == "category":
-                        refusal = await asyncio.to_thread(
-                            proposal_service.decline_category_row, config, row
+                            proposal_service._settle_selected_skill_draft,
+                            config, row, queue, fold_images[row["id"]]
                         )
                     else:
-                        # A settled note edit, not a permanent one: the check's
-                        # cooldown is what holds the note, and it expires. See
-                        # `ciao.note_edit_proposals.settle_note_edit`.
-                        refusal = await asyncio.to_thread(
-                            proposal_service._settle_note_edit,
-                            config,
-                            row,
-                            accepted=False,
-                        )
+                        continue
                     if refusal:
-                        return JSONResponse(
-                            {
-                                "error": refusal,
-                                "ids": sorted({ctx["row"]["id"] for ctx in resolved}),
-                            },
-                            status_code=409,
-                        )
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(ok=False, error=refusal)
             if action == "accept":
                 # The claim above only covers this process. Another resolver
                 # (the CLI, the undo path, a second server) may have taken a
@@ -10329,10 +10451,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 for row in entry["rows"]:
                     accept = proposal_kinds.accept_for(row["kind"])
                     if accept.action == "move_file":
-                        # Performed above the grouping, one at a time off the loop;
-                        # nothing to write here, only result shaping below.
-                        continue
+                        target, target_error = proposal_service._rehome_target(row, requested_workspace)
+                        if target_error:
+                            no_effect.add(row["id"])
+                            promoted[row["id"]] = proposal_service.AcceptOutcome(ok=False, error=target_error)
+                            keep_lines.add(int(row["line"]))
+                            continue
+                        move_targets[row["id"]] = target
                     if int(row["line"]) not in present:
+                        no_effect.add(row["id"])
                         promoted[row["id"]] = proposal_service.AcceptOutcome(
                             ok=False, error="this proposal was already resolved"
                         )
@@ -10340,6 +10467,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         continue
                     expected = revisions.get(row["id"], "")
                     linked = _linked_repos_for(request, row)
+                    linked_by_id[row["id"]] = linked
                     if expected:
                         current = await asyncio.to_thread(
                             functools.partial(
@@ -10350,6 +10478,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             )
                         )
                         if current and current != expected:
+                            no_effect.add(row["id"])
                             promoted[row["id"]] = proposal_service.AcceptOutcome(
                                 ok=False,
                                 conflict=True,
@@ -10359,35 +10488,34 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             keep_lines.add(int(row["line"]))
                             continue
                     promotion: proposal_service.AcceptOutcome
-                    if accept.action == "edit_region":
+                    if accept.action == "move_file":
+                        promotion = proposal_service.AcceptOutcome(ok=True)
+                    elif accept.action == "edit_region":
                         # No reconcile in the batch path: it is one model call
                         # per row, and a large selection would spend a timeout
                         # on each. A row that needs it is retried singly.
-                        promotion = await proposal_service._promote_region_row(
-                            config, row
-                        )
+                        promotion = proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "fold_doc":
-                        # A fold is a model call, so a large selection folds
-                        # sequentially; write-then-dismiss still holds per row.
-                        promotion = await proposal_service._accept_project_row(config, row)
+                        plan, fold_refusal = await proposal_service._prepare_proposal_fold(config, row, person=False)
+                        if plan is not None:
+                            fold_plans[row["id"]] = plan
+                        promotion = fold_refusal or proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "write_people_note":
-                        promotion = await proposal_service._accept_people_row(config, row)
+                        plan, fold_refusal = await proposal_service._prepare_proposal_fold(config, row, person=True)
+                        if plan is not None:
+                            fold_plans[row["id"]] = plan
+                        promotion = fold_refusal or proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "append_learnings":
-                        promotion = proposal_service._accept_learnings_row(config, row)
+                        promotion = proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "append_repo_doc":
-                        promotion = await asyncio.to_thread(
-                            proposal_service._accept_repo_row, config, row, linked
-                        )
+                        promotion = proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "add_category":
                         # A registry the validator refuses (a folder another
                         # category already claims) is the owner's problem to fix,
                         # not a transient failure, so it is reported as a
                         # refusal with the reason rather than retried. The row
                         # stays queued, like every other failure in this loop.
-                        try:
-                            promotion = proposal_service._accept_category_row(config, row)
-                        except entity_types.EntityTypeFileError as exc:
-                            promotion = proposal_service.AcceptOutcome(ok=False, error=str(exc))
+                        promotion = proposal_service.AcceptOutcome(ok=True)
                     elif accept.action == "note_edit":
                         # An explicit branch, not a fall-through: this accept
                         # rewrites one note through the revision-checked
@@ -10396,9 +10524,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # it reported "no destination yet", which is the
                         # `[review]` answer and describes nothing about a
                         # proposal whose destination is the note the row names.
-                        promotion = await asyncio.to_thread(
-                            proposal_service._accept_note_edit_row, config, row
-                        )
+                        promotion = proposal_service.AcceptOutcome(ok=True)
                     else:
                         # route_manually: nothing to perform, and the row stays.
                         promotion = proposal_service.AcceptOutcome(
@@ -10406,6 +10532,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         )
                     promoted[row["id"]] = promotion
                     if not promotion.ok:
+                        no_effect.add(row["id"])
                         keep_lines.add(int(row["line"]))
 
             # The batch is one atomic file rewrite: a single transaction-level
@@ -10429,6 +10556,111 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 for row in entry["rows"]
             ]
             try:
+                def commit_batch_region(row: dict[str, Any]) -> bool:
+                    if path in expected_images and queue.read_bytes().decode("utf-8") != expected_images[path]:
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(
+                            ok=False, conflict=True, error="the selected queue changed"
+                        )
+                        return False
+                    if action == "dismiss":
+                        if row.get("kind") == "category":
+                            refusal = proposal_service.decline_category_row(config, row)
+                        elif row.get("kind") == "note_edit":
+                            refusal = proposal_service._settle_note_edit(config, row, accepted=False)
+                        else:
+                            return True
+                        if refusal:
+                            promoted[row["id"]] = proposal_service.AcceptOutcome(ok=False, error=refusal)
+                            return False
+                        return True
+                    effect = proposal_kinds.accept_for(row["kind"]).action
+                    if action != "accept" or effect not in {"edit_region", "append_learnings", "append_repo_doc", "add_category", "note_edit", "fold_doc", "write_people_note", "move_file"}:
+                        return True
+                    if effect in {"fold_doc", "write_people_note", "move_file"} and not proposal_service._fold_selection_unambiguous(
+                        queue, entry["workspace"], fold_images[row["id"]], row
+                    ):
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(
+                            ok=False, conflict=True, error="duplicate proposal identity changed; reload the queue",
+                        )
+                        return False
+                    expected = revisions.get(row["id"], "")
+                    if expected:
+                        current = proposal_service.destination_revision(
+                            config, row, linked_repos=linked_by_id.get(row["id"], [])
+                        )
+                        if current and current != expected:
+                            no_effect.add(row["id"])
+                            promoted[row["id"]] = proposal_service.AcceptOutcome(
+                                ok=False, conflict=True,
+                                error="the destination changed since this preview; nothing was written",
+                            )
+                            return False
+                    if effect == "edit_region":
+                        outcome = proposal_service._commit_region_row(config, row, None)
+                    elif effect == "append_learnings":
+                        outcome = proposal_service._accept_learnings_row(config, row)
+                    elif effect == "append_repo_doc":
+                        outcome = proposal_service._accept_repo_row(config, row, linked_by_id.get(row["id"], []))
+                    elif effect == "add_category":
+                        try:
+                            outcome = proposal_service._accept_category_row(config, row)
+                        except entity_types.EntityTypeFileError as exc:
+                            outcome = proposal_service.AcceptOutcome(ok=False, error=str(exc))
+                    elif effect == "note_edit":
+                        outcome = proposal_service._accept_note_edit_row(config, row)
+                    elif effect == "move_file":
+                        move = proposal_service._perform_rehome_move(config, row, move_targets[row["id"]])
+                        outcome = proposal_service.AcceptOutcome(
+                            ok=bool(move.get("ok")), destination=str(move.get("destination", "")),
+                            error=str(move.get("error", "")) or None, conflict=bool(move.get("conflict")),
+                            already_moved=move.get("already_moved"),
+                        )
+                    else:
+                        outcome = proposal_service._commit_proposal_fold(fold_plans[row["id"]])
+                    promoted[row["id"]] = outcome
+                    if outcome.ok:
+                        completed_effects[row["id"]] = _known_destination_effect(effect, row, outcome)
+                    return bool(outcome.ok)
+
+                def record_batch_regions(removed: set[str], queue_receipt_id: str) -> None:
+                    for row in entry["rows"]:
+                        if action == "dismiss" and row["id"] in removed:
+                            proposal_actions.record_decision(
+                                queue, action="dismiss", text=str(row.get("text") or ""),
+                                kind=str(row.get("kind") or ""), via="pwa",
+                                source=str(row.get("source") or ""), proposal_id=row["id"],
+                                queue_receipt_id=queue_receipt_id,
+                            )
+                            decisions_written.add(row["id"])
+                            continue
+                        effect = proposal_kinds.accept_for(row["kind"]).action
+                        if (action != "accept" or row["id"] not in removed or
+                                effect not in {"edit_region", "append_learnings", "append_repo_doc", "add_category", "note_edit", "fold_doc", "write_people_note", "move_file"}):
+                            continue
+                        outcome = promoted[row["id"]]
+                        proposal_actions.record_decision(
+                            queue, action="accept", text=str(row.get("text") or ""),
+                            kind=str(row.get("kind") or ""), via="pwa",
+                            source=str(row.get("source") or ""),
+                            destination=proposal_service._decision_destination(effect, row, outcome),
+                            outcome="duplicate" if outcome.duplicate else "written",
+                            proposal_id=row["id"], receipt_id=outcome.receipt_id or "",
+                            queue_receipt_id=queue_receipt_id,
+                        )
+                        decisions_written.add(row["id"])
+
+                def batch_decision(row: dict[str, Any]) -> dict[str, str]:
+                    metadata = {"decision_via": "pwa", "decision_reason": ""}
+                    if action == "accept":
+                        outcome = promoted[row["id"]]
+                        effect = proposal_kinds.accept_for(row["kind"]).action
+                        metadata.update(
+                            decision_destination=proposal_service._decision_destination(effect, row, outcome),
+                            decision_outcome="duplicate" if outcome.duplicate else "written",
+                            decision_receipt_id=outcome.receipt_id or "",
+                        )
+                    return metadata
+
                 removed_here = await asyncio.to_thread(
                     proposal_service._rewrite_queue_batch,
                     queue,
@@ -10437,17 +10669,57 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     removals,
                     entry["workspace"],
                     vault_for_receipt,
+                    before_remove=commit_batch_region,
+                    after_remove=record_batch_regions,
+                    original_image=fold_images[entry["rows"][0]["id"]],
+                    decision=batch_decision,
                 )
-            except QueueReceiptUnavailable as exc:
-                return JSONResponse(
-                    {
-                        "error": "the memory receipt journal is unavailable; "
-                        "no proposals were removed",
-                        "detail": str(exc),
-                    },
-                    status_code=503,
+            except proposal_service.QueueDecisionIncomplete as exc:
+                removed_here = exc.removed
+                decisions_unconfirmed = removed_here - decisions_written
+                decision_queue_receipt = exc.receipt_id
+            except (QueueReceiptUnavailable, proposal_service.QueueSettlementIncomplete) as exc:
+                queue_failure = True
+                if isinstance(exc, proposal_service.QueueSettlementIncomplete):
+                    queue_failure_state = exc.queue_state
+                settled_draft = action == "dismiss" and any(
+                    int(row["line"]) in keep_lines and row["id"] not in promoted
+                    for row in entry["rows"]
                 )
+                if (path not in expected_images and not completed_effects and not results and not settled_draft
+                        and not (action == "dismiss" and isinstance(exc, proposal_service.QueueSettlementIncomplete))):
+                    if isinstance(exc, proposal_service.QueueSettlementIncomplete):
+                        return JSONResponse(
+                            {"error": "queue settlement could not be confirmed; inspect the queue before retrying",
+                             "queue_state": exc.queue_state, "queue_receipt_confirmed": False},
+                            status_code=503,
+                        )
+                    return JSONResponse(
+                        {
+                            "error": "the memory receipt journal is unavailable; "
+                            "no proposals were removed",
+                            "detail": str(exc),
+                        },
+                        status_code=503,
+                    )
+                removed_here = set()
+                for selected_row in entry["rows"]:
+                    if (action == "dismiss" and int(selected_row["line"]) in keep_lines
+                            and selected_row["id"] not in promoted):
+                        continue
+                    effect = completed_effects.get(selected_row["id"])
+                    promoted[selected_row["id"]] = proposal_service.AcceptOutcome(
+                        ok=False,
+                        destination=str(effect["destination"]) if effect else None,
+                        error=_PARTIAL_SETTLEMENT_ERROR if effect else str(exc),
+                    )
+                    keep_lines.add(int(selected_row["line"]))
             self_request_removed.update(removed_here)
+            if path in expected_images and removed_here:
+                selected_row = entry["rows"][0]
+                lines = expected_images[path].splitlines()
+                del lines[int(selected_row["line"])]
+                expected_images[path] = "\n".join(lines).rstrip() + "\n"
             # Record THIS queue's outcomes immediately after its rewrite lands: a
             # later file failing to persist must not take already-persisted
             # resolutions out of the tally — their ids are gone, so a retry can
@@ -10458,6 +10730,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 if pid not in removed_here or pid in recorded:
                     continue
                 recorded.add(pid)
+                if action == "dismiss":
+                    continue
+                if action == "accept" and proposal_kinds.accept_for(row["kind"]).action in {"edit_region", "append_learnings", "append_repo_doc", "add_category", "note_edit", "fold_doc", "write_people_note", "move_file"}:
+                    continue
                 # Same contract as the single-row route, through the same
                 # handler: the decision's text must outlive the row or the
                 # nightly curator re-files it, and only the extraction kinds
@@ -10472,14 +10748,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 row_outcome = proposal_service.AcceptOutcome()
                 if action == "accept":
                     accept_here = proposal_kinds.accept_for(row["kind"])
-                    if accept_here.action == "move_file":
-                        # The move ran above the grouping; only where the note
-                        # landed matters to the decision record.
-                        row_outcome = proposal_service.AcceptOutcome(
-                            destination=moved_destinations.get(pid, "")
-                        )
-                    else:
-                        row_outcome = promoted.get(pid, proposal_service.AcceptOutcome())
+                    row_outcome = promoted.get(pid, proposal_service.AcceptOutcome())
                     destination = proposal_service._decision_destination(
                         accept_here.action, row, row_outcome
                     )
@@ -10507,6 +10776,12 @@ async def proposals_batch(request: Request) -> JSONResponse:
             for row in entry["rows"]:
                 if action == "accept":
                     accept = proposal_kinds.accept_for(row["kind"])
+                    if (row["id"] not in removed_here
+                            and int(row["line"]) not in keep_lines):
+                        promoted[row["id"]] = proposal_service.AcceptOutcome(
+                            ok=False, conflict=True,
+                            error="the selected proposal changed before removal",
+                        )
                     # An absent outcome means nothing was written here (a rehome
                     # move performed above the grouping), which is a success.
                     # `written` says what actually landed, which is not always
@@ -10517,7 +10792,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     # the row is still promotable, just not against the body
                     # the operator read, so the UI reopens its preview rather
                     # than reporting a permanent failure.
-                    results.append(proposal_actions.build_accept_result(
+                    result = proposal_actions.build_accept_result(
                         row["id"],
                         accept,
                         row,
@@ -10525,11 +10800,52 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             row["id"], proposal_service.AcceptOutcome()
                         ).as_dict(),
                         include_usage=False,
-                    ).as_dict())
+                    ).as_dict()
+                    if row["id"] in no_effect:
+                        result["no_effect"] = True
+                    if queue_failure and row["id"] not in removed_here:
+                        result["queue_state"] = queue_failure_state
+                        result["queue_receipt_confirmed"] = False
+                    if row["id"] in completed_effects and row["id"] not in removed_here:
+                        result["queue_settled"] = False
+                        result["queue_receipt_confirmed"] = False
+                        result["destination_effect"] = completed_effects[row["id"]]
+                        result["error"] = _PARTIAL_SETTLEMENT_ERROR
+                        result["queue_state"] = queue_failure_state
+                    if row["id"] in decisions_unconfirmed:
+                        result["queue_settled"] = False
+                        result["queue_state"] = "replaced"
+                        result["queue_receipt_confirmed"] = True
+                        result["decision_confirmed"] = False
+                        result["queue_receipt_id"] = decision_queue_receipt
+                        result["error"] = "The destination and queue operation completed, but decision recording could not be confirmed. Inspect before retrying; do not retry accept blindly."
+                        if row["id"] in completed_effects:
+                            result["destination_effect"] = completed_effects[row["id"]]
+                    results.append(result)
                 else:
-                    results.append(proposal_actions.ProposalActionResult(
-                        id=row["id"], action="dismiss", dismissed=True
-                    ).as_dict())
+                    settled_draft = int(row["line"]) in keep_lines and row["id"] not in promoted
+                    result = proposal_actions.ProposalActionResult(
+                        id=row["id"], action="dismiss", dismissed=row["id"] in removed_here or settled_draft,
+                        error=(promoted[row["id"]].error if row["id"] in promoted else
+                               "the selected proposal changed before removal" if row["id"] not in removed_here and not settled_draft else None),
+                    ).as_dict()
+                    if queue_failure and not settled_draft:
+                        result["queue_settled"] = False
+                        result["queue_state"] = queue_failure_state
+                        result["queue_receipt_confirmed"] = False
+                        result["error"] = (
+                            f"{result['error']} " if result.get("error") else ""
+                        ) + "Queue settlement could not be confirmed; inspect the queue and receipt before retrying dismissal."
+                    if row["id"] in decisions_unconfirmed:
+                        result["queue_settled"] = False
+                        result["queue_state"] = "replaced"
+                        result["queue_receipt_confirmed"] = True
+                        result["decision_confirmed"] = False
+                        result["queue_receipt_id"] = decision_queue_receipt
+                        result["error"] = "Queue removal completed, but decision recording could not be confirmed; inspect before retrying."
+                    results.append(result)
+        order = {pid: index for index, pid in enumerate(ids)}
+        results.sort(key=lambda result: order.get(result["id"], len(order)))
         return JSONResponse(
             {
                 "ok": True,
@@ -10538,6 +10854,23 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 "summary": _batch_summary(action, results),
             }
         )
+
+
+_PARTIAL_SETTLEMENT_ERROR = (
+    "The destination operation completed, but queue settlement could not be confirmed. "
+    "Inspect the destination and receipt before deciding what to do; do not retry accept blindly."
+)
+
+
+def _known_destination_effect(action: str, row: dict[str, Any], outcome: proposal_service.AcceptOutcome) -> dict[str, Any]:
+    """Only report outcomes returned by the destination owner in this request."""
+    effect: dict[str, Any] = {
+        "status": "already_present" if outcome.duplicate else "already_moved" if outcome.already_moved else "completed",
+        "destination": proposal_service._decision_destination(action, row, outcome),
+    }
+    if outcome.receipt_id:
+        effect["receipt_id"] = outcome.receipt_id
+    return effect
 
 
 def _batch_destination(result: dict[str, Any]) -> str:
@@ -10584,12 +10917,10 @@ def _batch_summary(action: str, results: list[dict[str, Any]]) -> list[dict[str,
             groups[destination] = group
             order.append(destination)
         group["total"] += 1
-        # A dismiss reports `dismissed`; an accept reports `promoted`, and a
-        # rehome move reports neither because the move happened before the
-        # grouping — `dismissed` is the only signal it leaves.
+        # A move is not a promotion; its resolved status is `dismissed`.
         succeeded = (
             bool(result.get("promoted"))
-            if "promoted" in result
+            if "promoted" in result and result.get("action") != "move_file"
             else bool(result.get("dismissed"))
         )
         if result.get("duplicate"):
@@ -10642,6 +10973,52 @@ def _accept_journals_writable(
 
 
 async def proposal_action(request: Request) -> JSONResponse:
+    """Optionally admit and retain a single proposal operation."""
+    token = request.headers.get("X-Ciao-Proposal-Reservation")
+    if token is None:
+        return await _proposal_action(request)
+
+    from ciao.web.proposal_reservations import ReservationAdmissionError
+
+    # Cache the body before the request task can disconnect.
+    await request.body()
+    action = request.path_params.get("action", "").strip()
+    pid = request.path_params["id"]
+    if action not in {"accept", "dismiss"}:
+        return JSONResponse({"error": "invalid reserved action"}, status_code=400)
+    _rows, by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, request.app.state.config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": "proposal not available"}, status_code=404)
+    if ctx.get("workspace") != ctx.get("row", {}).get("workspace"):
+        return JSONResponse({"error": "inconsistent proposal workspace"}, status_code=409)
+    try:
+        scope = _single_reservation_scope(request, ctx, action, pid)
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "invalid proposal scope"}, status_code=409)
+    registry = getattr(request.app.state, "proposal_reservations", None)
+    if registry is None:
+        return JSONResponse({"error": "reservation registry unavailable"}, status_code=503)
+    try:
+        result: JSONResponse = await registry.run(token, scope, lambda: _proposal_action(request, scope))
+        return result
+    except ReservationAdmissionError:
+        return JSONResponse({"error": "reservation unavailable or scope mismatch"}, status_code=409)
+
+
+def _single_reservation_scope(request: Request, ctx: dict[str, Any], action: str, pid: str) -> Any:
+    from ciao.web.proposal_reservations import validate_scope
+    workspaces = set(request.app.state.config.workspace_names())
+    value: dict[str, Any] = {"kind": f"row_{action}", "workspace": ctx["workspace"], "targets": [pid]}
+    if action == "accept" and ctx["row"].get("kind") == "rehome":
+        target, error = proposal_service._rehome_target(ctx["row"], request.query_params.get("workspace", "").strip())
+        if error or target not in workspaces or target == ctx["workspace"]:
+            raise ValueError("invalid re-home destination")
+        value["destination"] = target
+    return validate_scope(value, workspaces)
+
+
+async def _proposal_action(request: Request, reserved_scope: Any = None) -> JSONResponse:
     """Accept or dismiss exactly one proposal by its stable id.
 
     ``accept`` PERFORMS the promotion: a memory/profile row is written into that
@@ -10670,8 +11047,26 @@ async def proposal_action(request: Request) -> JSONResponse:
     _rows, by_id = proposal_service._scan_proposal_rows(config)
     ctx = by_id.get(pid)
     if ctx is None:
-        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+        return JSONResponse({"error": f"unknown proposal id: {pid}",
+                             **({"id": pid, "no_effect": True} if reserved_scope is not None else {})},
+                            status_code=404)
     action = request.path_params.get("action", "").strip()
+    if reserved_scope is not None and (
+        ctx.get("workspace") != reserved_scope.workspace
+        or ctx.get("row", {}).get("workspace") != reserved_scope.workspace
+        or reserved_scope.kind != f"row_{action}"
+        or reserved_scope.targets != (pid,)
+    ):
+        return JSONResponse({"error": "proposal scope changed before mutation", "id": pid, "no_effect": True},
+                            status_code=409)
+    if reserved_scope is not None:
+        try:
+            if _single_reservation_scope(request, ctx, action, pid) != reserved_scope:
+                return JSONResponse({"error": "proposal destination changed before mutation",
+                                     "id": pid, "no_effect": True}, status_code=409)
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "proposal destination unavailable", "id": pid, "no_effect": True},
+                                status_code=409)
     # A body is optional here and always has been; a client that sends none
     # (or sends something unparseable) gets the pre-preview behaviour rather
     # than a 400 for a field it never had to supply.
@@ -10699,34 +11094,13 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
 
-    if action == "dismiss" and row.get("kind") == "category":
-        # Recorded BEFORE the bullet is removed, because the row IS the proposal:
-        # once it is gone the vault still has the cluster, and the sidecar flag is
-        # the only thing that keeps the next pass from filing it again. A refusal
-        # that could not be written keeps its row.
-        decline_error = proposal_service.decline_category_row(config, row)
-        if decline_error:
-            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
-
-    if action == "dismiss" and row.get("kind") == "note_edit":
-        # The same rule, and for the same reason: the queue row IS the proposal,
-        # so the settlement has to be on record before the bullet goes. Without
-        # it the check would keep holding the note for a month with nothing in
-        # the queue to settle, and the sidecar would still read as pending. It is
-        # NOT a permanent refusal, though — the settled record leaves the check's
-        # own cooldown running, so an edited note is proposed again.
-        decline_error = await asyncio.to_thread(
-            proposal_service._settle_note_edit, config, row, accepted=False
-        )
-        if decline_error:
-            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
-
     if action == "dismiss" and proposal_service._is_skill_draft_row(config, row):
         # The same rule again: the draft's settlement is on record before anything
         # else. It removes its own bullet, so the line removal below must not run
         # for this row; by index it would take a different line.
         decline_error = await asyncio.to_thread(
-            proposal_service._settle_skill_draft, config, row, reason=reason
+            proposal_service._settle_selected_skill_draft,
+            config, row, Path(ctx["path"]), ctx["queue_image"], reason=reason
         )
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
@@ -10751,7 +11125,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 },
                 status_code=400,
             )
-        outcome = proposal_service._dismiss_skill_proposal(ctx)
+        outcome = await asyncio.to_thread(proposal_service._dismiss_skill_proposal, ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
         # The decision is already in the sidecar: the settlement wrote it there
@@ -10770,6 +11144,10 @@ async def proposal_action(request: Request) -> JSONResponse:
     # refusals below, the result builder and the decision record read one
     # shape. A dismiss promotes nothing and leaves it empty.
     promoted = proposal_service.AcceptOutcome()
+    region_commit: dict[str, Any] = {}
+    if action == "dismiss":
+        kind = str(row.get("kind") or "")
+        region_commit.update(row=row, action="dismiss_" + (kind if kind in {"category", "note_edit"} else "plain"))
     queue = Path(ctx["path"])
     # Claimed BEFORE the promotion and held until the queue rewrite has landed:
     # two tabs accepting the same row both promoted (a doc folded twice, a
@@ -10788,6 +11166,8 @@ async def proposal_action(request: Request) -> JSONResponse:
                         "error": "this proposal is already being resolved; "
                         "reload the queue to see the outcome",
                         "id": pid,
+                        "no_effect": True,
+                        "busy": True,
                     },
                     status_code=409,
                 )
@@ -10806,6 +11186,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                         "error": "the memory receipt journal is unavailable; "
                         "the proposal was not accepted",
                         "id": pid,
+                        "no_effect": True,
                     },
                     status_code=503,
                 )
@@ -10825,6 +11206,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                         "error": "this proposal was already resolved; "
                         "reload the queue to see the outcome",
                         "id": pid,
+                        **({"no_effect": True} if reserved_scope is not None else {}),
                     },
                     status_code=409,
                 )
@@ -10862,6 +11244,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                             "confirm again.",
                             "id": pid,
                             "conflict": True,
+                            "no_effect": True,
                             "preview": refreshed,
                         },
                         status_code=409,
@@ -10876,25 +11259,8 @@ async def proposal_action(request: Request) -> JSONResponse:
             if accept.action == "move_file":
                 target, error = proposal_service._rehome_target(row, request.query_params.get("workspace", "").strip())
                 if error:
-                    return JSONResponse({"error": error, "id": pid}, status_code=400)
-                # Off the event loop: the sweep reads and rewrites notes across both
-                # vaults, and doing that inline blocked the loop long enough for the
-                # request to time out — after the git mv and before the queue row was
-                # dropped, so the note moved and its row stayed.
-                outcome = await asyncio.to_thread(proposal_service._perform_rehome_move, config, row, target)
-                if not outcome.get("ok"):
-                    # Move-then-dismiss, the same order as a region write: the bullet
-                    # survives a failed move so the note is not silently left where it
-                    # was with nothing recording that it should not be.
-                    return JSONResponse(
-                        {"error": outcome["error"], "id": pid}, status_code=409
-                    )
-                # The move reports more than an accept does (the rewritten files,
-                # the mover's own result); what the response and the decision
-                # record read from it is where the note landed.
-                promoted = proposal_service.AcceptOutcome(
-                    ok=True, destination=str(outcome.get("destination", ""))
-                )
+                    return JSONResponse({"error": error, "id": pid, "no_effect": True}, status_code=400)
+                region_commit.update(row=row, action="move_file", target=target)
             elif accept.action == "edit_region":
                 # `?reconcile=1` re-runs the write-time reconcile against the
                 # region's current entries before writing, which is how a fact
@@ -10906,9 +11272,12 @@ async def proposal_action(request: Request) -> JSONResponse:
                     request.query_params.get("reconcile", "").strip().lower()
                     in {"1", "true", "yes"}
                 )
-                promoted = await proposal_service._promote_region_row(
+                decision, preparation_refusal = await proposal_service._prepare_region_row(
                     config, promote_row, reconcile=reconcile
                 )
+                promoted = preparation_refusal or proposal_service.AcceptOutcome(ok=True)
+                if preparation_refusal is None:
+                    region_commit.update(row=promote_row, decision=decision, action="edit_region")
                 if not promoted.ok:
                     # The bullet is untouched, so the fact is still queued and the
                     # operator can fix the cause (usually an over-cap region) and
@@ -10917,6 +11286,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                         "error": promoted.error or "could not write the region",
                         "id": pid,
                         "region": promoted.region or "",
+                        "no_effect": True,
                     }
                     if promoted.deferred:
                         # The one refusal another `?reconcile=1` can resolve, so
@@ -10930,57 +11300,32 @@ async def proposal_action(request: Request) -> JSONResponse:
                         refusal["competing"] = list(promoted.competing or ())
                     return JSONResponse(refusal, status_code=409)
             elif accept.action == "fold_doc":
-                promoted = await proposal_service._accept_project_row(config, promote_row)
-                if not promoted.ok:
+                plan, fold_refusal = await proposal_service._prepare_proposal_fold(config, promote_row, person=False)
+                if fold_refusal is not None:
                     return JSONResponse(
-                        {"error": promoted.error or "fold failed", "id": pid},
+                        {"error": fold_refusal.error or "fold failed", "id": pid, "no_effect": True},
                         status_code=409,
                     )
+                region_commit.update(row=promote_row, action="fold_doc", plan=plan)
             elif accept.action == "write_people_note":
-                promoted = await proposal_service._accept_people_row(config, promote_row)
-                if not promoted.ok:
+                plan, fold_refusal = await proposal_service._prepare_proposal_fold(config, promote_row, person=True)
+                if fold_refusal is not None:
                     return JSONResponse(
-                        {"error": promoted.error or "could not write the note", "id": pid},
+                        {"error": fold_refusal.error or "could not write the note", "id": pid, "no_effect": True},
                         status_code=409,
                     )
+                region_commit.update(row=promote_row, action="write_people_note", plan=plan)
             elif accept.action == "append_learnings":
-                promoted = proposal_service._accept_learnings_row(config, promote_row)
-                if not promoted.ok:
-                    return JSONResponse(
-                        {"error": promoted.error or "could not append", "id": pid},
-                        status_code=409,
-                    )
+                region_commit.update(row=promote_row, action="append_learnings")
             elif accept.action == "append_repo_doc":
-                promoted = await asyncio.to_thread(
-                    proposal_service._accept_repo_row, config, promote_row, linked
-                )
-                if not promoted.ok:
-                    return JSONResponse(
-                        {
-                            "error": promoted.error or "could not append to AGENTS.md",
-                            "id": pid,
-                            "conflict": bool(promoted.conflict),
-                        },
-                        status_code=409,
-                    )
+                region_commit.update(row=promote_row, action="append_repo_doc", linked=linked)
             elif accept.action == "add_category":
                 # A registry the validator refuses — a folder another category
                 # already claims, a malformed id — is a 400 and not a 409: the
                 # proposal is sound, the category it would add is not, and the
                 # owner's next move is to edit the id or folder, not to retry.
                 # Nothing has been written, so the bullet stays.
-                try:
-                    promoted = proposal_service._accept_category_row(config, promote_row)
-                except entity_types.EntityTypeFileError as exc:
-                    return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
-                if not promoted.ok:
-                    return JSONResponse(
-                        {
-                            "error": promoted.error or "could not add the category",
-                            "id": pid,
-                        },
-                        status_code=409,
-                    )
+                region_commit.update(row=promote_row, action="add_category")
             elif accept.action == "note_edit":
                 # Off the event loop: the accept reads a note, takes the
                 # per-file receipt lock and, for a retirement, moves the file
@@ -10988,18 +11333,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 # inside one request on a large vault. A conflict is a 409 with
                 # the row untouched, so the owner can re-read the note the
                 # preview now names and decide again.
-                promoted = await asyncio.to_thread(
-                    proposal_service._accept_note_edit_row, config, promote_row
-                )
-                if not promoted.ok:
-                    return JSONResponse(
-                        {
-                            "error": promoted.error or "could not apply the note edit",
-                            "id": pid,
-                            "conflict": bool(promoted.conflict),
-                        },
-                        status_code=409,
-                    )
+                region_commit.update(row=promote_row, action="note_edit")
             else:
                 # route_manually: a [review] row has no known destination, so an
                 # accept would be a guess wearing a button.
@@ -11023,6 +11357,100 @@ async def proposal_action(request: Request) -> JSONResponse:
         # the prepared receipt is written before the rewrite so a crash between the
         # two is still recoverable: bullet gone means the removal landed.
         try:
+            def commit_region() -> bool:
+                if region_commit["action"].startswith("dismiss_"):
+                    if region_commit["action"] == "dismiss_category":
+                        refusal = proposal_service.decline_category_row(config, row)
+                    elif region_commit["action"] == "dismiss_note_edit":
+                        refusal = proposal_service._settle_note_edit(config, row, accepted=False)
+                    else:
+                        refusal = ""
+                    region_commit["outcome"] = proposal_service.AcceptOutcome(ok=not refusal, error=refusal)
+                    return not refusal
+                if region_commit["action"] in {"fold_doc", "write_people_note"} and not proposal_service._fold_selection_unambiguous(
+                    queue, ctx["workspace"], ctx["queue_image"], row
+                ):
+                    region_commit["outcome"] = proposal_service.AcceptOutcome(
+                        ok=False, conflict=True, error="duplicate proposal identity changed; reload the queue",
+                    )
+                    return False
+                if expected_revision:
+                    current = proposal_service.destination_revision(
+                        config, row, linked_repos=linked
+                    )
+                    if current and current != expected_revision:
+                        region_commit["no_effect"] = True
+                        region_commit["outcome"] = proposal_service.AcceptOutcome(
+                            ok=False, conflict=True,
+                            error="the destination changed since this preview; nothing was written",
+                        )
+                        return False
+                if region_commit["action"] == "edit_region":
+                    region_commit["outcome"] = proposal_service._commit_region_row(
+                        config, region_commit["row"], region_commit["decision"]
+                    )
+                elif region_commit["action"] == "append_learnings":
+                    region_commit["outcome"] = proposal_service._accept_learnings_row(
+                        config, region_commit["row"]
+                    )
+                elif region_commit["action"] == "append_repo_doc":
+                    region_commit["outcome"] = proposal_service._accept_repo_row(
+                        config, region_commit["row"], region_commit["linked"]
+                    )
+                elif region_commit["action"] == "add_category":
+                    region_commit["outcome"] = proposal_service._accept_category_row(
+                        config, region_commit["row"]
+                    )
+                elif region_commit["action"] == "move_file":
+                    move = proposal_service._perform_rehome_move(
+                        config, region_commit["row"], region_commit["target"]
+                    )
+                    region_commit["outcome"] = proposal_service.AcceptOutcome(
+                        ok=bool(move.get("ok")), destination=str(move.get("destination", "")),
+                        error=str(move.get("error", "")) or None, conflict=bool(move.get("conflict")),
+                        already_moved=move.get("already_moved"),
+                    )
+                elif region_commit["action"] in {"fold_doc", "write_people_note"}:
+                    region_commit["outcome"] = proposal_service._commit_proposal_fold(region_commit["plan"])
+                else:
+                    region_commit["outcome"] = proposal_service._accept_note_edit_row(
+                        config, region_commit["row"]
+                    )
+                return bool(region_commit["outcome"].ok)
+
+            def record_region(queue_receipt_id: str) -> None:
+                outcome = region_commit["outcome"]
+                if action == "dismiss":
+                    proposal_actions.record_decision(
+                        queue, action="dismiss", text=str(row.get("text") or ""),
+                        kind=str(row.get("kind") or ""), via="pwa",
+                        source=str(row.get("source") or ""), proposal_id=pid, reason=reason,
+                        queue_receipt_id=queue_receipt_id,
+                    )
+                    return
+                proposal_actions.record_decision(
+                    queue, action="accept", text=str(row.get("text") or ""),
+                    kind=str(row.get("kind") or ""), via="pwa",
+                    source=str(row.get("source") or ""),
+                    destination=proposal_service._decision_destination(region_commit["action"], row, outcome),
+                    outcome="duplicate" if outcome.duplicate else "written",
+                    proposal_id=pid, receipt_id=outcome.receipt_id or "", reason=reason,
+                    queue_receipt_id=queue_receipt_id,
+                )
+
+            extra = {"before_remove": commit_region, "after_remove": record_region} if region_commit else {}
+            def single_decision() -> dict[str, str]:
+                metadata = {"decision_via": "pwa", "decision_reason": reason}
+                if action == "accept":
+                    outcome = region_commit.get("outcome", promoted)
+                    effect = proposal_kinds.accept_for(row["kind"]).action
+                    metadata.update(
+                        decision_destination=proposal_service._decision_destination(effect, row, outcome),
+                        decision_outcome="duplicate" if outcome.duplicate else "written",
+                        decision_receipt_id=outcome.receipt_id or "",
+                    )
+                return metadata
+
             removed_ours = await asyncio.to_thread(
                 proposal_service._rewrite_queue_single,
                 queue,
@@ -11033,8 +11461,43 @@ async def proposal_action(request: Request) -> JSONResponse:
                 action == "accept",
                 ctx["workspace"],
                 vault_for_receipt,
+                pid,
+                original_image=ctx["queue_image"],
+                decision=single_decision,
+                **extra,
             )
-        except QueueReceiptUnavailable as exc:
+        except entity_types.EntityTypeFileError as exc:
+            return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
+        except proposal_service.QueueDecisionIncomplete as exc:
+            decision_outcome = region_commit.get("outcome")
+            payload: dict[str, Any] = {
+                "error": ("Queue removal completed, but decision recording could not be confirmed; "
+                          "inspect before retrying and do not retry "
+                          + ("dismissal" if action == "dismiss" else "accept") + " blindly."),
+                "id": pid, "queue_settled": False, "queue_state": "replaced",
+                "queue_receipt_confirmed": True, "decision_confirmed": False,
+                "queue_receipt_id": exc.receipt_id,
+            }
+            if action == "accept" and decision_outcome is not None and decision_outcome.ok:
+                payload["destination_effect"] = _known_destination_effect(region_commit["action"], row, decision_outcome)
+            return JSONResponse(payload, status_code=503)
+        except (QueueReceiptUnavailable, proposal_service.QueueSettlementIncomplete) as exc:
+            partial_outcome: proposal_service.AcceptOutcome | None = region_commit.get("outcome")
+            if action == "accept" and partial_outcome is not None and partial_outcome.ok:
+                return JSONResponse(
+                    {"error": _PARTIAL_SETTLEMENT_ERROR, "id": pid, "queue_settled": False,
+                     "queue_receipt_confirmed": False,
+                     "queue_state": exc.queue_state if isinstance(exc, proposal_service.QueueSettlementIncomplete) else "unknown",
+                     "destination_effect": _known_destination_effect(region_commit["action"], row, partial_outcome)},
+                    status_code=503,
+                )
+            if isinstance(exc, proposal_service.QueueSettlementIncomplete):
+                return JSONResponse(
+                    {"error": "queue settlement could not be confirmed; inspect the queue before retrying",
+                     "id": pid, "queue_settled": False, "queue_state": exc.queue_state,
+                     "queue_receipt_confirmed": False},
+                    status_code=503,
+                )
             return JSONResponse(
                 {
                     "error": "the memory receipt journal is unavailable; "
@@ -11043,6 +11506,24 @@ async def proposal_action(request: Request) -> JSONResponse:
                     "id": pid,
                 },
                 status_code=503,
+            )
+        if "outcome" in region_commit:
+            promoted = region_commit["outcome"]
+            if not promoted.ok:
+                refusal = {"error": promoted.error or "could not write the region",
+                           "id": pid, "region": promoted.region or ""}
+                if region_commit.get("no_effect"):
+                    refusal["no_effect"] = True
+                if promoted.conflict:
+                    refusal["conflict"] = True
+                if promoted.deferred:
+                    refusal.update(deferred=True, reason=promoted.reason or "",
+                                   competing=list(promoted.competing or ()))
+                return JSONResponse(refusal, status_code=409)
+        if not removed_ours:
+            return JSONResponse(
+                {"error": "the selected proposal changed before removal", "id": pid, "conflict": True},
+                status_code=409,
             )
 
     if action == "accept":
@@ -11058,7 +11539,7 @@ async def proposal_action(request: Request) -> JSONResponse:
         result = proposal_actions.build_accept_result(
             pid, accept, row, promoted.as_dict(), include_usage=True
         )
-        if removed_ours:
+        if removed_ours and not region_commit:
             # Preserve the accepted row's text in the same decision history a
             # dismissal uses: append-time dedupe consults the live queue and
             # that sidecar — never the promoted destination — so the nightly
@@ -11082,7 +11563,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 reason=reason,
             )
         return JSONResponse({"ok": True, "result": result.as_dict()})
-    if removed_ours:
+    if removed_ours and not region_commit:
         # Preserve the decided row's text: append-time dedupe consults this
         # history, so without it the nightly curator re-files the fact the
         # operator just rejected while its transcript is still recent.
@@ -11107,6 +11588,34 @@ async def proposal_action(request: Request) -> JSONResponse:
 
 
 async def proposal_implement(request: Request) -> JSONResponse:
+    """Optionally retain skill implementation against its resolved row."""
+    token = request.headers.get("X-Ciao-Proposal-Reservation")
+    if token is None:
+        return await _proposal_implement(request)
+    from ciao.web.proposal_reservations import ReservationAdmissionError, validate_scope
+    pid = request.path_params["id"]
+    _rows, by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, request.app.state.config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": "proposal unavailable"}, status_code=404)
+    if not ctx.get("file") or ctx.get("row", {}).get("kind") != "skill" or ctx.get("workspace") != ctx.get("row", {}).get("workspace"):
+        return JSONResponse({"error": "invalid skill proposal"}, status_code=409)
+    try:
+        scope = validate_scope({"kind": "implement", "workspace": ctx["workspace"], "targets": [pid]},
+                               set(request.app.state.config.workspace_names()))
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse({"error": "invalid proposal scope"}, status_code=409)
+    registry = getattr(request.app.state, "proposal_reservations", None)
+    if registry is None:
+        return JSONResponse({"error": "reservation registry unavailable"}, status_code=503)
+    try:
+        result: JSONResponse = await registry.run(token, scope, lambda: _proposal_implement(request, scope))
+        return result
+    except ReservationAdmissionError:
+        return JSONResponse({"error": "reservation unavailable or scope mismatch"}, status_code=409)
+
+
+async def _proposal_implement(request: Request, reserved_scope: Any = None) -> JSONResponse:
     """Accept one skill proposal into an implementation chat, idempotently.
 
     A skill proposal is the one row that cannot be accepted by writing: what it
@@ -11136,6 +11645,13 @@ async def proposal_implement(request: Request) -> JSONResponse:
     ctx = by_id.get(pid)
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    if reserved_scope is not None and (
+        not ctx.get("file") or ctx.get("row", {}).get("kind") != "skill"
+        or ctx.get("workspace") != reserved_scope.workspace
+        or ctx.get("row", {}).get("workspace") != reserved_scope.workspace
+        or reserved_scope.kind != "implement" or reserved_scope.targets != (pid,)
+    ):
+        return JSONResponse({"error": "skill scope changed before implementation"}, status_code=409)
     pcm = getattr(request.app.state, "project_chat_manager", None)
     # Off the event loop: the service lists projects, creates a chat and binds
     # the record, and a slow vault scan must not stall every other request. It
