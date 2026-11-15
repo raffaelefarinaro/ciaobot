@@ -97,6 +97,54 @@ def _signed(client: TestClient, origin: str = BASE) -> dict[str, str]:
     return {"Cookie": cookie, "Origin": origin}
 
 
+def test_terminal_path_routes_not_public_or_loopback_auth_exempt() -> None:
+    for path in ("/api/settings/terminal-path/preview", "/api/settings/terminal-path/apply"):
+        assert path not in auth._PUBLIC_API
+        assert path not in auth._LOOPBACK_ONLY_API
+
+
+def test_terminal_path_routes_require_session_and_local_browser(tmp_path, monkeypatch) -> None:
+    from ciao import install_receipt
+    from ciao.os_support import shell_hints
+    from ciao.web import routes_api
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    exe = bindir / "ciao"
+    exe.write_text("fixture")
+    exe.chmod(0o755)
+    receipt = install_receipt.InstallReceipt("1", str(exe), str(bindir / "python"), "none", "", "test")
+    monkeypatch.setattr(install_receipt, "running_receipt", lambda: receipt)
+    monkeypatch.setattr(routes_api, "sys", SimpleNamespace(platform="linux"))
+    calls = []
+    def preview(command, executable):
+        calls.append((command, executable))
+        return {"status": "ready", "detail": "ok", "executable": executable, "directory": str(bindir), "destination": "test", "revision": "a" * 64}
+    def apply(command, executable, revision):
+        calls.append((command, executable))
+        return {"status": "applied", "detail": "ok", "mutation": "written", "warning": ""}
+    monkeypatch.setattr(shell_hints, "preview_path_change", preview)
+    monkeypatch.setattr(shell_hints, "apply_path_change", apply)
+    serializer = URLSafeTimedSerializer(SECRET)
+    paths = ["/api/settings/terminal-path/preview", "/api/settings/terminal-path/apply"]
+    app = Starlette(routes=[Route(paths[0], routes_api.terminal_path_preview, methods=["POST"]), Route(paths[1], routes_api.terminal_path_apply, methods=["POST"])], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.serializer = serializer
+    for peer in ("127.0.0.1", "100.64.0.7"):
+        client = TestClient(app, base_url=BASE, client=(peer, 50000))
+        for path in paths:
+            body = {"target": "ciao"} if path.endswith("preview") else {"target": "ciao", "revision": "a" * 64}
+            assert client.post(path, json=body).status_code == 401
+            response = client.post(path, json=body, headers=_signed(client))
+            assert response.status_code == (200 if peer == "127.0.0.1" else 403)
+            if peer == "127.0.0.1":
+                for headers in ({"X-Forwarded-For": "127.0.0.1"}, {"Host": "evil.example:8443"}):
+                    assert client.post(path, json=body, headers={**_signed(client), **headers}).status_code == 403
+                response = client.post(path, json=body, headers=_signed(client, "http://evil.example"))
+                assert response.status_code == 403
+                assert response.json() == {"error": "forbidden origin"}
+    assert len(calls) == 2
+
+
 def _request(
     *,
     host: str = "localhost:8443",

@@ -86,6 +86,12 @@ repair, and if any step fails it undoes the steps that run completed.
 New terminals see `ciao` straight away; open a new terminal if the current one
 does not.
 
+In signed-in Settings on the host, Advanced → This host and the existing
+provider rows can preview a user PATH addition. Review the executable and
+destination before clicking Add to terminal PATH. A conflicting command is
+refused; an unverified write needs inspection rather than another automatic
+write. Open a new terminal after a verified change.
+
 ## How the engine runs
 
 The installer registers a per-user Task Scheduler task, `\Ciaobot\Engine`. It
