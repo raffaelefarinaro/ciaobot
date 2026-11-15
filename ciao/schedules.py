@@ -2660,6 +2660,17 @@ class ScheduleManager:
             "error": "a server update is pending; retry after the restart",
         }
 
+    def work_count(self) -> int:
+        """How much scheduled work is running or about to start.
+
+        Counts in-flight runs, chats claimed for a dispatch that has not
+        streamed yet, and tracked tasks that are still alive. A drain polls it
+        next to the active chats: it is non-zero while a command-only run, or a
+        dispatch between its claim and its first stream, has no chat to show.
+        """
+        live_tasks = sum(1 for task in self._run_tasks if not task.done())
+        return len(self._inflight) + len(self._claimed_chats) + live_tasks
+
     def update_idle_reasons(self) -> list[str]:
         """What a restart would interrupt here, empty when nothing is running.
 

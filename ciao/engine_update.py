@@ -137,14 +137,10 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 class PostJson(Protocol):
     """POST one drain-handshake request to the engine and return its JSON answer.
 
-    ``body`` is the JSON request body, or ``None`` when the caller names no
-    drain owner — which is what a manual update sends, byte-identical to the
-    empty POST this handshake has always used.
+    ``body`` is the JSON request body; every drain request names its owner.
     """
 
-    def __call__(
-        self, url: str, body: dict[str, Any] | None = None
-    ) -> dict[str, Any]: ...
+    def __call__(self, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
 
 GetJson = Callable[[str], "dict[str, Any] | None"]
@@ -734,17 +730,15 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
 
 
 def _drain_request(
-    post: PostJson, url: str, step: str, owner: str = ""
+    post: PostJson, url: str, step: str, owner: str
 ) -> dict[str, Any]:
     """POST one drain-handshake request, failing with a reason that names ``step``.
 
-    ``owner`` names the operation claiming the drain; empty sends the same URL
-    with no body a manual update has always sent, which is also all an injected
-    one-argument transport is called with.
+    ``owner`` names the operation claiming the drain; the engine refuses a
+    request without one.
     """
-    body = {"owner": owner} if owner else None
     try:
-        return post(url) if body is None else post(url, body)
+        return post(url, {"owner": owner})
     except urllib.error.HTTPError as exc:
         raise UpdateError(
             f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
@@ -798,7 +792,28 @@ def _drain_timeout_arg(value: str) -> float:
     return seconds
 
 
-def _reopen_admission(post: PostJson, base: str, owner: str = "") -> str:
+def drain_owner_for(operation_id: str, explicit: str = "") -> str:
+    """The owner an update's drain carries: the coordinator's, else its own id."""
+    return explicit or f"update-{operation_id}"
+
+
+def schedule_work_idle(body: dict[str, Any]) -> bool:
+    """True when the drain answer reports no scheduled work.
+
+    An engine that does not report ``schedule_work_count`` predates it and
+    cannot say whether scheduled work is running, so that is an error, never
+    "idle": the operator updates that engine from Settings first.
+    """
+    count = body.get("schedule_work_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise UpdateError(
+            "the running engine does not report scheduled work, so it cannot be "
+            "drained safely from here; update it from Settings, then run this again"
+        )
+    return count == 0
+
+
+def _reopen_admission(post: PostJson, base: str, owner: str) -> str:
     """Undo a drain and return why it failed, or ``""`` when it landed.
 
     ``owner`` is the operation the drain belongs to. The engine refuses a
@@ -955,9 +970,9 @@ def apply_update(
     transaction, and is the same everywhere.
 
     ``drain_owner`` names the operation claiming the drain when the coordinator,
-    not a person, started this apply. It rides every drain handshake so the
-    engine can refuse a cancel from anything else; empty keeps the manual
-    handshake exactly as it was.
+    not a person, started this apply; empty uses this operation's own id. It
+    rides every drain handshake so the engine can refuse a poll or cancel from
+    anything else.
 
     Everything is injectable so the tests exercise the handshake, the timeout
     and the handoff without launchd, a network, or a real engine. Note there is
@@ -995,6 +1010,8 @@ def apply_update(
                 raise UpdateError(f"last apply failed: {op.error}; run: ciao update stage")
             raise UpdateError("nothing staged; run: ciao update stage")
 
+        owner = drain_owner_for(op.id, drain_owner)
+
         def advance(phase: str) -> None:
             op.phase = phase
             op.updated_at = _now()
@@ -1005,7 +1022,7 @@ def apply_update(
 
             Returns the recorded message, which names a failed cancel too.
             """
-            cancel_error = _reopen_admission(post, base, drain_owner)
+            cancel_error = _reopen_admission(post, base, owner)
             if cancel_error:
                 message = (
                     f"{message}; reopening chats also failed ({cancel_error}), "
@@ -1019,7 +1036,7 @@ def apply_update(
 
         try:
             advance("draining")
-            _drain_request(post, f"{base}/api/admin/drain", "drain request", drain_owner)
+            _drain_request(post, f"{base}/api/admin/drain", "drain request", owner)
             # Polled by re-POSTing the drain, not by reading
             # a separate chat list: the drain POST is loopback-only, so it always
             # answers for this machine, and `begin_restart_drain` is idempotent,
@@ -1032,10 +1049,10 @@ def apply_update(
             idle = 0
             while True:
                 body = _drain_request(
-                    post, f"{base}/api/admin/drain", "drain status poll", drain_owner
+                    post, f"{base}/api/admin/drain", "drain status poll", owner
                 )
                 active = body.get("active_chat_ids") or []
-                idle = idle + 1 if not active else 0
+                idle = idle + 1 if not active and schedule_work_idle(body) else 0
                 if idle >= _IDLE_POLLS_REQUIRED:
                     break
                 if clock() >= deadline:
@@ -1351,6 +1368,7 @@ def run_apply(
     *before* the engine is stopped reopens admission on the way out, because
     the foreground half has already closed it and nothing else would.
     """
+    drain_owner = drain_owner_for(operation_id, drain_owner)
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
     post = http_post or _post_json
