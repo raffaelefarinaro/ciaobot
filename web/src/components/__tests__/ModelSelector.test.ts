@@ -400,11 +400,37 @@ describe('ModelSelector', () => {
   })
 
   it('can render as a triggerless popup and emit close', async () => {
-    const wrapper = mountSelector({ triggerless: true })
+    const wrapper = mountSelector({ triggerless: true, mobileSheet: true })
     await flushPromises()
 
     expect(wrapper.find('.model-selector__trigger').exists()).toBe(false)
     expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+
+    const closeButton = wrapper.get<HTMLButtonElement>('.model-selector__close')
+    expect(closeButton.attributes('aria-label')).toBe('Close model picker')
+    expect(closeButton.element.closest('[role="listbox"]')).toBeNull()
+    await closeButton.trigger('click')
+    expect(wrapper.emitted('close')).toEqual([['close']])
+  })
+
+  it('keeps the close button out of ordinary trigger-based pickers', async () => {
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__close').exists()).toBe(false)
+  })
+
+  it('keeps other triggerless pickers free of the mobile chat sheet header', async () => {
+    const wrapper = mountSelector({ triggerless: true })
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__mobile-header').exists()).toBe(false)
+  })
+
+  it('closes a triggerless picker on Escape', async () => {
+    const wrapper = mountSelector({ triggerless: true })
+    await flushPromises()
 
     await wrapper.find('.model-selector__search').trigger('keydown', { key: 'Escape' })
     await flushPromises()
