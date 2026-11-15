@@ -3407,6 +3407,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 # The list carries no transcript, so the run length comes from
                 # the child session's own timestamps.
                 "duration_ms": transcript_service._opencode_child_duration_ms(info),
+                "started_at": (info.get("time") or {}).get("created")
+                if isinstance(info.get("time"), dict) else None,
             })
         return JSONResponse(opencode_entries)
 

@@ -387,6 +387,7 @@ def test_opencode_subagents_read_child_sessions(
                 "id": "ses_child",
                 "parentID": "ses_parent",
                 "title": "Research it",
+                "time": {"created": 1_797_800_000_000},
             },
             "messages": [{
                 "info": {"role": "assistant"},
@@ -417,6 +418,7 @@ def test_opencode_subagents_read_child_sessions(
         # The child session carries no timestamps here, so there is no length
         # to report.
         "duration_ms": None,
+        "started_at": 1_797_800_000_000,
     }]
 
 
