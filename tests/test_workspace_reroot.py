@@ -446,6 +446,7 @@ def test_apply_rewrites_schedule_prompt_paths_from_moves(tmp_path: Path) -> None
             "enabled": True,
             "last_run": "2026-10-01T00:00:00Z",
             "unknown_row_key": [1, 2],
+            "_rev": 1,
         },
         {
             "schedule_id": "system-one",
@@ -457,6 +458,7 @@ def test_apply_rewrites_schedule_prompt_paths_from_moves(tmp_path: Path) -> None
             "schedule_id": "promoted",
             "prompt": "Check Logs/Chats/chat-1/session.md and templates-src/person.md",
             "scope": "user",
+            "_rev": 1,
         },
     ]
     assert result["schedule_prompt_rewrites"] == [
@@ -614,7 +616,7 @@ def test_undo_restores_schedule_prompts_preserving_runtime_updates(tmp_path: Pat
     assert undone["status"] == "undone", undone
     restored = json.loads(store.read_text(encoding="utf-8"))
     assert restored["schedules"] == [
-        {"schedule_id": "target", "prompt": "memory-vault/work", "last_run": "after"},
+        {"schedule_id": "target", "prompt": "memory-vault/work", "last_run": "after", "_rev": 2},
         {"schedule_id": "new", "prompt": "new schedule"},
     ]
 
@@ -3914,3 +3916,62 @@ def test_from_env_raises_when_the_registry_is_denied(
             }
         )
     assert exc.value.path == registry.resolve()
+
+
+def test_failed_apply_keeps_an_edit_made_to_the_store_after_the_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(
+        runtime,
+        [{"schedule_id": "target", "prompt": "memory-vault/work", "title": "before"}],
+    )
+
+    def edit_then_fail(*args, **kwargs):
+        payload = json.loads(store.read_text(encoding="utf-8"))
+        payload["schedules"][0]["title"] = "edited meanwhile"
+        payload["schedules"].append({"schedule_id": "added", "prompt": "new"})
+        store.write_text(json.dumps(payload), encoding="utf-8")
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(workspace_reroot, "write_skills_triage", edit_then_fail)
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    rows = {r["schedule_id"]: r for r in json.loads(store.read_text(encoding="utf-8"))["schedules"]}
+    assert rows["target"]["prompt"] == "memory-vault/work"
+    assert rows["target"]["title"] == "edited meanwhile"
+    assert "added" in rows
+
+
+def test_undo_applies_prompt_restore_to_the_row_as_it_is_at_write_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "title": "t"}])
+    assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
+
+    real_run_git = workspace_reroot.run_git
+    edited: list[bool] = []
+
+    def edit_before_first_move(root, *args, **kwargs):
+        if args and args[0] == "mv" and not edited:
+            payload = json.loads(store.read_text(encoding="utf-8"))
+            payload["schedules"][0]["title"] = "edited during undo"
+            store.write_text(json.dumps(payload), encoding="utf-8")
+            edited.append(True)
+        return real_run_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_reroot, "run_git", edit_before_first_move)
+    assert undo(install, runtime)["status"] == "undone"
+    assert edited
+    row = json.loads(store.read_text(encoding="utf-8"))["schedules"][0]
+    assert row["prompt"] == "memory-vault/work"
+    assert row["title"] == "edited during undo"
+
+
+def test_apply_bumps_the_revision_of_a_rewritten_row(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "_rev": 4}])
+    assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0]["_rev"] == 5

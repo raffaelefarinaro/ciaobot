@@ -594,3 +594,15 @@ def test_delete_with_stale_revision_conflicts_and_keeps_the_row(client: TestClie
     assert any(s["schedule_id"] == sid for s in client.get("/api/schedules").json())
     current = next(s for s in client.get("/api/schedules").json() if s["schedule_id"] == sid)["revision"]
     assert client.delete(f"/api/schedules/{sid}?revision={current}").json() == {"ok": True}
+
+
+def test_create_on_an_unreadable_store_answers_503_and_keeps_the_file(
+    client: TestClient, tmp_path: Path
+) -> None:
+    store_file = tmp_path / ".runtime" / "schedules.json"
+    store_file.write_text("{bad", encoding="utf-8")
+    resp = client.post("/api/schedules", json={
+        "prompt": "x", "frequency": INTERVAL_FREQUENCY, "interval_minutes": 5, "web_chat_id": "chat-idle",
+    })
+    assert resp.status_code == 503
+    assert store_file.read_text(encoding="utf-8") == "{bad"

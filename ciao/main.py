@@ -1075,7 +1075,7 @@ async def _run_server_locked(
             entry.last_run_chat_id = result["chat_id"]
             # Persist only if the entry still exists: a "once" schedule may have
             # been consumed (replace-then-delete) before this background task
-            # resolves, and replace() upserts — writing here would resurrect it.
+            # resolves, and update_fields never resurrects a deleted row.
             #
             # Write only the field this function owns, onto a freshly read row.
             # `entry` is the snapshot taken when the run started, and a run can
@@ -1088,12 +1088,12 @@ async def _run_server_locked(
             # And only while the row still names this dispatch: a superseded
             # run writing its own (older) chat here would re-point the
             # "last run" link away from the run the entry now describes.
-            latest = schedule_store.get(entry.schedule_id)
-            if latest is not None and dispatch_is_current(
-                latest, getattr(entry, "last_dispatch_id", "") or ""
-            ):
-                latest.last_run_chat_id = result["chat_id"]
-                schedule_store.replace(latest)
+            dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
+            schedule_store.update_fields(
+                entry.schedule_id,
+                {"last_run_chat_id": result["chat_id"]},
+                only_if=lambda latest: dispatch_is_current(latest, dispatch_id),
+            )
         return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):

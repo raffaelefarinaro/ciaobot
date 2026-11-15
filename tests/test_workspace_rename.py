@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 
@@ -731,3 +732,73 @@ async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
     assert manager._providers[other_chat] is other_provider
     assert manager._chats[renamed_chat].project_id == _general_id(manager, "santo")
 
+
+
+def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undoing a failed rename must not discard an unrelated schedule edit."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    _seed_all(config, tmp_path, projects)
+    schedules, webhooks, imports = _stores(config, tmp_path)
+    target = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1,
+        workspace="personal", title="t",
+    )
+
+    original = WebhookStore.rename_workspace
+
+    def _edit_then_fail(self: WebhookStore, old: str, new: str) -> int:
+        original(self, old, new)
+        current = schedules.get(target.schedule_id)
+        base = dataclasses.replace(current)
+        current.title = "edited meanwhile"
+        schedules.replace(current, base=base)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WebhookStore, "rename_workspace", _edit_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+        )
+
+    row = schedules.get(target.schedule_id)
+    assert row is not None
+    assert row.workspace == "personal"
+    assert row.title == "edited meanwhile"
+
+
+def test_failure_inside_the_schedule_rename_step_is_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User rows saved, overlay save failing: the rows must not stay renamed."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    _seed_all(config, tmp_path, projects)
+    schedules, webhooks, imports = _stores(config, tmp_path)
+    target = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1,
+        workspace="personal", title="t",
+    )
+
+    def _fail_overlay(self, payload):
+        raise OSError("overlay disk full")
+
+    monkeypatch.setattr(type(schedules), "_save_system_state", _fail_overlay)
+    with pytest.raises(OSError, match="overlay disk full"):
+        rename_workspace(
+            config, old="personal", new="santo", projects=projects,
+            schedules=schedules, webhooks=webhooks, imports=imports,
+        )
+    monkeypatch.undo()
+    row = schedules.get(target.schedule_id)
+    assert row is not None and row.workspace == "personal"
