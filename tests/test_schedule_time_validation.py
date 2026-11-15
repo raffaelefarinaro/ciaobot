@@ -99,7 +99,7 @@ class _Store:
     def list_entries(self) -> list[ScheduleEntry]:
         return list(self.entries)
 
-    def replace(self, entry: ScheduleEntry) -> None:
+    def replace(self, entry: ScheduleEntry, **_scope: object) -> None:
         self.replaced.append(entry)
         self.entries = [entry]
 

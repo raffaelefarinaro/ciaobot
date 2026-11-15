@@ -9,6 +9,7 @@ knowledge of ``.runtime`` JSON layouts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import hashlib
 import json
@@ -56,6 +57,8 @@ from ciao.schedules import (
     FREQUENCIES,
     INTERVAL_FREQUENCY,
     ScheduleEntry,
+    ScheduleNotFound,
+    ScheduleStoreCorrupt,
     compute_next_run,
     is_interval,
     normalize_days_of_week,
@@ -6936,12 +6939,40 @@ class CiaoControlPlane:
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(entry))
 
+    @staticmethod
+    def _schedule_access_check(principal: AgentPrincipal, *, removing: bool = False) -> Callable[[ScheduleEntry], None]:
+        """Authorization the store re-runs on the current row inside its write
+        transaction, so a workspace change made after the first read cannot be
+        acted on with a stale decision."""
+
+        def check(entry: ScheduleEntry) -> None:
+            if entry.workspace and entry.workspace != principal.workspace:
+                raise ControlPlaneError("workspace_forbidden", "Schedule belongs to another workspace.")
+            if removing and (entry.scope == "system" or not entry.removable):
+                raise ControlPlaneError("schedule_not_removable", "This schedule cannot be removed.")
+
+        return check
+
+    @staticmethod
+    def _schedule_store_errors(schedule_id: str):
+        """Translate store failures of a scoped write into tool errors."""
+
+        @contextlib.contextmanager
+        def translate():
+            try:
+                yield
+            except ScheduleNotFound as exc:
+                raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.") from exc
+            except ScheduleStoreCorrupt as exc:
+                raise ControlPlaneError("schedule_store_unavailable", "The schedule store is unreadable; nothing was changed.") from exc
+
+        return translate()
+
     def _schedule(self, principal: AgentPrincipal, schedule_id: str) -> ScheduleEntry:
         entry = next((item for item in self.schedules.list_entries() if item.schedule_id == schedule_id), None)
         if entry is None:
             raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.")
-        if entry.workspace and entry.workspace != principal.workspace:
-            raise ControlPlaneError("workspace_forbidden", "Schedule belongs to another workspace.")
+        self._schedule_access_check(principal)(entry)
         resolved: ScheduleEntry = entry
         return resolved
 
@@ -7125,10 +7156,13 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_time", time_error)
         # A changed chat/project binding moves where this entry re-homes.
         stamp_fallback_project(updated, self.pcm)
-        if entry.scope == "system":
-            self.schedules.replace(updated, timing_fields=system_timing_fields)
-        else:
-            self.schedules.replace(updated)
+        with self._schedule_store_errors(schedule_id):
+            self.schedules.replace(
+                updated,
+                timing_fields=system_timing_fields if entry.scope == "system" else frozenset(),
+                base=entry,
+                authorize=self._schedule_access_check(principal),
+            )
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
 
@@ -7170,7 +7204,11 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" or not entry.removable:
             raise ControlPlaneError("schedule_not_removable", "This schedule cannot be removed.")
-        deleted = self.schedules.delete(schedule_id)
+        with self._schedule_store_errors(schedule_id):
+            deleted = self.schedules.delete(
+                schedule_id,
+                authorize=self._schedule_access_check(principal, removing=True),
+            )
         publish_automations_changed(self.pcm)
         return _ok({"deleted": deleted, "schedule_id": schedule_id})
 

@@ -21,9 +21,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import threading
 import uuid
+import dataclasses
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -33,6 +35,7 @@ from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.schedule_command import normalize_schedule_command
 from ciao.models import BridgeMode
 
@@ -1190,6 +1193,74 @@ class ScheduleEntry:
     removable: bool = True
 
 
+class ScheduleStoreCorrupt(RuntimeError):
+    """A schedule store file is unreadable, so a write must not replace it.
+
+    Reads keep treating such a file as empty (the engine stays up); a write
+    would otherwise persist an empty store over data an operator may still be
+    able to repair.
+    """
+
+
+class ScheduleNotFound(LookupError):
+    """The row a scoped write targets no longer exists (deleted meanwhile)."""
+
+
+class _RootLock:
+    """Per-runtime-root writer lock shared by every ``ScheduleStore`` instance.
+
+    ``rlock`` gives in-process reentrancy across instances; ``hold`` adds an
+    exclusive advisory lock on a sidecar file so cooperating processes
+    serialize too. The sidecar is a stable path that is never unlinked and is
+    not the JSON file, whose inode every save replaces. Order is always rlock
+    then file lock. Nothing may await or call out while holding it.
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self.rlock = threading.RLock()
+        self._depth = 0
+        self._fd: int | None = None
+
+    @contextlib.contextmanager
+    def hold(self):
+        with self.rlock:
+            if self._depth == 0:
+                self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    lock_exclusive(fd)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                self._fd = fd
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+                if self._depth == 0:
+                    fd, self._fd = self._fd, None
+                    assert fd is not None
+                    try:
+                        unlock(fd)
+                    finally:
+                        os.close(fd)
+
+
+_ROOT_LOCKS: dict[str, _RootLock] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def _root_lock(runtime_root: Path) -> _RootLock:
+    key = os.path.realpath(runtime_root)
+    with _ROOT_LOCKS_GUARD:
+        lock = _ROOT_LOCKS.get(key)
+        if lock is None:
+            lock = _ROOT_LOCKS[key] = _RootLock(Path(key) / "schedules.lock")
+        return lock
+
+
 class ScheduleStore:
     """JSON-backed storage for user schedules plus packaged system schedules."""
 
@@ -1211,7 +1282,11 @@ class ScheduleStore:
         # Packaged stock definitions, cached after the first successful read.
         # See _load_system_definitions for why this is not re-read per tick.
         self._system_definitions: list[dict] | None = None
-        self._lock = threading.RLock()
+        root = _root_lock(runtime_root)
+        # Reads and in-process reentrancy share the thread lock; every write
+        # goes through ``_txn`` so other processes are excluded as well.
+        self._lock = root.rlock
+        self._txn = root.hold
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         with self._lock:
@@ -1300,15 +1375,77 @@ class ScheduleStore:
             description=description or "",
             command=normalize_schedule_command(command),
         )
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             normalize_auto_archive(entry)
             data.setdefault("schedules", []).append(self._serialize_entry(entry))
             self._save(data)
         return entry
 
-    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
-        # Both write doors normalise, so no caller can persist an auto-archive
+    def replace(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+    ) -> None:
+        """Persist ``entry``.
+
+        Without ``base`` this is the legacy upsert of the whole row. With
+        ``base`` (the row as the caller read it before editing) only the fields
+        that differ from it are applied to the *current* row, under the writer
+        lock: another writer's edit to a different field is kept, a row deleted
+        meanwhile raises :class:`ScheduleNotFound` instead of coming back, and
+        unknown stored keys survive. Two edits to the same field still resolve
+        last-writer-wins. ``authorize`` runs on the current row before anything
+        is written and may raise to refuse.
+        """
+        if base is None:
+            self._replace_whole(entry, timing_fields=timing_fields, authorize=authorize)
+            return
+        with self._txn():
+            if entry.scope == "system":
+                current = self.get(entry.schedule_id)
+                if current is None:
+                    raise ScheduleNotFound(entry.schedule_id)
+                if authorize is not None:
+                    authorize(current)
+                merged = self._merge_changes(current, base, entry)
+                self._finalize_entry(merged)
+                self._replace_system_state(
+                    merged, timing_fields=timing_fields, base=base, changed=entry
+                )
+                return
+            data = self._load_for_write()
+            items = data.setdefault("schedules", [])
+            for index, item in enumerate(items):
+                if not isinstance(item, dict) or item.get("schedule_id") != entry.schedule_id:
+                    continue
+                current = self._entry_from_item(item)
+                if authorize is not None:
+                    authorize(current)
+                merged = self._merge_changes(current, base, entry)
+                self._finalize_entry(merged)
+                before, after = asdict(current), asdict(merged)
+                updated = dict(item)
+                updated.update({k: v for k, v in after.items() if before.get(k) != v})
+                items[index] = updated
+                self._save(data)
+                return
+            raise ScheduleNotFound(entry.schedule_id)
+
+    @staticmethod
+    def _merge_changes(
+        current: ScheduleEntry, base: ScheduleEntry, edited: ScheduleEntry
+    ) -> ScheduleEntry:
+        base_values, edited_values = asdict(base), asdict(edited)
+        changes = {k: v for k, v in edited_values.items() if base_values.get(k) != v}
+        return dataclasses.replace(current, **changes)
+
+    @staticmethod
+    def _finalize_entry(entry: ScheduleEntry) -> None:
+        # Every write door normalises, so no caller can persist an auto-archive
         # policy the dispatcher will refuse to honour.
         normalize_auto_archive(entry)
         entry.command = normalize_schedule_command(entry.command)
@@ -1316,11 +1453,24 @@ class ScheduleStore:
             time_error = wall_clock_time_error(entry)
             if time_error:
                 raise ValueError(time_error)
-        with self._lock:
+
+    def _replace_whole(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str],
+        authorize: Callable[[ScheduleEntry], None] | None,
+    ) -> None:
+        self._finalize_entry(entry)
+        with self._txn():
+            if authorize is not None:
+                current = self.get(entry.schedule_id)
+                if current is not None:
+                    authorize(current)
             if entry.scope == "system":
                 self._replace_system_state(entry, timing_fields=timing_fields)
                 return
-            data = self._load()
+            data = self._load_for_write()
             items = data.setdefault("schedules", [])
             for index, item in enumerate(items):
                 if item.get("schedule_id") == entry.schedule_id:
@@ -1330,12 +1480,20 @@ class ScheduleStore:
             items.append(self._serialize_entry(entry))
             self._save(data)
 
-    def delete(self, schedule_id: str) -> bool:
-        with self._lock:
+    def delete(
+        self,
+        schedule_id: str,
+        *,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+    ) -> bool:
+        with self._txn():
             entry = self.get(schedule_id)
-            if entry is not None and entry.scope == "system":
-                return False
-            data = self._load()
+            if entry is not None:
+                if authorize is not None:
+                    authorize(entry)
+                if entry.scope == "system":
+                    return False
+            data = self._load_for_write()
             before = len(data.setdefault("schedules", []))
             data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
             if len(data["schedules"]) == before:
@@ -1354,8 +1512,8 @@ class ScheduleStore:
         be taken; per-workspace system routines stop by losing their workspace
         from the registry instead.
         """
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             items = [item for item in data.get("schedules", []) if isinstance(item, dict)]
             taken = [
                 item for item in items
@@ -1374,8 +1532,8 @@ class ScheduleStore:
         A row whose ``schedule_id`` is already present is skipped rather than
         duplicated. Returns how many rows were added.
         """
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             current = data.setdefault("schedules", [])
             present = {
                 str(item.get("schedule_id"))
@@ -1405,8 +1563,8 @@ class ScheduleStore:
         Idempotent: a second call sees no ``old`` rows and writes nothing.
         """
         renamed = 0
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             dirty = False
             for item in data.get("schedules", []):
                 if (
@@ -1419,7 +1577,7 @@ class ScheduleStore:
                     renamed += 1
             if dirty:
                 self._save(data)
-            state = self._load_system_state()
+            state = self._load_system_state(strict=True)
             rebuilt: dict[str, dict] = {}
             relocated = 0
             for schedule_id, overlay in state.items():
@@ -1445,6 +1603,18 @@ class ScheduleStore:
             return data
         except json.JSONDecodeError:
             return {"schedules": []}
+
+    def _load_for_write(self) -> dict:
+        """Load for a read-modify-write; refuse a store that cannot be parsed."""
+        if not self._path.exists():
+            return {"schedules": []}
+        try:
+            data = read_json_dict(self._path)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise ScheduleStoreCorrupt(f"{self._path.name} is unreadable: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("schedules", []), list):
+            raise ScheduleStoreCorrupt(f"{self._path.name} is not a schedule store")
+        return data
 
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -1601,8 +1771,8 @@ class ScheduleStore:
         """
         if not self._include_system:
             return []
-        with self._lock:
-            state = self._load_system_state()
+        with self._txn():
+            state = self._load_system_state(strict=True)
             stamp = _utc_stamp(now)
             stamped: list[str] = []
             for entry in self._system_entries():
@@ -1681,15 +1851,21 @@ class ScheduleStore:
         )
         return {key: value for key, value in overlay.items() if key != "workspace"}
 
-    def _load_system_state(self) -> dict[str, dict]:
+    def _load_system_state(self, *, strict: bool = False) -> dict[str, dict]:
+        """Read the overlay file; ``strict`` (writers) refuses an unreadable one."""
+        name = self._system_state_path.name
         if not self._system_state_path.exists():
             return {}
         try:
             data = json.loads(self._system_state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            if strict:
+                raise ScheduleStoreCorrupt(f"{name} is unreadable: {exc}") from exc
             return {}
-        raw = data.get("schedules", {})
+        raw = data.get("schedules", {}) if isinstance(data, dict) else None
         if not isinstance(raw, dict):
+            if strict:
+                raise ScheduleStoreCorrupt(f"{name} is not a system state store")
             return {}
         return {
             key: self._normalized_overlay(value)
@@ -1745,7 +1921,20 @@ class ScheduleStore:
             f"'{requested or '(none)'}'.{hint}"
         )
 
-    def _replace_system_state(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
+    def _replace_system_state(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        changed: ScheduleEntry | None = None,
+    ) -> None:
+        """Write ``entry``'s overlay.
+
+        With ``base``/``changed`` (a scoped write) only the non-timing fields the
+        caller actually edited are written; the rest stay as the current overlay
+        has them.
+        """
         unknown_timing = timing_fields - SYSTEM_TIMING_FIELDS
         if unknown_timing:
             raise ValueError(f"unknown system timing fields: {', '.join(sorted(unknown_timing))}")
@@ -1756,7 +1945,7 @@ class ScheduleStore:
         # Validate before changing state; empty or malformed system defaults are
         # not accepted as an operator update either.
         validate_system_timing(entry.daily_time_utc, entry.timezone_name)
-        state = self._load_system_state()
+        state = self._load_system_state(strict=True)
         was_direct = entry.schedule_id in state
         current = state.setdefault(entry.schedule_id, {})
         if not was_direct:
@@ -1768,6 +1957,12 @@ class ScheduleStore:
             if field in SYSTEM_TIMING_FIELDS:
                 if field in timing_fields or getattr(entry, field) != getattr(previous, field):
                     current[field] = getattr(entry, field)
+                continue
+            if (
+                base is not None
+                and changed is not None
+                and getattr(changed, field) == getattr(base, field)
+            ):
                 continue
             current[field] = getattr(entry, field)
         current.setdefault(SYSTEM_FIRST_SEEN_KEY, entry.created_at)
@@ -2000,8 +2195,13 @@ class ScheduleManager:
             logger.info("Recorded the re-home fallback on %d schedule(s)", stamped)
         return stamped
 
-    def delete(self, schedule_id: str) -> bool:
-        return self._store.delete(schedule_id)
+    def delete(
+        self,
+        schedule_id: str,
+        *,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+    ) -> bool:
+        return self._store.delete(schedule_id, authorize=authorize)
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """See :meth:`ScheduleStore.take_user_items`."""
@@ -2011,9 +2211,18 @@ class ScheduleManager:
         """See :meth:`ScheduleStore.put_back_user_items`."""
         return self._store.put_back_user_items(items)
 
-    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
+    def replace(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+    ) -> None:
         """Persist a validated schedule update through the public manager API."""
-        self._store.replace(entry, timing_fields=timing_fields)
+        self._store.replace(
+            entry, timing_fields=timing_fields, base=base, authorize=authorize
+        )
 
     def _prepare_run_chat(
         self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str
