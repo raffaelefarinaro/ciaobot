@@ -67,6 +67,29 @@ _EXPORTED_DOTENV_KEYS: set[str] = set()
 DOTENV_IGNORED_KEYS: frozenset[str] = frozenset({"CIAO_RUNTIME_ROOT"})
 
 
+def _installer_bootstrap_port(dotenv_path: Path) -> int:
+    """The port an installer bootstrap serves setup on.
+
+    ``PWA_PORT`` in the bootstrap's own ``.env`` when set, else 8443. The file
+    is read directly, not from ``os.environ``, which the bootstrap sanitises.
+    A value that is not a port number is an error, not a silent default.
+    """
+    if not dotenv_path.is_file():
+        return 8443
+    from dotenv import dotenv_values
+
+    raw = (dotenv_values(dotenv_path).get("PWA_PORT") or "").strip()
+    if not raw:
+        return 8443
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"PWA_PORT in {dotenv_path} is not a port number: {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"PWA_PORT in {dotenv_path} is outside 1-65535: {port}")
+    return port
+
+
 def without_ignored_dotenv_keys(values: Mapping[str, str | None]) -> dict[str, str]:
     """``values`` read from a workspace ``.env``, minus :data:`DOTENV_IGNORED_KEYS`."""
     return {
@@ -1764,7 +1787,7 @@ class CiaoConfig:
                 bootstrap_mode=True,
                 suggested_workspace=Path(installer_suggest_workspace) if installer_suggest_workspace is not None else None,
                 pwa_host="127.0.0.1",
-                pwa_port=8443,
+                pwa_port=_installer_bootstrap_port(root / ".env"),
             )
         overlay: dict[str, str] = {}
         if env is None:
