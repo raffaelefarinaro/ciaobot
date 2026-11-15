@@ -13,7 +13,7 @@ let active = false
 const lifecycleEvents = new Set([
   'storyRenderPhaseChanged', 'storyRendered', 'storyFinished', 'storyUnmounted',
   'storyErrored', 'storyThrewException', 'storyMissing', 'currentStoryWasSet',
-  'storybook/instrumenter/sync', 'pong',
+  'storybook/instrumenter/sync', 'previewKeydown', 'pong',
 ])
 
 // Only established workshop sockets can reach this seam: constructors below

@@ -952,14 +952,13 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "With/without DecisionReason; actual Reka dialog semantics. Detailed variants are unassessed.",
+    "variantNotes": "Production askConfirm/askConfirmReason requests with one mounted host per canvas; no inline Docs. Enter confirms even with Cancel focused, except inside the reason field or chips. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ConfirmDialog.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "default", "coverage": "covered", "storyIds": ["confirm-dialog--normal"], "note": "Normal opens a non-destructive request through askConfirm." },
+      { "name": "destructive", "coverage": "covered", "storyIds": ["confirm-dialog--destructive"], "note": "Destructive uses the actual danger action." },
+      { "name": "reason", "coverage": "covered", "storyIds": ["confirm-dialog--reason"], "note": "Reason uses askConfirmReason and the production DecisionReason." },
+      { "name": "long-content", "coverage": "covered", "storyIds": ["confirm-dialog--long-content"], "note": "Long title, multiline message and longer action label." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["confirm-dialog--narrow"], "note": "Reason dialog in a maximum 390px, 640px-high containing block; also check a real narrow viewport." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -1075,14 +1074,14 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
     "variants": [],
-    "variantNotes": "Actual shared reason field, not a new generic form wrapper. Detailed variants are unassessed.",
+    "variantNotes": "Production controlled field with default quick reasons, custom text and disabled controls; no persistence. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in DecisionReason.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "empty", "coverage": "covered", "storyIds": ["decision-reason--empty"], "note": "Empty controlled textarea and unselected quick reasons." },
+      { "name": "quick-reason", "coverage": "covered", "storyIds": ["decision-reason--quick-reason"], "note": "Already done is selected in the actual chip group." },
+      { "name": "custom", "coverage": "covered", "storyIds": ["decision-reason--custom"], "note": "Custom text with no selected quick reason." },
+      { "name": "disabled", "coverage": "covered", "storyIds": ["decision-reason--disabled"], "note": "All chips and the textarea disabled with a selected reason." },
+      { "name": "long-content", "coverage": "covered", "storyIds": ["decision-reason--long-content"], "note": "Long text at the 1000-character field limit." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["decision-reason--narrow"], "note": "Custom text and wrapping chips in a maximum 390px container." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -3043,14 +3042,14 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Production askPrompt request after host mount. Empty/whitespace disable submission; no whole-dialog disabled API exists. One host per canvas; no inline Docs. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in PromptDialog.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "empty", "coverage": "covered", "storyIds": ["prompt-dialog--empty"], "note": "Empty input, placeholder and disabled Create action." },
+      { "name": "whitespace", "coverage": "covered", "storyIds": ["prompt-dialog--whitespace"], "note": "Whitespace-only request value cannot submit." },
+      { "name": "prefilled", "coverage": "covered", "storyIds": ["prompt-dialog--prefilled"], "note": "Rename request seeds and selects an existing name." },
+      { "name": "populated", "coverage": "covered", "storyIds": ["prompt-dialog--populated"], "note": "Nonblank text enables submission; returned text is trimmed." },
+      { "name": "disabled", "coverage": "covered", "storyIds": ["prompt-dialog--disabled"], "note": "Actual validation-disabled submit action with whitespace; input and Cancel remain enabled." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["prompt-dialog--narrow"], "note": "Prefilled request in a maximum 390px, 640px-high containing block; also check a real narrow viewport." },
       {
         "name": "other states",
         "coverage": "unknown",
@@ -6429,19 +6428,43 @@ export const inventory: InventoryEntry[] = [
       "selected",
       "fontFamily"
     ],
-    "variantNotes": "Observed branches in SettingsRadioGroup.vue; remaining variants have not been audited.",
+    "variantNotes": "Controlled label/options/modelValue radio group; Theme, Text contrast and Body font use production consumer options, including per-option fontFamily.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsRadioGroup.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--default"],
+        "note": "Theme with Dark selected in the dark theme; local state accepts production update:modelValue events."
       },
       {
         "name": "selected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsRadioGroup.vue has a selected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--selected"],
+        "note": "Theme with Light selected in the light theme."
+      },
+      {
+        "name": "text-contrast",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--text-contrast"],
+        "note": "Normal/Soft consumer options with Soft selected and the production soft text contrast applied."
+      },
+      {
+        "name": "body-font",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--body-font"],
+        "note": "System/Serif/Mono consumer options in their actual font families, with Serif selected."
+      },
+      {
+        "name": "unselected",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--unselected"],
+        "note": "Null modelValue leaves all options unchecked and the first option tabbable."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--narrow"],
+        "note": "Body font options with Serif selected in a maximum 390px container."
       },
       {
         "name": "disabled",
@@ -6450,19 +6473,19 @@ export const inventory: InventoryEntry[] = [
         "note": "SettingsRadioGroup.vue defines no disabled prop or disabled branch."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "keyboard-focus",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Arrow wraparound, Home/End and focus movement are interactive behavior, not a dedicated rendered focus story."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsRadioGroup.vue has not yet been audited."
+      "status": "none",
+      "detail": "Synchronous controlled component with no fetch, loading or busy branch; parents own persistence."
     },
     "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
+      "status": "retained",
+      "note": "Existing production component and CSS retained; stories do not migrate connected Settings consumers."
     }
   },
   {

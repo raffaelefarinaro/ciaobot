@@ -79,6 +79,38 @@ describe('connected stats transport boundary', () => {
     expect(native).not.toHaveBeenCalled()
   })
 
+  it('forwards preview keyboard reports only on the authorized workshop channel', () => {
+    const nativeSend = vi.fn()
+    const socket = vi.fn(function () {})
+    socket.prototype.send = nativeSend
+    vi.stubGlobal('WebSocket', socket)
+    vi.stubGlobal('CHANNEL_OPTIONS', { wsToken: 'synthetic-workshop-token' })
+    const boundary = installStatsBoundary('default')
+    cleanups.push(boundary.dispose)
+    const origin = location.origin.replace(/^http/, 'ws')
+    const preview = { url: `${origin}/storybook-server-channel?token=synthetic-workshop-token&page=preview`, protocol: '' }
+    const keyboard = JSON.stringify({
+      type: 'previewKeydown',
+      args: [{ event: { key: 'Tab', code: 'Tab', keyCode: 9, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false } }],
+      from: 'preview',
+    })
+    const send = socket.prototype.send
+    send.call(preview, keyboard)
+    expect(nativeSend).toHaveBeenCalledExactlyOnceWith(keyboard)
+    expect(boundary.violations).toEqual([])
+    for (const [target, data] of [
+      [{ ...preview, url: preview.url.replace(origin, 'wss://example.com') }, keyboard],
+      [{ ...preview, url: preview.url.replace('/storybook-server-channel', '/ws/events') }, keyboard],
+      [{ ...preview, url: preview.url.replace('synthetic-workshop-token', 'wrong') }, keyboard],
+      [{ ...preview, url: preview.url.replace('page=preview', 'page=manager') }, keyboard],
+      [preview, '{"type":"custom","event":"previewKeydown"}'],
+      [preview, '{"type":"saveStory"}'],
+      [preview, '{"type":"undeclaredSocketMessage"}'],
+    ] as const) expect(() => send.call(target, data)).toThrow('Story network violation')
+    expect(nativeSend).toHaveBeenCalledTimes(1)
+    expect(boundary.violations).toHaveLength(7)
+  })
+
   it('permits only established same-origin workshop lifecycle/heartbeat sends, never custom or write events', () => {
     const nativeSend = vi.fn()
     const socket = vi.fn(function () {})

@@ -71,6 +71,37 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
     failed: ['connected-home-today-stats--failed'],
     partial: ['connected-home-today-stats--partial'],
   },
+  'web/src/components/ConfirmDialog.vue': {
+    default: ['confirm-dialog--normal'],
+    destructive: ['confirm-dialog--destructive'],
+    reason: ['confirm-dialog--reason'],
+    'long-content': ['confirm-dialog--long-content'],
+    narrow: ['confirm-dialog--narrow'],
+  },
+  'web/src/components/PromptDialog.vue': {
+    empty: ['prompt-dialog--empty'],
+    whitespace: ['prompt-dialog--whitespace'],
+    prefilled: ['prompt-dialog--prefilled'],
+    populated: ['prompt-dialog--populated'],
+    disabled: ['prompt-dialog--disabled'],
+    narrow: ['prompt-dialog--narrow'],
+  },
+  'web/src/components/DecisionReason.vue': {
+    empty: ['decision-reason--empty'],
+    'quick-reason': ['decision-reason--quick-reason'],
+    custom: ['decision-reason--custom'],
+    disabled: ['decision-reason--disabled'],
+    'long-content': ['decision-reason--long-content'],
+    narrow: ['decision-reason--narrow'],
+  },
+  'web/src/components/settings/SettingsRadioGroup.vue': {
+    default: ['settings-radio-group--default'],
+    selected: ['settings-radio-group--selected'],
+    'text-contrast': ['settings-radio-group--text-contrast'],
+    'body-font': ['settings-radio-group--body-font'],
+    unselected: ['settings-radio-group--unselected'],
+    narrow: ['settings-radio-group--narrow'],
+  },
   'web/src/components/settings/SettingsSwitch.vue': switchCovered,
   'web/src/components/TabBar.vue': Object.fromEntries(Object.entries(covered).map(([state, id]) => [state, [id]])),
   'web/src/components/SidebarRow.vue': {
@@ -89,6 +120,10 @@ const expectedCoverage: Record<string, Record<string, readonly string[]>> = {
 const coveredOwners: Record<string, string> = {
   'web/src/components/settings/WorkspaceColorPicker.vue': 'components-settings-workspace-color-picker',
   'web/src/components/HomeTodayStats.vue': 'components-home-today-stats',
+  'web/src/components/ConfirmDialog.vue': 'components-confirm-dialog',
+  'web/src/components/PromptDialog.vue': 'components-prompt-dialog',
+  'web/src/components/DecisionReason.vue': 'components-decision-reason',
+  'web/src/components/settings/SettingsRadioGroup.vue': 'components-settings-settings-radio-group',
   'web/src/components/settings/SettingsSwitch.vue': 'components-settings-settings-switch',
   'web/src/components/TabBar.vue': 'components-tab-bar',
   'web/src/components/SidebarRow.vue': 'components-sidebar-row',
@@ -268,7 +303,7 @@ describe('production ownership', () => {
 
   it('keeps switch admission complete without dropping existing row and skeleton coverage', () => {
     const admitted = inventory.filter((entry) => entry.owner.path in expectedCoverage)
-    expect(admitted).toHaveLength(6)
+    expect(admitted).toHaveLength(10)
     assertCoverage(admitted)
     const mutateSwitch = (change: (entry: InventoryEntry) => void, error: string) => {
       const entries = structuredClone(admitted)
@@ -281,6 +316,59 @@ describe('production ownership', () => {
     mutateSwitch((entry) => { entry.states.push(entry.states[0]) }, 'Duplicate state')
     for (const path of Object.keys(expectedCoverage)) {
       expect(() => assertCoverage(admitted.filter((entry) => entry.owner.path !== path))).toThrow('Missing or duplicate covered owner')
+    }
+  })
+
+  it('keeps each dialog and reason owner/state/ID admission exact', () => {
+    for (const path of ['web/src/components/ConfirmDialog.vue', 'web/src/components/PromptDialog.vue', 'web/src/components/DecisionReason.vue']) {
+      const original = inventory.find((entry) => entry.owner.path === path)!
+      const corrupt = (change: (entry: InventoryEntry) => void, error: string) => {
+        const entries = structuredClone(inventory)
+        change(entries.find((entry) => entry.owner.path === path)!)
+        expect(() => assertCoverage(entries)).toThrow(error)
+      }
+      for (const state of original.states.filter((state) => state.coverage === 'covered')) {
+        corrupt((entry) => { entry.states = entry.states.filter((item) => item.name !== state.name) }, 'Missing covered state')
+        for (const id of ['inventory--all', 'confirm-dialog--docs', 'missing--story', 'foundation-tab-bar--default']) {
+          corrupt((entry) => { entry.states.find((item) => item.name === state.name)!.storyIds = [id] }, 'Invalid covered state')
+        }
+        corrupt((entry) => { entry.states.find((item) => item.name === state.name)!.storyIds.push(state.storyIds[0]) }, 'Invalid covered state')
+      }
+      corrupt((entry) => { entry.states.push(entry.states[0]) }, 'Duplicate state')
+      corrupt((entry) => { entry.id = 'wrong-owner' }, 'Invalid covered state')
+      corrupt((entry) => { entry.owner.path = 'web/src/components/Other.vue' }, 'Invalid covered state')
+    }
+  })
+
+  it('admits radio coverage only for its exact owner, states and story IDs', () => {
+    const id = 'components-settings-settings-radio-group'
+    const mutate = (change: (entry: InventoryEntry, entries: InventoryEntry[]) => void, error: string) => {
+      const entries = structuredClone(inventory)
+      change(entries.find((entry) => entry.id === id)!, entries)
+      expect(() => assertCoverage(entries)).toThrow(error)
+    }
+    for (const name of Object.keys(expectedCoverage['web/src/components/settings/SettingsRadioGroup.vue'])) {
+      mutate((entry) => { entry.states = entry.states.filter((state) => state.name !== name) }, 'Missing covered state')
+      for (const storyIds of [[], ['settings-radio-group--docs'], ['settings-radio-group--missing'], ['settings-switch--on'], ['settings-radio-group--default', 'settings-radio-group--default']]) {
+        mutate((entry) => { entry.states.find((state) => state.name === name)!.storyIds = storyIds }, 'Invalid covered state')
+      }
+    }
+    mutate((entry) => { entry.states[0].storyIds = ['settings-radio-group--selected'] }, 'Invalid covered state')
+    mutate((entry) => { entry.states.push(entry.states[0]) }, 'Duplicate state')
+    mutate((entry) => { entry.id = 'wrong-radio-owner' }, 'Invalid covered state')
+    mutate((entry) => { entry.owner.path = 'web/src/components/Other.vue' }, 'Invalid covered state')
+    mutate((entry, entries) => { entries.splice(entries.indexOf(entry), 1) }, 'Missing or duplicate covered owner')
+    mutate((entry, entries) => { entries.push({ ...entry, id: 'duplicate-radio-owner' }) }, 'Invalid covered state')
+    const entry = inventory.find((entry) => entry.id === id)!
+    expect(entry.loading.status).toBe('none')
+    expect(entry.states.find((state) => state.name === 'disabled')?.coverage).toBe('not-applicable')
+    for (const state of entry.states.filter((state) => state.coverage === 'covered')) {
+      const story = state.storyIds[0]
+      const isolated = { ...entry, states: [state] }
+      expect(() => checkStorybookIndex([isolated], { [story]: { type: 'story' } })).not.toThrow()
+      for (const index of [{}, { [story]: { type: 'docs' } }]) {
+        expect(() => checkStorybookIndex([isolated], index)).toThrow('invalid or missing story')
+      }
     }
   })
 
