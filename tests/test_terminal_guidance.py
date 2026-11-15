@@ -415,6 +415,16 @@ def test_managed_mcp_callback_guidance_preserves_both_providers() -> None:
     _assert_managed_callback_contract(bridge)
 
 
+def test_mcp_recovery_copies_only_and_requires_user_terminal_step() -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    for fact in ("Terminal recovery", "copies only", "Chat details → Open → Terminal",
+                 "Workspace if offered", "review, paste and run", "never types"):
+        assert fact in bridge
+    offer = next(line for line in guidance.splitlines() if line.startswith("- **The agent offers, the user runs.**"))
+    assert "suggestion card types" in offer
+
+
 @pytest.mark.parametrize(("old", "new"), [
     ("supports callback paste-back", "does NOT support callback paste-back"),
     ("both Claude and OpenCode", "Claude but not OpenCode"),
