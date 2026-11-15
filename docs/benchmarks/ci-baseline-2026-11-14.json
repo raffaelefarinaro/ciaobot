@@ -1,0 +1,2711 @@
+{
+  "schema": 1,
+  "captured_at": "2026-11-14T17:06:31.140882+00:00",
+  "repository": "raffaelefarinaro/ciaobot",
+  "workflow": "ci.yml",
+  "workflow_before_commit": "aa2c71cf977996a2b895cd61cd9dc9d904a2d077",
+  "candidate_commit": "6cc0b911c",
+  "selection": "Latest 20 successful completed ci.yml runs in the 60 most recent runs, captured before this PR was pushed. Explicit attempt jobs; incomplete required-check sets excluded from aggregates. No claims of random sampling. Aggregates use first attempts only; rerun samples stay in runs for audit because original workflow creation time includes intervening retry/human delay.",
+  "census": {
+    "runs": 60,
+    "completed_outcomes": {
+      "success": 46,
+      "failure": 12
+    },
+    "unfinished": 2
+  },
+  "profiles": {
+    "develop-push": {
+      "samples": 5,
+      "median_required_checks_wall_seconds": 1142.0,
+      "median_all_jobs_wall_seconds": 1859.0,
+      "job_medians_seconds": {
+        "linux-server": 285.0,
+        "linux-server-latest-python": 289.0,
+        "linux-web": 237.0,
+        "test": 1857.0,
+        "windows": 1141.0
+      }
+    },
+    "pr-windows-fast-web-no": {
+      "samples": 2,
+      "median_required_checks_wall_seconds": 369.5,
+      "median_all_jobs_wall_seconds": 399.5,
+      "job_medians_seconds": {
+        "linux-server": 337.5,
+        "linux-server-latest-python": 358.0,
+        "linux-web": 307.0,
+        "windows": 140.5
+      }
+    },
+    "pr-windows-fast-web-yes": {
+      "samples": 8,
+      "median_required_checks_wall_seconds": 658.0,
+      "median_all_jobs_wall_seconds": 658.0,
+      "job_medians_seconds": {
+        "linux-e2e": 391.5,
+        "linux-server": 390.0,
+        "linux-server-latest-python": 370.5,
+        "linux-web": 263.5,
+        "windows": 138.5
+      }
+    },
+    "pr-windows-full-web-no": {
+      "samples": 4,
+      "median_required_checks_wall_seconds": 1063.5,
+      "median_all_jobs_wall_seconds": 1063.5,
+      "job_medians_seconds": {
+        "linux-server": 320.0,
+        "linux-server-latest-python": 362.0,
+        "linux-web": 250.5,
+        "windows": 1061.5
+      }
+    }
+  },
+  "job_execution": {
+    "linux-e2e": {
+      "samples": 8,
+      "median_seconds": 391.5
+    },
+    "linux-server": {
+      "samples": 19,
+      "median_seconds": 339.0
+    },
+    "linux-server-latest-python": {
+      "samples": 19,
+      "median_seconds": 359.0
+    },
+    "linux-web": {
+      "samples": 19,
+      "median_seconds": 250.0
+    },
+    "test": {
+      "samples": 5,
+      "median_seconds": 1857.0
+    },
+    "windows": {
+      "samples": 19,
+      "median_seconds": 163.0
+    }
+  },
+  "local_context_only": {
+    "platform": "darwin",
+    "python": "3.13.17",
+    "commit": "6cc0b911c",
+    "backend": {
+      "passed": 15920,
+      "skipped": 142,
+      "seconds": 441.44
+    },
+    "frontend": {
+      "files": 369,
+      "passed": 6220,
+      "seconds": 55.52
+    },
+    "vite_build_seconds_excluding_typecheck": 4.92,
+    "lock_wait_seconds": null,
+    "note": "One contended local run, not a statistical baseline. No new before/after app runtime-performance claim."
+  },
+  "runs": [
+    {
+      "run_id": 43616885067,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43616885067",
+      "head_sha": "83f0ac2c58c013c50d93b633f4ed81aa9a0d5dec",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:40:28Z",
+      "profile": "pr-windows-full-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 957.0,
+      "required_checks_wall_seconds": 957.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:40:30Z",
+          "completed_at": "2026-11-14T16:56:25Z",
+          "duration_seconds": 955.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 489.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 257.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:40:30Z",
+          "completed_at": "2026-11-14T16:44:56Z",
+          "duration_seconds": 266.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 6.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 238.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:40:30Z",
+          "completed_at": "2026-11-14T16:45:12Z",
+          "duration_seconds": 282.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 244.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:40:30Z",
+          "completed_at": "2026-11-14T16:44:37Z",
+          "duration_seconds": 247.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 158.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 31.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:40:28Z",
+          "completed_at": "2026-11-14T16:40:28Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:44:38Z",
+          "completed_at": "2026-11-14T16:44:38Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43615606146,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43615606146",
+      "head_sha": "23ac49e284fa1c237c1f1d3811d5128ca53d4e1f",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:26:23Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 641.0,
+      "required_checks_wall_seconds": 641.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:26:25Z",
+          "completed_at": "2026-11-14T16:32:04Z",
+          "duration_seconds": 339.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 299.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:26:25Z",
+          "completed_at": "2026-11-14T16:28:59Z",
+          "duration_seconds": 154.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:26:25Z",
+          "completed_at": "2026-11-14T16:30:47Z",
+          "duration_seconds": 262.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 174.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:26:25Z",
+          "completed_at": "2026-11-14T16:32:54Z",
+          "duration_seconds": 389.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 351.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:26:23Z",
+          "completed_at": "2026-11-14T16:26:23Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:30:49Z",
+          "completed_at": "2026-11-14T16:37:04Z",
+          "duration_seconds": 375.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43614919160,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43614919160",
+      "head_sha": "3c66928c46af8d80931ff206a67f7263a4cba8d2",
+      "event": "push",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:18:54Z",
+      "profile": "develop-push",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1859.0,
+      "required_checks_wall_seconds": 1081.0,
+      "jobs": [
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:18:56Z",
+          "completed_at": "2026-11-14T16:22:50Z",
+          "duration_seconds": 234.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 154.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 30.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:18:56Z",
+          "completed_at": "2026-11-14T16:24:30Z",
+          "duration_seconds": 334.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 301.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:18:56Z",
+          "completed_at": "2026-11-14T16:25:06Z",
+          "duration_seconds": 370.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 330.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:18:56Z",
+          "completed_at": "2026-11-14T16:49:53Z",
+          "duration_seconds": 1857.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Run pytest with coverage",
+              "conclusion": "success",
+              "duration_seconds": 835.0
+            },
+            {
+              "name": "Run frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 278.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 51.0
+            },
+            {
+              "name": "Run PWA browser tests",
+              "conclusion": "success",
+              "duration_seconds": 513.0
+            },
+            {
+              "name": "Upload browser test traces",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Smoke-test package",
+              "conclusion": "success",
+              "duration_seconds": 19.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:18:56Z",
+          "completed_at": "2026-11-14T16:36:55Z",
+          "duration_seconds": 1079.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 58.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 574.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 273.0
+            }
+          ]
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:22:50Z",
+          "completed_at": "2026-11-14T16:22:50Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43614323546,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43614323546",
+      "head_sha": "db3e99623160481f7c7e6acb9e1a23560096540d",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:12:22Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 662.0,
+      "required_checks_wall_seconds": 662.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:24Z",
+          "completed_at": "2026-11-14T16:14:19Z",
+          "duration_seconds": 115.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 45.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:25Z",
+          "completed_at": "2026-11-14T16:19:42Z",
+          "duration_seconds": 437.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 390.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:25Z",
+          "completed_at": "2026-11-14T16:19:38Z",
+          "duration_seconds": 433.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 387.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:25Z",
+          "completed_at": "2026-11-14T16:16:50Z",
+          "duration_seconds": 265.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 180.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 36.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:12:23Z",
+          "completed_at": "2026-11-14T16:12:23Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:16:52Z",
+          "completed_at": "2026-11-14T16:23:24Z",
+          "duration_seconds": 392.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43614285612,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43614285612",
+      "head_sha": "fb730b45341542bfdb3e0db5dbf8aa5da54f0186",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:11:58Z",
+      "profile": "pr-windows-fast-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 435.0,
+      "required_checks_wall_seconds": 375.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:00Z",
+          "completed_at": "2026-11-14T16:17:14Z",
+          "duration_seconds": 314.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 282.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:01Z",
+          "completed_at": "2026-11-14T16:18:13Z",
+          "duration_seconds": 372.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 257.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 20.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:01Z",
+          "completed_at": "2026-11-14T16:14:33Z",
+          "duration_seconds": 152.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:12:01Z",
+          "completed_at": "2026-11-14T16:19:13Z",
+          "duration_seconds": 432.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 384.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:11:59Z",
+          "completed_at": "2026-11-14T16:11:58Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:18:13Z",
+          "completed_at": "2026-11-14T16:18:13Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43613712063,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43613712063",
+      "head_sha": "7164248757a76bfcce84b3f9ac505cec5c4c346e",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T16:05:46Z",
+      "profile": "pr-windows-full-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1255.0,
+      "required_checks_wall_seconds": 1255.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:05:48Z",
+          "completed_at": "2026-11-14T16:26:41Z",
+          "duration_seconds": 1253.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 654.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 355.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:05:48Z",
+          "completed_at": "2026-11-14T16:12:05Z",
+          "duration_seconds": 377.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 338.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:05:48Z",
+          "completed_at": "2026-11-14T16:10:41Z",
+          "duration_seconds": 293.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 7.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 262.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:05:49Z",
+          "completed_at": "2026-11-14T16:10:03Z",
+          "duration_seconds": 254.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 175.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:05:47Z",
+          "completed_at": "2026-11-14T16:05:46Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T16:10:04Z",
+          "completed_at": "2026-11-14T16:10:04Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43612858694,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43612858694",
+      "head_sha": "dfdcde935bb426e96bf7a4fc1108950dbf1d9c97",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T15:56:30Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 743.0,
+      "required_checks_wall_seconds": 743.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:56:32Z",
+          "completed_at": "2026-11-14T16:01:26Z",
+          "duration_seconds": 294.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 255.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:56:32Z",
+          "completed_at": "2026-11-14T16:02:10Z",
+          "duration_seconds": 338.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 239.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 43.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 19.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:56:33Z",
+          "completed_at": "2026-11-14T16:02:34Z",
+          "duration_seconds": 361.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 321.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:56:32Z",
+          "completed_at": "2026-11-14T15:58:43Z",
+          "duration_seconds": 131.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T15:56:31Z",
+          "completed_at": "2026-11-14T15:56:31Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T16:02:13Z",
+          "completed_at": "2026-11-14T16:08:53Z",
+          "duration_seconds": 400.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43612275674,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43612275674",
+      "head_sha": "9645bd1e465513e7098d855a0b0d6bc6bb13fa47",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T15:49:53Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 654.0,
+      "required_checks_wall_seconds": 654.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:49:59Z",
+          "completed_at": "2026-11-14T15:52:42Z",
+          "duration_seconds": 163.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 49.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:49:56Z",
+          "completed_at": "2026-11-14T15:54:06Z",
+          "duration_seconds": 250.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 173.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 17.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:49:56Z",
+          "completed_at": "2026-11-14T15:56:01Z",
+          "duration_seconds": 365.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 327.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:49:56Z",
+          "completed_at": "2026-11-14T15:54:51Z",
+          "duration_seconds": 295.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 250.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T15:49:54Z",
+          "completed_at": "2026-11-14T15:49:54Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:54:08Z",
+          "completed_at": "2026-11-14T16:00:47Z",
+          "duration_seconds": 399.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43610760397,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43610760397",
+      "head_sha": "69b384ae60a827609d7ac7877d5e8c17d1f1685a",
+      "event": "push",
+      "attempt": 1,
+      "created_at": "2026-11-14T15:32:49Z",
+      "profile": "develop-push",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1981.0,
+      "required_checks_wall_seconds": 1218.0,
+      "jobs": [
+        {
+          "name": "test",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:32:52Z",
+          "completed_at": "2026-11-14T16:05:50Z",
+          "duration_seconds": 1978.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 12.0
+            },
+            {
+              "name": "Run pytest with coverage",
+              "conclusion": "success",
+              "duration_seconds": 941.0
+            },
+            {
+              "name": "Run frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 268.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 56.0
+            },
+            {
+              "name": "Run PWA browser tests",
+              "conclusion": "success",
+              "duration_seconds": 507.0
+            },
+            {
+              "name": "Upload browser test traces",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Smoke-test package",
+              "conclusion": "success",
+              "duration_seconds": 20.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:32:51Z",
+          "completed_at": "2026-11-14T15:38:29Z",
+          "duration_seconds": 338.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 301.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:32:51Z",
+          "completed_at": "2026-11-14T15:36:45Z",
+          "duration_seconds": 234.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 157.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:32:52Z",
+          "completed_at": "2026-11-14T15:37:42Z",
+          "duration_seconds": 290.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 244.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:32:52Z",
+          "completed_at": "2026-11-14T15:53:07Z",
+          "duration_seconds": 1215.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 54.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 595.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 359.0
+            }
+          ]
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T15:36:45Z",
+          "completed_at": "2026-11-14T15:36:45Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43609789426,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43609789426",
+      "head_sha": "b9131b33682f253985a23a7f353b58c5ccc1391e",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T15:21:57Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 635.0,
+      "required_checks_wall_seconds": 635.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:22:00Z",
+          "completed_at": "2026-11-14T15:28:56Z",
+          "duration_seconds": 416.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 13.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 377.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:22:00Z",
+          "completed_at": "2026-11-14T15:27:51Z",
+          "duration_seconds": 351.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 307.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:22:00Z",
+          "completed_at": "2026-11-14T15:26:00Z",
+          "duration_seconds": 240.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 163.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:22:01Z",
+          "completed_at": "2026-11-14T15:24:09Z",
+          "duration_seconds": 128.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 46.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T15:21:58Z",
+          "completed_at": "2026-11-14T15:21:58Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:26:01Z",
+          "completed_at": "2026-11-14T15:32:32Z",
+          "duration_seconds": 391.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43608372554,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43608372554",
+      "head_sha": "aa2c71cf977996a2b895cd61cd9dc9d904a2d077",
+      "event": "push",
+      "attempt": 1,
+      "created_at": "2026-11-14T15:06:33Z",
+      "profile": "develop-push",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1839.0,
+      "required_checks_wall_seconds": 1171.0,
+      "jobs": [
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:06:36Z",
+          "completed_at": "2026-11-14T15:11:24Z",
+          "duration_seconds": 288.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 252.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:06:36Z",
+          "completed_at": "2026-11-14T15:26:04Z",
+          "duration_seconds": 1168.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 573.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 354.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:06:36Z",
+          "completed_at": "2026-11-14T15:11:21Z",
+          "duration_seconds": 285.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 247.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:06:35Z",
+          "completed_at": "2026-11-14T15:11:00Z",
+          "duration_seconds": 265.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 181.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 36.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "success",
+          "started_at": "2026-11-14T15:06:36Z",
+          "completed_at": "2026-11-14T15:37:12Z",
+          "duration_seconds": 1836.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Run pytest with coverage",
+              "conclusion": "success",
+              "duration_seconds": 884.0
+            },
+            {
+              "name": "Run frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 248.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 49.0
+            },
+            {
+              "name": "Run PWA browser tests",
+              "conclusion": "success",
+              "duration_seconds": 477.0
+            },
+            {
+              "name": "Upload browser test traces",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Smoke-test package",
+              "conclusion": "success",
+              "duration_seconds": 18.0
+            }
+          ]
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T15:11:00Z",
+          "completed_at": "2026-11-14T15:11:00Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43607306509,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43607306509",
+      "head_sha": "e9a54b0cca2856a2cfb6aa0487c2b6c24178c682",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:54:37Z",
+      "profile": "pr-windows-full-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1074.0,
+      "required_checks_wall_seconds": 1074.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:54:39Z",
+          "completed_at": "2026-11-14T15:01:45Z",
+          "duration_seconds": 426.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 384.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:54:39Z",
+          "completed_at": "2026-11-14T15:00:38Z",
+          "duration_seconds": 359.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 319.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:54:38Z",
+          "completed_at": "2026-11-14T15:12:31Z",
+          "duration_seconds": 1073.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 53.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 568.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 279.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:54:40Z",
+          "completed_at": "2026-11-14T14:58:38Z",
+          "duration_seconds": 238.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 156.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 30.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:54:37Z",
+          "completed_at": "2026-11-14T14:54:37Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:58:39Z",
+          "completed_at": "2026-11-14T14:58:38Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43607037697,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43607037697",
+      "head_sha": "781321e08c0009eea6e896820b5f0d96b2179b43",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:51:26Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 720.0,
+      "required_checks_wall_seconds": 720.0,
+      "jobs": [
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:51:28Z",
+          "completed_at": "2026-11-14T14:57:48Z",
+          "duration_seconds": 380.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 336.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:51:28Z",
+          "completed_at": "2026-11-14T14:53:27Z",
+          "duration_seconds": 119.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 45.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:51:29Z",
+          "completed_at": "2026-11-14T14:57:06Z",
+          "duration_seconds": 337.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 236.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 43.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 17.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:51:28Z",
+          "completed_at": "2026-11-14T14:57:30Z",
+          "duration_seconds": 362.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 329.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:51:27Z",
+          "completed_at": "2026-11-14T14:51:26Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:57:08Z",
+          "completed_at": "2026-11-14T15:03:26Z",
+          "duration_seconds": 378.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43606576188,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43606576188",
+      "head_sha": "8d20b32509137c4bc74b691285341dc7f2edad29",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:46:08Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 803.0,
+      "required_checks_wall_seconds": 803.0,
+      "jobs": [
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:46:10Z",
+          "completed_at": "2026-11-14T14:50:56Z",
+          "duration_seconds": 286.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 246.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:46:11Z",
+          "completed_at": "2026-11-14T14:53:06Z",
+          "duration_seconds": 415.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 374.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:46:10Z",
+          "completed_at": "2026-11-14T14:51:46Z",
+          "duration_seconds": 336.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 236.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 43.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 19.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:46:10Z",
+          "completed_at": "2026-11-14T14:48:41Z",
+          "duration_seconds": 151.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 13.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 51.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:46:09Z",
+          "completed_at": "2026-11-14T14:46:08Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:51:48Z",
+          "completed_at": "2026-11-14T14:59:31Z",
+          "duration_seconds": 463.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43606405543,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43606405543",
+      "head_sha": "b66b7cc285f23135c20b5707261fd1c70fe9bf4f",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:44:11Z",
+      "profile": "pr-windows-fast-web-yes",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 580.0,
+      "required_checks_wall_seconds": 580.0,
+      "jobs": [
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:44:13Z",
+          "completed_at": "2026-11-14T14:51:43Z",
+          "duration_seconds": 450.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 402.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:44:14Z",
+          "completed_at": "2026-11-14T14:48:18Z",
+          "duration_seconds": 244.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 152.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 29.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:44:13Z",
+          "completed_at": "2026-11-14T14:46:39Z",
+          "duration_seconds": 146.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:44:13Z",
+          "completed_at": "2026-11-14T14:50:43Z",
+          "duration_seconds": 390.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 348.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:44:12Z",
+          "completed_at": "2026-11-14T14:44:11Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:48:20Z",
+          "completed_at": "2026-11-14T14:53:51Z",
+          "duration_seconds": 331.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43605986598,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43605986598",
+      "head_sha": "a1bb646306db87ced4a18ef0e800b39dd0fef7ba",
+      "event": "push",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:39:18Z",
+      "profile": "develop-push",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1328.0,
+      "required_checks_wall_seconds": 996.0,
+      "jobs": [
+        {
+          "name": "test",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:39:20Z",
+          "completed_at": "2026-11-14T15:01:26Z",
+          "duration_seconds": 1326.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Run pytest with coverage",
+              "conclusion": "success",
+              "duration_seconds": 585.0
+            },
+            {
+              "name": "Run frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 168.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 33.0
+            },
+            {
+              "name": "Run PWA browser tests",
+              "conclusion": "success",
+              "duration_seconds": 419.0
+            },
+            {
+              "name": "Upload browser test traces",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Smoke-test package",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:39:20Z",
+          "completed_at": "2026-11-14T14:43:20Z",
+          "duration_seconds": 240.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 158.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 29.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:39:20Z",
+          "completed_at": "2026-11-14T14:44:05Z",
+          "duration_seconds": 285.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 246.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:39:20Z",
+          "completed_at": "2026-11-14T14:55:54Z",
+          "duration_seconds": 994.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 520.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 260.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:39:20Z",
+          "completed_at": "2026-11-14T14:44:04Z",
+          "duration_seconds": 284.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 9.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 247.0
+            }
+          ]
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:43:21Z",
+          "completed_at": "2026-11-14T14:43:20Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43605410572,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43605410572",
+      "head_sha": "0c0b895022b0a3f5d7cf2649df96faa3954a64b6",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:32:41Z",
+      "profile": "pr-windows-fast-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 364.0,
+      "required_checks_wall_seconds": 364.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:32:43Z",
+          "completed_at": "2026-11-14T14:34:52Z",
+          "duration_seconds": 129.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:32:44Z",
+          "completed_at": "2026-11-14T14:36:46Z",
+          "duration_seconds": 242.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 156.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 30.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:32:44Z",
+          "completed_at": "2026-11-14T14:38:45Z",
+          "duration_seconds": 361.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 320.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:32:44Z",
+          "completed_at": "2026-11-14T14:37:28Z",
+          "duration_seconds": 284.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 239.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:32:42Z",
+          "completed_at": "2026-11-14T14:32:41Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:36:46Z",
+          "completed_at": "2026-11-14T14:36:46Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43602932360,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43602932360",
+      "head_sha": "36482aff947db1e20c321786bdc2f46df1c99095",
+      "event": "pull_request",
+      "attempt": 1,
+      "created_at": "2026-11-14T14:04:23Z",
+      "profile": "pr-windows-full-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1053.0,
+      "required_checks_wall_seconds": 1053.0,
+      "jobs": [
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:26Z",
+          "completed_at": "2026-11-14T14:09:18Z",
+          "duration_seconds": 292.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 202.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 38.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 17.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:25Z",
+          "completed_at": "2026-11-14T14:10:30Z",
+          "duration_seconds": 365.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 327.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:26Z",
+          "completed_at": "2026-11-14T14:21:56Z",
+          "duration_seconds": 1050.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 12.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 49.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 521.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 312.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:25Z",
+          "completed_at": "2026-11-14T14:10:12Z",
+          "duration_seconds": 347.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 10.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 311.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:04:24Z",
+          "completed_at": "2026-11-14T14:04:24Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:09:18Z",
+          "completed_at": "2026-11-14T14:09:18Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43601843018,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43601843018",
+      "head_sha": "c82530559242f5fc3049c0be0f80a5bffb402983",
+      "event": "push",
+      "attempt": 1,
+      "created_at": "2026-11-14T13:51:19Z",
+      "profile": "develop-push",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1870.0,
+      "required_checks_wall_seconds": 1142.0,
+      "jobs": [
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T13:51:20Z",
+          "completed_at": "2026-11-14T14:10:21Z",
+          "duration_seconds": 1141.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 48.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "success",
+              "duration_seconds": 657.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 262.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T13:51:21Z",
+          "completed_at": "2026-11-14T13:55:18Z",
+          "duration_seconds": 237.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 154.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 30.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 14.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T13:51:21Z",
+          "completed_at": "2026-11-14T13:55:47Z",
+          "duration_seconds": 266.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 7.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 237.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "success",
+          "started_at": "2026-11-14T13:51:22Z",
+          "completed_at": "2026-11-14T14:22:29Z",
+          "duration_seconds": 1867.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Run pytest with coverage",
+              "conclusion": "success",
+              "duration_seconds": 812.0
+            },
+            {
+              "name": "Run frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 281.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 56.0
+            },
+            {
+              "name": "Run PWA browser tests",
+              "conclusion": "success",
+              "duration_seconds": 548.0
+            },
+            {
+              "name": "Upload browser test traces",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Smoke-test package",
+              "conclusion": "success",
+              "duration_seconds": 17.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T13:51:21Z",
+          "completed_at": "2026-11-14T13:56:10Z",
+          "duration_seconds": 289.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 8.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 252.0
+            }
+          ]
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T13:55:19Z",
+          "completed_at": "2026-11-14T13:55:18Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        }
+      ]
+    },
+    {
+      "run_id": 43601116912,
+      "url": "https://github.com/raffaelefarinaro/ciaobot/actions/runs/43601116912",
+      "head_sha": "74bc5e47cf38c545952a9343888b2ff0e8510631",
+      "event": "pull_request",
+      "attempt": 2,
+      "created_at": "2026-11-14T13:42:34Z",
+      "profile": "pr-windows-fast-web-no",
+      "complete_required_set": true,
+      "all_jobs_wall_seconds": 1684.0,
+      "required_checks_wall_seconds": 1684.0,
+      "jobs": [
+        {
+          "name": "linux-server-latest-python",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:06Z",
+          "completed_at": "2026-11-14T14:08:39Z",
+          "duration_seconds": 273.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 7.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 239.0
+            }
+          ]
+        },
+        {
+          "name": "windows",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:06Z",
+          "completed_at": "2026-11-14T14:06:40Z",
+          "duration_seconds": 154.0,
+          "steps": [
+            {
+              "name": "Python static type check (win32)",
+              "conclusion": "success",
+              "duration_seconds": 15.0
+            },
+            {
+              "name": "Windows ConPTY terminal tests",
+              "conclusion": "success",
+              "duration_seconds": 50.0
+            },
+            {
+              "name": "Windows backend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            },
+            {
+              "name": "Windows frontend tests",
+              "conclusion": "skipped",
+              "duration_seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "linux-web",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:06Z",
+          "completed_at": "2026-11-14T14:09:14Z",
+          "duration_seconds": 308.0,
+          "steps": [
+            {
+              "name": "Frontend tests",
+              "conclusion": "success",
+              "duration_seconds": 212.0
+            },
+            {
+              "name": "Build PWA",
+              "conclusion": "success",
+              "duration_seconds": 40.0
+            },
+            {
+              "name": "Smoke-test installed package",
+              "conclusion": "success",
+              "duration_seconds": 16.0
+            }
+          ]
+        },
+        {
+          "name": "linux-server",
+          "conclusion": "success",
+          "started_at": "2026-11-14T14:04:05Z",
+          "completed_at": "2026-11-14T14:10:38Z",
+          "duration_seconds": 393.0,
+          "steps": [
+            {
+              "name": "Python static type check",
+              "conclusion": "success",
+              "duration_seconds": 11.0
+            },
+            {
+              "name": "Linux backend tests",
+              "conclusion": "success",
+              "duration_seconds": 352.0
+            }
+          ]
+        },
+        {
+          "name": "test",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:04:04Z",
+          "completed_at": "2026-11-14T14:04:03Z",
+          "duration_seconds": -1.0,
+          "steps": []
+        },
+        {
+          "name": "linux-e2e",
+          "conclusion": "skipped",
+          "started_at": "2026-11-14T14:09:14Z",
+          "completed_at": "2026-11-14T14:09:14Z",
+          "duration_seconds": 0.0,
+          "steps": []
+        }
+      ]
+    }
+  ]
+}

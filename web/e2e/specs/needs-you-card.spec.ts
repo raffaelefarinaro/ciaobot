@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, settled } from '../support/app'
 
@@ -11,7 +10,6 @@ import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, settled }
 const CHAT_PATH = '/chat/alpha-chat-1'
 const CHAT_ID = 'alpha-chat-1'
 const TOUCH_MIN = 44
-const HAS_MCP_SIDEBAR = existsSync(new URL('../../src/components/ChatMcpConnections.vue', import.meta.url))
 
 /** Put an `mcp_auth` action on the chat, before the app boots. */
 async function raiseSignIn(page: Page, state?: 'waiting'): Promise<void> {
@@ -23,7 +21,7 @@ async function raiseSignIn(page: Page, state?: 'waiting'): Promise<void> {
   expect(res.ok(), 'the fixture refused the action').toBe(true)
 }
 
-async function openMcpTestSurface(page: Page): Promise<{ root: ReturnType<Page['locator']>; sidebar: boolean }> {
+async function openMcpTestSurface(page: Page): Promise<ReturnType<Page['locator']>> {
   const detailsAside = page.locator('aside').filter({ has: page.getByRole('heading', { name: 'Chat details' }) })
   const hideDetails = detailsAside.getByRole('button', { name: 'Hide chat details' })
   if (!(await detailsAside.isVisible())) {
@@ -33,13 +31,8 @@ async function openMcpTestSurface(page: Page): Promise<{ root: ReturnType<Page['
   }
   await expect(hideDetails).toBeVisible()
   const rail = detailsAside.locator('.chat-mcp-connections')
-  if (HAS_MCP_SIDEBAR) {
-    await expect(rail).toBeVisible()
-    return { root: rail, sidebar: true }
-  }
-  await expect(rail).toHaveCount(0)
-  await hideDetails.click()
-  return { root: page.locator('.chat-column .needs-you-stack'), sidebar: false }
+  await expect(rail).toBeVisible()
+  return rail
 }
 
 interface PopupRecord { args: unknown[]; href: string; opener: boolean }
@@ -74,20 +67,14 @@ test.describe('sidebar-managed OAuth', () => {
     await raiseSignIn(page)
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const { root, sidebar } = await openMcpTestSurface(page)
+    const root = await openMcpTestSurface(page)
     const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     await expect(card.locator('.needs-you-card-title')).toHaveText('Sign in to linear')
-    if (sidebar) {
-      const rail = await root.boundingBox()
-      const box = await card.boundingBox()
-      expect(box!.y).toBeGreaterThanOrEqual(rail!.y)
-      expect(box!.y + box!.height).toBeLessThanOrEqual(rail!.y + rail!.height)
-    } else {
-      const cardBox = await card.boundingBox()
-      const composerBox = await page.locator(COMPOSER).boundingBox()
-      expect(cardBox!.y + cardBox!.height).toBeLessThanOrEqual(composerBox!.y + 1)
-    }
+    const rail = await root.boundingBox()
+    const box = await card.boundingBox()
+    expect(box!.y).toBeGreaterThanOrEqual(rail!.y)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(rail!.y + rail!.height)
 
     await card.getByRole('button', { name: 'Sign in', exact: true }).click()
 
@@ -111,7 +98,7 @@ test.describe('sidebar-managed OAuth', () => {
     await raiseSignIn(page)
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const { root } = await openMcpTestSurface(page)
+    const root = await openMcpTestSurface(page)
     const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     await expect(card.getByRole('button', { name: 'Turn off linear' })).toBeVisible()
@@ -133,7 +120,7 @@ test.describe('sidebar-managed OAuth on a phone', () => {
     // A coarse pointer, so the touch rules are the ones under test.
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
 
-    const { root } = await openMcpTestSurface(page)
+    const root = await openMcpTestSurface(page)
     const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     const { overflow, culprits } = await horizontalOverflow(page)
@@ -157,7 +144,7 @@ test.describe('sidebar-managed OAuth on a phone', () => {
     await raiseSignIn(page, 'waiting')
     await boot(page, CHAT_PATH, COMPOSER)
 
-    const { root } = await openMcpTestSurface(page)
+    const root = await openMcpTestSurface(page)
     const card = root.locator('.needs-you-card')
     await expect(card).toBeVisible()
     const { overflow, culprits } = await horizontalOverflow(page)

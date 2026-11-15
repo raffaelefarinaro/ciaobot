@@ -323,7 +323,7 @@ def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:
             "- **Chat MCP navigation", "- **The manual bridge", "- **Never report a step",
         ))
     )
-    reload = cli.split("### Reloading tools", 1)[1].split("### Long-running commands", 1)[0]
+    reload = cli.split("## Reloading tools", 1)[1].split("## Projects", 1)[0]
     row = next(line for line in cli.splitlines() if line.startswith("| `chat needs-action KIND"))
     intro = row.split(" `command --command-file", 1)[0]
     mcp_action = row.split(" `mcp_auth --server NAME`", 1)[1].split(" `permission_mode", 1)[0]
@@ -361,7 +361,7 @@ def _mcp_sources() -> tuple[str, str, str]:
     return (
         _section(_skill(), "Connecting providers"),
         _reference("install-and-settings.md"),
-        (STOCK / "skills/ciao-cli/SKILL.md").read_text(encoding="utf-8"),
+        agent_cli._help_text("chat"),
     )
 
 
@@ -413,6 +413,16 @@ def test_managed_mcp_callback_guidance_preserves_both_providers() -> None:
     guidance = _reference("install-and-settings.md")
     bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
     _assert_managed_callback_contract(bridge)
+
+
+def test_mcp_recovery_copies_only_and_requires_user_terminal_step() -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    for fact in ("Terminal recovery", "copies only", "Chat details → Open → Terminal",
+                 "Workspace if offered", "review, paste and run", "never types"):
+        assert fact in bridge
+    offer = next(line for line in guidance.splitlines() if line.startswith("- **The agent offers, the user runs.**"))
+    assert "suggestion card types" in offer
 
 
 @pytest.mark.parametrize(("old", "new"), [
