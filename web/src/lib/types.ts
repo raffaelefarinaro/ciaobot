@@ -506,6 +506,8 @@ export interface SubagentTranscript {
   // Run length in milliseconds, when the provider can report it without the
   // transcript (opencode child sessions carry their own timestamps).
   duration_ms?: number | null
+  // Provider start time as Unix milliseconds, when available.
+  started_at?: number | null
 }
 
 // One live subagent from `/api/subagents/running`. Same dispatch metadata as

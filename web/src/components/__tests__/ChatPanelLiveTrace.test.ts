@@ -262,6 +262,28 @@ describe('ChatPanel live trace', () => {
     })
   })
 
+  it('keeps completed same-turn subagents from earlier wakes out of the live trace', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_797_800_000_500)
+    localStorage.setItem('ciao-stream-started-at', JSON.stringify({ 'chat-1': 1_797_800_000_500 }))
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'long-running task', timestamp: '2026-10-19T10:00:00Z', turn_index: 5 },
+    ]
+    store.subagents['chat-1'] = [
+      { agent_id: 'prior-wake', messages: [], status: 'completed', turn_index: 5, started_at: 1_797_800_000_000 },
+      { agent_id: 'current-wake', messages: [], status: 'completed', turn_index: 5, started_at: 1_797_800_001_000 },
+      { agent_id: 'still-running', messages: [], status: 'running', turn_index: 5, started_at: 1_797_800_000_000 },
+    ] as never
+    store.streaming['chat-1'] = true
+    await flushPromises()
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+
+    expect(wrapper.findAllComponents(SubagentPanelStub)
+      .flatMap(panel => (panel.props('subagents') as { agent_id: string }[]).map(sub => sub.agent_id)))
+      .toEqual(['current-wake', 'still-running'])
+  })
+
   it('keeps the live trace collapsed by default while streaming', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnMessages().slice(0, 1)

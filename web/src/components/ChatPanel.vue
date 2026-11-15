@@ -4637,11 +4637,16 @@ const renderData = computed<{
     && firstRenderedTurn !== null
     && sub.turn_index < firstRenderedTurn
   // While streaming, the in-flight turn's subagents nest in the live trace,
-  // along with any still running from an earlier turn. Finished agents of
-  // earlier rendered turns were already placed by flushTurn.
+  // along with any still running from an earlier turn. Drop settled children
+  // created before this stream, even when background wakes share a turn index.
   if (view.isStreaming) {
+    const streamStartedAt = view.currentStreamStartedAt
     const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
       .filter(sub => !belongsToUnloadedTurn(sub))
+      .filter(sub => sub.status === 'running'
+        || !streamStartedAt
+        || typeof sub.started_at !== 'number'
+        || sub.started_at >= streamStartedAt)
     return { items, liveSubs: live, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
