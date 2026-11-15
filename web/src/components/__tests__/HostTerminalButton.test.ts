@@ -69,6 +69,37 @@ describe('HostTerminalButton', () => {
     expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
   })
 
+  it.each([
+    ['not_on_host', 'Opening a terminal is only available on the computer running Ciaobot.'],
+    ['unavailable_headless', 'Ciaobot cannot open a terminal without a desktop session.'],
+    ['no_terminal_found', 'No supported terminal app was found on the computer running Ciaobot.'],
+    ['unsupported_platform', 'Opening a terminal is not supported on this operating system.'],
+    ['not_applicable', 'This update is no longer needed.'],
+    ['launch_failed', 'Could not open a terminal. Please try again.'],
+    ['unknown-secret-reason', 'Could not open a terminal. Please try again.'],
+    ['__proto__', 'Could not open a terminal. Please try again.'],
+  ])('renders safe guidance for %s without exposing error details', async (reason, expected) => {
+    vi.mocked(api.post).mockRejectedValue({ message: 'SECRET_EXCEPTION', payload: { reason, error: 'SECRET_PAYLOAD' } })
+    const wrapper = await mountButton({ action: 'claude-install', safeErrors: true })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toBe(expected)
+    expect(wrapper.text()).not.toContain('SECRET_')
+    expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
+    if (reason === 'not_applicable') expect(wrapper.emitted('not-applicable')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('uses the generic safe message for a thrown exception without a payload', async () => {
+    vi.mocked(api.post).mockRejectedValue(new Error('SECRET_THROWN'))
+    const wrapper = await mountButton({ action: 'claude-install', safeErrors: true })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toBe('Could not open a terminal. Please try again.')
+    expect(wrapper.text()).not.toContain('SECRET_THROWN')
+    wrapper.unmount()
+  })
+
   it('tells its parent when the engine says there is nothing to update', async () => {
     vi.mocked(api.post).mockRejectedValue({ status: 409, payload: { ok: false, reason: 'not_applicable', error: 'opencode-update: nothing to update' } })
     const wrapper = await mountButton({ action: 'skills-update' })

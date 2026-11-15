@@ -648,7 +648,7 @@
           </div>
         </div>
         <template v-else-if="providerKeysError">
-          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
+          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p><button type="button" class="set-link" @click="fetchProviderKeys">Retry</button></div>
         </template>
         <template v-else-if="providerKeys">
           <div id="chat-providers" class="card">
@@ -656,7 +656,7 @@
               <div>
                 <p class="section-title">Chat providers</p>
                 <p class="hint">
-                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
+                  Each provider CLI manages its own login and credentials. OpenCode configuration does not verify upstream credentials.
                   The defaults below apply to new chats; any chat can override them from the picker.
                   Session insights is the model that reads chats into memory and names them. On Automatic it
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
@@ -672,6 +672,7 @@
             </div>
 
             <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
+            <button v-if="workspaceModelsError" type="button" class="set-link" @click="fetchWorkspaceModels()">Retry model options</button>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
                 <div class="set-row-head provider-row-head">
@@ -679,11 +680,12 @@
                     <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
                     <p class="set-row-sub provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
-                      <span v-if="conn.account">{{ conn.account }}</span>
-                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                      <span v-if="connKey === 'claude' && conn.auth === 'oauth'">OAuth</span>
+                      <span v-if="connKey === 'claude' && conn.auth === 'oauth' && conn.account">{{ conn.account }}</span>
+                      <span v-if="connKey !== 'opencode' && !conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
                     <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
-                      {{ conn.detail }}
+                      <template v-if="connKey !== 'opencode'">{{ conn.detail }}</template>
                       Install it with <code>{{ conn.command }}</code>
                       <template v-if="conn.path_command">
                         , then put it on your PATH with
@@ -698,6 +700,7 @@
                     <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
                       <HostTerminalButton
                         :action="conn.terminal_action"
+                        safe-errors
                         variant="small"
                         :aria-label="`Install ${conn.label || connKey} in Terminal`"
                         label="Install in Terminal"
@@ -713,17 +716,8 @@
                   </div>
                   <div class="set-row-actions provider-connection-actions">
                     <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
-                      {{ conn.ok ? 'Connected' : 'Not connected' }}
+                      {{ connKey === 'opencode' ? (conn.ok ? 'CLI ready' : 'CLI not ready') : (conn.ok ? 'Connected' : 'Not connected') }}
                     </span>
-                    <!-- Connect is the row's one primary only while it is needed;
-                         once connected, the rare Reconnect / Log out live in the menu. -->
-                    <button
-                      v-if="!conn.ok"
-                      type="button"
-                      class="btn-primary btn-small"
-                      :disabled="providerConnectionPending === connKey"
-                      @click="providerConnectionAction(String(connKey), 'connect')"
-                    >Connect</button>
                     <button
                       type="button"
                       class="set-link"
@@ -746,9 +740,6 @@
                       </DropdownMenuTrigger>
                       <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
                         <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
-                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'connect')">
-                            <button type="button" class="settings-menu-item">Reconnect</button>
-                          </DropdownMenuItem>
                           <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'logout')">
                             <button type="button" class="settings-menu-item settings-menu-item--danger">Log out</button>
                           </DropdownMenuItem>
@@ -757,6 +748,11 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :workspace="projectStore.activeWorkspace" />
+                <details v-if="connKey === 'claude'" class="provider-sign-in">
+                  <summary>{{ conn.ok ? 'Reconnect Claude Code' : 'Connect Claude Code' }}</summary>
+                  <ProviderSignInGuidance cli="claude" context="Claude Code" :workspace="projectStore.activeWorkspace" />
+                </details>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
                   <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
@@ -770,6 +766,7 @@
                     <HostTerminalButton
                       v-if="conn.release_check.terminal_action"
                       :action="conn.release_check.terminal_action"
+                      safe-errors
                       variant="small"
                       label="Update in Terminal"
                       :aria-label="`Update ${conn.label || connKey} in Terminal`"
@@ -928,12 +925,24 @@
                   </div>
                 </details>
               </div>
-              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
+              <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />
             </div>
+            <ProviderInventory v-else :workspace="projectStore.activeWorkspace" />
+            <button
+              v-if="!providerKeys.connections?.opencode"
+              type="button"
+              class="set-link"
+              :disabled="!!providerConnectionPending"
+              @click="providerConnectionAction('opencode', 'verify')"
+            >Refresh after sign-in</button>
+            <div v-if="providerConnectionResult" class="action-result" role="status">{{ providerConnectionResult }}</div>
           </div>
         </template>
 
-        <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
+        <div v-if="routinesError" class="card">
+          <p class="hint hint--warn" role="alert">{{ routinesError }}</p>
+          <button type="button" class="set-link" @click="fetchRoutines">Retry model settings</button>
+        </div>
       </template>
 
       <!-- WORKSPACE OVERVIEW TAB (the active workspace's cards, then every workspace; /settings/workspace) -->
@@ -1359,7 +1368,7 @@
           <div class="rail-kvs">
             <div v-for="(conn, connKey) in providerKeys?.connections" :key="`rail-${connKey}`" class="rail-kv">
               <span>{{ conn.label || connKey }}</span>
-              <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
+              <strong :class="{ 'rail-attention': !conn.ok }">{{ connKey === 'opencode' ? (conn.ok ? 'CLI ready' : 'CLI not ready') : (conn.ok ? 'Connected' : 'Not connected') }}</strong>
             </div>
           </div>
         </section>
@@ -1429,7 +1438,6 @@ import type {
   PackageUpdateResult,
   EngineUpdateStatus,
   AutoUpdateStatus,
-  ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
 import {
@@ -1448,6 +1456,8 @@ import {
 } from '../composables/useWorkspaceAdmin'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
+import { invalidateProviderReads, providerGeneration, providerMutation, providerMutationIsCurrent, providerRead, providerReadIsCurrent, subscribeProviderRefresh, waitForProviderMutation } from '../lib/providerOperations'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import {
   DropdownMenuContent,
@@ -1458,7 +1468,8 @@ import {
 import PaneHeader from './PaneHeader.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
-import { useRunInTerminal } from '../composables/useRunInTerminal'
+import ProviderInventory from './settings/ProviderInventory.vue'
+import ProviderSignInGuidance from './settings/ProviderSignInGuidance.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1498,6 +1509,7 @@ const route = useRoute()
 const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
+const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 
 // Native MCP inventory follows the sidebar's selected workspace.
@@ -1826,8 +1838,9 @@ function onWorkspaceMoveStarted() {
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
-  } catch (e) {
-    routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
+    routinesError.value = ''
+  } catch {
+    routinesError.value = 'Failed to load model settings.'
   }
 }
 
@@ -1836,9 +1849,8 @@ async function saveRoutines(patch: Record<string, unknown>) {
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
-  } catch (e) {
-    const detail = errorMessage(e)
-    notifyFailed('Could not save model settings', detail)
+  } catch {
+    notifyFailed('Could not save model settings', 'Please try again.')
   } finally {
     routinesSaving.value = false
   }
@@ -1937,18 +1949,46 @@ const providerKeysError = ref('')
 const providersStatusRail = computed(() => currentTab.value === 'providers' && !!providerKeys.value?.connections)
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
+let providerEpoch = 0
+let workspaceTransition = 0
+let settingsModelEpoch = 0
+let providerViewAlive = true
+let providerPendingOwner: symbol | null = null
+let deferredProviderRead: Promise<void> | null = null
+const unsubscribeProviderRefresh = subscribeProviderRefresh(() => {
+  if (!providerViewAlive) return
+  for (const key of tabLoads.keys()) {
+    if (key.startsWith('providers:')) tabLoads.delete(key)
+  }
+  if (currentTab.value === 'providers') void fetchProviderKeys()
+  else providerKeysLoaded.value = false
+})
+onUnmounted(() => { providerViewAlive = false; providerPendingOwner = null; providerEpoch++; settingsModelEpoch++; unsubscribeProviderRefresh() })
 const gwsAccounts = useGwsAccounts({ notifySaved, notifyFailed })
 const { gwsProfileOptions, fetchGwsIntegration } = gwsAccounts
 provide(GWS_ACCOUNTS_KEY, gwsAccounts)
 
-async function fetchProviderKeys() {
-  try {
-    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
-    providerKeys.value = res
-  } catch (e) {
-    providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
-  } finally {
+async function fetchProviderKeys(): Promise<void> {
+  const pending = waitForProviderMutation()
+  if (pending) {
+    if (!deferredProviderRead) {
+      deferredProviderRead = pending.then(() => {
+        deferredProviderRead = null
+        if (providerViewAlive) return fetchProviderKeys()
+      })
+    }
+    return deferredProviderRead
+  }
+  const epoch = ++providerEpoch
+  const result = await providerRead(() => api.get<ProviderConfigSettings>('/api/settings/providers'))
+  if (providerViewAlive && epoch === providerEpoch && providerReadIsCurrent(result.generation)) {
     providerKeysLoaded.value = true
+    if (!result.value) {
+      providerKeysError.value = 'Could not load provider status.'
+      return
+    }
+    providerKeys.value = result.value
+    providerKeysError.value = ''
   }
 }
 
@@ -1958,13 +1998,20 @@ async function fetchProviderKeys() {
 // view stays mounted across tabs). Scroll on the first load and on each
 // navigation to the anchor — not after every refetch, or Verify/Connect would
 // yank the page back to the top of the card.
+let providerAnchorNavigation = 0
+let providerAnchorScrolled = -1
 function scrollToChatProvidersIfLinked(): void {
   if (route.hash !== '#chat-providers') return
+  const navigation = providerAnchorNavigation
   void nextTick(() => {
-    document.getElementById('chat-providers')?.scrollIntoView?.({ block: 'start' })
+    if (navigation !== providerAnchorNavigation || providerAnchorScrolled === navigation) return
+    const card = document.getElementById('chat-providers')
+    if (!card) return
+    providerAnchorScrolled = navigation
+    card.scrollIntoView?.({ block: 'start' })
   })
 }
-watch(() => route.fullPath, scrollToChatProvidersIfLinked)
+watch(() => route.fullPath, () => { providerAnchorNavigation++; scrollToChatProvidersIfLinked() }, { flush: 'sync' })
 
 // Home links land on these cards (#install-app on General from the setup
 // card's "How to install", #other-devices on Access & devices from "Phone
@@ -2002,9 +2049,7 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
 
 
 const providerCommandCopy = useCommandCopy()
-const providerTerminal = useRunInTerminal()
-
-async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
+async function providerConnectionAction(provider: string, action: 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
     title: 'Log out',
     confirmLabel: 'Log out',
@@ -2012,39 +2057,61 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   })) {
     return
   }
-  const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
-  providerConnectionPending.value = provider
-  providerConnectionResult.value = ''
-  try {
-    const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
-    if (action === 'connect') {
-      providerConnectionResult.value = `Opened the ${providerName} sign-in in ${result.launched || 'a terminal'}.`
-    } else if (action === 'logout') {
-      providerConnectionResult.value = 'Logged out.'
-    } else {
-      providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
-    }
-    await fetchProviderKeys()
-  } catch (e) {
-    // Connect answers a browser that is not on the engine's computer (or a host that
-    // cannot open a terminal) with the engine-built sign-in command. Type it into the
-    // Ciao terminal, a shell on the engine's computer; copy or show it when that fails.
-    const command = errorPayload(e)?.command
-    if (action === 'connect' && typeof command === 'string' && command) {
-      const typed = await providerTerminal.run(command)
-      if (typed === 'typed') {
-        providerConnectionResult.value = `Started the ${providerName} sign-in in the Ciao terminal. Finish it there, then press Verify.`
-      } else if (typed === 'copied') {
-        providerConnectionResult.value = `Copied the command. ${errorMessage(e)}`
-      } else {
-        providerConnectionResult.value = errorMessage(e)
-      }
-    } else {
-      providerConnectionResult.value = `Error: ${errorMessage(e)}`
-    }
-  } finally {
-    providerConnectionPending.value = ''
+  const workspace = projectStore.activeWorkspace
+  if (provider === 'opencode' && action === 'verify'
+    && (!workspace || !projectStore.workspaces.some(item => item.name === workspace))) {
+    providerConnectionResult.value = 'Select a registered workspace before refreshing.'
+    return
   }
+  const transition = workspaceTransition
+  const taskTransition = taskStore.modelTransition
+  const operation = providerMutation(async () => {
+    const epoch = ++providerEpoch
+    const sharedGeneration = providerGeneration()
+    const owner = Symbol('provider mutation')
+    const current = () => providerViewAlive && epoch === providerEpoch
+      && transition === workspaceTransition && workspace === projectStore.activeWorkspace
+      && taskTransition === taskStore.modelTransition
+      && providerMutationIsCurrent(sharedGeneration)
+    providerConnectionPending.value = provider
+    providerPendingOwner = owner
+    providerConnectionResult.value = ''
+    try {
+      const result = await api.post<ProviderConnection>(`/api/settings/providers/${provider}/${action}`)
+      if (!current()) return
+      if (action === 'verify' && providerKeys.value?.connections) {
+        providerKeys.value = { ...providerKeys.value, connections: { ...providerKeys.value.connections, [provider]: result } }
+      }
+      if (action === 'verify' && provider === 'opencode') {
+        if (!current()) return
+        const [settingsResult, sharedResult] = await Promise.all([fetchWorkspaceModels(false, workspace), taskStore.fetchModels(workspace)])
+        if (!current()) return
+        if (settingsResult === 'superseded' || sharedResult.status === 'superseded') {
+          providerConnectionResult.value = 'Model reads were superseded. Please try again.'
+          return
+        }
+        providerConnectionResult.value = settingsResult === 'success' && sharedResult.status === 'success'
+          ? 'Provider and model reads completed. Catalog availability and credential verification are unknown.'
+          : 'Model reads failed or are stale. Please try again.'
+      } else {
+        providerConnectionResult.value = action === 'logout' ? 'Logged out.'
+          : result.ok ? 'Claude Code connection verified.' : 'Claude Code is not connected.'
+      }
+    } catch {
+      if (current()) providerConnectionResult.value = 'Could not update provider status. Please try again.'
+    } finally {
+      if (providerViewAlive && providerPendingOwner === owner) {
+        providerPendingOwner = null
+        providerConnectionPending.value = ''
+      }
+      if (providerViewAlive) void fetchProviderKeys()
+    }
+  })
+  if (!operation) {
+    providerConnectionResult.value = 'Another provider operation is in progress. Please try again.'
+    return
+  }
+  await operation
 }
 
 // The skills, commands, subagents and MCP servers below belong to ONE
@@ -2807,14 +2874,26 @@ function connectionMcps(providerId: string): string[] {
 // spawn. Opening Settings is exactly the moment a user has just connected a
 // provider elsewhere, so the tab does refresh -- but it renders from cache first
 // and lets the forced fetch land after, rather than holding the page on it.
-async function fetchWorkspaceModels(force = false) {
+async function fetchWorkspaceModels(force = false, workspace = projectStore.activeWorkspace): Promise<'success' | 'error' | 'superseded'> {
+  if (!workspace || workspace !== projectStore.activeWorkspace) return 'superseded'
+  const generation = ++settingsModelEpoch
+  const transition = workspaceTransition
+  const current = () => providerViewAlive && generation === settingsModelEpoch
+    && transition === workspaceTransition && workspace === projectStore.activeWorkspace
+  const query = new URLSearchParams({ workspace })
+  if (force) query.set('refresh', '1')
   try {
-    workspaceModels.value = await api.get<ModelsResponse>(
-      force ? '/api/models?refresh=1' : '/api/models',
-    )
+    const result = await api.get<ModelsResponse>(`/api/models?${query}`)
+    if (!current()) return 'superseded'
+    workspaceModels.value = result
     workspaceModelsError.value = ''
-  } catch (e) {
-    workspaceModelsError.value = `Could not load model and effort options: ${errorMessage(e)}`
+    return 'success'
+  } catch {
+    if (!current()) return 'superseded'
+    workspaceModelsError.value = workspaceModels.value
+      ? 'Could not load model and effort options; showing stale options.'
+      : 'Could not load model and effort options.'
+    return 'error'
   }
 }
 
@@ -2921,6 +3000,21 @@ watch(() => projectStore.workspaceRegistryRevision, () => {
 })
 
 watch(() => projectStore.activeWorkspace, () => {
+  workspaceTransition++
+  providerEpoch++
+  settingsModelEpoch++
+  workspaceModels.value = null
+  workspaceModelsError.value = ''
+  providerKeys.value = null
+  providerKeysLoaded.value = false
+  providerKeysError.value = ''
+  providerConnectionPending.value = ''
+  providerPendingOwner = null
+  providerConnectionResult.value = ''
+  invalidateProviderReads()
+}, { flush: 'sync' })
+
+watch(() => projectStore.activeWorkspace, () => {
   // "Settings ↑" and Create and open land at the top. Only a File access deep
   // link keeps its own scroll target; every other switch returns to the top.
   if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
@@ -2937,7 +3031,7 @@ watch(() => projectStore.activeWorkspace, () => {
     // unscoped: its other reads do not belong to a workspace.
     void fetchAgentAssets()
   }
-})
+}, { flush: 'sync' })
 
 
 async function doSnapshot(confirmWarnings = false) {
@@ -4771,6 +4865,13 @@ a.btn-secondary {
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
    away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
+@media (pointer: coarse) {
+  .provider-sign-in > summary {
+    min-height: var(--touch);
+    min-width: var(--touch);
+    align-content: center;
+  }
+}
 .provider-brings > summary {
   display: inline-flex;
   align-items: center;

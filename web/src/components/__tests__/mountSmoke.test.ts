@@ -913,6 +913,45 @@ describe('component mount smoke', () => {
     opencode: { state: 'below_tested', installed: '2.0.32', tested: '2.1.0', command: 'opencode upgrade 2.1.0', terminal_action: 'opencode-update' },
   }
 
+  it.each(['install', 'update', 'not_applicable'] as const)('SettingsView hides raw host-terminal %s errors in the rendered alert', async (action) => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    const oldCaps = testApi.getResponse('/api/host/terminal')
+    const host = await import('../../composables/useHostTerminal')
+    const loopback = await import('../../lib/loopback')
+    const local = vi.spyOn(loopback, 'isLoopbackPage').mockReturnValue(true)
+    host.resetHostTerminalForTests()
+    testApi.setResponse('/api/host/terminal', { available: true, platform: 'macos', actions: ['opencode-install', 'opencode-update'] })
+    const opencode = action === 'install'
+      ? { ...original.connections.opencode, auth: 'not_installed', command: 'install', terminal_action: 'opencode-install' }
+      : { ...original.connections.opencode, release_check: { state: 'below_tested', tested: '2.1', command: 'update', terminal_action: 'opencode-update' } }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, opencode } })
+    vi.mocked(api.post).mockRejectedValueOnce({ message: 'SECRET_EXCEPTION', payload: { reason: action === 'not_applicable' ? 'not_applicable' : 'launch_failed', error: 'SECRET_PAYLOAD' } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = providerRow(wrapper, /opencode/i)
+      const readsBefore = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+      await row.get(`button[aria-label="${action === 'install' ? 'Install opencode in Terminal' : 'Update opencode in Terminal'}"]`).trigger('click')
+      await flushPromises()
+      expect(row.get('[role="alert"]').text()).toBe(action === 'not_applicable' ? 'This update is no longer needed.' : 'Could not open a terminal. Please try again.')
+      expect(row.text()).not.toContain('SECRET_')
+      if (action === 'not_applicable') {
+        expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(readsBefore + 1)
+      }
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+      testApi.setResponse('/api/host/terminal', oldCaps)
+      local.mockRestore()
+      host.resetHostTerminalForTests()
+    }
+  })
+
   it('SettingsView says the copy failed, in text, when the clipboard is refused', async () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
     const { wrapper, restore } = await mountModelsWith(belowTested)
@@ -977,6 +1016,734 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('SettingsView provides manual sign-in without claiming OpenCode verification', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Ciaobot verifies every connection')
+    expect(wrapper.text()).toContain('Provider inventory unavailable')
+    expect(wrapper.text()).toContain('claude auth login')
+    expect(wrapper.text()).toContain('OAuth')
+    expect(wrapper.text()).toContain('person@example.com')
+    expect(wrapper.text()).toContain('opencode auth login')
+    expect(runInTerminal).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not expose routines GET errors and allows a successful retry', async () => {
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    let fail = true
+    get.mockImplementation(((path: string) => path === '/api/settings/routines' && fail
+      ? Promise.reject(new Error('SECRET_ROUTINES_GET')) : original(path)) as typeof api.get)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('Failed to load model settings.')
+      expect(wrapper.text()).not.toContain('SECRET_ROUTINES_GET')
+      fail = false
+      await wrapper.findAll('button').find(button => button.text() === 'Retry model settings')!.trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Failed to load model settings.')
+    } finally {
+      wrapper.unmount()
+      get.mockImplementation(original)
+    }
+  })
+
+  it('does not expose routines PATCH errors in the UI or failure toast and can retry', async () => {
+    const projects = (await import('../../stores/projects')).useProjectStore()
+    const toast = vi.spyOn(projects, 'pushErrorToast')
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('SECRET_ROUTINES_PATCH'))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const state = (wrapper.vm as unknown as { $: { setupState: { saveRoutines: (patch: Record<string, unknown>) => Promise<void> } } }).$.setupState
+      await state.saveRoutines({ provider_default_modes: { claude: 'manual' } })
+      expect(toast).toHaveBeenCalledWith('Could not save model settings', 'Please try again.')
+      expect(JSON.stringify(toast.mock.calls)).not.toContain('SECRET_ROUTINES_PATCH')
+      expect(wrapper.text()).not.toContain('SECRET_ROUTINES_PATCH')
+      await state.saveRoutines({ provider_default_modes: { claude: 'manual' } })
+      expect(vi.mocked(api.patch)).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      toast.mockRestore()
+    }
+  })
+
+  it.each([
+    ['oauth', 'person@example.com', true],
+    ['oauth', 'Claude OAuth', true],
+    ['missing', 'untrusted account', false],
+    ['not_installed', 'untrusted account', false],
+  ] as const)('shows only known Claude %s account and method', async (auth, account, showAccount) => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, claude: {
+      ...original.connections.claude, auth, account, ok: showAccount, command: 'install-command-not-login',
+    } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = wrapper.findAll('.provider-connections .credential-row')[0]!
+      const details = row.find('.provider-connection-detail').text()
+      expect(details.includes(account)).toBe(showAccount)
+      expect(details.includes('OAuth')).toBe(showAccount)
+      expect(row.find('details code').text()).toBe('claude auth login')
+      expect(runInTerminal).not.toHaveBeenCalled()
+      expect(vi.mocked(api.post).mock.calls.some(([path]) => String(path).endsWith('/connect'))).toBe(false)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
+  it('SettingsView renders configured OpenCode metadata but not credential fields', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, opencode: {
+      ...original.connections.opencode, credential_inventory: { status: 'complete', providers: [
+        { id: 'custom', name: '<example>', auth_types: ['environment'], configured: true, verified: null, value: 'secret-value', label: 'secret-label', env: 'SECRET_ENV' },
+      ] },
+    } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('<example>')
+      expect(wrapper.text()).toContain('Configured · verification unknown')
+      expect(wrapper.text()).not.toContain('secret-value')
+      expect(wrapper.text()).not.toContain('secret-label')
+      expect(wrapper.text()).not.toContain('SECRET_ENV')
+      expect(wrapper.find('example').exists()).toBe(false)
+      expect(vi.mocked(api.post).mock.calls.some(([path]) => String(path).endsWith('/connect'))).toBe(false)
+      expect(runInTerminal).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
+  it('offers OpenCode refresh when its provider row is missing', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, unknown> }
+    testApi.setResponse('/api/settings/providers', { connections: { claude: original.connections.claude } })
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work'
+    tasks.fetchModels = vi.fn().mockResolvedValue({ status: 'success', workspace: 'work', generation: 1 }) as never
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: false, auth: 'missing' })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('Provider inventory unavailable')
+      const refresh = wrapper.findAll('button').find(button => button.text() === 'Refresh after sign-in')
+      expect(refresh).toBeDefined()
+      await refresh!.trigger('click')
+      await flushPromises()
+      expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/settings/providers/opencode/verify')
+      expect(wrapper.text()).toContain('Catalog availability and credential verification are unknown')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
+  it('releases pending ownership when the model transition changes during verify', async () => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore() as unknown as { modelTransition: number, fetchModels: () => Promise<unknown> }
+    project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work'
+    tasks.modelTransition = 1
+    tasks.fetchModels = vi.fn()
+    let finish!: (value: unknown) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const row = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const verify = row.findAll('button').find(button => button.text() === 'Verify')!
+    await verify.trigger('click')
+    expect(verify.attributes('disabled')).toBeDefined()
+    tasks.modelTransition++
+    finish({ name: 'opencode', ok: true, auth: 'oauth' })
+    await flushPromises()
+    const nextVerify = wrapper.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!
+    expect(nextVerify.attributes('disabled')).toBeUndefined()
+    expect(tasks.fetchModels).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('Provider and model reads completed')
+    wrapper.unmount()
+  })
+
+  it('discards a verify after an A-B-A workspace transition before either model reader', async () => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.activeWorkspace = 'A'
+    const shared = vi.fn().mockResolvedValue({ status: 'success', workspace: 'A', generation: 1 })
+    tasks.fetchModels = shared as never
+    let finish!: (value: unknown) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const row = wrapper.findAll('.provider-connections .credential-row')[1]!
+    await row.findAll('button').find(button => button.text() === 'Verify')!.trigger('click')
+    const providersBefore = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    project.activeWorkspace = 'B'
+    project.activeWorkspace = 'A'
+    await nextTick()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(providersBefore)
+    const readsBefore = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
+    finish({ name: 'opencode', ok: true, auth: 'oauth' })
+    await flushPromises()
+    const readsAfter = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
+    expect(shared).not.toHaveBeenCalled()
+    expect(readsAfter).toBe(readsBefore)
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(providersBefore + 1)
+    expect(wrapper.text()).not.toContain('Provider and model reads completed')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('does not supersede a real open-picker model read after old verify (return to A: %s)', async (returnToA) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.workspaceRegistryStatus = 'ready'
+    project.activeWorkspace = 'A'
+    const get = vi.mocked(api.get)
+    const originalGet = get.getMockImplementation()!
+    const actualFetch = tasks.fetchModels
+    let sharedCall = false
+    let holdShared = false
+    let finishModel!: (value: unknown) => void
+    let finishVerify!: (value: unknown) => void
+    const shared = vi.spyOn(tasks, 'fetchModels').mockImplementation((workspace?: string) => {
+      sharedCall = true
+      try { return actualFetch(workspace) } finally { sharedCall = false }
+    })
+    get.mockImplementation(((path: string) => {
+      if (path.startsWith('/api/models?') && sharedCall && holdShared) {
+        return new Promise<unknown>(resolve => { finishModel = resolve })
+      }
+      return originalGet(path)
+    }) as typeof api.get)
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finishVerify = resolve }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const settingsModule = await import('../SettingsView.vue')
+    const homeModule = await import('../HomeIntake.vue')
+    const settings = mount(settingsModule.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    const home = mount(homeModule.default as never)
+    try {
+      await flushPromises()
+      await home.get('.home-intake-model-trigger').trigger('click')
+      await flushPromises()
+      const verify = settings.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!
+      await verify.trigger('click')
+      holdShared = true
+      project.activeWorkspace = 'B'
+      if (returnToA) project.activeWorkspace = 'A'
+      await nextTick()
+      expect(tasks.modelLoading).toBe(true)
+      expect(tasks.models).toBeNull()
+      const calls = shared.mock.calls.length
+      const modelsCalls = get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length
+      const transition = tasks.modelTransition
+      finishVerify({ name: 'opencode', ok: true, auth: 'oauth' })
+      await flushPromises()
+      expect(shared).toHaveBeenCalledTimes(calls)
+      expect(get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length).toBe(modelsCalls)
+      expect(tasks.modelTransition).toBe(transition)
+      expect(tasks.modelLoading).toBe(true)
+      expect(tasks.modelError).toBe('')
+      expect(tasks.models).toBeNull()
+      expect(settings.text()).not.toContain('Provider and model reads completed')
+      finishModel({ models: ['new-model'], default: 'new-model', provider_models: { claude: ['new-model'] } })
+      await flushPromises()
+      expect(tasks.modelLoading).toBe(false)
+      expect(tasks.models?.models).toEqual(['new-model'])
+      await home.get('.home-intake-model-trigger').trigger('click')
+      await flushPromises()
+      expect(home.find('[role="option"][data-model="new-model"]').exists()).toBe(true)
+    } finally {
+      get.mockImplementation(originalGet)
+      shared.mockRestore()
+      settings.unmount()
+      home.unmount()
+    }
+  })
+
+  it('refreshes both workspace model readers but never exposes model errors', async () => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'work & home', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work & home'
+    const shared = vi.fn().mockResolvedValue({ status: 'error', workspace: 'work & home', generation: 1, error: 'private error' })
+    tasks.fetchModels = shared as never
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth' })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    await wrapper.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!.trigger('click')
+    await flushPromises()
+    expect(shared).toHaveBeenCalledWith('work & home')
+    expect(vi.mocked(api.get).mock.calls.some(([path]) => String(path) === '/api/models?workspace=work+%26+home')).toBe(true)
+    expect(wrapper.text()).toContain('Model reads failed or are stale')
+    expect(wrapper.text()).not.toContain('private error')
+    wrapper.unmount()
+  })
+
+  it.each(['success', 'failure'] as const)('defers a remounted view’s provider read until verify %s', async (outcome) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }] as never
+    project.activeWorkspace = 'A'
+    let fail!: (reason: Error) => void
+    let settle!: (value: unknown) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const options = { global: { plugins: [router], stubs: { Teleport: true } } }
+    const first = mount(mod.default as never, options)
+    await flushPromises()
+    await first.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!.trigger('click')
+    first.unmount()
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const second = mount(mod.default as never, options)
+    await nextTick()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth' })
+    else fail(new Error('private failure'))
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(second.text()).not.toContain('private failure')
+    expect(second.text()).not.toContain('Provider and model reads completed')
+    expect(second.text()).toContain('Chat providers')
+    second.unmount()
+  })
+
+  it.each(['success', 'superseded'] as const)('reports %s model results without claiming catalog availability', async (status) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work'
+    tasks.fetchModels = vi.fn().mockResolvedValue({ status, workspace: 'work', generation: 1 }) as never
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth' })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    await wrapper.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!.trigger('click')
+    await flushPromises()
+    if (status === 'success') expect(wrapper.text()).toContain('Catalog availability and credential verification are unknown')
+    else expect(wrapper.text()).not.toContain('Provider and model reads completed')
+    expect(wrapper.text()).not.toContain('catalog refreshed successfully')
+    wrapper.unmount()
+  })
+
+  it.each(['success', 'failure'] as const)('coalesces logout rereads across an A-B-A transition on %s', async (outcome) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const { pendingConfirm } = await import('../../lib/confirm')
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.activeWorkspace = 'A'
+    let settle!: (value: unknown) => void
+    let fail!: (reason: Error) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      providerConnectionAction: (provider: string, action: 'logout') => Promise<void>
+      fetchProviderKeys: () => Promise<void>
+    }
+    const logout = state.providerConnectionAction('claude', 'logout')
+    expect(pendingConfirm.value?.destructive).toBe(true)
+    pendingConfirm.value!.resolve(true)
+    await nextTick()
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/settings/providers/claude/logout')
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const read1 = state.fetchProviderKeys()
+    const read2 = state.fetchProviderKeys()
+    project.activeWorkspace = 'B'
+    project.activeWorkspace = 'A'
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    if (outcome === 'success') settle({ ok: true })
+    else fail(new Error('private logout error'))
+    await Promise.all([logout, read1, read2])
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(wrapper.text()).not.toContain('Logged out.')
+    expect(wrapper.text()).not.toContain('private logout error')
+    expect(wrapper.text()).not.toContain('Could not update provider status')
+    wrapper.unmount()
+  })
+
+  it.each(['success', 'failure'] as const)('preserves the current logout result while rereads are queued on %s', async (outcome) => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    let settle!: (value: unknown) => void
+    let fail!: (reason: Error) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      providerConnectionAction: (provider: string, action: 'logout') => Promise<void>
+      fetchProviderKeys: () => Promise<void>
+    }
+    const logout = state.providerConnectionAction('claude', 'logout')
+    pendingConfirm.value!.resolve(true)
+    await nextTick()
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const reads = [state.fetchProviderKeys(), state.fetchProviderKeys()]
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    if (outcome === 'success') settle({ ok: true })
+    else fail(new Error('private logout error'))
+    await Promise.all([logout, ...reads])
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(wrapper.text()).toContain(outcome === 'success' ? 'Logged out.' : 'Could not update provider status')
+    expect(wrapper.text()).not.toContain('private logout error')
+    wrapper.unmount()
+  })
+
+  it.each(['success', 'failure'] as const)('releases logout lock for a remounted Settings view on %s', async (outcome) => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    let settle!: (value: unknown) => void
+    let fail!: (reason: Error) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const options = { global: { plugins: [router], stubs: { Teleport: true } } }
+    const first = mount(mod.default as never, options)
+    await flushPromises()
+    const state = (first.vm as unknown as { $: { setupState: unknown } }).$.setupState as { providerConnectionAction: (provider: string, action: 'logout') => Promise<void> }
+    const logout = state.providerConnectionAction('claude', 'logout')
+    pendingConfirm.value!.resolve(true)
+    await nextTick()
+    first.unmount()
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const second = mount(mod.default as never, options)
+    await nextTick()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    if (outcome === 'success') settle({ ok: true })
+    else fail(new Error('private logout error'))
+    await logout
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(second.text()).not.toContain('Logged out.')
+    expect(second.text()).not.toContain('private logout error')
+    second.unmount()
+  })
+
+  it.each(['success', 'failure'] as const)('coalesces provider rereads during verify on %s', async (outcome) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }] as never
+    project.activeWorkspace = 'A'
+    tasks.fetchModels = vi.fn().mockResolvedValue({ status: 'success', workspace: 'A', generation: 1 }) as never
+    let settle!: (value: unknown) => void
+    let fail!: (reason: Error) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      providerConnectionAction: (provider: string, action: 'verify') => Promise<void>
+      fetchProviderKeys: () => Promise<void>
+    }
+    const verify = state.providerConnectionAction('opencode', 'verify')
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const reads = [state.fetchProviderKeys(), state.fetchProviderKeys()]
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth' })
+    else fail(new Error('private verify error'))
+    await Promise.all([verify, ...reads])
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(wrapper.text()).toContain(outcome === 'success' ? 'Catalog availability and credential verification are unknown' : 'Could not update provider status')
+    expect(wrapper.text()).not.toContain('private verify error')
+    wrapper.unmount()
+  })
+
+  it('coalesces post-mutation reads across two simultaneously mounted Settings views', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    let finish!: (value: unknown) => void
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const options = { global: { plugins: [router], stubs: { Teleport: true } } }
+    const first = mount(mod.default as never, options)
+    const second = mount(mod.default as never, options)
+    await flushPromises()
+    type State = { providerConnectionAction: (provider: string, action: 'logout') => Promise<void>, fetchProviderKeys: () => Promise<void> }
+    const a = (first.vm as unknown as { $: { setupState: State } }).$.setupState
+    const b = (second.vm as unknown as { $: { setupState: State } }).$.setupState
+    const logout = a.providerConnectionAction('claude', 'logout')
+    pendingConfirm.value!.resolve(true)
+    await nextTick()
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+    const reads = [a.fetchProviderKeys(), b.fetchProviderKeys()]
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
+    finish({ ok: true })
+    await Promise.all([logout, ...reads])
+    await flushPromises()
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(first.text()).toContain('Logged out.')
+    first.unmount()
+    second.unmount()
+  })
+
+  it('does not publish a provider GET started in another view before a mutation', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    let finishRead!: (value: unknown) => void
+    let finishMutation!: (value: unknown) => void
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const options = { global: { plugins: [router], stubs: { Teleport: true } } }
+    const first = mount(mod.default as never, options)
+    const second = mount(mod.default as never, options)
+    await flushPromises()
+    type State = { providerConnectionAction: (provider: string, action: 'logout') => Promise<void>, fetchProviderKeys: () => Promise<void> }
+    const a = (first.vm as unknown as { $: { setupState: State } }).$.setupState
+    const b = (second.vm as unknown as { $: { setupState: State } }).$.setupState
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    let held = false
+    get.mockImplementation(((path: string) => {
+      if (path === '/api/settings/providers' && !held) {
+        held = true
+        return new Promise<unknown>(resolve => { finishRead = resolve })
+      }
+      return original(path)
+    }) as typeof api.get)
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finishMutation = resolve }))
+    try {
+      const oldRead = a.fetchProviderKeys()
+      const logout = b.providerConnectionAction('claude', 'logout')
+      pendingConfirm.value!.resolve(true)
+      await nextTick()
+      finishMutation({ ok: true })
+      await logout
+      await flushPromises()
+      expect(first.text()).toContain('Claude Code')
+      finishRead({ connections: { claude: { name: 'claude', label: 'STALE SNAPSHOT', ok: true, auth: 'oauth' } } })
+      await oldRead
+      await nextTick()
+      expect(first.text()).not.toContain('STALE SNAPSHOT')
+      expect(first.text()).toContain('Claude Code')
+    } finally {
+      get.mockImplementation(original)
+      first.unmount()
+      second.unmount()
+    }
+  })
+
+  it.each([false, true])('starts a fresh provider read across a workspace transition (return to A: %s)', async (returnToA) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.activeWorkspace = 'A'
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    const pending: ((value: unknown) => void)[] = []
+    get.mockImplementation(((path: string) => path === '/api/settings/providers'
+      ? new Promise<unknown>(resolve => pending.push(resolve)) : original(path)) as typeof api.get)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await nextTick()
+      expect(pending).toHaveLength(1)
+      project.activeWorkspace = 'B'
+      if (returnToA) project.activeWorkspace = 'A'
+      expect(pending).toHaveLength(returnToA ? 3 : 2)
+      pending[pending.length - 1]!({ connections: { claude: { name: 'claude', label: 'Fresh', ok: true, auth: 'oauth' } } })
+      await flushPromises()
+      expect(wrapper.text()).toContain('Fresh')
+      for (const resolve of pending.slice(0, -1)) resolve({ connections: { claude: { name: 'claude', label: 'Stale', ok: true, auth: 'oauth' } } })
+      await flushPromises()
+      expect(wrapper.text()).toContain('Fresh')
+      expect(wrapper.text()).not.toContain('Stale')
+    } finally {
+      for (const resolve of pending) resolve({ connections: {} })
+      get.mockImplementation(original)
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('rereads after another view mutates while inactive (initial read pending: %s)', async (initialPending) => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const routerA = makeRouter()
+    const routerB = makeRouter()
+    await routerA.push('/settings/providers')
+    await routerB.push('/settings/providers')
+    await Promise.all([routerA.isReady(), routerB.isReady()])
+    const mod = await import('../SettingsView.vue')
+    const second = mount(mod.default as never, { global: { plugins: [routerB], stubs: { Teleport: true } } })
+    await flushPromises()
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    let finishOld: ((value: unknown) => void) | undefined
+    let providerCalls = 0
+    const fresh = { connections: { claude: { name: 'claude', label: 'Fresh provider', ok: true, auth: 'oauth' } } }
+    const old = { connections: { claude: { name: 'claude', label: 'Old provider', ok: true, auth: 'oauth' } } }
+    get.mockImplementation(((path: string) => {
+      if (path !== '/api/settings/providers') return original(path)
+      providerCalls++
+      if (initialPending && providerCalls === 1) {
+        return new Promise<unknown>(resolve => { finishOld = resolve })
+      }
+      if (!initialPending && providerCalls === 1) return Promise.resolve(old)
+      return Promise.resolve(fresh)
+    }) as typeof api.get)
+    const first = mount(mod.default as never, { global: { plugins: [routerA], stubs: { Teleport: true } } })
+    try {
+      if (initialPending) await nextTick()
+      else {
+        await flushPromises()
+        expect(first.text()).toContain('Old provider')
+        expect(first.text()).not.toContain('Fresh provider')
+      }
+      await routerA.push('/settings/home')
+      await nextTick()
+      const state = (second.vm as unknown as { $: { setupState: { providerConnectionAction: (p: string, a: 'logout') => Promise<void> } } }).$.setupState
+      const logout = state.providerConnectionAction('claude', 'logout')
+      pendingConfirm.value!.resolve(true)
+      await logout
+      await flushPromises()
+      if (finishOld) finishOld(old)
+      const callsBeforeReturn = providerCalls
+      await routerA.push('/settings/providers')
+      await flushPromises()
+      expect(providerCalls).toBe(callsBeforeReturn + 1)
+      expect(first.text()).toContain('Fresh provider')
+      expect(first.text()).not.toContain('Old provider')
+      expect(first.find('[aria-label="Loading providers"]').exists()).toBe(false)
+    } finally {
+      finishOld?.({ connections: {} })
+      get.mockImplementation(original)
+      first.unmount()
+      second.unmount()
+    }
+  })
+
+  it('fences the Settings model reader across A-B-A including an old failure', async () => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.activeWorkspace = 'A'
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    const pending: { path: string, resolve: (value: unknown) => void, reject: (reason: Error) => void }[] = []
+    get.mockImplementation(((path: string) => {
+      if (path.startsWith('/api/models?')) return new Promise<unknown>((resolve, reject) => pending.push({ path, resolve, reject }))
+      return original(path)
+    }) as typeof api.get)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await nextTick()
+      project.activeWorkspace = 'B'
+      project.activeWorkspace = 'A'
+      expect(pending.map(item => item.path)).toEqual(['/api/models?workspace=A', '/api/models?workspace=B', '/api/models?workspace=A'])
+      pending[2]!.resolve({ models: [], provider_models: {}, thinking_levels: {} })
+      await flushPromises()
+      pending[0]!.reject(new Error('old sensitive error'))
+      pending[1]!.reject(new Error('old B error'))
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Could not load model and effort options')
+      expect(wrapper.text()).not.toContain('sensitive error')
+    } finally {
+      get.mockImplementation(original)
+      wrapper.unmount()
+    }
+  })
+
+  it('marks same-workspace model options stale on failure and clears the warning after retry', async () => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }] as never
+    project.activeWorkspace = 'A'
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as { fetchWorkspaceModels: () => Promise<string> }
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    get.mockImplementation(((path: string) => path.startsWith('/api/models?')
+      ? Promise.reject(new Error('private catalog error')) : original(path)) as typeof api.get)
+    try {
+      expect(await state.fetchWorkspaceModels()).toBe('error')
+      await nextTick()
+      expect(wrapper.text()).toContain('showing stale options')
+      expect(wrapper.text()).not.toContain('private catalog error')
+      get.mockImplementation(original)
+      await wrapper.findAll('button').find(button => button.text() === 'Retry model options')!.trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('showing stale options')
+    } finally {
+      get.mockImplementation(original)
+      wrapper.unmount()
+    }
+  })
+
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -993,158 +1760,12 @@ describe('component mount smoke', () => {
     // still gets its own card rather than another provider's label.
     expect(names).toEqual(['Claude Code', 'opencode'])
 
-    // The unauthenticated provider offers Connect but not Log out.
+    // OpenCode readiness is not a credential verification claim.
     const rows = wrapper.findAll('.provider-connections .credential-row')
     const opencodeRow = rows[1]!
-    expect(opencodeRow.text()).toContain('Not connected')
+    expect(opencodeRow.text()).toContain('CLI not ready')
     const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
-    expect(actions).toEqual(['Connect', 'Verify'])
-    wrapper.unmount()
-  })
-
-  it('SettingsView Connect reports the terminal it opened', async () => {
-    const router = makeRouter()
-    await router.push('/settings/providers')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, launched: 'Terminal', command: 'opencode auth login' })
-
-    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
-    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
-    await connect.trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    expect(wrapper.find('.action-result').text()).toBe('Opened the opencode sign-in in Terminal.')
-    expect(runInTerminal).not.toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
-  it('SettingsView Connect on a remote browser types the sign-in into the Ciao terminal', async () => {
-    const router = makeRouter()
-    await router.push('/settings/providers')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
-    vi.mocked(api.post).mockRejectedValueOnce(
-      Object.assign(new Error(hint), {
-        status: 403,
-        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
-      }),
-    )
-
-    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
-    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
-    await connect.trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    expect(runInTerminal).toHaveBeenCalledTimes(1)
-    expect(runInTerminal).toHaveBeenCalledWith('opencode auth login')
-    expect(wrapper.find('.action-result').text()).toBe('Started the opencode sign-in in the Ciao terminal. Finish it there, then press Verify.')
-    wrapper.unmount()
-  })
-
-  it('SettingsView Connect shows the sign-in command when the Ciao terminal cannot take it', async () => {
-    const router = makeRouter()
-    await router.push('/settings/providers')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
-    vi.mocked(api.post).mockRejectedValueOnce(
-      Object.assign(new Error(hint), {
-        status: 403,
-        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
-      }),
-    )
-    runInTerminal.mockResolvedValueOnce('failed')
-
-    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
-    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
-    await connect.trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    const text = wrapper.find('.action-result').text()
-    expect(text).toBe(hint)
-    expect(text.startsWith('Error:')).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('SettingsView Connect copies the sign-in command when the Ciao terminal is locked', async () => {
-    const router = makeRouter()
-    await router.push('/settings/providers')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const hint = 'This browser cannot open a terminal window on the computer running Ciaobot. Run this in the Ciaobot terminal (Terminal on any chat or project) or another shell on the computer running Ciaobot, as the account Ciaobot runs as: opencode auth login'
-    vi.mocked(api.post).mockRejectedValueOnce(
-      Object.assign(new Error(hint), {
-        status: 403,
-        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
-      }),
-    )
-    runInTerminal.mockResolvedValueOnce('copied')
-
-    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
-    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
-    await connect.trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    expect(wrapper.find('.action-result').text()).toBe(`Copied the command. ${hint}`)
-    wrapper.unmount()
-  })
-
-  it('SettingsView Connect without a command reports an error and leaves the terminal alone', async () => {
-    const router = makeRouter()
-    await router.push('/settings/providers')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    vi.mocked(api.post).mockRejectedValueOnce(
-      Object.assign(new Error('this provider has no sign-in action'), {
-        status: 404,
-        payload: { error: 'this provider has no sign-in action' },
-      }),
-    )
-
-    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
-    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
-    await connect.trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    expect(runInTerminal).not.toHaveBeenCalled()
-    expect(wrapper.find('.action-result').text()).toBe('Error: this provider has no sign-in action')
+    expect(actions).toEqual(['Verify'])
     wrapper.unmount()
   })
 
@@ -1333,7 +1954,8 @@ describe('component mount smoke', () => {
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('Effort options unavailable.')
-      expect(wrapper.find('[role="alert"]').text()).toContain('catalog unavailable')
+      expect(wrapper.find('[role="alert"]').text()).toContain('Could not load model and effort options')
+      expect(wrapper.text()).not.toContain('catalog unavailable')
       expect(wrapper.find('[aria-labelledby="thinking-label-claude"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()

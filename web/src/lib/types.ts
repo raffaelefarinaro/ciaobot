@@ -1061,6 +1061,16 @@ export interface ProviderConnection {
   detail?: string
   version?: string
   account?: string
+  credential_inventory?: {
+    status: 'complete' | 'partial' | 'unknown'
+    providers: {
+      id: string
+      name: string
+      auth_types: ('oauth' | 'api_key' | 'environment' | 'unknown')[]
+      configured: true
+      verified: null
+    }[]
+  }
   protocol?: string
   mcps?: string[]
   skills?: string[]

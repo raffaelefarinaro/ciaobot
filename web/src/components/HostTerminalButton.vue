@@ -12,6 +12,7 @@ const props = withDefaults(
     label?: string
     ariaLabel?: string
     variant?: 'link' | 'small'
+    safeErrors?: boolean
   }>(),
   { variant: 'link' },
 )
@@ -31,6 +32,17 @@ const resolvedLabel = computed(() => props.label ?? (props.action ? 'Run in Term
 
 onMounted(ensureCapabilities)
 
+function safeTerminalError(reason: unknown): string {
+  switch (reason) {
+    case 'not_on_host': return 'Opening a terminal is only available on the computer running Ciaobot.'
+    case 'unavailable_headless': return 'Ciaobot cannot open a terminal without a desktop session.'
+    case 'no_terminal_found': return 'No supported terminal app was found on the computer running Ciaobot.'
+    case 'unsupported_platform': return 'Opening a terminal is not supported on this operating system.'
+    case 'not_applicable': return 'This update is no longer needed.'
+    default: return 'Could not open a terminal. Please try again.'
+  }
+}
+
 async function launch() {
   error.value = ''
   done.value = ''
@@ -41,8 +53,9 @@ async function launch() {
       : await openFolder({ chatId: props.chatId, projectId: props.projectId })
     done.value = result.launched
   } catch (e) {
-    error.value = apiErrorMessage(e, 'Could not open a terminal.')
-    if (errorPayload(e)?.reason === 'not_applicable') emit('not-applicable')
+    const reason = errorPayload(e)?.reason
+    error.value = props.safeErrors ? safeTerminalError(reason) : apiErrorMessage(e, 'Could not open a terminal.')
+    if (reason === 'not_applicable') emit('not-applicable')
   } finally {
     pending.value = false
   }

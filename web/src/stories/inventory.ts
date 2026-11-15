@@ -5918,6 +5918,83 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-settings-provider-inventory",
+    "name": "ProviderInventory",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderInventory.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": ["complete", "partial", "unknown"],
+    "variantNotes": "Inventory status controls the displayed provider availability guidance.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Provider inventory and sign-in disclosures have no rendered-state story."
+      },
+      {
+        "name": "other states",
+        "coverage": "unknown",
+        "storyIds": [],
+        "note": "Further state branches and their coverage have not yet been audited."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "Inventory data is supplied by the parent; this component does not load it."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-settings-provider-sign-in-guidance",
+    "name": "ProviderSignInGuidance",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderSignInGuidance.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue",
+      "web/src/components/settings/ProviderInventory.vue"
+    ],
+    "variants": ["Claude", "OpenCode"],
+    "variantNotes": "Sign-in command and guidance depend on the CLI.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Sign-in guidance has no rendered-state story."
+      },
+      {
+        "name": "other states",
+        "coverage": "unknown",
+        "storyIds": [],
+        "note": "Further action and status branches have not yet been audited."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "The guidance has no initial or refresh loading state."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-settings-settings-all-workspaces",
     "name": "SettingsAllWorkspaces",
     "family": "Settings",
