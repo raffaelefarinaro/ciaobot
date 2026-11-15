@@ -464,12 +464,6 @@ th { color: var(--muted); font-weight: 600; }
 .install-client { margin: 0 0 10px; }
 .install-client-note { margin: 0 0 20px; text-align: left; }
 .install-guide { margin-top: 12px; }
-.install[data-platform="windows"] .install-box button {
-  background: var(--primary);
-  border-left-color: var(--primary);
-  color: var(--bg);
-}
-.install[data-platform="windows"] .install-box button:hover { background: var(--primary-strong); }
 
 /* Big product screenshot under the hero */
 .shot { margin: 32px auto 0; max-width: 1080px; }

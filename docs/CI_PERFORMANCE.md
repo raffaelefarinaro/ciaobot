@@ -41,6 +41,8 @@ After the follow-up CI reduction, develop pushes do not trigger CI at all;
 compare develop PR checks with earlier PRs, and full nightly runs with release
 PRs rather than the former push profile.
 
+Ciaobot 2.0 removed the Windows jobs (`windows-backend`, `windows-web`, the `windows` summary) and the `windows-full` label. Later samples have no Windows profile; compare them with the baseline's Linux and macOS jobs, not with the Windows rows above.
+
 ### Local context, not a statistical baseline
 
 One contended macOS run of candidate `6cc0b911c`:
@@ -54,25 +56,22 @@ One contended macOS run of candidate `6cc0b911c`:
 ## Compare after merge
 
 1. Collect the next 20 successful **first-attempt** `ci.yml` runs after the merge,
-   retaining run IDs, commits, event, full-Windows status and browser-suite status.
+   retaining run IDs, commits, event and browser-suite status.
    Report sample counts per profile; a missing profile is unmeasured, not faster.
 2. Use the same wall-time definitions above, including dependency/runner waits.
    Compare medians within a profile and show the spread; do not sum parallel
    job durations as if they were elapsed time.
-3. The old `windows` job maps to the new `windows-backend`, `windows-web` and
-   stable `windows` summary. Compare the elapsed Windows acceptance window, not
-   the nearly empty summary's own execution duration.
-4. For browser PRs compare both `linux-e2e` execution and its start delay from
+3. For browser PRs compare both `linux-e2e` execution and its start delay from
    workflow creation. The intended improvement is removing its wait on
    `linux-web`, not claiming that Playwright itself runs faster.
-5. Separately report failed/cancelled runs, reruns, runner minutes and test
+4. Separately report failed/cancelled runs, reruns, runner minutes and test
    counts. PR cancellation saves obsolete work but is not a successful test.
    More concurrent jobs may cost more runner minutes even when users wait less.
-6. For complete loop runs record user continuation-only nudges, duplicate full
+5. For complete loop runs record user continuation-only nudges, duplicate full
    gate executions on unchanged inputs, lock-wait time, CI-wait time and
    approved-graph completion. These were **not quantified** in this historical
    CI sample; archived chats establish examples, not a trustworthy numeric rate.
-7. Keep a dated after-data file beside the baseline; do not overwrite the before
+6. Keep a dated after-data file beside the baseline; do not overwrite the before
    data or treat this same PR's one CI run as proof of a sustained improvement.
 
 Read-only retrieval:

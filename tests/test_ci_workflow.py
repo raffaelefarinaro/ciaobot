@@ -6,7 +6,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -175,13 +174,13 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
-def test_publish_attaches_only_the_seven_engine_assets() -> None:
+def test_publish_attaches_only_the_six_engine_assets() -> None:
     # #653: the release carries the engine and nothing else. #1022 adds one
     # prebuilt universal server host archive the signed manifest authenticates.
-    # Exactly seven assets - the macOS installer under both names, the Windows
-    # installer, the wheel, the manifest with its signature, and the host -
-    # each pinned here so a re-added app asset is a failing test rather than a
-    # surprise in a published release.
+    # Exactly six assets - the macOS installer under both names, the wheel, the
+    # manifest with its signature, and the host - each pinned here so a
+    # re-added app asset is a failing test rather than a surprise in a
+    # published release.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
@@ -190,7 +189,6 @@ def test_publish_attaches_only_the_seven_engine_assets() -> None:
           gh release upload "$TAG" \\
             install.sh \\
             scripts/install-engine.sh \\
-            scripts/install.ps1 \\
             dist/ciaobot-*.whl \\
             ciaobot-engine-manifest.json \\
             ciaobot-engine-manifest.json.sig \\
@@ -198,19 +196,18 @@ def test_publish_attaches_only_the_seven_engine_assets() -> None:
             --clobber
 """
     assert attached in workflow, (
-        "publish.yml no longer attaches exactly the seven engine assets"
+        "publish.yml no longer attaches exactly the six engine assets"
     )
 
     # Every name is attached and proven present on the release where the tag is
     # still known - a missing asset would otherwise only surface as a failed
-    # install on a user's machine. install.ps1 is uploaded as the file itself,
-    # so /releases/latest/download/install.ps1 resolves without a rename.
+    # install on a user's machine.
     assert "cp scripts/install-engine.sh install.sh" in workflow
     assert "s/__VERIFIER_SHA256__/" not in workflow
     assert "verifier_name" not in workflow
     assert "grep -qx install.sh" in workflow
     assert "grep -qx install-engine.sh" in workflow
-    assert "grep -qx install.ps1" in workflow
+    assert "install.ps1" not in workflow
     assert "grep -qx ciaobot-server-host-macos-universal-v1.tar.gz" in workflow
 
 
@@ -255,151 +252,6 @@ def test_publish_host_asset_is_built_and_signed_in_manifest() -> None:
     assert archive_paths == [
         "$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
     ] * 2
-
-
-def test_windows_job_checks_the_install_ps1_advisorily() -> None:
-    # #838: the Windows installer can only be exercised on a Windows runner,
-    # and the whole `windows` job is a measurement until C9 - a step that could
-    # fail it would take every other measurement down with it.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
-    ).read_text(encoding="utf-8")
-
-    assert "scripts/install.ps1" in workflow
-    assert "    runs-on: windows-latest\n" in workflow
-    windows_job = workflow.split("    runs-on: windows-latest\n", 1)[1].split("\n    steps:", 1)[0]
-    assert "timeout-minutes: 45" in windows_job, "a hung step must not hold the runner for six hours"
-    assert "-ReleaseDir ./ps1-fixture/release -DryRun" in workflow
-    assert "Invoke-ScriptAnalyzer" in workflow
-    assert "windows-install-ps1.txt" in workflow
-    # The offline fixture is built from the same helpers the test suite uses, so
-    # it has to import them from a checkout root.
-    assert 'sys.path.insert(0, ".")' in workflow
-    assert "from tests.test_engine_installer import" in workflow
-
-    # Every step that touches the installer redirects into its own log and ends
-    # in `|| true`: the job may report a refusal, never fail on one. #853 added
-    # a second pair of steps (the end-to-end fixture and the end-to-end
-    # install/uninstall run), so the property is checked per step rather than by
-    # pinning whichever one happens to be last.
-    steps = workflow.split("    - name: Build install.ps1 offline fixture")[1]
-    steps = steps.split("    - name: Summarize")[0]
-    assert steps.count("|| true") >= 2
-    # Each run step's own `run` block ends with its own log redirection and
-    # `|| true`; a step that lost either would fail the job on a refusal. A step
-    # may carry keys other than `run` between its name and its `run` block - the
-    # end-to-end step sets `env:` there - so everything up to `run: |` is
-    # skipped rather than assumed to be a single line.
-    run_blocks = re.findall(
-        r"(?ms)^    - name: ([^\n]+)\n(?:^(?!      run: \|\n)[^\n]*\n)*?      run: \|\n"
-        r"(.*?)(?=^    - name:|\Z)",
-        steps,
-    )
-    assert run_blocks, "no install.ps1 run steps found in the windows job"
-    for name, body in run_blocks:
-        # The comment block introducing the *next* step is captured with this
-        # one's body; it is not part of the command.
-        body = re.sub(r"(?m)^\s*#.*$", "", body)
-        lines = [line.strip() for line in body.rstrip().splitlines() if line.strip()]
-        if lines[0].startswith("python - <<"):
-            # A heredoc step: the guard is on the command that opens it, the way
-            # the offline fixture step has always done it.
-            assert lines[0].endswith("|| true"), (
-                f"the '{name}' step would fail the windows job: it does not end in '|| true'"
-            )
-            continue
-        last = lines[-1]
-        assert last.endswith("2>&1 || true"), (
-            f"the '{name}' step would fail the windows job: it does not end in '|| true'"
-        )
-        assert last.startswith("} > windows-"), (
-            f"the '{name}' step does not redirect its output to a windows-*.txt log"
-        )
-    names = [name for name, _ in run_blocks]
-    assert "install.ps1 offline verification and analyzer (advisory)" in names
-    assert "install.ps1 end-to-end install and uninstall (advisory)" in names
-    assert "} > windows-install-ps1.txt 2>&1 || true" in steps
-    assert "} > windows-install-e2e.txt 2>&1 || true" in steps
-    # The end-to-end run reports whether the task existed after install and
-    # after uninstall, and never fails on either answer: an InteractiveToken
-    # task may not register or start on a hosted runner, and that is the datum.
-    e2e = dict(run_blocks)["install.ps1 end-to-end install and uninstall (advisory)"]
-    # The four markers the summary line and a human reader both grep for. They
-    # are worded so that reading the log says what happened in one word each:
-    # `installed` is the engine's own entry point, `uninstalled` is the absence
-    # of the uv tool, and the two task lines are the schtasks probe either side
-    # of -Uninstall. A step that failed before installing prints "installed: no"
-    # and nothing pretends otherwise.
-    for marker in (
-        '"installed: yes"',
-        '"task existed after install: yes"',
-        '"uninstalled: yes',
-        '"task gone after uninstall: yes',
-        "workspace kept:",
-        "task registered after -NoStart:",
-        "-NoStart",
-    ):
-        assert marker in e2e, f"the end-to-end run no longer reports {marker!r}"
-
-    # The summary line greps the same four markers, so a reader of the job
-    # summary sees whether the installer ran at all without opening the artifact.
-    summary = workflow.split("    - name: Summarize")[1]
-    assert (
-        "^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)"
-        in summary
-    )
-    assert "install.ps1 end-to-end:" in summary
-    # The comments in this step quote `::add-mask::` while explaining why it is not
-    # used; every check here is about the commands, not the prose about them.
-    commands = "\n".join(
-        line for line in e2e.splitlines() if not line.strip().startswith("#")
-    )
-    # Q3: the one-time setup URL is a credential and belongs in no log, least of
-    # all in windows-install-e2e.txt, which is uploaded as an artifact. The token
-    # is only known after the installer prints it, so it cannot be masked before
-    # the fact: `::add-mask::` on its own masks the empty string and protects
-    # nothing. The install output is redacted on the way into the file instead,
-    # and the exit code is the installer's own, from `wait` on the background
-    # job rather than from sed.
-    assert "add-mask" not in commands, (
-        "the setup URL token is redacted, not masked: it is unknown until the "
-        "installer prints it, so no mask can cover it"
-    )
-    assert r"sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'" in commands
-    assert 'wait "$installer"\n            install_exit=$?' in commands, (
-        "the install's exit code must come from the installer, not from sed's"
-    )
-    # A fresh install serves the browser setup wizard and waits for it. Nobody
-    # is at a CI runner's browser, so the step finishes it over HTTP, and both
-    # the wizard wait and the installer wait are bounded: an unbounded wait
-    # held the Windows job for GitHub's six-hour limit on every develop push.
-    assert "/api/setup/finish" in commands
-    assert "deadline = time.time() + 600" in commands
-    assert "taskkill /F /T /PID" in commands
-    # The version the installer is given is cut from the wheel *file name*. The
-    # path has to go through basename first: `cut -d- -f2` on
-    # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
-    # `e2e/release/ciaobot`, which the installer refuses as invalid, and the step
-    # then reports "no" for everything having installed nothing.
-    assert 'basename "$(ls ps1-e2e/release/*.whl' in commands
-    assert "| head -1 | cut -d- -f2)" not in commands
-
-    # The step's shell is Git Bash, whose MSYS path conversion rewrites the
-    # `/Query`, `/TN` and `/v` arguments of the schtasks and reg probes below
-    # into Windows paths: both programs were then asked about paths, printed
-    # nothing, and reported "no" while the task and the PATH entry were there -
-    # the install log said it had added the PATH entry and the very next line
-    # contradicted it. MSYS_NO_PATHCONV=1 is what makes the probes measure the
-    # machine instead of the shell, and it has to be on this step specifically:
-    # `env:` scopes it to the run that needs it.
-    step = workflow.split(
-        "    - name: install.ps1 end-to-end install and uninstall (advisory)"
-    )[1].split("\n    - name:")[0]
-    assert "env:" in step, "the end-to-end step carries no env: mapping"
-    assert re.search(r"(?m)^        MSYS_NO_PATHCONV: '1'$", step), (
-        "the end-to-end step runs under Git Bash without MSYS_NO_PATHCONV, so its "
-        "schtasks and reg probes read paths and report the shell, not the machine"
-    )
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
@@ -581,7 +433,7 @@ def _run_web_detector(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 @pytest.mark.parametrize(
@@ -636,7 +488,7 @@ def test_web_change_detector_uses_pr_three_dot_diff(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 def test_web_change_detector_ignores_base_only_web_changes(tmp_path: Path) -> None:
@@ -655,7 +507,7 @@ def test_web_change_detector_ignores_base_only_web_changes(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 def test_web_change_detector_handles_fork_head_without_branch_name(tmp_path: Path) -> None:
@@ -683,7 +535,7 @@ def test_web_change_detector_handles_fork_head_without_branch_name(tmp_path: Pat
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 @pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
@@ -710,7 +562,7 @@ def test_web_change_detector_rejects_invalid_sha_inputs(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 @pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
@@ -738,7 +590,7 @@ def test_web_change_detector_fails_for_unknown_commits(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 def test_web_change_detector_fails_for_disconnected_commits(tmp_path: Path) -> None:
@@ -792,7 +644,7 @@ def _run_mac_detector(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 @pytest.mark.parametrize(
@@ -859,7 +711,7 @@ def test_mac_change_detector_uses_pr_three_dot_diff(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the detector runs on GitHub's Linux bash runner",
 )
 @pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
@@ -927,20 +779,44 @@ def test_branch_protection_declares_conditional_linux_e2e_for_develop() -> None:
     assert len(blocks) == 2
     develop, main = (json.loads(block) for block in blocks)
     assert develop["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "linux-e2e", "windows", "mac-app"
+        "linux-server", "linux-web", "linux-e2e", "mac-app"
     ]
     assert main["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "windows", "test", "mac-app"
+        "linux-server", "linux-web", "linux-server-latest-python", "test", "mac-app"
     ]
     assert develop["enforce_admins"] is False
     assert main["enforce_admins"] is True
 
 
-def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
-    # A develop PR waits on the two parallel Linux jobs, conditional Linux
-    # browser coverage for web changes, and the Windows import/win32 mypy
-    # gates. The Windows suites take over a quarter hour, so they run on
-    # release PRs into main only.
+def test_branch_protection_matches_ci_jobs() -> None:
+    script = (
+        Path(__file__).parents[1] / "scripts" / "configure-github-branches.sh"
+    ).read_text(encoding="utf-8")
+    blocks = re.findall(r"(?ms)^\w+_json\(\) \{\n  cat <<'JSON'\n(.*?)\nJSON\n\}", script)
+    assert len(blocks) == 2
+    develop, main = (json.loads(block) for block in blocks)
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    jobs = re.split(r"(?m)^  (?=[a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
+    for context in (
+        develop["required_status_checks"]["contexts"]
+        + main["required_status_checks"]["contexts"]
+    ):
+        assert context in by_name
+    release_if = "    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'"
+    main_contexts = main["required_status_checks"]["contexts"]
+    for name, job in by_name.items():
+        header = job.split("\n    steps:", 1)[0]
+        if any(line == release_if for line in header.splitlines()):
+            assert name in main_contexts
+    assert not [name for name in by_name if name.startswith("windows")]
+
+
+def test_develop_prs_run_linux_split_gates() -> None:
+    # A develop PR waits on the two parallel Linux jobs and conditional Linux
+    # browser coverage for web changes.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
@@ -954,48 +830,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     # The smoke serves the packaged PWA, so it must follow the build.
     web = by_name["linux-web"]
     assert web.index("npm run build") < web.index("ciao package-smoke --skip-frontend")
-
-    windows = by_name["windows-backend"]
-    assert (
-        "WINDOWS_FULL: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}"
-        in windows
-    )
-    steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))
-    full = "if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}"
-    for name in ("Import every ciao module", "Python static type check (win32)"):
-        assert "WINDOWS_FULL" not in steps[name], f"{name!r} must run on every PR"
-    for name in (
-        "Windows backend tests",
-        "Build install.ps1 offline fixture",
-        "Build install.ps1 end-to-end fixture",
-        "install.ps1 offline verification and analyzer (advisory)",
-        "install.ps1 end-to-end install and uninstall (advisory)",
-    ):
-        assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"
-    assert "Windows frontend tests" in by_name["windows-web"]
-    assert "github.base_ref == 'main'" in by_name["windows-web"]
-
-
-def test_develop_prs_can_opt_into_the_full_windows_suites() -> None:
-    # The label allows platform-sensitive changes to run Windows early.
-    # The pull_request trigger keeps no `types:` filter, so no label change
-    # reruns CI.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
-    ).read_text(encoding="utf-8")
-    assert "windows-full" in workflow
-    on_block = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-    assert "types:" not in on_block.split("  pull_request:", 1)[1]
-
-    jobs = re.split(r"(?m)^  (?=[a-z-]+:\n)", workflow.split("\njobs:\n", 1)[1])
-    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
-    windows_full = [
-        line
-        for line in by_name["windows-backend"].splitlines()
-        if line.strip().startswith("WINDOWS_FULL:")
-    ]
-    assert len(windows_full) == 1
-    assert "github.base_ref == 'main'" in windows_full[0]
+    assert not [name for name in by_name if name.startswith("windows")]
 
 
 def _rehearsal_workflow() -> str:
@@ -1247,7 +1082,7 @@ def _dispatch_guard_script() -> str:
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
+    shutil.which("bash") is None,
     reason="the guard runs on the macOS runner under bash",
 )
 @pytest.mark.parametrize(
@@ -1446,7 +1281,7 @@ def test_workflow_expressions_are_valid_for_github() -> None:
 
 def test_publish_lists_installers_in_the_signed_manifest() -> None:
     # #2483: a client authenticates install.sh from the signed manifest, so the
-    # three installers are listed in the build, by the exact files that are
+    # two installers are listed in the build, by the exact files that are
     # uploaded later, and the manifest is built after Prepare release assets has
     # copied install.sh.
     workflow = (
@@ -1459,9 +1294,9 @@ def test_publish_lists_installers_in_the_signed_manifest() -> None:
     for installer in (
         '--installer "$ws/install.sh"',
         '--installer "$ws/scripts/install-engine.sh"',
-        '--installer "$ws/scripts/install.ps1"',
     ):
         assert installer in build, f"the manifest build does not list {installer}"
+    assert "install.ps1" not in build
     assert workflow.index("Prepare release assets") < workflow.index(
         "Write and sign engine manifest"
     )
@@ -1497,11 +1332,10 @@ def test_publish_rechecks_uploaded_installers_against_the_manifest() -> None:
         '"$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig"',
         '--asset "$uploaded/install.sh"',
         '--asset "$uploaded/install-engine.sh"',
-        '--asset "$uploaded/install.ps1"',
     ):
         assert asset in step, f"publish.yml does not verify {asset}"
 
-    # The verify statement itself: a live call, the three installers in it, and
+    # The verify statement itself: a live call, the two installers in it, and
     # no `||` on any of its lines, so a failure cannot be swallowed.
     lines = step.splitlines()
     start_line = next(i for i, line in enumerate(lines) if "ciao.release_manifest verify" in line)
@@ -1511,7 +1345,6 @@ def test_publish_rechecks_uploaded_installers_against_the_manifest() -> None:
     for asset in (
         '--asset "$uploaded/install.sh"',
         '--asset "$uploaded/install-engine.sh"',
-        '--asset "$uploaded/install.ps1"',
     ):
         assert any(asset in line for line in statement), f"verify does not check {asset}"
     assert not any("||" in line for line in statement), (
