@@ -43,7 +43,8 @@
                 :items="titleRail.items.value"
                 group-label="Chats in this workspace"
                 :current-id="chat.chat_id"
-                @select="titleRail.select"
+                :busy="titleRail.switching.value"
+                @select="onTitleRailSelect"
                 @rename="startEditTitle"
                 @lean="railLean = $event"
                 @pull="emit('pull', $event)"
@@ -1892,6 +1893,13 @@ const titleRailOn = computed(() => titleRail.items.value.length > 1)
 const railLean = ref(0)
 const railArrival = ref<-1 | 1 | 0>(takeChatRailArrival(props.beside))
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
+async function onTitleRailSelect(id: string): Promise<void> {
+  try {
+    await titleRail.select(id)
+  } catch {
+    railLean.value = 0
+  }
+}
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
   if (!titleRailOn.value) return false

@@ -51,6 +51,13 @@ export function useChatRail(currentChatId: () => string, openBeside?: (chatId: s
     scope: () => store.activeWorkspace,
     currentId: currentChatId,
     entries,
-    navigate: async id => openBeside ? openBeside(id) : store.switchChat(id),
+    navigate: async id => {
+      if (openBeside) {
+        openBeside(id)
+        return true
+      }
+      await store.switchChat(id)
+      return store.activeChatId === id
+    },
   })
 }

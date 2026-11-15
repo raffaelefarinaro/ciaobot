@@ -290,10 +290,10 @@ describe('TitleRail', () => {
     strip.scrollTo = vi.fn() as unknown as typeof strip.scrollTo
     strip.scrollLeft = 100
 
-    const wheel = new WheelEvent('wheel', { deltaX: 120, deltaY: 0, cancelable: true, bubbles: true })
+    const wheel = new WheelEvent('wheel', { deltaX: 1200, deltaY: 0, cancelable: true, bubbles: true })
     strip.dispatchEvent(wheel)
     expect(wheel.defaultPrevented).toBe(true)
-    expect(strip.scrollLeft).toBe(220)
+    expect(strip.scrollLeft).toBe(200)
     vi.advanceTimersByTime(RAIL_SETTLE_MS)
     expect(wrapper.emitted('select')).toEqual([['c']])
 
