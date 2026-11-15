@@ -13,7 +13,7 @@
       <!-- RESTARTING SCREEN -->
       <div v-if="isRestarting" class="login-body restarting-body">
         <p v-if="!nativeBootstrap" class="line line--banner">
-          <span class="wordmark wordmark--md">restarting</span>
+          <Wordmark size="md" text="restarting" />
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p v-if="nativeBootstrap" class="line line--sys">Setup saved. Ciaobot is starting on this Mac.</p>
@@ -31,7 +31,7 @@
       <!-- SETUP WIZARD SCREEN -->
       <form v-else-if="isBootstrap" class="login-body setup-wizard" @submit.prevent="doFinish">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciaobot setup</span>
+          <Wordmark size="md" text="ciaobot setup" />
           <span v-if="isBootstrap && !nativeBootstrap" class="banner-meta">// tour + local setup</span>
         </p>
 
@@ -405,7 +405,7 @@
            the password, and people could not tell where to type. -->
       <form v-else class="login-body login-form" @submit.prevent="doLogin">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciaobot</span>
+          <Wordmark size="md" />
         </p>
         <h1 class="login-title">Enter your password</h1>
         <p class="login-lede">Enter your Ciaobot password. The installer picks one for you; you can change it in Settings.</p>
@@ -447,6 +447,7 @@
 </template>
 
 <script setup lang="ts">
+import Wordmark from './Wordmark.vue'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import type { SetupStatus } from '../lib/types'

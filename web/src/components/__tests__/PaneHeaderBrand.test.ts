@@ -33,20 +33,21 @@ describe('BrandMark', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders the supplied static icon', () => {
+  it('renders the inline vector mark with a themeable C and accent dots', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.element.tagName).toBe('IMG')
-    expect(wrapper.attributes('src')).toBe('/icons/icon-32.png')
-    expect(wrapper.attributes('alt')).toBe('Ciaobot')
+    expect(wrapper.attributes()).toMatchObject({ role: 'img', 'aria-label': 'Ciaobot' })
+    expect(wrapper.get('svg path').attributes('stroke')).toBe('currentColor')
+    expect(wrapper.findAll('svg circle')).toHaveLength(2)
+    expect(wrapper.findAll('svg circle').map((circle) => circle.attributes('fill'))).toEqual(['var(--accent)', 'var(--accent)'])
+    expect(wrapper.find('img').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('is not a focusable reload control', () => {
+  it('is an accessible non-focusable brand image, not a reload control', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.element.tagName).toBe('IMG')
+    expect(wrapper.get('[role="img"]').attributes('aria-label')).toBe('Ciaobot')
     expect(wrapper.attributes('tabindex')).toBeUndefined()
-    expect(wrapper.attributes('role')).toBeUndefined()
-    expect(wrapper.attributes('aria-label')).toBeUndefined()
+    expect(wrapper.attributes('role')).toBe('img')
     expect(wrapper.attributes('aria-busy')).toBeUndefined()
     expect(wrapper.attributes('title')).toBeUndefined()
     wrapper.unmount()

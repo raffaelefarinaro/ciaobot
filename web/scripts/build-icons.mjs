@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Generate favicon + PWA icon variants from the brand app icon.
 // Source: web/brand/ciaobot-icon-source.png (the supplied artwork).
-// Output: web/public/brand/ciaobot-mark-{ink,dots}.png (transparent masks)
 // Output: web/public/favicon.png (1024, transparent corners)
 //         web/public/icons/icon-{16,32,180,192,512}.png
 //         web/public/icons/icon-{192,512}-maskable.png (with safe-zone padding)
@@ -34,7 +33,6 @@ import sharp from 'sharp'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const webRoot = resolve(__dirname, '..')
-const BRAND = resolve(webRoot, 'public/brand')
 const SOURCE = resolve(webRoot, 'brand/ciaobot-icon-source.png')
 const FAVICON = resolve(webRoot, 'public/favicon.png')
 const OUT = resolve(webRoot, 'public/icons')
@@ -62,8 +60,6 @@ async function main() {
   // pixels, keeping the supplied artwork and its antialiased edges intact.
   const { data, info } = await sharp(SOURCE).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   if (info.width !== 1254 || info.height !== 1254) throw new Error('Expected the 1254×1254 brand reference')
-  const ink = Buffer.alloc(720 * 720 * 4)
-  const dots = Buffer.alloc(720 * 720 * 4)
   const alpha = n => Math.round(Math.max(0, Math.min(1, n)) * 255)
   for (let y = 0; y < info.height; y++) {
     for (let x = 0; x < info.width; x++) {
@@ -78,17 +74,8 @@ async function main() {
           data[i + 3] = alpha(level / 245)
         }
       }
-      if (x >= 260 && x < 980 && y >= 250 && y < 970) {
-        const j = ((y - 250) * 720 + x - 260) * 4
-        ink[j] = ink[j + 1] = ink[j + 2] = 255
-        dots[j] = dots[j + 1] = dots[j + 2] = 255
-        ink[j + 3] = g - r > 3 ? alpha((245 - (r + g + b) / 3) / 205) : 0
-        dots[j + 3] = r - b > 4 ? alpha((245 - (r + g + b) / 3) / 100) : 0
-      }
     }
   }
-  await sharp(ink, { raw: { width: 720, height: 720, channels: 4 } }).png().toFile(resolve(BRAND, 'ciaobot-mark-ink.png'))
-  await sharp(dots, { raw: { width: 720, height: 720, channels: 4 } }).png().toFile(resolve(BRAND, 'ciaobot-mark-dots.png'))
   const SRC = await sharp(data, { raw: info }).resize(1024, 1024).png().toBuffer()
   await sharp(SRC).png({ compressionLevel: 9 }).toFile(FAVICON)
   console.log(`[build-icons] wrote ${FAVICON}`)

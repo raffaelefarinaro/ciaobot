@@ -269,7 +269,6 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/PaneHeader.vue",
       "web/src/components/ProjectSidebar.vue"
     ],
     "variants": [],
@@ -279,7 +278,7 @@ export const inventory: InventoryEntry[] = [
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in BrandMark.vue implements this render; no rendered-state story exists."
+        "note": "BrandMark.vue wraps CiaoMark.vue in an accessible image; the inline SVG uses currentColor for the C and --accent for its dots. No rendered-state story exists."
       },
       {
         "name": "other states",
@@ -289,8 +288,49 @@ export const inventory: InventoryEntry[] = [
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in BrandMark.vue has not yet been audited."
+      "status": "none",
+      "detail": "BrandMark.vue is static SVG presentation and performs no loading."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-wordmark",
+    "name": "Wordmark",
+    "family": "Root, navigation and common presentation",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/Wordmark.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/LoginView.vue",
+      "web/src/components/RestartNotice.vue",
+      "web/src/components/StartupView.vue",
+      "web/src/components/UpdateProgressView.vue"
+    ],
+    "variants": [],
+    "variantNotes": "Detailed text and size variants remain unassessed; no variants have been enumerated.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Wordmark.vue renders the brand text and accent dots; no rendered-state story exists."
+      },
+      {
+        "name": "other states",
+        "coverage": "unknown",
+        "storyIds": [],
+        "note": "Additional wordmark text and size states have not been audited."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "Wordmark.vue is static presentation and performs no loading."
     },
     "migration": {
       "status": "unassessed",
@@ -795,6 +835,7 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
+      "web/src/components/BrandMark.vue",
       "web/src/components/SettingsView.vue"
     ],
     "variants": [],
@@ -804,7 +845,7 @@ export const inventory: InventoryEntry[] = [
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in CiaoMark.vue implements this render; no rendered-state story exists."
+        "note": "CiaoMark.vue renders the inline SVG mark; no rendered-state story exists."
       },
       {
         "name": "other states",
@@ -814,8 +855,8 @@ export const inventory: InventoryEntry[] = [
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CiaoMark.vue has not yet been audited."
+      "status": "none",
+      "detail": "CiaoMark.vue is static SVG presentation and performs no loading."
     },
     "migration": {
       "status": "unassessed",
@@ -8238,13 +8279,13 @@ export const inventory: InventoryEntry[] = [
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".wordmark in app.css implements this family; no rendered-state story exists."
+        "note": ".wordmark in app.css styles Wordmark.vue and terminal status labels; no rendered-state story exists."
       },
       {
         "name": "wordmark",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".wordmark in app.css includes wordmark; no rendered-state story exists."
+        "note": ".wordmark in app.css includes the shared monospace wordmark; no rendered-state story exists."
       },
       {
         "name": "caret",

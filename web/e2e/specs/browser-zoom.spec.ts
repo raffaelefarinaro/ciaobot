@@ -43,14 +43,15 @@ test.describe('zoom and text scaling', () => {
     ).toBeLessThanOrEqual(0)
   })
 
-  test('the phone drawer shows the small static icon', async ({ page }) => {
+  test('the phone drawer shows the 30px vector brand mark', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await boot(page)
     await page.getByRole('button', { name: 'Open sidebar', exact: true }).click()
-    const brand = page.locator('img.sidebar-brand')
+    const brand = page.locator('.sidebar-brand[role="img"]')
     await expect(brand).toBeVisible()
-    await expect(brand).toHaveAttribute('src', '/icons/icon-32.png')
-    await expect(brand).toHaveAttribute('alt', 'Ciaobot')
+    await expect(brand).toHaveAttribute('aria-label', 'Ciaobot')
+    await expect(brand.locator('svg path')).toHaveAttribute('stroke', 'currentColor')
+    await expect(brand.locator('svg circle')).toHaveCount(2)
     await expect(brand).toHaveCSS('width', '30px')
     await expect(brand).toHaveCSS('height', '30px')
     await expect(page.getByRole('button', { name: 'Reload Ciaobot' })).toHaveCount(0)
