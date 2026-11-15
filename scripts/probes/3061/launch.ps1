@@ -35,8 +35,11 @@ try {
         if ($null -ne $value) { $keep[$name] = $value }
     }
     foreach ($item in @(Get-ChildItem Env:)) {
-        [Environment]::SetEnvironmentVariable($item.Name, $null)
+        # A genuine null deletes; PowerShell $null binds as empty string and
+        # .NET 9+ preserves that variable, defeating the bootstrap name allowlist.
+        [Environment]::SetEnvironmentVariable($item.Name, [System.Management.Automation.Language.NullString]::Value)
     }
+    if ([Environment]::GetEnvironmentVariables().Count -ne 0) { throw "environment deletion unconfirmed" }
     foreach ($name in $keep.Keys) { [Environment]::SetEnvironmentVariable($name, $keep[$name]) }
     $folders = @{
         HOME="home"; USERPROFILE="home"; LOCALAPPDATA="localappdata"; APPDATA="appdata"

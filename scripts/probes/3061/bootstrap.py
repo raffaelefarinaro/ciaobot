@@ -68,6 +68,10 @@ def main():
         "CIAO_LAUNCH_AGENTS_DIR", "CIAO_QUEUE_LOCK_DIR", "TMPDIR", "TMP", "TEMP",
         "LC_CTYPE",  # CPython may coerce the locale at startup.
     }
+    if sys.platform == "darwin":
+        # macOS runtime startup adds this even with a sanitized exec environment.
+        # Allow its name only on macOS; never log the user-specific value.
+        allowed.add("__CF_USER_TEXT_ENCODING")
     require(all(key.upper() in allowed for key in os.environ))
     for key, sub in {
         "CIAO_MEMORY_DIR": "memory", "CIAO_LAUNCH_AGENTS_DIR": "launchagents",
