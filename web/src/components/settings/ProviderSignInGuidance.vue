@@ -55,6 +55,7 @@ async function openTerminal() {
 }
 </script>
 
+<style scoped src="./settingsPanels.css"></style>
 <style scoped>
 .guidance { padding: var(--space-3) 0; min-width: 0; }
 .guidance-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }

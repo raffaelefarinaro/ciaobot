@@ -913,6 +913,45 @@ describe('component mount smoke', () => {
     opencode: { state: 'below_tested', installed: '2.0.32', tested: '2.1.0', command: 'opencode upgrade 2.1.0', terminal_action: 'opencode-update' },
   }
 
+  it.each(['install', 'update', 'not_applicable'] as const)('SettingsView hides raw host-terminal %s errors in the rendered alert', async (action) => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    const oldCaps = testApi.getResponse('/api/host/terminal')
+    const host = await import('../../composables/useHostTerminal')
+    const loopback = await import('../../lib/loopback')
+    const local = vi.spyOn(loopback, 'isLoopbackPage').mockReturnValue(true)
+    host.resetHostTerminalForTests()
+    testApi.setResponse('/api/host/terminal', { available: true, platform: 'macos', actions: ['opencode-install', 'opencode-update'] })
+    const opencode = action === 'install'
+      ? { ...original.connections.opencode, auth: 'not_installed', command: 'install', terminal_action: 'opencode-install' }
+      : { ...original.connections.opencode, release_check: { state: 'below_tested', tested: '2.1', command: 'update', terminal_action: 'opencode-update' } }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, opencode } })
+    vi.mocked(api.post).mockRejectedValueOnce({ message: 'SECRET_EXCEPTION', payload: { reason: action === 'not_applicable' ? 'not_applicable' : 'launch_failed', error: 'SECRET_PAYLOAD' } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = providerRow(wrapper, /opencode/i)
+      const readsBefore = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
+      await row.get(`button[aria-label="${action === 'install' ? 'Install opencode in Terminal' : 'Update opencode in Terminal'}"]`).trigger('click')
+      await flushPromises()
+      expect(row.get('[role="alert"]').text()).toBe(action === 'not_applicable' ? 'This update is no longer needed.' : 'Could not open a terminal. Please try again.')
+      expect(row.text()).not.toContain('SECRET_')
+      if (action === 'not_applicable') {
+        expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(readsBefore + 1)
+      }
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+      testApi.setResponse('/api/host/terminal', oldCaps)
+      local.mockRestore()
+      host.resetHostTerminalForTests()
+    }
+  })
+
   it('SettingsView says the copy failed, in text, when the clipboard is refused', async () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
     const { wrapper, restore } = await mountModelsWith(belowTested)
@@ -992,6 +1031,55 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('opencode auth login')
     expect(runInTerminal).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+
+  it('does not expose routines GET errors and allows a successful retry', async () => {
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    let fail = true
+    get.mockImplementation(((path: string) => path === '/api/settings/routines' && fail
+      ? Promise.reject(new Error('SECRET_ROUTINES_GET')) : original(path)) as typeof api.get)
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('Failed to load model settings.')
+      expect(wrapper.text()).not.toContain('SECRET_ROUTINES_GET')
+      fail = false
+      await wrapper.findAll('button').find(button => button.text() === 'Retry model settings')!.trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Failed to load model settings.')
+    } finally {
+      wrapper.unmount()
+      get.mockImplementation(original)
+    }
+  })
+
+  it('does not expose routines PATCH errors in the UI or failure toast and can retry', async () => {
+    const projects = (await import('../../stores/projects')).useProjectStore()
+    const toast = vi.spyOn(projects, 'pushErrorToast')
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('SECRET_ROUTINES_PATCH'))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const state = (wrapper.vm as unknown as { $: { setupState: { saveRoutines: (patch: Record<string, unknown>) => Promise<void> } } }).$.setupState
+      await state.saveRoutines({ provider_default_modes: { claude: 'manual' } })
+      expect(toast).toHaveBeenCalledWith('Could not save model settings', 'Please try again.')
+      expect(JSON.stringify(toast.mock.calls)).not.toContain('SECRET_ROUTINES_PATCH')
+      expect(wrapper.text()).not.toContain('SECRET_ROUTINES_PATCH')
+      await state.saveRoutines({ provider_default_modes: { claude: 'manual' } })
+      expect(vi.mocked(api.patch)).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      toast.mockRestore()
+    }
   })
 
   it.each([
@@ -1144,6 +1232,76 @@ describe('component mount smoke', () => {
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(providersBefore + 1)
     expect(wrapper.text()).not.toContain('Provider and model reads completed')
     wrapper.unmount()
+  })
+
+  it.each([false, true])('does not supersede a real open-picker model read after old verify (return to A: %s)', async (returnToA) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'A', vault_root: 'A' }, { name: 'B', vault_root: 'B' }] as never
+    project.workspaceRegistryStatus = 'ready'
+    project.activeWorkspace = 'A'
+    const get = vi.mocked(api.get)
+    const originalGet = get.getMockImplementation()!
+    const actualFetch = tasks.fetchModels
+    let sharedCall = false
+    let holdShared = false
+    let finishModel!: (value: unknown) => void
+    let finishVerify!: (value: unknown) => void
+    const shared = vi.spyOn(tasks, 'fetchModels').mockImplementation((workspace?: string) => {
+      sharedCall = true
+      try { return actualFetch(workspace) } finally { sharedCall = false }
+    })
+    get.mockImplementation(((path: string) => {
+      if (path.startsWith('/api/models?') && sharedCall && holdShared) {
+        return new Promise<unknown>(resolve => { finishModel = resolve })
+      }
+      return originalGet(path)
+    }) as typeof api.get)
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise(resolve => { finishVerify = resolve }))
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const settingsModule = await import('../SettingsView.vue')
+    const homeModule = await import('../HomeIntake.vue')
+    const settings = mount(settingsModule.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    const home = mount(homeModule.default as never)
+    try {
+      await flushPromises()
+      await home.get('.home-intake-model-trigger').trigger('click')
+      await flushPromises()
+      const verify = settings.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!
+      await verify.trigger('click')
+      holdShared = true
+      project.activeWorkspace = 'B'
+      if (returnToA) project.activeWorkspace = 'A'
+      await nextTick()
+      expect(tasks.modelLoading).toBe(true)
+      expect(tasks.models).toBeNull()
+      const calls = shared.mock.calls.length
+      const modelsCalls = get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length
+      const transition = tasks.modelTransition
+      finishVerify({ name: 'opencode', ok: true, auth: 'oauth' })
+      await flushPromises()
+      expect(shared).toHaveBeenCalledTimes(calls)
+      expect(get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length).toBe(modelsCalls)
+      expect(tasks.modelTransition).toBe(transition)
+      expect(tasks.modelLoading).toBe(true)
+      expect(tasks.modelError).toBe('')
+      expect(tasks.models).toBeNull()
+      expect(settings.text()).not.toContain('Provider and model reads completed')
+      finishModel({ models: ['new-model'], default: 'new-model', provider_models: { claude: ['new-model'] } })
+      await flushPromises()
+      expect(tasks.modelLoading).toBe(false)
+      expect(tasks.models?.models).toEqual(['new-model'])
+      await home.get('.home-intake-model-trigger').trigger('click')
+      await flushPromises()
+      expect(home.find('[role="option"][data-model="new-model"]').exists()).toBe(true)
+    } finally {
+      get.mockImplementation(originalGet)
+      shared.mockRestore()
+      settings.unmount()
+      home.unmount()
+    }
   })
 
   it('refreshes both workspace model readers but never exposes model errors', async () => {

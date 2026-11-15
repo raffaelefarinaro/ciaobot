@@ -134,7 +134,6 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ModelSelector from '../ModelSelector.vue'
 import { api } from '../../lib/api'
-import { apiErrorMessage } from '../../lib/errorMessage'
 import { modelDisplayName } from '../../lib/modelLabels'
 import { setOverride } from '../../lib/workspaceOverrides'
 import { DEFAULT_MODE_SELECTION, PROVIDER_MODE_OPTIONS, useProviderChoices } from '../../composables/useProviderChoices'
@@ -319,10 +318,10 @@ async function fetchModels(): Promise<void> {
         if (valid() && document.activeElement === document.body) modelStatus.value?.focus()
       }
     }
-  } catch (error) {
+  } catch {
     if (valid()) {
       modelsLoading.value = false
-      modelsError.value = `Could not load the model list: ${apiErrorMessage(error, 'The request failed.')}`
+      modelsError.value = 'Could not load the model list.'
       showRetry.value = true
     }
   }
@@ -335,8 +334,8 @@ onMounted(async () => {
   try {
     const result = await api.get<RoutineSettings>('/api/settings/routines')
     if (!unmounted) routines.value = result
-  } catch (error) {
-    if (!unmounted) routinesError.value = `Could not load the provider defaults: ${apiErrorMessage(error, 'The request failed.')}`
+  } catch {
+    if (!unmounted) routinesError.value = 'Could not load the provider defaults.'
   }
 })
 onBeforeUnmount(() => { unmounted = true; generation.value++ })

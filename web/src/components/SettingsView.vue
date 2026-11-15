@@ -705,6 +705,7 @@
                     <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
                       <HostTerminalButton
                         :action="conn.terminal_action"
+                        safe-errors
                         variant="small"
                         :aria-label="`Install ${conn.label || connKey} in Terminal`"
                         label="Install in Terminal"
@@ -753,7 +754,7 @@
                   </div>
                 </div>
                 <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :workspace="projectStore.activeWorkspace" />
-                <details v-if="connKey === 'claude'">
+                <details v-if="connKey === 'claude'" class="provider-sign-in">
                   <summary>{{ conn.ok ? 'Reconnect Claude Code' : 'Connect Claude Code' }}</summary>
                   <ProviderSignInGuidance cli="claude" context="Claude Code" :workspace="projectStore.activeWorkspace" />
                 </details>
@@ -770,6 +771,7 @@
                     <HostTerminalButton
                       v-if="conn.release_check.terminal_action"
                       :action="conn.release_check.terminal_action"
+                      safe-errors
                       variant="small"
                       label="Update in Terminal"
                       :aria-label="`Update ${conn.label || connKey} in Terminal`"
@@ -942,7 +944,10 @@
           </div>
         </template>
 
-        <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
+        <div v-if="routinesError" class="card">
+          <p class="hint hint--warn" role="alert">{{ routinesError }}</p>
+          <button type="button" class="set-link" @click="fetchRoutines">Retry model settings</button>
+        </div>
       </template>
 
       <!-- WORKSPACE OVERVIEW TAB (the active workspace's cards, then every workspace; /settings/workspace) -->
@@ -1839,8 +1844,9 @@ function onWorkspaceMoveStarted() {
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
-  } catch (e) {
-    routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
+    routinesError.value = ''
+  } catch {
+    routinesError.value = 'Failed to load model settings.'
   }
 }
 
@@ -1849,9 +1855,8 @@ async function saveRoutines(patch: Record<string, unknown>) {
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
-  } catch (e) {
-    const detail = errorMessage(e)
-    notifyFailed('Could not save model settings', detail)
+  } catch {
+    notifyFailed('Could not save model settings', 'Please try again.')
   } finally {
     routinesSaving.value = false
   }
@@ -2065,14 +2070,14 @@ async function providerConnectionAction(provider: string, action: 'verify' | 'lo
     return
   }
   const transition = workspaceTransition
-  const taskTransition = (taskStore as unknown as { modelTransition: number }).modelTransition
+  const taskTransition = taskStore.modelTransition
   const operation = providerMutation(async () => {
     const epoch = ++providerEpoch
     const sharedGeneration = providerGeneration()
     const owner = Symbol('provider mutation')
     const current = () => providerViewAlive && epoch === providerEpoch
       && transition === workspaceTransition && workspace === projectStore.activeWorkspace
-      && taskTransition === (taskStore as unknown as { modelTransition: number }).modelTransition
+      && taskTransition === taskStore.modelTransition
       && providerMutationIsCurrent(sharedGeneration)
     providerConnectionPending.value = provider
     providerPendingOwner = owner
@@ -2085,8 +2090,7 @@ async function providerConnectionAction(provider: string, action: 'verify' | 'lo
       }
       if (action === 'verify' && provider === 'opencode') {
         if (!current()) return
-        const shared = taskStore.fetchModels as unknown as (workspace: string) => Promise<{ status: 'success' | 'error' | 'superseded' }>
-        const [settingsResult, sharedResult] = await Promise.all([fetchWorkspaceModels(false, workspace), shared(workspace)])
+        const [settingsResult, sharedResult] = await Promise.all([fetchWorkspaceModels(false, workspace), taskStore.fetchModels(workspace)])
         if (!current()) return
         if (settingsResult === 'superseded' || sharedResult.status === 'superseded') {
           providerConnectionResult.value = 'Model reads were superseded. Please try again.'
@@ -4867,6 +4871,13 @@ a.btn-secondary {
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
    away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
+@media (pointer: coarse) {
+  .provider-sign-in > summary {
+    min-height: var(--touch);
+    min-width: var(--touch);
+    align-content: center;
+  }
+}
 .provider-brings > summary {
   display: inline-flex;
   align-items: center;

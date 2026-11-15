@@ -530,7 +530,8 @@ describe('SettingsWorkspaceModels', () => {
       : ++attempts < 3 ? Promise.reject(new Error(`failure ${attempts}`)) : Promise.resolve(state.models))
     const view = await mountCard()
     for (const message of ['failure 1', 'failure 2']) {
-      expect(view.text()).toContain(message)
+      expect(view.text()).toContain('Could not load the model list')
+      expect(view.text()).not.toContain(message)
       await view.get('button.btn-small').trigger('click')
       await flushPromises()
     }
@@ -708,10 +709,11 @@ describe('SettingsWorkspaceModels', () => {
 
   it('names what failed when a fetch errors', async () => {
     const { api } = await import('../../lib/api')
-    vi.mocked(api.get).mockImplementation((path: string) => Promise.reject(new Error(`boom ${path}`)))
+    vi.mocked(api.get).mockImplementation(() => Promise.reject(new Error('private provider error')))
     const view = await mountCard()
     const alerts = view.findAll('[role="alert"]').map((a) => a.text())
-    expect(alerts.some((t) => t.startsWith('Could not load the provider defaults:'))).toBe(true)
-    expect(alerts.some((t) => t.startsWith('Could not load the model list:'))).toBe(true)
+    expect(alerts.some((t) => t.includes('Could not load the provider defaults'))).toBe(true)
+    expect(alerts.some((t) => t.includes('Could not load the model list'))).toBe(true)
+    expect(view.text()).not.toContain('private provider error')
   })
 })
